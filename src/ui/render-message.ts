@@ -1,0 +1,184 @@
+import { Component, normalizePath, setIcon, TFile } from "obsidian";
+import type { App } from "obsidian";
+
+export function renderRichText(app: App, component: Component, container: HTMLElement, text: string): void {
+  container.empty();
+  const lines = text.split(/\r?\n/);
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index];
+    const fence = line.match(/^```(\w+)?/);
+    if (fence) {
+      const language = fence[1] || "";
+      const codeLines: string[] = [];
+      index += 1;
+      while (index < lines.length && !lines[index].startsWith("```")) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      index += 1;
+      renderCodeBlock(container, codeLines.join("\n"), language);
+      continue;
+    }
+
+    if (line.trim().startsWith("|") && index + 1 < lines.length && lines[index + 1].includes("---")) {
+      const tableLines: string[] = [line, lines[index + 1]];
+      index += 2;
+      while (index < lines.length && lines[index].trim().startsWith("|")) {
+        tableLines.push(lines[index]);
+        index += 1;
+      }
+      renderTable(container, tableLines);
+      continue;
+    }
+
+    if (!line.trim()) {
+      container.createDiv({ cls: "codex-message-spacer" });
+      index += 1;
+      continue;
+    }
+
+    renderLine(app, component, container, line);
+    index += 1;
+  }
+}
+
+function renderLine(app: App, component: Component, container: HTMLElement, line: string): void {
+  const trimmed = line.trim();
+  if (/^>\s+/.test(trimmed)) {
+    const callout = container.createDiv({ cls: "codex-message-callout" });
+    renderInline(callout, trimmed.replace(/^>\s+/, ""));
+    return;
+  }
+
+  if (trimmed.startsWith("#")) {
+    const level = Math.min(4, trimmed.match(/^#+/)?.[0].length ?? 2);
+    const heading = container.createEl(`h${level}` as keyof HTMLElementTagNameMap, { cls: "codex-message-heading" });
+    heading.setText(trimmed.replace(/^#+\s*/, ""));
+    return;
+  }
+
+  if (/^[-*]\s+/.test(trimmed) || /^\d+\.\s+/.test(trimmed)) {
+    const row = container.createDiv({ cls: "codex-message-list-row" });
+    const task = trimmed.match(/^[-*]\s+\[([ xX])]\s+(.*)$/);
+    if (task) {
+      const box = row.createSpan({ cls: `codex-message-checkbox ${task[1].trim() ? "is-checked" : ""}` });
+      if (task[1].trim()) box.setText("✓");
+      renderInline(row.createSpan(), task[2]);
+    } else if (/^\d+\.\s+/.test(trimmed)) {
+      const number = trimmed.match(/^(\d+)\.\s+/)?.[1] ?? "1";
+      row.createSpan({ cls: "codex-message-number", text: `${number}.` });
+      renderInline(row.createSpan(), trimmed.replace(/^\d+\.\s+/, ""));
+    } else {
+      row.createSpan({ cls: "codex-message-bullet", text: "•" });
+      renderInline(row.createSpan(), trimmed.replace(/^[-*]\s+/, ""));
+    }
+    return;
+  }
+
+  const imageMatch = trimmed.match(/!\[\[([^\]]+)\]\]|!\[[^\]]*]\(([^)]+)\)/);
+  if (imageMatch) {
+    const path = imageMatch[1] || imageMatch[2];
+    const wrapper = container.createDiv({ cls: "codex-embedded-image" });
+    const img = wrapper.createEl("img");
+    img.src = resolveImageSrc(app, path);
+    img.onclick = () => openImageOverlay(img.src);
+    return;
+  }
+
+  for (const paragraphText of splitReadableParagraphs(line)) {
+    const paragraph = container.createEl("p");
+    renderInline(paragraph, paragraphText);
+  }
+}
+
+function resolveImageSrc(app: App, rawPath: string): string {
+  const cleaned = rawPath.split("|")[0].split("#")[0].trim();
+  if (/^https?:\/\//i.test(cleaned) || cleaned.startsWith("data:") || cleaned.startsWith("file://")) return cleaned;
+  if (cleaned.startsWith("/")) return `file://${encodeURI(cleaned)}`;
+
+  const file = app.vault.getAbstractFileByPath(normalizePath(cleaned));
+  if (file instanceof TFile) return app.vault.getResourcePath(file);
+  return cleaned;
+}
+
+function renderInline(container: HTMLElement, text: string): void {
+  const parts = text.split(/(`[^`]+`|\*\*[^*]+\*\*)/g);
+  for (const part of parts) {
+    if (!part) continue;
+    if (part.startsWith("`") && part.endsWith("`")) {
+      container.createEl("code", { text: part.slice(1, -1) });
+    } else if (part.startsWith("**") && part.endsWith("**")) {
+      container.createEl("strong", { text: part.slice(2, -2) });
+    } else {
+      container.appendText(part);
+    }
+  }
+}
+
+function renderCodeBlock(container: HTMLElement, code: string, language: string): void {
+  const wrapper = container.createDiv({ cls: "codex-code-wrapper" });
+  if (language) wrapper.createSpan({ cls: "codex-code-lang", text: language });
+  const button = wrapper.createEl("button", { cls: "codex-code-copy", attr: { type: "button" } });
+  setIcon(button, "copy");
+  button.onclick = async () => {
+    await navigator.clipboard.writeText(code);
+    button.empty();
+    button.setText("已复制");
+    window.setTimeout(() => {
+      button.empty();
+      setIcon(button, "copy");
+    }, 1200);
+  };
+  wrapper.createEl("pre").createEl("code", { text: code });
+}
+
+function renderTable(container: HTMLElement, lines: string[]): void {
+  const table = container.createEl("table", { cls: "codex-message-table" });
+  const headerCells = splitTableRow(lines[0]);
+  const thead = table.createEl("thead").createEl("tr");
+  for (const cell of headerCells) thead.createEl("th", { text: cell });
+  const tbody = table.createEl("tbody");
+  for (const line of lines.slice(2)) {
+    const tr = tbody.createEl("tr");
+    for (const cell of splitTableRow(line)) tr.createEl("td", { text: cell });
+  }
+}
+
+function splitTableRow(line: string): string[] {
+  return line
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.trim());
+}
+
+function splitReadableParagraphs(line: string): string[] {
+  if (line.length < 180) return [line];
+  const chunks = line
+    .split(/(?<=[。！？；])\s*/u)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (chunks.length <= 1) return [line];
+  const paragraphs: string[] = [];
+  let current = "";
+  for (const chunk of chunks) {
+    if (current && `${current}${chunk}`.length > 120) {
+      paragraphs.push(current);
+      current = chunk;
+    } else {
+      current = current ? `${current}${chunk}` : chunk;
+    }
+  }
+  if (current) paragraphs.push(current);
+  return paragraphs;
+}
+
+export function openImageOverlay(src: string): void {
+  const overlay = document.body.createDiv({ cls: "codex-image-overlay" });
+  const img = overlay.createEl("img");
+  img.src = src;
+  overlay.onclick = () => overlay.remove();
+}

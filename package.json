@@ -1,0 +1,26 @@
+{
+  "name": "obsidian-codex",
+  "version": "0.1.0",
+  "description": "Codex for Obsidian",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "node esbuild.config.mjs production",
+    "dev": "node esbuild.config.mjs watch",
+    "typecheck": "tsc --noEmit",
+    "test": "node scripts/run-tests.mjs",
+    "package": "npm run build && node scripts/package.mjs",
+    "deploy": "npm run build && node scripts/deploy.mjs"
+  },
+  "keywords": [
+    "obsidian",
+    "codex"
+  ],
+  "author": "Codex for Obsidian contributors",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "esbuild": "^0.25.3",
+    "obsidian": "^1.8.7",
+    "typescript": "^5.8.3"
+  }
+}

@@ -1,0 +1,453 @@
+import * as fs from "fs";
+import * as path from "path";
+import { PluginSettingTab, Setting, setIcon } from "obsidian";
+import type CodexForObsidianPlugin from "../main";
+import {
+  errorsFromWorkspaceResourceCache,
+  loadedTabsFromWorkspaceResourceCache,
+  mergeWorkspaceResourceSnapshot,
+  snapshotFromWorkspaceResourceCache,
+  updateWorkspaceResourceCache,
+  type WorkspaceResourceKind
+} from "../core/workspace-resources";
+import { DEFAULT_SETTINGS, ensureModelChoices, resourceEnabled, type ResourceManagementTab } from "./settings";
+import type { CodexPluginInfo, CodexSkill, McpServerStatus, PermissionMode, ReasoningEffort, ServiceTierChoice, UiMode, WorkspaceResourceSnapshot } from "../types/app-server";
+
+export class CodexSettingTab extends PluginSettingTab {
+  private resourceSnapshot: WorkspaceResourceSnapshot | null = null;
+  private resourceLoadingTab: ResourceManagementTab | null = null;
+  private resourceLoaded: Record<ResourceManagementTab, boolean> = { plugins: false, mcp: false, skills: false };
+  private resourceLoadErrors: Partial<Record<ResourceManagementTab, string>> = {};
+
+  constructor(private readonly plugin: CodexForObsidianPlugin) {
+    super(plugin.app, plugin);
+    this.resourceSnapshot = snapshotFromWorkspaceResourceCache(this.plugin.settings.workspaceResourceCache);
+    this.resourceLoaded = loadedTabsFromWorkspaceResourceCache(this.plugin.settings.workspaceResourceCache);
+    this.resourceLoadErrors = errorsFromWorkspaceResourceCache(this.plugin.settings.workspaceResourceCache);
+  }
+
+  display(): void {
+    const { containerEl } = this;
+    containerEl.empty();
+    containerEl.createEl("h2", { text: "Codex for Obsidian 设置" });
+
+    const status = this.plugin.lastStatus;
+    const statusBox = containerEl.createDiv({ cls: "codex-settings-status" });
+    this.addStatusRow(statusBox, "activity", "Codex 状态", status?.connected ? "已连接" : "未连接");
+    this.addStatusRow(statusBox, "user-check", "账号状态", status?.accountLabel ?? "未知");
+    this.addStatusRow(statusBox, "terminal", "CLI 路径", detectCliPath(this.plugin.settings.cliPath));
+    this.addStatusRow(statusBox, "waypoints", "代理", this.plugin.settings.proxyEnabled ? this.plugin.settings.proxyUrl : "关闭");
+    this.addStatusRow(statusBox, "blocks", "聊天 MCP", this.plugin.settings.mcpEnabled ? "启用" : "关闭");
+    this.addStatusRow(statusBox, "box", "模型数量", `${status?.models.length ?? 0}`);
+    this.addStatusRow(statusBox, "sparkles", "Skills 数量", `${status?.skills.length ?? 0}`);
+    this.addStatusRow(statusBox, "blocks", "MCP 数量", `${status?.mcpServers.length ?? 0}`);
+    this.addStatusRow(statusBox, "package-check", "插件目录", pluginInstallDir(this.plugin));
+
+    this.renderWorkspaceResourceManager(containerEl);
+
+    this.decorateSetting(
+      new Setting(containerEl)
+      .setName("Codex CLI 路径")
+      .setDesc("留空时自动从 PATH 和常见目录查找。不会保存 OpenAI key。")
+      .addText((text) =>
+        text.setPlaceholder("~/.npm-global/bin/codex").setValue(this.plugin.settings.cliPath).onChange(async (value) => {
+          this.plugin.settings.cliPath = value.trim();
+          await this.plugin.saveSettings();
+        })
+      ),
+      "terminal"
+    );
+
+    this.decorateSetting(new Setting(containerEl).setName("启用本地代理").setDesc("只影响插件启动的 Codex，不改全局配置。").addToggle((toggle) =>
+      toggle.setValue(this.plugin.settings.proxyEnabled).onChange(async (value) => {
+        this.plugin.settings.proxyEnabled = value;
+        await this.plugin.saveSettings();
+      })
+    ), "waypoints");
+
+    this.decorateSetting(
+      new Setting(containerEl)
+        .setName("代理地址")
+        .setDesc("如需本机代理，可填写 Clash 等代理地址。")
+        .addText((text) =>
+          text.setPlaceholder("http://127.0.0.1:7890").setValue(this.plugin.settings.proxyUrl).onChange(async (value) => {
+            this.plugin.settings.proxyUrl = value.trim();
+            await this.plugin.saveSettings();
+          })
+        ),
+      "route"
+    );
+
+    this.decorateSetting(new Setting(containerEl).setName("启用 MCP 工具").setDesc("默认关闭以加快普通聊天；只影响聊天线程。").addToggle((toggle) =>
+      toggle.setValue(this.plugin.settings.mcpEnabled).onChange(async (value) => {
+        this.plugin.settings.mcpEnabled = value;
+        await this.plugin.saveSettings();
+      })
+    ), "blocks");
+
+    this.decorateSetting(
+      new Setting(containerEl)
+      .setName("默认模型")
+      .setDesc("留空时使用 Codex 返回的默认模型。")
+      .addDropdown((dropdown) => {
+        dropdown.addOption("", "自动");
+        for (const model of ensureModelChoices(status?.models ?? [], this.plugin.settings.defaultModel, DEFAULT_SETTINGS.defaultModel)) {
+          dropdown.addOption(model.model, model.displayName || model.model);
+        }
+        dropdown.setValue(this.plugin.settings.defaultModel);
+        dropdown.onChange(async (value) => {
+          this.plugin.settings.defaultModel = value;
+          await this.plugin.saveSettings();
+          this.plugin.applyComposerDefaultsToView();
+        });
+      }),
+      "box"
+    );
+
+    this.decorateSetting(new Setting(containerEl).setName("默认思考强度").addDropdown((dropdown) => {
+      const options: ReasoningEffort[] = ["low", "medium", "high", "xhigh"];
+      for (const option of options) dropdown.addOption(option, option);
+      dropdown.setValue(this.plugin.settings.defaultReasoning);
+      dropdown.onChange(async (value) => {
+        this.plugin.settings.defaultReasoning = value as ReasoningEffort;
+        await this.plugin.saveSettings();
+        this.plugin.applyComposerDefaultsToView();
+      });
+    }), "brain");
+
+    this.decorateSetting(new Setting(containerEl).setName("默认速度").addDropdown((dropdown) => {
+      const options: Record<ServiceTierChoice, string> = {
+        standard: "标准",
+        fast: "快速",
+        flex: "弹性"
+      };
+      for (const [value, label] of Object.entries(options)) dropdown.addOption(value, label);
+      dropdown.setValue(this.plugin.settings.defaultServiceTier);
+      dropdown.onChange(async (value) => {
+        this.plugin.settings.defaultServiceTier = value as ServiceTierChoice;
+        await this.plugin.saveSettings();
+        this.plugin.applyComposerDefaultsToView();
+      });
+    }), "gauge");
+
+    this.decorateSetting(new Setting(containerEl).setName("默认文件权限").addDropdown((dropdown) => {
+      const options: Record<PermissionMode, string> = {
+        "read-only": "只读",
+        "workspace-write": "工作区可写",
+        "danger-full-access": "完全放开"
+      };
+      for (const [value, label] of Object.entries(options)) dropdown.addOption(value, label);
+      dropdown.setValue(this.plugin.settings.defaultPermission);
+      dropdown.onChange(async (value) => {
+        this.plugin.settings.defaultPermission = value as PermissionMode;
+        await this.plugin.saveSettings();
+        this.plugin.applyComposerDefaultsToView();
+      });
+    }), "shield-check");
+
+    this.decorateSetting(new Setting(containerEl).setName("默认模式").addDropdown((dropdown) => {
+      const options: Record<UiMode, string> = {
+        agent: "Agent",
+        plan: "Plan"
+      };
+      for (const [value, label] of Object.entries(options)) dropdown.addOption(value, label);
+      dropdown.setValue(this.plugin.settings.defaultMode);
+      dropdown.onChange(async (value) => {
+        this.plugin.settings.defaultMode = value as UiMode;
+        await this.plugin.saveSettings();
+        this.plugin.applyComposerDefaultsToView();
+      });
+    }), "route");
+
+    this.decorateSetting(new Setting(containerEl).setName("启动时自动打开侧栏").addToggle((toggle) =>
+      toggle.setValue(this.plugin.settings.autoOpen).onChange(async (value) => {
+        this.plugin.settings.autoOpen = value;
+        await this.plugin.saveSettings();
+      })
+    ), "panel-right-open");
+
+    this.decorateSetting(new Setting(containerEl).setName("显示上下文容量").addToggle((toggle) =>
+      toggle.setValue(this.plugin.settings.showContext).onChange(async (value) => {
+        this.plugin.settings.showContext = value;
+        await this.plugin.saveSettings();
+      })
+    ), "pie-chart");
+
+    this.decorateSetting(new Setting(containerEl).addButton((button) =>
+      button
+        .setButtonText("重新连接 Codex")
+        .setCta()
+        .onClick(async () => {
+          await this.plugin.reconnectCodex();
+          this.display();
+        })
+    ), "refresh-cw");
+  }
+
+  private renderWorkspaceResourceManager(container: HTMLElement): void {
+    const wrapper = container.createDiv({ cls: "codex-resource-manager" });
+    const header = wrapper.createDiv({ cls: "codex-resource-manager-header" });
+    const title = header.createDiv({ cls: "codex-resource-manager-title" });
+    const icon = title.createSpan({ cls: "codex-setting-icon" });
+    setIcon(icon, "blocks");
+    title.createSpan({ text: "工作区能力管理" });
+
+    wrapper.createDiv({
+      cls: "codex-resource-note",
+      text: "这里只改当前 Obsidian 仓库的线程配置，不写入桌面端 Codex 全局配置。"
+    });
+
+    const tabs = wrapper.createDiv({ cls: "codex-resource-tabs" });
+    for (const tab of RESOURCE_TABS) {
+      const button = tabs.createEl("button", {
+        cls: `codex-resource-tab ${this.plugin.settings.resourceManagementTab === tab.id ? "is-active" : ""}`,
+        attr: { type: "button" }
+      });
+      const tabIcon = button.createSpan({ cls: "codex-resource-tab-icon" });
+      setIcon(tabIcon, tab.icon);
+      button.createSpan({ text: tab.label });
+      button.onclick = async () => {
+        this.plugin.settings.resourceManagementTab = tab.id;
+        await this.plugin.saveSettings();
+        this.display();
+      };
+    }
+    const refresh = tabs.createEl("button", {
+      cls: "codex-resource-refresh",
+      attr: { type: "button", title: "刷新当前列表" }
+    });
+    const refreshIcon = refresh.createSpan({ cls: "codex-resource-refresh-icon" });
+    setIcon(refreshIcon, "refresh-cw");
+    refresh.createSpan({ text: this.resourceLoadingTab === this.plugin.settings.resourceManagementTab ? "读取中" : "刷新" });
+    refresh.disabled = this.resourceLoadingTab === this.plugin.settings.resourceManagementTab;
+    refresh.onclick = () => void this.loadWorkspaceResources(true, this.plugin.settings.resourceManagementTab);
+
+    const body = wrapper.createDiv({ cls: "codex-resource-body" });
+    const activeTab = this.plugin.settings.resourceManagementTab;
+    const activeMeta = RESOURCE_TABS.find((tab) => tab.id === activeTab);
+    const isLoading = this.resourceLoadingTab === activeTab;
+    const loadError = this.resourceLoadErrors[activeTab] ?? "";
+    if (isLoading) {
+      body.createDiv({ cls: "codex-resource-empty", text: `正在读取 Codex ${activeMeta?.label ?? "能力"}...` });
+    }
+    if (loadError) {
+      body.createDiv({ cls: "codex-resource-error", text: `读取失败：${loadError}` });
+    }
+    if (!this.resourceLoaded[activeTab] && !isLoading && !loadError) {
+      body.createDiv({ cls: "codex-resource-empty", text: "尚未读取能力列表。" });
+    }
+    if (this.resourceSnapshot && (this.resourceLoaded[activeTab] || isLoading)) this.renderActiveResourceTab(body, this.resourceSnapshot);
+    if (!this.resourceLoaded[activeTab] && !isLoading && !loadError) void this.loadWorkspaceResources(false, activeTab);
+  }
+
+  private renderActiveResourceTab(container: HTMLElement, snapshot: WorkspaceResourceSnapshot): void {
+    if (this.plugin.settings.resourceManagementTab === "plugins") {
+      this.renderPluginResources(container, snapshot.plugins, snapshot.errors.plugins);
+      return;
+    }
+    if (this.plugin.settings.resourceManagementTab === "mcp") {
+      this.renderMcpResources(container, snapshot.mcpServers, snapshot.errors.mcp);
+      return;
+    }
+    this.renderSkillResources(container, snapshot.skills, snapshot.errors.skills);
+  }
+
+  private renderPluginResources(container: HTMLElement, plugins: CodexPluginInfo[], error?: string): void {
+    this.renderResourceSummary(container, plugins.length, plugins.filter((plugin) => resourceEnabled(this.plugin.settings.workspaceResources.plugins, plugin.id, plugin.enabled !== false)).length, error);
+    if (!plugins.length) {
+      container.createDiv({ cls: "codex-resource-empty", text: "没有读取到插件。" });
+      return;
+    }
+    for (const plugin of plugins) {
+      this.renderResourceRow(container, {
+        key: plugin.id,
+        kind: "plugins",
+        name: plugin.displayName || plugin.name || plugin.id,
+        meta: [plugin.category, plugin.marketplace, plugin.installed ? "已安装" : "未安装"].filter(Boolean).join(" · "),
+        desc: plugin.description || plugin.id,
+        enabled: resourceEnabled(this.plugin.settings.workspaceResources.plugins, plugin.id, plugin.enabled !== false)
+      });
+    }
+  }
+
+  private renderMcpResources(container: HTMLElement, servers: McpServerStatus[], error?: string): void {
+    this.renderResourceSummary(container, servers.length, servers.filter((server) => resourceEnabled(this.plugin.settings.workspaceResources.mcpServers, server.name, true)).length, error);
+    if (!this.plugin.settings.mcpEnabled && servers.length) {
+      container.createDiv({ cls: "codex-resource-warning", text: "聊天 MCP 总开关当前关闭；单项开关会保存，打开总开关后生效。" });
+    }
+    if (!servers.length) {
+      container.createDiv({ cls: "codex-resource-empty", text: "没有读取到 MCP 服务器。" });
+      return;
+    }
+    for (const server of servers) {
+      this.renderResourceRow(container, {
+        key: server.name,
+        kind: "mcpServers",
+        name: server.name,
+        meta: `${Object.keys(server.tools ?? {}).length} 个工具 · ${server.authStatus ?? "unknown"}`,
+        desc: "来自 Codex MCP 配置",
+        enabled: resourceEnabled(this.plugin.settings.workspaceResources.mcpServers, server.name, true)
+      });
+    }
+  }
+
+  private renderSkillResources(container: HTMLElement, skills: CodexSkill[], error?: string): void {
+    this.renderResourceSummary(container, skills.length, skills.filter((skill) => resourceEnabled(this.plugin.settings.workspaceResources.skills, skill.path || skill.name, skill.enabled !== false)).length, error);
+    if (!skills.length) {
+      container.createDiv({ cls: "codex-resource-empty", text: "没有读取到 Skills。" });
+      return;
+    }
+    for (const skill of skills) {
+      this.renderResourceRow(container, {
+        key: skill.path || skill.name,
+        kind: "skills",
+        name: `/${skill.name}`,
+        meta: [skill.scope, skill.path].filter(Boolean).join(" · "),
+        desc: skill.description || "无描述",
+        enabled: resourceEnabled(this.plugin.settings.workspaceResources.skills, skill.path || skill.name, skill.enabled !== false)
+      });
+    }
+  }
+
+  private renderResourceSummary(container: HTMLElement, total: number, enabled: number, error?: string): void {
+    container.createDiv({ cls: "codex-resource-summary", text: `已允许 ${enabled} / ${total}` });
+    if (error) container.createDiv({ cls: "codex-resource-error", text: `部分读取失败：${error}` });
+  }
+
+  private renderResourceRow(
+    container: HTMLElement,
+    item: {
+      key: string;
+      kind: "plugins" | "mcpServers" | "skills";
+      name: string;
+      meta: string;
+      desc: string;
+      enabled: boolean;
+    }
+  ): void {
+    const row = container.createDiv({ cls: `codex-resource-row ${item.enabled ? "is-enabled" : "is-disabled"}` });
+    const icon = row.createSpan({ cls: "codex-resource-row-icon" });
+    setIcon(icon, item.kind === "skills" ? "sparkles" : item.kind === "mcpServers" ? "blocks" : "package");
+    const content = row.createDiv({ cls: "codex-resource-row-content" });
+    content.createDiv({ cls: "codex-resource-row-name", text: item.name });
+    if (item.meta) content.createDiv({ cls: "codex-resource-row-meta", text: item.meta });
+    if (item.desc) content.createDiv({ cls: "codex-resource-row-desc", text: item.desc });
+    const toggle = row.createEl("input", {
+      cls: "codex-resource-toggle",
+      attr: { type: "checkbox", "aria-label": `${item.name} 开关` }
+    }) as HTMLInputElement;
+    toggle.checked = item.enabled;
+    toggle.onchange = async () => {
+      this.plugin.settings.workspaceResources[item.kind][item.key] = toggle.checked;
+      await this.plugin.saveSettings(true);
+      this.display();
+    };
+  }
+
+  private async loadWorkspaceResources(force = false, tab: ResourceManagementTab = this.plugin.settings.resourceManagementTab): Promise<void> {
+    if (this.resourceLoadingTab === tab) return;
+    if (this.resourceLoaded[tab] && !force) return;
+    this.resourceLoadingTab = tab;
+    delete this.resourceLoadErrors[tab];
+    this.display();
+    try {
+      const status = await this.plugin.ensureCodexConnected();
+      if (!status.connected || !this.plugin.codex) throw new Error("Codex 未连接");
+      const result = await this.loadResourceTab(tab);
+      this.resourceSnapshot = mergeWorkspaceResourceSnapshot(this.resourceSnapshot, result.kind, result.data, result.error);
+      this.resourceLoaded[tab] = true;
+      this.plugin.settings.workspaceResourceCache = updateWorkspaceResourceCache(
+        this.plugin.settings.workspaceResourceCache,
+        result.kind,
+        result.data,
+        result.error
+      );
+      if (this.plugin.lastStatus) {
+        if (tab === "skills") this.plugin.lastStatus.skills = this.resourceSnapshot.skills;
+        if (tab === "mcp") this.plugin.lastStatus.mcpServers = this.resourceSnapshot.mcpServers;
+      }
+      await this.plugin.saveSettings(true);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.resourceLoadErrors[tab] = message;
+      const kind = resourceKindForTab(tab);
+      this.resourceSnapshot = mergeWorkspaceResourceSnapshot(this.resourceSnapshot, kind, [], message);
+      this.resourceLoaded[tab] = true;
+      this.plugin.settings.workspaceResourceCache = updateWorkspaceResourceCache(this.plugin.settings.workspaceResourceCache, kind, [], message);
+      await this.plugin.saveSettings(true);
+    } finally {
+      this.resourceLoadingTab = null;
+      this.display();
+    }
+  }
+
+  private async loadResourceTab(tab: ResourceManagementTab): Promise<{ kind: WorkspaceResourceKind; data: CodexPluginInfo[] | CodexSkill[] | McpServerStatus[]; error: string | null }> {
+    if (!this.plugin.codex) throw new Error("Codex 未连接");
+    if (tab === "plugins") {
+      const result = await this.plugin.codex.refreshPluginResources();
+      return { kind: "plugins", data: result.plugins, error: result.error };
+    }
+    if (tab === "mcp") {
+      const result = await this.plugin.codex.refreshMcpStatus();
+      return { kind: "mcp", data: result.servers, error: result.error };
+    }
+    const result = await this.plugin.codex.refreshSkillResources();
+    return { kind: "skills", data: result.skills, error: result.error };
+  }
+
+  private addStatusRow(container: HTMLElement, iconName: string, label: string, value: string): void {
+    const row = container.createDiv({ cls: "codex-settings-status-row" });
+    const icon = row.createSpan({ cls: "codex-settings-status-icon" });
+    setIcon(icon, iconName);
+    row.createSpan({ cls: "codex-settings-status-label", text: label });
+    row.createSpan({ cls: "codex-settings-status-value", text: value });
+  }
+
+  private decorateSetting(setting: Setting, iconName: string): Setting {
+    const nameEl = (setting as any).nameEl as HTMLElement | undefined;
+    if (!nameEl) return setting;
+    nameEl.addClass("codex-setting-name-with-icon");
+    const icon = document.createElement("span");
+    icon.addClass("codex-setting-icon");
+    setIcon(icon, iconName);
+    nameEl.prepend(icon);
+    return setting;
+  }
+}
+
+const RESOURCE_TABS: Array<{ id: ResourceManagementTab; label: string; icon: string }> = [
+  { id: "plugins", label: "插件", icon: "package" },
+  { id: "mcp", label: "MCP", icon: "blocks" },
+  { id: "skills", label: "Skills", icon: "sparkles" }
+];
+
+function resourceKindForTab(tab: ResourceManagementTab): WorkspaceResourceKind {
+  return tab === "mcp" ? "mcp" : tab === "skills" ? "skills" : "plugins";
+}
+
+function detectCliPath(customPath: string): string {
+  const expanded = expandHome(customPath.trim());
+  const home = process.env.HOME ?? "";
+  const candidates = [
+    expanded,
+    home ? path.join(home, ".npm-global", "bin", "codex") : "",
+    "/opt/homebrew/bin/codex",
+    "/usr/local/bin/codex",
+    ...String(process.env.PATH || "")
+      .split(path.delimiter)
+      .map((part) => path.join(part, "codex"))
+  ].filter(Boolean);
+  const found = candidates.find((candidate) => fs.existsSync(candidate));
+  return found ? `已检测：${found}` : "未检测到，可手动填写";
+}
+
+function pluginInstallDir(plugin: CodexForObsidianPlugin): string {
+  const dir = (plugin.manifest as any).dir;
+  return dir ? `${dir}/` : ".obsidian/plugins/obsidian-codex/";
+}
+
+function expandHome(value: string): string {
+  if (value === "~") return process.env.HOME ?? "";
+  if (value.startsWith("~/")) return path.join(process.env.HOME ?? "", value.slice(2));
+  return value;
+}

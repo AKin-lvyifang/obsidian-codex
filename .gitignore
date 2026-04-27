@@ -1,0 +1,13 @@
+.DS_Store
+.env
+.env.*
+
+AGENTS.md
+.codex-memory/
+node_modules/
+dist/
+release/
+.tmp/
+.omx/
+
+*.log
