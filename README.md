@@ -2,6 +2,8 @@
 
 在 Obsidian 侧栏中使用 Codex CLI，让 Codex 以当前 vault 为工作区阅读、整理和修改笔记。
 
+![Codex for Obsidian 侧栏演示](docs/images/obsidian-codex-vault-answer.png)
+
 ## 功能
 
 - 右侧栏多会话聊天
