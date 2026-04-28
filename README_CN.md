@@ -1,0 +1,113 @@
+<a href="https://github.com/AKin-lvyifang/obsidian-codex">
+  <img width="1024" alt="Codex for Obsidian，把 Obsidian 仓库变成本地 AI 工作台。" src="docs/images/obsidian-codex-parchment-hero.png">
+</a>
+
+<p align="center">
+  <a href="#功能特性">功能特性</a> ·
+  <a href="#安装">安装</a> ·
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#截图">截图</a> ·
+  <a href="#本地开发">本地开发</a> ·
+  <a href="#许可证">许可证</a> ·
+  <a href="README.md">English</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/AKin-lvyifang/obsidian-codex/releases/tag/v0.1.0">
+    <img src="https://img.shields.io/badge/platform-Obsidian_Desktop-7C3AED?style=flat-square&logo=obsidian&logoColor=white" alt="平台：Obsidian 桌面端">
+    <img src="https://img.shields.io/badge/version-v0.1.0-0EA5E9?style=flat-square" alt="版本 v0.1.0">
+    <img src="https://img.shields.io/badge/license-MIT-10B981?style=flat-square" alt="MIT 开源许可证">
+    <img src="https://img.shields.io/badge/language-English_%2B_%E4%B8%AD%E6%96%87-F59E0B?style=flat-square" alt="英文和中文 README">
+  </a>
+</p>
+
+---
+
+<a id="功能特性"></a>
+## 功能特性
+
+### Vault 原生 Codex 工作区
+
+- 在 Obsidian 侧栏中打开 Codex。
+- 直接以当前 vault 为工作区。
+- 让 Codex 读取笔记、查看文件夹、修改文档、执行本地命令。
+- 不需要在 Obsidian 和外部聊天窗口之间来回切换。
+
+### Agent 式过程时间线
+
+- 将思考、命令、文件编辑、MCP 调用和上下文用量渲染成可读过程卡片。
+- 被处理的文件会显示为文件 chip，vault 内文件可回到 Obsidian 打开。
+- 大输出和原始详情默认折叠，避免对话被日志淹没。
+- 支持 Agent / Plan 模式、模型选择、思考强度、速度和文件权限模式。
+
+### 本地优先集成
+
+- 复用本机 Codex CLI 登录状态。
+- 默认不要求保存 OpenAI API key。
+- 支持为插件启动的 Codex 子进程配置本地代理。
+- 插件、MCP、Skills 开关只作用于当前 vault，不改 Codex 全局配置。
+
+<a id="安装"></a>
+## 安装
+
+1. 先安装并登录 Codex CLI。
+2. 在 [Releases](https://github.com/AKin-lvyifang/obsidian-codex/releases/tag/v0.1.0) 下载 `obsidian-codex-0.1.0.zip`。
+3. 解压后得到 `obsidian-codex` 文件夹。
+4. 放到你的 vault 插件目录：
+
+```text
+<vault>/.obsidian/plugins/obsidian-codex/
+```
+
+5. 重启 Obsidian，在第三方插件里启用 `Codex for Obsidian`。
+
+插件文件夹里应包含：
+
+```text
+obsidian-codex/
+  main.js
+  manifest.json
+  styles.css
+```
+
+<a id="快速开始"></a>
+## 快速开始
+
+1. 从 Ribbon 图标或命令面板打开 Codex 侧栏。
+2. 让 Codex 检查、总结、改写或管理当前 vault 里的文件。
+3. 需要时附加笔记、文件、图片、skills 或 MCP 工具。
+4. 通过过程卡片查看命令、编辑、上下文用量和结果证据。
+
+<a id="截图"></a>
+## 截图
+
+![Codex for Obsidian 侧栏演示](docs/images/obsidian-codex-vault-answer.png)
+
+<a id="本地开发"></a>
+## 本地开发
+
+```bash
+npm install
+npm run test
+npm run typecheck
+npm run build
+```
+
+生成可分享安装包：
+
+```bash
+npm run package
+```
+
+部署到自己的 Obsidian vault：
+
+```bash
+OBSIDIAN_VAULT=/path/to/your/vault npm run deploy
+```
+
+<a id="许可证"></a>
+## 许可证
+
+Codex for Obsidian 使用 [MIT License](LICENSE) 开源。
+
+在保留版权声明和许可证声明的前提下，你可以按照 MIT License 允许的范围使用、复制、修改、合并、发布、分发、再授权或销售本软件。本软件按“现状”提供，不提供任何形式的担保。
