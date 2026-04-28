@@ -14,6 +14,7 @@ import type {
   TokenUsage,
   UiMode
 } from "../types/app-server";
+import { extractClipboardImageFiles, saveClipboardImageAttachments } from "../core/clipboard-images";
 import { buildDiffSummary, diffSummaryLabel, parseFileChangeDiff, serializeFileChanges, type ParsedDiffFile } from "../core/diff-summary";
 import { basename, buildUserInput, contextUsageView, filterSkills, getSlashQuery, normalizeProcessFileRef, reasoningTextFromPayload, summarizeProcessEvent } from "../core/mapping";
 import { settleStaleRunningMessages } from "../core/message-state";
@@ -301,6 +302,9 @@ export class CodexView extends ItemView {
       attr: { placeholder: "问 Codex，让它管理当前 Obsidian 仓库" }
     });
     this.inputEl.addEventListener("input", () => this.onInputChanged());
+    this.inputEl.addEventListener("paste", (event) => {
+      void this.handlePastedFiles(event);
+    });
     this.inputEl.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault();
@@ -1922,6 +1926,20 @@ export class CodexView extends ItemView {
       });
     }
     this.renderAttachments();
+  }
+
+  private async handlePastedFiles(event: ClipboardEvent): Promise<void> {
+    const files = extractClipboardImageFiles(event.clipboardData);
+    if (!files.length) return;
+    event.preventDefault();
+    try {
+      const pasted = await saveClipboardImageAttachments(files, { vaultPath: this.plugin.getVaultPath() });
+      this.attachments.push(...pasted);
+      this.renderAttachments();
+    } catch (error) {
+      console.error("Codex paste image failed", error);
+      new Notice("粘贴图片失败");
+    }
   }
 }
 

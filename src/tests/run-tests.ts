@@ -1,7 +1,8 @@
 import * as assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
+import { extractClipboardImageFiles, imageExtensionForMime, saveClipboardImageAttachment } from "../core/clipboard-images";
 import { buildDiffSummary, parseFileChangeDiff, serializeFileChanges } from "../core/diff-summary";
 import { calculateVirtualWindow, isNearVirtualBottom, scrollTopForVirtualBottom } from "../core/virtual-window";
 import {
@@ -102,6 +103,41 @@ assert.ok(input[2].type === "text" && input[2].text.includes("/vault/a.md"));
 assert.equal(input[3].type, "text");
 assert.equal(input[4].type, "mention");
 assert.equal(input[5].type, "localImage");
+
+assert.equal(imageExtensionForMime("image/png"), "png");
+assert.equal(imageExtensionForMime("image/jpeg"), "jpg");
+assert.equal(imageExtensionForMime("image/webp"), "webp");
+
+const clipboardPng = new File([new Uint8Array([1, 2, 3])], "wechat-screenshot.png", { type: "image/png" });
+const clipboardText = new File(["hello"], "hello.txt", { type: "text/plain" });
+assert.deepEqual(
+  extractClipboardImageFiles({
+    items: [
+      { kind: "string", type: "text/plain", getAsFile: () => null },
+      { kind: "file", type: "image/png", getAsFile: () => clipboardPng },
+      { kind: "file", type: "text/plain", getAsFile: () => clipboardText }
+    ]
+  }),
+  [clipboardPng]
+);
+
+const clipboardVault = await mkdtemp(path.join(tmpdir(), "codex-clipboard-"));
+try {
+  const attachment = await saveClipboardImageAttachment(clipboardPng, {
+    vaultPath: clipboardVault,
+    timestamp: 1700000000000,
+    index: 1
+  });
+  const expectedPath = path.join(clipboardVault, ".obsidian", "plugins", "obsidian-codex", "clipboard", "clipboard-1700000000000-1.png");
+  assert.deepEqual(attachment, {
+    type: "image",
+    name: "clipboard-1700000000000-1.png",
+    path: expectedPath
+  });
+  assert.deepEqual(await readFile(expectedPath), Buffer.from([1, 2, 3]));
+} finally {
+  await rm(clipboardVault, { recursive: true, force: true });
+}
 
 assert.equal(contextPercent(50, 100), 50);
 assert.equal(contextPercent(200, 100), 100);
