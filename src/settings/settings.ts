@@ -56,7 +56,18 @@ export interface StoredSession {
   updatedAt: number;
 }
 
+export type SettingsTab = "general" | "providers" | "resources";
+export type ProviderMode = "codex-login" | "custom-api";
 export type ResourceManagementTab = "plugins" | "mcp" | "skills";
+
+export interface ApiProviderConfig {
+  id: string;
+  name: string;
+  baseUrl: string;
+  model: string;
+  apiKey: string;
+  queryParams?: Record<string, string>;
+}
 
 export interface WorkspaceResourceToggles {
   plugins: Record<string, boolean>;
@@ -78,9 +89,13 @@ export interface WorkspaceResourceCache {
 
 export interface CodexForObsidianSettings {
   settingsVersion: number;
+  settingsTab: SettingsTab;
   cliPath: string;
   proxyEnabled: boolean;
   proxyUrl: string;
+  providerMode: ProviderMode;
+  activeApiProviderId: string;
+  apiProviders: ApiProviderConfig[];
   mcpEnabled: boolean;
   defaultModel: string;
   defaultReasoning: ReasoningEffort;
@@ -97,10 +112,14 @@ export interface CodexForObsidianSettings {
 }
 
 export const DEFAULT_SETTINGS: CodexForObsidianSettings = {
-  settingsVersion: 5,
+  settingsVersion: 6,
+  settingsTab: "general",
   cliPath: "",
   proxyEnabled: false,
   proxyUrl: "http://127.0.0.1:7890",
+  providerMode: "codex-login",
+  activeApiProviderId: "",
+  apiProviders: [],
   mcpEnabled: false,
   defaultModel: "gpt-5.5",
   defaultReasoning: "high",
@@ -125,6 +144,10 @@ export function normalizeSettingsData(data: any): { settings: CodexForObsidianSe
   const settings: CodexForObsidianSettings = {
     ...DEFAULT_SETTINGS,
     ...data,
+    settingsTab: normalizeSettingsTab(data?.settingsTab),
+    providerMode: normalizeProviderMode(data?.providerMode),
+    activeApiProviderId: typeof data?.activeApiProviderId === "string" ? data.activeApiProviderId.trim() : "",
+    apiProviders: normalizeApiProviders(data?.apiProviders),
     resourceManagementTab: normalizeResourceManagementTab(data?.resourceManagementTab),
     workspaceResources: normalizeWorkspaceResources(data?.workspaceResources),
     workspaceResourceCache: normalizeWorkspaceResourceCache(data?.workspaceResourceCache),
@@ -159,8 +182,41 @@ export function normalizeSettingsData(data: any): { settings: CodexForObsidianSe
     }
   }
 
+  normalizeApiProviderSelection(settings);
   settings.settingsVersion = DEFAULT_SETTINGS.settingsVersion;
   return { settings, changed: previousVersion !== DEFAULT_SETTINGS.settingsVersion };
+}
+
+export function getActiveApiProvider(settings: Pick<CodexForObsidianSettings, "activeApiProviderId" | "apiProviders">): ApiProviderConfig | null {
+  return settings.apiProviders.find((provider) => provider.id === settings.activeApiProviderId) ?? null;
+}
+
+export function validateApiProvider(provider: Pick<ApiProviderConfig, "name" | "baseUrl" | "model" | "apiKey">): string[] {
+  const errors: string[] = [];
+  if (!provider.name.trim()) errors.push("名称不能为空");
+  if (!provider.baseUrl.trim()) errors.push("Base URL 不能为空");
+  if (!provider.model.trim()) errors.push("模型不能为空");
+  if (!provider.apiKey.trim()) errors.push("API key 不能为空");
+  return errors;
+}
+
+export function removeApiProvider(settings: Pick<CodexForObsidianSettings, "providerMode" | "activeApiProviderId" | "apiProviders">, providerId: string): boolean {
+  const index = settings.apiProviders.findIndex((provider) => provider.id === providerId);
+  if (index < 0) return false;
+  const wasActive = settings.activeApiProviderId === providerId;
+  settings.apiProviders.splice(index, 1);
+  if (wasActive) {
+    const next = settings.apiProviders[Math.min(index, settings.apiProviders.length - 1)];
+    settings.activeApiProviderId = next?.id ?? "";
+    if (!next) settings.providerMode = "codex-login";
+  }
+  return true;
+}
+
+export function providerConnectionLabel(settings: Pick<CodexForObsidianSettings, "providerMode" | "activeApiProviderId" | "apiProviders">): string {
+  if (settings.providerMode !== "custom-api") return "Codex 登录态";
+  const provider = getActiveApiProvider(settings);
+  return provider ? `自定义 API：${provider.name} · ${provider.model}` : "自定义 API 未配置";
 }
 
 export function ensureModelChoices(models: CodexModel[], ...preferredModels: Array<string | null | undefined>): CodexModel[] {
@@ -211,6 +267,67 @@ export function newId(prefix: string): string {
 
 function normalizeResourceManagementTab(value: any): ResourceManagementTab {
   return value === "mcp" || value === "skills" || value === "plugins" ? value : DEFAULT_SETTINGS.resourceManagementTab;
+}
+
+function normalizeSettingsTab(value: any): SettingsTab {
+  return value === "providers" || value === "resources" || value === "general" ? value : DEFAULT_SETTINGS.settingsTab;
+}
+
+function normalizeProviderMode(value: any): ProviderMode {
+  return value === "custom-api" ? "custom-api" : DEFAULT_SETTINGS.providerMode;
+}
+
+function normalizeApiProviderSelection(settings: Pick<CodexForObsidianSettings, "providerMode" | "activeApiProviderId" | "apiProviders">): void {
+  const active = getActiveApiProvider(settings);
+  if (active) return;
+  const first = settings.apiProviders[0];
+  settings.activeApiProviderId = first?.id ?? "";
+  if (settings.providerMode === "custom-api" && !first) settings.providerMode = "codex-login";
+}
+
+function normalizeApiProviders(value: any): ApiProviderConfig[] {
+  if (!Array.isArray(value)) return [];
+  const usedIds = new Set<string>();
+  return value.map((item, index) => {
+    const id = uniqueProviderId(sanitizeProviderId(item?.id, index), usedIds, index);
+    usedIds.add(id);
+    const queryParams = normalizeQueryParams(item?.queryParams);
+    return {
+      id,
+      name: typeof item?.name === "string" ? item.name.trim() : "",
+      baseUrl: typeof item?.baseUrl === "string" ? item.baseUrl.trim() : "",
+      model: typeof item?.model === "string" ? item.model.trim() : "",
+      apiKey: typeof item?.apiKey === "string" ? item.apiKey.trim() : "",
+      ...(Object.keys(queryParams).length ? { queryParams } : {})
+    };
+  });
+}
+
+function sanitizeProviderId(value: any, index: number): string {
+  const id = typeof value === "string" ? value.trim() : "";
+  return /^[A-Za-z0-9_-]+$/.test(id) ? id : `provider_${index + 1}`;
+}
+
+function uniqueProviderId(id: string, usedIds: Set<string>, index: number): string {
+  if (!usedIds.has(id)) return id;
+  let next = `provider_${index + 1}`;
+  let suffix = 2;
+  while (usedIds.has(next)) {
+    next = `provider_${index + 1}_${suffix}`;
+    suffix += 1;
+  }
+  return next;
+}
+
+function normalizeQueryParams(value: any): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const result: Record<string, string> = {};
+  for (const [key, raw] of Object.entries(value)) {
+    if (!/^[A-Za-z0-9_-]+$/.test(key)) continue;
+    const stringValue = typeof raw === "string" ? raw.trim() : "";
+    if (stringValue) result[key] = stringValue;
+  }
+  return result;
 }
 
 function normalizeBooleanMap(value: any): Record<string, boolean> {

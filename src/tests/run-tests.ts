@@ -31,11 +31,16 @@ import {
 } from "../core/workspace-resources";
 import {
   DEFAULT_SETTINGS,
+  getActiveApiProvider,
   ensureModelChoices,
   filterEnabledSkills,
+  providerConnectionLabel,
   normalizeSettingsData,
+  removeApiProvider,
+  validateApiProvider,
   resourceEnabled
 } from "../settings/settings";
+import { buildCodexLaunchConfig } from "../core/codex-service";
 import { SETTINGS_GEAR_ICON_PATHS } from "../ui/codex-icon";
 
 const workspace = buildSandboxPolicy("workspace-write", "/vault");
@@ -52,6 +57,9 @@ assert.equal(normalizeServiceTier("flex"), "flex");
 assert.equal(DEFAULT_SETTINGS.defaultModel, "gpt-5.5");
 assert.equal(DEFAULT_SETTINGS.defaultReasoning, "high");
 assert.equal(DEFAULT_SETTINGS.proxyEnabled, false);
+assert.equal(DEFAULT_SETTINGS.settingsVersion, 6);
+assert.equal(DEFAULT_SETTINGS.settingsTab, "general");
+assert.equal(DEFAULT_SETTINGS.providerMode, "codex-login");
 
 assert.deepEqual(buildCollaborationMode("agent", "gpt-5.4", "high"), null);
 assert.deepEqual(buildCollaborationMode("plan", "gpt-5.4", "high"), {
@@ -154,7 +162,7 @@ const migratedSettings = normalizeSettingsData({
   proxyEnabled: true,
   proxyUrl: "http://127.0.0.1:7890"
 });
-assert.equal(migratedSettings.settings.settingsVersion, 5);
+assert.equal(migratedSettings.settings.settingsVersion, 6);
 assert.equal(migratedSettings.settings.defaultReasoning, "high");
 assert.equal(migratedSettings.settings.defaultServiceTier, "fast");
 assert.equal(migratedSettings.settings.proxyEnabled, true);
@@ -181,7 +189,7 @@ const migratedDefaultModelSettings = normalizeSettingsData({
   defaultReasoning: "low",
   defaultServiceTier: "fast"
 });
-assert.equal(migratedDefaultModelSettings.settings.settingsVersion, 5);
+assert.equal(migratedDefaultModelSettings.settings.settingsVersion, 6);
 assert.equal(migratedDefaultModelSettings.settings.defaultModel, "gpt-5.5");
 assert.equal(migratedDefaultModelSettings.settings.defaultReasoning, "high");
 assert.equal(migratedDefaultModelSettings.changed, true);
@@ -194,7 +202,7 @@ const workspaceResources = normalizeSettingsData({
     skills: { "/home/demo/.codex/skills/answer/SKILL.md": false }
   }
 });
-assert.equal(workspaceResources.settings.settingsVersion, 5);
+assert.equal(workspaceResources.settings.settingsVersion, 6);
 assert.equal(resourceEnabled(workspaceResources.settings.workspaceResources.plugins, "browser-use@openai-bundled", true), false);
 assert.equal(resourceEnabled(workspaceResources.settings.workspaceResources.mcpServers, "paper", false), true);
 assert.equal(resourceEnabled(workspaceResources.settings.workspaceResources.skills, "missing", true), true);
@@ -256,6 +264,109 @@ assert.equal(
   normalizeSettingsData({ settingsVersion: 5, workspaceResourceCache: cachedResources }).settings.workspaceResourceCache.mcp?.items[0].name,
   "paper"
 );
+
+const apiProviderSettings = normalizeSettingsData({
+  settingsVersion: 5,
+  providerMode: "custom-api",
+  activeApiProviderId: "provider_demo",
+  apiProviders: [
+    {
+      id: "provider_demo",
+      name: "Demo API",
+      baseUrl: "https://api.example.com/v1",
+      model: "gpt-5.4",
+      apiKey: "sk-demo",
+      queryParams: {
+        "api-version": "2026-04-28",
+        empty: ""
+      }
+    },
+    {
+      id: "bad id!",
+      name: 42,
+      baseUrl: "",
+      model: "",
+      apiKey: ""
+    }
+  ]
+});
+assert.equal(apiProviderSettings.settings.settingsVersion, 6);
+assert.equal(apiProviderSettings.settings.providerMode, "custom-api");
+assert.equal(apiProviderSettings.settings.settingsTab, "general");
+assert.equal(apiProviderSettings.settings.apiProviders.length, 2);
+assert.equal(apiProviderSettings.settings.apiProviders[1].id, "provider_2");
+assert.deepEqual(apiProviderSettings.settings.apiProviders[0].queryParams, { "api-version": "2026-04-28" });
+assert.equal(getActiveApiProvider(apiProviderSettings.settings)?.name, "Demo API");
+assert.equal(providerConnectionLabel(apiProviderSettings.settings), "自定义 API：Demo API · gpt-5.4");
+
+const invalidActiveProviderSettings = normalizeSettingsData({
+  settingsVersion: 6,
+  providerMode: "custom-api",
+  activeApiProviderId: "missing",
+  apiProviders: []
+});
+assert.equal(invalidActiveProviderSettings.settings.providerMode, "codex-login");
+assert.equal(invalidActiveProviderSettings.settings.activeApiProviderId, "");
+assert.equal(providerConnectionLabel(invalidActiveProviderSettings.settings), "Codex 登录态");
+
+const providerDeleteSettings = normalizeSettingsData({
+  settingsVersion: 6,
+  providerMode: "custom-api",
+  activeApiProviderId: "first",
+  apiProviders: [
+    { id: "first", name: "First", baseUrl: "https://first.example/v1", model: "gpt-5.4", apiKey: "sk-first" },
+    { id: "second", name: "Second", baseUrl: "https://second.example/v1", model: "gpt-5.4-mini", apiKey: "sk-second" }
+  ]
+}).settings;
+assert.equal(removeApiProvider(providerDeleteSettings, "first"), true);
+assert.equal(providerDeleteSettings.providerMode, "custom-api");
+assert.equal(providerDeleteSettings.activeApiProviderId, "second");
+assert.equal(removeApiProvider(providerDeleteSettings, "second"), true);
+assert.equal(providerDeleteSettings.providerMode, "codex-login");
+assert.equal(providerDeleteSettings.activeApiProviderId, "");
+assert.deepEqual(validateApiProvider({ name: "", baseUrl: "", model: "", apiKey: "" }), [
+  "名称不能为空",
+  "Base URL 不能为空",
+  "模型不能为空",
+  "API key 不能为空"
+]);
+
+const customLaunch = buildCodexLaunchConfig({
+  proxyEnabled: false,
+  proxyUrl: "",
+  providerMode: "custom-api",
+  activeApiProvider: {
+    id: "provider_demo",
+    name: "Demo API",
+    baseUrl: "https://api.example.com/v1",
+    model: "gpt-5.4",
+    apiKey: "sk-secret",
+    queryParams: { "api-version": "2026-04-28" }
+  }
+});
+assert.deepEqual(customLaunch.args.slice(0, 3), ["app-server", "--listen", "stdio://"]);
+assert.ok(customLaunch.args.includes('model_provider="provider_demo"'));
+assert.ok(customLaunch.args.includes('model="gpt-5.4"'));
+assert.ok(customLaunch.args.includes('model_providers.provider_demo.base_url="https://api.example.com/v1"'));
+assert.ok(customLaunch.args.includes('model_providers.provider_demo.wire_api="responses"'));
+assert.ok(customLaunch.args.includes('model_providers.provider_demo.env_key="OBSIDIAN_CODEX_API_KEY_PROVIDER_DEMO"'));
+assert.ok(customLaunch.args.includes('model_providers.provider_demo.query_params.api-version="2026-04-28"'));
+assert.equal(customLaunch.args.join(" ").includes("sk-secret"), false);
+assert.equal(customLaunch.env.OBSIDIAN_CODEX_API_KEY_PROVIDER_DEMO, "sk-secret");
+
+const loginLaunch = buildCodexLaunchConfig({
+  proxyEnabled: false,
+  proxyUrl: "",
+  providerMode: "codex-login",
+  activeApiProvider: {
+    id: "provider_demo",
+    name: "Demo API",
+    baseUrl: "https://api.example.com/v1",
+    model: "gpt-5.4",
+    apiKey: "sk-secret"
+  }
+});
+assert.deepEqual(loginLaunch.args, ["app-server", "--listen", "stdio://"]);
 
 const modelChoices = ensureModelChoices([{ id: "gpt-5.4", model: "gpt-5.4", displayName: "GPT-5.4" }], "gpt-5.5");
 assert.deepEqual(

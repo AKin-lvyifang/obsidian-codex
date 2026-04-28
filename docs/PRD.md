@@ -8,7 +8,7 @@
 
 用户已经在本机登录并配置 Codex CLI，也已经在 Obsidian 中使用类似 Claudian 的侧栏式 Agent UI。现在需要一个独立 Obsidian 插件：
 
-- 不要求再次登录或配置 API key。
+- 默认复用 Codex 登录态；也允许用户在设置页配置 OpenAI Responses API 兼容的 API Provider。
 - 不要求手动选择工作目录。
 - 不复用 Claudian 源码，但可以参考其 UI 信息架构。
 - 所有设置和错误提示默认中文。
@@ -57,7 +57,8 @@
   - 用户配置。
   - skills。
   - MCP 状态。
-- 不在插件中要求填写 OpenAI key。
+- 默认不在插件中要求填写 OpenAI key。
+- 启用自定义 API Provider 时，只在插件启动的 Codex 子进程中注入临时 provider 配置，不修改 Codex 全局配置。
 - app-server 进程异常时显示中文错误，可手动重启。
 - skills/MCP 读取需要单独超时，不能阻塞主聊天。
 
@@ -174,6 +175,10 @@
 ### 5.10 中文设置页
 
 - 设置页全中文。
+- 设置页分为：
+  - 基础设置。
+  - API Provider。
+  - 工作区能力。
 - 设置项包括：
   - Codex CLI 路径检测。
   - 默认模型。
@@ -183,19 +188,42 @@
   - 默认 Agent / Plan 模式。
   - 是否自动打开侧栏。
   - 是否显示上下文容量。
-- 设置只保存插件偏好，不保存 OpenAI 密钥。
+  - 自定义 API Provider 列表。
+- API key 允许明文保存在插件数据里，但 UI 必须明确提示风险。
 
 验收：
 
 - 重启 Obsidian 后设置仍生效。
 - 页面没有英文主文案。
 
+### 5.11 自定义 API Provider
+
+- 支持保存多个 OpenAI Responses API 兼容 Provider。
+- 同一时间只能启用一个 Provider。
+- 可在 Codex 登录态和自定义 API Provider 之间切换。
+- 每个 Provider 包含：
+  - 名称。
+  - Base URL。
+  - 模型。
+  - API key。
+  - 可选 query params。
+- 启用自定义 Provider 后，插件继续复用 Codex app-server、当前 vault、skills、MCP 和权限链路。
+- API key 只能通过子进程环境变量传给 Codex，不能出现在启动参数里。
+- 切换 Provider 后需要重连 Codex；只影响新会话。
+
+验收：
+
+- 设置页能新增、编辑、删除、启用 Provider。
+- Provider 缺少名称、Base URL、模型或 API key 时不能启用。
+- 状态区能显示当前连接方式。
+- 切回 Codex 登录态后不再注入自定义 Provider。
+
 ## 6. 非目标
 
 - 不做移动端。
 - 不做远程服务。
 - 不做 Codex 全局配置编辑器。
-- 不保存 OpenAI key。
+- 不承诺兼容所有 `/v1/chat/completions` 平台。
 - 不复用 Claudian 源码。
 - 不在第一版实现语音输入。
 - 不在第一版实现 Codex Cloud 任务浏览。
@@ -215,7 +243,7 @@
 3. `/` 唤起 skills：覆盖，见 5.8。
 4. 支持 skills、MCP：覆盖，见 5.8、5.9。
 5. 图片渲染、接近 Codex 桌面端：覆盖，见 5.6、5.7。
-6. 不额外配置、复用 Codex 登录：覆盖，见 5.2、5.10。
+6. 不额外配置、复用 Codex 登录：覆盖，见 5.2、5.10；自定义 API Provider 是可选能力，见 5.11。
 7. 默认当前 Obsidian 仓库：覆盖，见 5.3。
 8. 插件设置页中文：覆盖，见 5.10。
 
@@ -231,3 +259,4 @@
 - Phase 8：skills/MCP 基础交互可用。
 - Phase 9：中文设置页和体验打磨完成。
 - Phase 10：完成最终验收并部署。
+- Phase 11：自定义 API Provider 可配置、可切换、可重连。
