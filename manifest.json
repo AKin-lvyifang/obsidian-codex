@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "minAppVersion": "1.4.5",
   "main": "main.js",
-  "description": "在 Obsidian 侧栏中使用 Codex CLI 管理当前 vault。",
+  "description": "Use Codex CLI in the Obsidian sidebar to manage your current vault. / 在 Obsidian 侧栏中使用 Codex CLI 管理当前 vault。",
   "author": "Codex for Obsidian contributors",
   "isDesktopOnly": true
 }
