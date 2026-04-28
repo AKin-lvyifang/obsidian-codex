@@ -4,6 +4,7 @@
 
 <p align="center">
   <a href="#功能特性">功能特性</a> ·
+  <a href="#更新说明">更新说明</a> ·
   <a href="#安装">安装</a> ·
   <a href="#快速开始">快速开始</a> ·
   <a href="#截图">截图</a> ·
@@ -44,8 +45,18 @@
 
 - 复用本机 Codex CLI 登录状态。
 - 默认不要求保存 OpenAI API key。
+- 可选配置 OpenAI Responses API 兼容的自定义 Provider，并为同一个 Provider 保存多个模型。
 - 支持为插件启动的 Codex 子进程配置本地代理。
 - 插件、MCP、Skills 开关只作用于当前 vault，不改 Codex 全局配置。
+
+<a id="更新说明"></a>
+## 更新说明
+
+### main 分支更新
+
+- 新增 `API Provider` 设置页，可在 Codex 登录态和自定义 API Provider 之间切换。
+- 一个 Provider 可填写多个模型，侧栏模型菜单会按配置提供选择。
+- API key 只传给插件启动的 Codex 子进程，不写入 Codex 全局配置。
 
 <a id="安装"></a>
 ## 安装

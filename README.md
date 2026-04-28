@@ -4,6 +4,7 @@
 
 <p align="center">
   <a href="#features">Features</a> ·
+  <a href="#whats-new">What's New</a> ·
   <a href="#install">Install</a> ·
   <a href="#quick-start">Quick Start</a> ·
   <a href="#screenshots">Screenshots</a> ·
@@ -43,8 +44,17 @@
 
 - Reuses your local Codex CLI login state.
 - Does not require storing an OpenAI API key by default.
+- Optionally supports OpenAI Responses API-compatible custom providers, including multiple models per provider.
 - Supports local proxy settings for the Codex child process.
 - Keeps plugin, MCP, and skill switches scoped to the current vault instead of rewriting global Codex config.
+
+## What's New
+
+### Main branch updates
+
+- Adds an `API Provider` settings tab for switching between Codex login and custom API providers.
+- Lets one provider define multiple models, which then appear in the sidebar model menu.
+- Passes API keys only to the Codex child process and does not rewrite global Codex config.
 
 ## Install
 
