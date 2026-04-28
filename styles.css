@@ -846,7 +846,50 @@ body.theme-light .codex-code-wrapper pre {
   white-space: nowrap;
 }
 
+.codex-settings-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 14px;
+}
+
+.codex-settings-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  color: var(--text-muted);
+  background: var(--background-primary);
+  cursor: pointer;
+}
+
+.codex-settings-tab.is-active {
+  color: var(--text-on-accent);
+  border-color: var(--interactive-accent);
+  background: var(--interactive-accent);
+}
+
+.codex-settings-tab-icon,
+.codex-settings-tab-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
 .codex-resource-manager {
+  margin: 12px 0 18px;
+  padding: 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: var(--background-secondary);
+}
+
+.codex-api-provider-manager {
+  display: grid;
+  gap: 10px;
   margin: 12px 0 18px;
   padding: 12px;
   border: 1px solid var(--background-modifier-border);
@@ -925,6 +968,79 @@ body.theme-light .codex-code-wrapper pre {
   color: var(--text-on-accent);
   border-color: var(--interactive-accent);
   background: var(--interactive-accent);
+}
+
+.codex-api-provider-mode,
+.codex-api-provider-head,
+.codex-api-provider-title,
+.codex-api-provider-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.codex-api-provider-mode {
+  flex-wrap: wrap;
+}
+
+.codex-api-provider-list {
+  display: grid;
+  gap: 10px;
+}
+
+.codex-api-provider-row {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 7px;
+  background: var(--background-primary);
+}
+
+.codex-api-provider-row.is-active {
+  border-color: var(--interactive-accent);
+}
+
+.codex-api-provider-head {
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.codex-api-provider-title {
+  min-width: 0;
+  color: var(--text-normal);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.codex-api-provider-actions {
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.codex-api-provider-field {
+  display: grid;
+  grid-template-columns: minmax(86px, 120px) minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.codex-api-provider-label {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.codex-api-provider-input,
+.codex-api-provider-textarea {
+  width: 100%;
+  min-width: 0;
+}
+
+.codex-api-provider-textarea {
+  min-height: 58px;
+  resize: vertical;
 }
 
 .codex-resource-tab-icon,

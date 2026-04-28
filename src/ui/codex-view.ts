@@ -1,7 +1,7 @@
 import { ItemView, Menu, normalizePath, Notice, Platform, setIcon, TFile, WorkspaceLeaf } from "obsidian";
 import type CodexForObsidianPlugin from "../main";
 import type { ChatMessage, DiffSummary, StoredAttachment, StoredSession } from "../settings/settings";
-import { DEFAULT_SETTINGS, ensureModelChoices, filterEnabledSkills, newId } from "../settings/settings";
+import { DEFAULT_SETTINGS, ensureModelChoices, filterEnabledSkills, newId, providerConnectionLabel } from "../settings/settings";
 import type {
   CodexNotification,
   CodexSkill,
@@ -330,7 +330,8 @@ export class CodexView extends ItemView {
     this.headerStatusEl.toggleClass("has-warning", Boolean(status?.errors?.length) || !status?.connected);
     this.headerStatusEl.toggleClass("is-ok", Boolean(status?.connected && !status?.errors?.length));
     this.headerStatusEl.toggleClass("is-active", this.running);
-    this.headerStatusEl.setAttr("title", status?.errors?.length ? status.errors.join("\n") : status?.accountLabel ?? "未连接");
+    const providerLabel = providerConnectionLabel(this.plugin.settings);
+    this.headerStatusEl.setAttr("title", status?.errors?.length ? status.errors.join("\n") : `${status?.accountLabel ?? "未连接"}\n${providerLabel}`);
     this.updateUsageHeader(status?.rateLimits ?? null, this.usageLoading, this.usageError);
     this.renderUsagePanel(status?.rateLimits ?? null, this.usageError, this.usageLoading);
     this.renderToolbar();

@@ -22,15 +22,22 @@ import { buildCollaborationMode, buildSandboxPolicy, normalizeServiceTier } from
 import { CodexRpcClient } from "./codex-rpc";
 import { normalizeRateLimitResponse } from "./rate-limits";
 import { mergeMcpServers } from "./workspace-resources";
-import { hasResourceOverrides, resourceEnabled, type WorkspaceResourceToggles } from "../settings/settings";
+import { hasResourceOverrides, resourceEnabled, type ApiProviderConfig, type ProviderMode, type WorkspaceResourceToggles } from "../settings/settings";
 
 export interface CodexServiceOptions {
   cliPath: string;
   proxyEnabled: boolean;
   proxyUrl: string;
+  providerMode: ProviderMode;
+  activeApiProvider: ApiProviderConfig | null;
   vaultPath: string;
   onNotification: (notification: CodexNotification) => void;
   onServerRequest: (request: CodexServerRequest) => Promise<any>;
+}
+
+export interface CodexLaunchConfig {
+  args: string[];
+  env: NodeJS.ProcessEnv;
 }
 
 export interface TurnOptions {
@@ -90,12 +97,17 @@ export class CodexService {
     await this.disconnect();
 
     const command = resolveCodexCommand(this.options.cliPath);
-    const env = buildEnv(this.options.proxyEnabled, this.options.proxyUrl);
+    const launch = buildCodexLaunchConfig({
+      proxyEnabled: this.options.proxyEnabled,
+      proxyUrl: this.options.proxyUrl,
+      providerMode: this.options.providerMode,
+      activeApiProvider: this.options.activeApiProvider
+    });
     this.client = new CodexRpcClient({
       command,
-      args: ["app-server", "--listen", "stdio://"],
+      args: launch.args,
       cwd: this.options.vaultPath,
-      env
+      env: launch.env
     });
     this.client.start();
 
@@ -398,6 +410,53 @@ function resolveCodexCommand(customPath: string): string {
   ];
   const found = candidates.find((candidate) => fs.existsSync(candidate));
   return found ?? "codex";
+}
+
+export function buildCodexLaunchConfig(options: {
+  proxyEnabled: boolean;
+  proxyUrl: string;
+  providerMode: ProviderMode;
+  activeApiProvider: ApiProviderConfig | null;
+}): CodexLaunchConfig {
+  const env = buildEnv(options.proxyEnabled, options.proxyUrl);
+  const args = ["app-server", "--listen", "stdio://"];
+  const provider = options.providerMode === "custom-api" ? options.activeApiProvider : null;
+  if (!provider) return { args, env };
+
+  const providerId = provider.id;
+  const envKey = customApiProviderEnvKey(providerId);
+  env[envKey] = provider.apiKey;
+  args.push(
+    "-c",
+    `model_provider=${tomlString(providerId)}`,
+    "-c",
+    `model=${tomlString(provider.model)}`,
+    "-c",
+    `model_providers.${providerId}.name=${tomlString(provider.name)}`,
+    "-c",
+    `model_providers.${providerId}.base_url=${tomlString(provider.baseUrl)}`,
+    "-c",
+    `model_providers.${providerId}.env_key=${tomlString(envKey)}`,
+    "-c",
+    `model_providers.${providerId}.wire_api="responses"`,
+    "-c",
+    `model_providers.${providerId}.requires_openai_auth=false`
+  );
+  for (const [key, value] of Object.entries(provider.queryParams ?? {})) {
+    if (/^[A-Za-z0-9_-]+$/.test(key) && value.trim()) {
+      args.push("-c", `model_providers.${providerId}.query_params.${key}=${tomlString(value.trim())}`);
+    }
+  }
+  return { args, env };
+}
+
+function customApiProviderEnvKey(providerId: string): string {
+  const safeId = providerId.toUpperCase().replace(/[^A-Z0-9]/g, "_");
+  return `OBSIDIAN_CODEX_API_KEY_${safeId || "CUSTOM"}`;
+}
+
+function tomlString(value: string): string {
+  return JSON.stringify(value);
 }
 
 function buildEnv(proxyEnabled: boolean, proxyUrl: string): NodeJS.ProcessEnv {

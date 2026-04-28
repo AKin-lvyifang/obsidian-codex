@@ -14,7 +14,7 @@
   - 期望：8 条都有对应章节。
 - TC-PRD-03：PRD 明确非目标。
   - 步骤：检查“非目标”章节。
-  - 期望：移动端、远程服务、全局配置编辑器、保存 key 均不在范围内。
+  - 期望：移动端、远程服务、全局配置编辑器、Chat Completions 泛兼容均不在范围内。
 
 ## 3. Phase 2：测试文档自检
 
@@ -63,6 +63,12 @@
 - TC-BACKEND-07：用量读取不阻塞主聊天。
   - 步骤：模拟或等待 `account/rateLimits/read` 慢响应/超时，再发送普通消息。
   - 期望：右上角主状态不显示用量接口超时；聊天连接、建线程和发送不等待用量读取；用量面板内可单独展示读取失败。
+- TC-BACKEND-08：自定义 API Provider 不泄漏 key 到启动参数。
+  - 步骤：启用一个自定义 Provider 后检查插件生成的 Codex 启动参数。
+  - 期望：启动参数包含 `model_provider`、`base_url`、`wire_api="responses"`、`env_key`，不包含真实 API key。
+- TC-BACKEND-09：自定义 Provider 能被 app-server 读取。
+  - 步骤：用假 key 和假 base URL 启动临时 `codex app-server`，调用 `config/read`。
+  - 期望：返回配置里能看到自定义 `model_provider` 和 Provider 元数据；不发真实模型请求。
 
 ## 6. Phase 5：基础聊天闭环
 
@@ -180,6 +186,15 @@
 - TC-SETTINGS-04：主题适配。
   - 步骤：切换 Obsidian 明暗主题。
   - 期望：文字和边框可读。
+- TC-SETTINGS-05：API Provider 设置页。
+  - 步骤：打开设置页的 `API Provider` 标签，新增一个 Provider。
+  - 期望：可填写名称、Base URL、模型、API key 和 query params；API key 输入框显示为掩码。
+- TC-SETTINGS-06：Provider 启用校验。
+  - 步骤：Provider 缺少名称、Base URL、模型或 API key 时点击“启用并重连”。
+  - 期望：不能启用，并显示中文错误。
+- TC-SETTINGS-07：Provider 切换。
+  - 步骤：保存两个 Provider，依次点击“启用并重连”，再切回 Codex 登录态。
+  - 期望：同一时间只有一个 Provider 生效；切回登录态后不再注入自定义 Provider。
 
 ## 11. Phase 10：最终验收
 
@@ -213,3 +228,5 @@
   - 期望：只影响用量面板，不污染“活跃/思考中”主状态，不阻塞发送。
 - ERR-05：权限被拒绝。
   - 期望：turn 显示权限被拒绝，不崩溃。
+- ERR-06：自定义 Provider 配置不完整。
+  - 期望：设置页阻止启用，提示缺失字段，不启动错误的 Codex 子进程。

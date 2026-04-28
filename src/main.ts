@@ -1,7 +1,7 @@
 import { Notice, Plugin, WorkspaceLeaf } from "obsidian";
 import { CodexService } from "./core/codex-service";
 import { externalizeLargeMessages, prepareRawMessage, readRawText, writeRawText } from "./core/raw-message-store";
-import { normalizeSettingsData, type ChatMessage, type CodexForObsidianSettings, type ResourceManagementTab } from "./settings/settings";
+import { getActiveApiProvider, normalizeSettingsData, type ChatMessage, type CodexForObsidianSettings, type ResourceManagementTab } from "./settings/settings";
 import { CodexSettingTab } from "./settings/settings-tab";
 import { confirmModal, requestUserInputModal } from "./ui/modals";
 import { CodexView, VIEW_TYPE_CODEX } from "./ui/codex-view";
@@ -75,6 +75,7 @@ export default class CodexForObsidianPlugin extends Plugin {
   }
 
   async openWorkspaceResourceSettings(tab: ResourceManagementTab = "plugins"): Promise<void> {
+    this.settings.settingsTab = "resources";
     this.settings.resourceManagementTab = tab;
     await this.saveSettings(true);
     const setting = (this.app as any).setting;
@@ -93,6 +94,8 @@ export default class CodexForObsidianPlugin extends Plugin {
         cliPath: this.settings.cliPath,
         proxyEnabled: this.settings.proxyEnabled,
         proxyUrl: this.settings.proxyUrl,
+        providerMode: this.settings.providerMode,
+        activeApiProvider: getActiveApiProvider(this.settings),
         vaultPath: this.getVaultPath(),
         onNotification: (notification) => this.view?.handleCodexNotification(notification),
         onServerRequest: (request) => this.handleServerRequest(request)

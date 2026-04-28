@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
-import { PluginSettingTab, Setting, setIcon } from "obsidian";
+import { Notice, PluginSettingTab, Setting, setIcon } from "obsidian";
 import type CodexForObsidianPlugin from "../main";
 import {
   errorsFromWorkspaceResourceCache,
@@ -10,8 +10,20 @@ import {
   updateWorkspaceResourceCache,
   type WorkspaceResourceKind
 } from "../core/workspace-resources";
-import { DEFAULT_SETTINGS, ensureModelChoices, resourceEnabled, type ResourceManagementTab } from "./settings";
-import type { CodexPluginInfo, CodexSkill, McpServerStatus, PermissionMode, ReasoningEffort, ServiceTierChoice, UiMode, WorkspaceResourceSnapshot } from "../types/app-server";
+import {
+  DEFAULT_SETTINGS,
+  ensureModelChoices,
+  getActiveApiProvider,
+  newId,
+  providerConnectionLabel,
+  removeApiProvider,
+  resourceEnabled,
+  validateApiProvider,
+  type ApiProviderConfig,
+  type ResourceManagementTab,
+  type SettingsTab
+} from "./settings";
+import type { CodexPluginInfo, CodexSkill, CodexStatusSnapshot, McpServerStatus, PermissionMode, ReasoningEffort, ServiceTierChoice, UiMode, WorkspaceResourceSnapshot } from "../types/app-server";
 
 export class CodexSettingTab extends PluginSettingTab {
   private resourceSnapshot: WorkspaceResourceSnapshot | null = null;
@@ -35,6 +47,7 @@ export class CodexSettingTab extends PluginSettingTab {
     const statusBox = containerEl.createDiv({ cls: "codex-settings-status" });
     this.addStatusRow(statusBox, "activity", "Codex 状态", status?.connected ? "已连接" : "未连接");
     this.addStatusRow(statusBox, "user-check", "账号状态", status?.accountLabel ?? "未知");
+    this.addStatusRow(statusBox, "key-round", "连接方式", providerConnectionLabel(this.plugin.settings));
     this.addStatusRow(statusBox, "terminal", "CLI 路径", detectCliPath(this.plugin.settings.cliPath));
     this.addStatusRow(statusBox, "waypoints", "代理", this.plugin.settings.proxyEnabled ? this.plugin.settings.proxyUrl : "关闭");
     this.addStatusRow(statusBox, "blocks", "聊天 MCP", this.plugin.settings.mcpEnabled ? "启用" : "关闭");
@@ -43,8 +56,20 @@ export class CodexSettingTab extends PluginSettingTab {
     this.addStatusRow(statusBox, "blocks", "MCP 数量", `${status?.mcpServers.length ?? 0}`);
     this.addStatusRow(statusBox, "package-check", "插件目录", pluginInstallDir(this.plugin));
 
-    this.renderWorkspaceResourceManager(containerEl);
+    this.renderTopTabs(containerEl);
+    if (this.plugin.settings.settingsTab === "providers") {
+      this.renderApiProviderManager(containerEl);
+      return;
+    }
+    if (this.plugin.settings.settingsTab === "resources") {
+      this.renderWorkspaceResourceManager(containerEl);
+      return;
+    }
 
+    this.renderGeneralSettings(containerEl, status);
+  }
+
+  private renderGeneralSettings(containerEl: HTMLElement, status: CodexStatusSnapshot | null): void {
     this.decorateSetting(
       new Setting(containerEl)
       .setName("Codex CLI 路径")
@@ -182,6 +207,194 @@ export class CodexSettingTab extends PluginSettingTab {
           this.display();
         })
     ), "refresh-cw");
+  }
+
+  private renderTopTabs(container: HTMLElement): void {
+    const tabs = container.createDiv({ cls: "codex-settings-tabs" });
+    for (const tab of SETTINGS_TABS) {
+      const button = tabs.createEl("button", {
+        cls: `codex-settings-tab ${this.plugin.settings.settingsTab === tab.id ? "is-active" : ""}`,
+        attr: { type: "button" }
+      });
+      const icon = button.createSpan({ cls: "codex-settings-tab-icon" });
+      setIcon(icon, tab.icon);
+      button.createSpan({ text: tab.label });
+      button.onclick = async () => {
+        this.plugin.settings.settingsTab = tab.id;
+        await this.plugin.saveSettings();
+        this.display();
+      };
+    }
+  }
+
+  private renderApiProviderManager(container: HTMLElement): void {
+    const wrapper = container.createDiv({ cls: "codex-api-provider-manager" });
+    const header = wrapper.createDiv({ cls: "codex-resource-manager-header" });
+    const title = header.createDiv({ cls: "codex-resource-manager-title" });
+    const icon = title.createSpan({ cls: "codex-setting-icon" });
+    setIcon(icon, "key-round");
+    title.createSpan({ text: "API Provider" });
+
+    wrapper.createDiv({
+      cls: "codex-resource-warning",
+      text: "API key 会明文保存在 Obsidian 插件数据里；只建议本机使用，不建议同步或提交。"
+    });
+
+    const modeRow = wrapper.createDiv({ cls: "codex-api-provider-mode" });
+    modeRow.createDiv({
+      cls: "codex-resource-summary",
+      text: `当前：${providerConnectionLabel(this.plugin.settings)}`
+    });
+    const loginButton = modeRow.createEl("button", {
+      cls: `codex-resource-tab ${this.plugin.settings.providerMode === "codex-login" ? "is-active" : ""}`,
+      text: "Codex 登录态",
+      attr: { type: "button" }
+    });
+    loginButton.onclick = async () => {
+      this.plugin.settings.providerMode = "codex-login";
+      await this.plugin.saveSettings(true);
+      await this.plugin.reconnectCodex();
+      this.display();
+    };
+
+    const add = header.createEl("button", {
+      cls: "codex-resource-refresh",
+      text: "新增",
+      attr: { type: "button", title: "新增 API Provider" }
+    });
+    add.onclick = async () => {
+      const provider: ApiProviderConfig = {
+        id: newId("provider").replace(/[^A-Za-z0-9_-]/g, "_"),
+        name: "自定义 API",
+        baseUrl: "https://api.openai.com/v1",
+        model: this.plugin.settings.defaultModel || DEFAULT_SETTINGS.defaultModel,
+        apiKey: ""
+      };
+      this.plugin.settings.apiProviders.push(provider);
+      this.plugin.settings.activeApiProviderId = provider.id;
+      await this.plugin.saveSettings(true);
+      this.display();
+    };
+
+    if (!this.plugin.settings.apiProviders.length) {
+      wrapper.createDiv({ cls: "codex-resource-empty", text: "还没有自定义 API Provider。" });
+      return;
+    }
+
+    const body = wrapper.createDiv({ cls: "codex-api-provider-list" });
+    for (const provider of this.plugin.settings.apiProviders) {
+      this.renderApiProviderRow(body, provider);
+    }
+  }
+
+  private renderApiProviderRow(container: HTMLElement, provider: ApiProviderConfig): void {
+    const activeProvider = getActiveApiProvider(this.plugin.settings);
+    const row = container.createDiv({
+      cls: `codex-api-provider-row ${activeProvider?.id === provider.id && this.plugin.settings.providerMode === "custom-api" ? "is-active" : ""}`
+    });
+    const head = row.createDiv({ cls: "codex-api-provider-head" });
+    const title = head.createDiv({ cls: "codex-api-provider-title" });
+    const icon = title.createSpan({ cls: "codex-resource-row-icon" });
+    setIcon(icon, "key-round");
+    title.createSpan({ text: provider.name || "未命名 Provider" });
+    title.createSpan({ cls: "codex-resource-row-meta", text: provider.model || "未设置模型" });
+
+    const actions = head.createDiv({ cls: "codex-api-provider-actions" });
+    const enable = actions.createEl("button", {
+      cls: "codex-resource-tab",
+      text: activeProvider?.id === provider.id && this.plugin.settings.providerMode === "custom-api" ? "已启用" : "启用并重连",
+      attr: { type: "button" }
+    });
+    enable.onclick = async () => {
+      const errors = validateApiProvider(provider);
+      if (errors.length) {
+        new Notice(`无法启用：${errors.join("，")}`);
+        return;
+      }
+      this.plugin.settings.providerMode = "custom-api";
+      this.plugin.settings.activeApiProviderId = provider.id;
+      await this.plugin.saveSettings(true);
+      await this.plugin.reconnectCodex();
+      this.display();
+    };
+
+    const remove = actions.createEl("button", {
+      cls: "codex-resource-tab",
+      text: "删除",
+      attr: { type: "button" }
+    });
+    remove.onclick = async () => {
+      if (!window.confirm(`删除 ${provider.name || "这个 Provider"}？`)) return;
+      const wasActive = this.plugin.settings.providerMode === "custom-api" && this.plugin.settings.activeApiProviderId === provider.id;
+      removeApiProvider(this.plugin.settings, provider.id);
+      await this.plugin.saveSettings(true);
+      if (wasActive) await this.plugin.reconnectCodex();
+      this.display();
+    };
+
+    this.addProviderText(row, "名称", provider.name, "例如 OpenAI API", async (value) => {
+      provider.name = value.trim();
+      await this.plugin.saveSettings();
+      this.display();
+    });
+    this.addProviderText(row, "Base URL", provider.baseUrl, "https://api.openai.com/v1", async (value) => {
+      provider.baseUrl = value.trim();
+      await this.plugin.saveSettings();
+    });
+    this.addProviderText(row, "模型", provider.model, DEFAULT_SETTINGS.defaultModel, async (value) => {
+      provider.model = value.trim();
+      await this.plugin.saveSettings();
+      this.display();
+    });
+    this.addProviderText(row, "API key", provider.apiKey, "sk-...", async (value) => {
+      provider.apiKey = value.trim();
+      await this.plugin.saveSettings();
+    }, "password");
+    this.addProviderTextArea(row, "Query Params", formatQueryParams(provider.queryParams), "api-version=2026-04-28", async (value) => {
+      provider.queryParams = parseQueryParams(value);
+      if (!Object.keys(provider.queryParams).length) delete provider.queryParams;
+      await this.plugin.saveSettings();
+    });
+
+    const errors = validateApiProvider(provider);
+    if (errors.length) row.createDiv({ cls: "codex-resource-error", text: `缺少：${errors.join("，")}` });
+    if (activeProvider?.id === provider.id && this.plugin.settings.providerMode === "custom-api") {
+      row.createDiv({ cls: "codex-resource-note", text: "修改配置后，需要再次点击“启用并重连”才会让当前 Codex 进程生效。" });
+    }
+  }
+
+  private addProviderText(
+    container: HTMLElement,
+    label: string,
+    value: string,
+    placeholder: string,
+    onChange: (value: string) => Promise<void>,
+    type: "text" | "password" = "text"
+  ): void {
+    const field = container.createDiv({ cls: "codex-api-provider-field" });
+    field.createDiv({ cls: "codex-api-provider-label", text: label });
+    const input = field.createEl("input", {
+      cls: "codex-api-provider-input",
+      attr: { type, placeholder, value }
+    }) as HTMLInputElement;
+    input.onchange = () => void onChange(input.value);
+  }
+
+  private addProviderTextArea(
+    container: HTMLElement,
+    label: string,
+    value: string,
+    placeholder: string,
+    onChange: (value: string) => Promise<void>
+  ): void {
+    const field = container.createDiv({ cls: "codex-api-provider-field" });
+    field.createDiv({ cls: "codex-api-provider-label", text: label });
+    const input = field.createEl("textarea", {
+      cls: "codex-api-provider-textarea",
+      attr: { placeholder }
+    }) as HTMLTextAreaElement;
+    input.value = value;
+    input.onchange = () => void onChange(input.value);
   }
 
   private renderWorkspaceResourceManager(container: HTMLElement): void {
@@ -421,6 +634,12 @@ const RESOURCE_TABS: Array<{ id: ResourceManagementTab; label: string; icon: str
   { id: "skills", label: "Skills", icon: "sparkles" }
 ];
 
+const SETTINGS_TABS: Array<{ id: SettingsTab; label: string; icon: string }> = [
+  { id: "general", label: "基础设置", icon: "settings" },
+  { id: "providers", label: "API Provider", icon: "key-round" },
+  { id: "resources", label: "工作区能力", icon: "blocks" }
+];
+
 function resourceKindForTab(tab: ResourceManagementTab): WorkspaceResourceKind {
   return tab === "mcp" ? "mcp" : tab === "skills" ? "skills" : "plugins";
 }
@@ -444,6 +663,26 @@ function detectCliPath(customPath: string): string {
 function pluginInstallDir(plugin: CodexForObsidianPlugin): string {
   const dir = (plugin.manifest as any).dir;
   return dir ? `${dir}/` : ".obsidian/plugins/obsidian-codex/";
+}
+
+function formatQueryParams(params?: Record<string, string>): string {
+  return Object.entries(params ?? {})
+    .map(([key, value]) => `${key}=${value}`)
+    .join("\n");
+}
+
+function parseQueryParams(value: string): Record<string, string> {
+  const params: Record<string, string> = {};
+  for (const line of value.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const separator = trimmed.indexOf("=");
+    if (separator <= 0) continue;
+    const key = trimmed.slice(0, separator).trim();
+    const paramValue = trimmed.slice(separator + 1).trim();
+    if (/^[A-Za-z0-9_-]+$/.test(key) && paramValue) params[key] = paramValue;
+  }
+  return params;
 }
 
 function expandHome(value: string): string {
