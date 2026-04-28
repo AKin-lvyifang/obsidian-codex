@@ -14,7 +14,9 @@ import {
   DEFAULT_SETTINGS,
   ensureModelChoices,
   getActiveApiProvider,
+  getApiProviderModels,
   newId,
+  providerModelLabel,
   providerConnectionLabel,
   removeApiProvider,
   resourceEnabled,
@@ -268,6 +270,7 @@ export class CodexSettingTab extends PluginSettingTab {
         name: "自定义 API",
         baseUrl: "https://api.openai.com/v1",
         model: this.plugin.settings.defaultModel || DEFAULT_SETTINGS.defaultModel,
+        models: [this.plugin.settings.defaultModel || DEFAULT_SETTINGS.defaultModel],
         apiKey: ""
       };
       this.plugin.settings.apiProviders.push(provider);
@@ -297,7 +300,7 @@ export class CodexSettingTab extends PluginSettingTab {
     const icon = title.createSpan({ cls: "codex-resource-row-icon" });
     setIcon(icon, "key-round");
     title.createSpan({ text: provider.name || "未命名 Provider" });
-    title.createSpan({ cls: "codex-resource-row-meta", text: provider.model || "未设置模型" });
+    title.createSpan({ cls: "codex-resource-row-meta", text: providerModelLabel(provider) });
 
     const actions = head.createDiv({ cls: "codex-api-provider-actions" });
     const enable = actions.createEl("button", {
@@ -341,8 +344,10 @@ export class CodexSettingTab extends PluginSettingTab {
       provider.baseUrl = value.trim();
       await this.plugin.saveSettings();
     });
-    this.addProviderText(row, "模型", provider.model, DEFAULT_SETTINGS.defaultModel, async (value) => {
-      provider.model = value.trim();
+    this.addProviderTextArea(row, "模型", getApiProviderModels(provider).join("\n"), `${DEFAULT_SETTINGS.defaultModel}\ngpt-5.4`, async (value) => {
+      const models = parseModelList(value);
+      provider.models = models;
+      provider.model = models[0] ?? "";
       await this.plugin.saveSettings();
       this.display();
     });
@@ -683,6 +688,18 @@ function parseQueryParams(value: string): Record<string, string> {
     if (/^[A-Za-z0-9_-]+$/.test(key) && paramValue) params[key] = paramValue;
   }
   return params;
+}
+
+function parseModelList(value: string): string[] {
+  const seen = new Set<string>();
+  const models: string[] = [];
+  for (const line of value.split(/\r?\n/)) {
+    const model = line.trim();
+    if (!model || seen.has(model)) continue;
+    seen.add(model);
+    models.push(model);
+  }
+  return models;
 }
 
 function expandHome(value: string): string {

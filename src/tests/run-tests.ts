@@ -31,9 +31,11 @@ import {
 } from "../core/workspace-resources";
 import {
   DEFAULT_SETTINGS,
+  getApiProviderModels,
   getActiveApiProvider,
   ensureModelChoices,
   filterEnabledSkills,
+  providerModelLabel,
   providerConnectionLabel,
   normalizeSettingsData,
   removeApiProvider,
@@ -275,6 +277,7 @@ const apiProviderSettings = normalizeSettingsData({
       name: "Demo API",
       baseUrl: "https://api.example.com/v1",
       model: "gpt-5.4",
+      models: ["gpt-5.4", "gpt-5.5", "gpt-4.1"],
       apiKey: "sk-demo",
       queryParams: {
         "api-version": "2026-04-28",
@@ -297,7 +300,13 @@ assert.equal(apiProviderSettings.settings.apiProviders.length, 2);
 assert.equal(apiProviderSettings.settings.apiProviders[1].id, "provider_2");
 assert.deepEqual(apiProviderSettings.settings.apiProviders[0].queryParams, { "api-version": "2026-04-28" });
 assert.equal(getActiveApiProvider(apiProviderSettings.settings)?.name, "Demo API");
-assert.equal(providerConnectionLabel(apiProviderSettings.settings), "自定义 API：Demo API · gpt-5.4");
+assert.deepEqual(getApiProviderModels(apiProviderSettings.settings.apiProviders[0]), ["gpt-5.4", "gpt-5.5", "gpt-4.1"]);
+assert.equal(providerModelLabel(apiProviderSettings.settings.apiProviders[0]), "gpt-5.4 等 3 个");
+assert.equal(providerConnectionLabel(apiProviderSettings.settings), "自定义 API：Demo API · gpt-5.4 等 3 个");
+assert.deepEqual(
+  ensureModelChoices([], ...getApiProviderModels(apiProviderSettings.settings.apiProviders[0])).map((model) => model.model),
+  ["gpt-5.4", "gpt-5.5", "gpt-4.1"]
+);
 
 const invalidActiveProviderSettings = normalizeSettingsData({
   settingsVersion: 6,
@@ -340,6 +349,7 @@ const customLaunch = buildCodexLaunchConfig({
     name: "Demo API",
     baseUrl: "https://api.example.com/v1",
     model: "gpt-5.4",
+    models: ["gpt-5.4", "gpt-5.5"],
     apiKey: "sk-secret",
     queryParams: { "api-version": "2026-04-28" }
   }
@@ -363,6 +373,7 @@ const loginLaunch = buildCodexLaunchConfig({
     name: "Demo API",
     baseUrl: "https://api.example.com/v1",
     model: "gpt-5.4",
+    models: ["gpt-5.4"],
     apiKey: "sk-secret"
   }
 });
