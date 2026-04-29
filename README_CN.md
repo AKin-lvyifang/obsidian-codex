@@ -14,12 +14,18 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/AKin-lvyifang/obsidian-codex/releases/tag/v0.1.0">
+  <a href="https://github.com/AKin-lvyifang/obsidian-codex/releases/latest">
     <img src="https://img.shields.io/badge/platform-Obsidian_Desktop-7C3AED?style=flat-square&logo=obsidian&logoColor=white" alt="平台：Obsidian 桌面端">
-    <img src="https://img.shields.io/badge/version-v0.1.0-0EA5E9?style=flat-square" alt="版本 v0.1.0">
+    <img src="https://img.shields.io/badge/version-v0.1.1-0EA5E9?style=flat-square" alt="版本 v0.1.1">
     <img src="https://img.shields.io/badge/license-MIT-10B981?style=flat-square" alt="MIT 开源许可证">
     <img src="https://img.shields.io/badge/language-English_%2B_%E4%B8%AD%E6%96%87-F59E0B?style=flat-square" alt="英文和中文 README">
   </a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/AKin-lvyifang/obsidian-codex/releases/download/v0.1.1/obsidian-codex-0.1.1.zip"><strong>下载 v0.1.1</strong></a>
+  ·
+  <a href="https://github.com/AKin-lvyifang/obsidian-codex/releases/latest">最新 Release</a>
 </p>
 
 ---
@@ -52,6 +58,11 @@
 <a id="更新说明"></a>
 ## 更新说明
 
+### v0.1.1
+
+- 支持在 Codex 输入框里用 `Command+V` 直接粘贴微信截图或系统截图。
+- 剪贴板图片会保存到插件内部目录，并作为图片附件发送给 Codex。
+
 ### main 分支更新
 
 - 新增 `API Provider` 设置页，可在 Codex 登录态和自定义 API Provider 之间切换。
@@ -62,7 +73,7 @@
 ## 安装
 
 1. 先安装并登录 Codex CLI。
-2. 在 [Releases](https://github.com/AKin-lvyifang/obsidian-codex/releases/tag/v0.1.0) 下载 `obsidian-codex-0.1.0.zip`。
+2. 在 [最新 Release](https://github.com/AKin-lvyifang/obsidian-codex/releases/latest) 下载 [`obsidian-codex-0.1.1.zip`](https://github.com/AKin-lvyifang/obsidian-codex/releases/download/v0.1.1/obsidian-codex-0.1.1.zip)。
 3. 解压后得到 `obsidian-codex` 文件夹。
 4. 放到你的 vault 插件目录：
 
