@@ -58,14 +58,13 @@
 
 ### v0.1.1
 
-- Paste WeChat or system screenshots directly into the Codex input with `Command+V`.
-- Clipboard images are saved inside the plugin data folder and sent as image attachments.
+**New feature:** paste WeChat or system screenshots directly into the Codex input box.
 
-### Main branch updates
+**How to use:**
 
-- Adds an `API Provider` settings tab for switching between Codex login and custom API providers.
-- Lets one provider define multiple models, which then appear in the sidebar model menu.
-- Passes API keys only to the Codex child process and does not rewrite global Codex config.
+1. Take a screenshot.
+2. Click the Codex input box.
+3. Press `Command+V`, then send.
 
 ## Install
 
