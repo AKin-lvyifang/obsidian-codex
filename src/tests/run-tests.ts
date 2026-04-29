@@ -175,10 +175,10 @@ assert.equal(vaultFile.name, "a.md");
 const externalFile = normalizeProcessFileRef("/tmp/out.txt", "/vault");
 assert.equal(externalFile.kind, "external");
 assert.equal(externalFile.path, "/tmp/out.txt");
-const refs = extractProcessFileRefs("sed -n '1,20p' src/ui/codex-view.ts && rg foo docs/PRD.md", "/vault");
+const refs = extractProcessFileRefs("sed -n '1,20p' src/ui/codex-view.ts && rg foo docs/sample.md", "/vault");
 assert.deepEqual(
   refs.map((item) => item.path),
-  ["src/ui/codex-view.ts", "docs/PRD.md"]
+  ["src/ui/codex-view.ts", "docs/sample.md"]
 );
 assert.equal(summarizeProcessEvent("commandExecution", { command: "sed -n '1,20p' src/ui/codex-view.ts" }, "/vault").title, "查看文件");
 assert.equal(summarizeProcessEvent("commandExecution", { command: "rg -n foo docs" }, "/vault").title, "搜索文件");
@@ -186,8 +186,8 @@ assert.equal(summarizeProcessEvent("commandExecution", { command: "npm run build
 assert.equal(summarizeProcessEvent("commandExecution", { command: "rg -n foo docs" }, "/vault").kind, "search");
 assert.equal(summarizeProcessEvent("commandExecution", { command: "sed -n '1,20p' src/ui/codex-view.ts" }, "/vault").kind, "view");
 assert.equal(summarizeProcessEvent("commandExecution", { command: "npm run build" }, "/vault").kind, "run");
-assert.equal(summarizeProcessEvent("fileChange", { changes: [{ path: "docs/PRD.md" }] }, "/vault").title, "编辑文件");
-assert.equal(summarizeProcessEvent("fileChange", { changes: [{ path: "docs/PRD.md" }] }, "/vault").kind, "edit");
+assert.equal(summarizeProcessEvent("fileChange", { changes: [{ path: "docs/sample.md" }] }, "/vault").title, "编辑文件");
+assert.equal(summarizeProcessEvent("fileChange", { changes: [{ path: "docs/sample.md" }] }, "/vault").kind, "edit");
 assert.equal(reasoningTextFromPayload({ summary: ["先确认附件", "再读取文件"], content: ["检查结构"] }), "先确认附件\n再读取文件\n检查结构");
 assert.equal(summarizeProcessEvent("reasoning", { text: "确认当前文档", status: "running" }, "/vault").title, "正在思考");
 assert.equal(summarizeProcessEvent("reasoning", { summary: ["确认完成"] }, "/vault").title, "已思考");
@@ -314,7 +314,7 @@ const apiProviderSettings = normalizeSettingsData({
       baseUrl: "https://api.example.com/v1",
       model: "gpt-5.4",
       models: ["gpt-5.4", "gpt-5.5", "gpt-4.1"],
-      apiKey: "sk-demo",
+      apiKey: "test-key-demo",
       queryParams: {
         "api-version": "2026-04-28",
         empty: ""
@@ -359,8 +359,8 @@ const providerDeleteSettings = normalizeSettingsData({
   providerMode: "custom-api",
   activeApiProviderId: "first",
   apiProviders: [
-    { id: "first", name: "First", baseUrl: "https://first.example/v1", model: "gpt-5.4", apiKey: "sk-first" },
-    { id: "second", name: "Second", baseUrl: "https://second.example/v1", model: "gpt-5.4-mini", apiKey: "sk-second" }
+    { id: "first", name: "First", baseUrl: "https://first.example/v1", model: "gpt-5.4", apiKey: "test-key-first" },
+    { id: "second", name: "Second", baseUrl: "https://second.example/v1", model: "gpt-5.4-mini", apiKey: "test-key-second" }
   ]
 }).settings;
 assert.equal(removeApiProvider(providerDeleteSettings, "first"), true);
@@ -386,7 +386,7 @@ const customLaunch = buildCodexLaunchConfig({
     baseUrl: "https://api.example.com/v1",
     model: "gpt-5.4",
     models: ["gpt-5.4", "gpt-5.5"],
-    apiKey: "sk-secret",
+    apiKey: "test-key-value",
     queryParams: { "api-version": "2026-04-28" }
   }
 });
@@ -397,8 +397,8 @@ assert.ok(customLaunch.args.includes('model_providers.provider_demo.base_url="ht
 assert.ok(customLaunch.args.includes('model_providers.provider_demo.wire_api="responses"'));
 assert.ok(customLaunch.args.includes('model_providers.provider_demo.env_key="OBSIDIAN_CODEX_API_KEY_PROVIDER_DEMO"'));
 assert.ok(customLaunch.args.includes('model_providers.provider_demo.query_params.api-version="2026-04-28"'));
-assert.equal(customLaunch.args.join(" ").includes("sk-secret"), false);
-assert.equal(customLaunch.env.OBSIDIAN_CODEX_API_KEY_PROVIDER_DEMO, "sk-secret");
+assert.equal(customLaunch.args.join(" ").includes("test-key-value"), false);
+assert.equal(customLaunch.env.OBSIDIAN_CODEX_API_KEY_PROVIDER_DEMO, "test-key-value");
 
 const loginLaunch = buildCodexLaunchConfig({
   proxyEnabled: false,
@@ -410,7 +410,7 @@ const loginLaunch = buildCodexLaunchConfig({
     baseUrl: "https://api.example.com/v1",
     model: "gpt-5.4",
     models: ["gpt-5.4"],
-    apiKey: "sk-secret"
+    apiKey: "test-key-value"
   }
 });
 assert.deepEqual(loginLaunch.args, ["app-server", "--listen", "stdio://"]);

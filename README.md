@@ -16,14 +16,14 @@
 <p align="center">
   <a href="https://github.com/AKin-lvyifang/obsidian-codex/releases/latest">
     <img src="https://img.shields.io/badge/platform-Obsidian_Desktop-7C3AED?style=flat-square&logo=obsidian&logoColor=white" alt="Platform: Obsidian Desktop">
-    <img src="https://img.shields.io/badge/version-v0.1.1-0EA5E9?style=flat-square" alt="Version v0.1.1">
+    <img src="https://img.shields.io/badge/version-v0.1.2-0EA5E9?style=flat-square" alt="Version v0.1.2">
     <img src="https://img.shields.io/badge/license-MIT-10B981?style=flat-square" alt="MIT License">
     <img src="https://img.shields.io/badge/language-English_%2B_%E4%B8%AD%E6%96%87-F59E0B?style=flat-square" alt="English and Chinese README">
   </a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/AKin-lvyifang/obsidian-codex/releases/download/v0.1.1/obsidian-codex-0.1.1.zip"><strong>Download v0.1.1</strong></a>
+  <a href="https://github.com/AKin-lvyifang/obsidian-codex/releases/download/v0.1.2/obsidian-codex-0.1.2.zip"><strong>Download v0.1.2</strong></a>
   ·
   <a href="https://github.com/AKin-lvyifang/obsidian-codex/releases/latest">Latest Release</a>
 </p>
@@ -56,6 +56,16 @@
 
 ## What's New
 
+### v0.1.2
+
+**New feature:** public releases now keep the GitHub repository focused on install and usage files only.
+
+**How to use:**
+
+1. Download the latest release package.
+2. Install the `obsidian-codex` plugin folder.
+3. Use the plugin without browsing internal project documents.
+
 ### v0.1.1
 
 **New feature:** paste WeChat or system screenshots directly into the Codex input box.
@@ -69,7 +79,7 @@
 ## Install
 
 1. Install and log in to Codex CLI.
-2. Download [`obsidian-codex-0.1.1.zip`](https://github.com/AKin-lvyifang/obsidian-codex/releases/download/v0.1.1/obsidian-codex-0.1.1.zip) from [the latest release](https://github.com/AKin-lvyifang/obsidian-codex/releases/latest).
+2. Download [`obsidian-codex-0.1.2.zip`](https://github.com/AKin-lvyifang/obsidian-codex/releases/download/v0.1.2/obsidian-codex-0.1.2.zip) from [the latest release](https://github.com/AKin-lvyifang/obsidian-codex/releases/latest).
 3. Unzip it and get the `obsidian-codex` folder.
 4. Move it into your vault plugin directory:
 
