@@ -1,20 +1,25 @@
 {
   "name": "codex-echoink",
-  "version": "1.4.0",
+  "version": "2.0.0",
   "description": "Codex EchoInk",
   "main": "dist/main.js",
   "scripts": {
     "build": "node esbuild.config.mjs production",
+    "check:phase1-obsidian-runtime": "node scripts/check-phase1-obsidian-runtime.mjs",
     "check:public": "node scripts/check-public-files.mjs",
     "check:release": "node scripts/check-release-contract.mjs",
     "dev": "node esbuild.config.mjs watch",
-    "inventory:storage": "node scripts/run-storage-inventory.mjs",
     "lint": "node scripts/check-obsidian-review.mjs",
     "lint:report": "eslint .",
     "lint:update-baseline": "node scripts/check-obsidian-review.mjs --write-baseline",
     "prepare": "node scripts/install-git-hooks.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node scripts/run-tests.mjs",
+    "test:provider-settings": "node scripts/provider-settings-tests.mjs",
+    "test:conversation-ui": "node scripts/conversation-ui-tests.mjs",
+    "test:personal-memory": "node scripts/personal-memory-tests.mjs",
+    "test:knowledge": "node scripts/phase3-tests.mjs",
+    "test:mcp-vault": "node scripts/mcp-vault-tests.mjs",
     "verify:obsidian": "npm run check:public && npm run check:release && npm run lint && npm run test && npm run typecheck && npm run build",
     "package": "npm run build && node scripts/package.mjs",
     "deploy": "npm run build && node scripts/deploy.mjs"
@@ -39,6 +44,9 @@
     "yaml": "^2.9.0"
   },
   "dependencies": {
-    "@opencode-ai/sdk": "^1.14.48"
+    "@earendil-works/pi-agent-core": "0.82.1",
+    "@earendil-works/pi-ai": "0.82.1",
+    "@earendil-works/pi-coding-agent": "0.82.1",
+    "@xenova/transformers": "2.17.2"
   }
 }

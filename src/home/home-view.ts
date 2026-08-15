@@ -1,4 +1,4 @@
-import { App, ItemView, Menu, Modal, Notice, TFile, WorkspaceLeaf, normalizePath, setIcon } from "obsidian";
+import { ItemView, Menu, Notice, TFile, WorkspaceLeaf, normalizePath, setIcon } from "obsidian";
 import type CodexForObsidianPlugin from "../main";
 import type { KnowledgeBaseDashboardFile, KnowledgeBaseDashboardRecommendationCard, KnowledgeBaseDashboardSnapshot } from "../knowledge-base/dashboard";
 import { rawDigestStateForRecord, rawDigestStateLabel } from "../knowledge-base/digest-status";
@@ -24,7 +24,7 @@ export interface HomeCard {
 
 const WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 const MONTH_LABELS = ["1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"];
-export const HOME_CARD_ACTION_LABELS = ["打开", "提炼", "加入复盘"] as const;
+export const HOME_CARD_ACTION_LABELS = ["打开"] as const;
 export const HOME_CARDS_PAGE_SIZE = 24;
 export const HOME_FOLDER_ALL = "all";
 const HOME_RAW_ACTION_STATUSES = new Set(["Raw 待提炼", "待重新提炼", "提炼失败"]);
@@ -75,7 +75,7 @@ export class EchoInkHomeView extends ItemView {
   }
 
   async refresh(): Promise<void> {
-    const manager = this.plugin.getKnowledgeBaseManager();
+    const manager = this.plugin.getKnowledgeSurfaceService();
     if (!manager) {
       this.error = "知识库管理器还没有准备好。";
       this.render();
@@ -132,19 +132,7 @@ export class EchoInkHomeView extends ItemView {
     });
 
     const actions = header.createDiv({ cls: "codex-home-actions" });
-    this.addActionButton(actions, "体检", "shield-check", () => void this.runKnowledgeMaintenance("lint"));
-    this.addActionButton(actions, "维护", "wrench", () => void this.openBatchMaintainCommand());
-    this.addActionButton(actions, "收集", "inbox", () => void this.openKnowledgeCommand("/inbox "));
-    this.addActionButton(actions, "查看历史", "history", () => void this.openKnowledgeCommand("/history"));
     this.addIconButton(actions, "settings", "插件设置", () => void this.plugin.openWorkspaceResourceSettings());
-  }
-
-  private addActionButton(container: HTMLElement, label: string, iconName: string, onClick: () => void): void {
-    const button = container.createEl("button", { cls: "codex-home-action", attr: { type: "button" } });
-    const icon = button.createSpan({ cls: "codex-home-action-icon" });
-    setIcon(icon, iconName);
-    button.createSpan({ text: label });
-    button.onclick = onClick;
   }
 
   private addIconButton(container: HTMLElement, iconName: string, label: string, onClick: (event: MouseEvent) => void, disabled = false): void {
@@ -347,7 +335,6 @@ export class EchoInkHomeView extends ItemView {
     } else {
       for (const log of logs) this.addLogItem(list, formatClock(log.at), `${log.label}：${log.text}`, log.tone);
     }
-    panel.createEl("button", { cls: "codex-home-text-link", text: "查看全部日志 →", attr: { type: "button" } }).onclick = () => void this.openKnowledgeCommand("/history");
   }
 
   private addLogItem(container: HTMLElement, time: string, text: string, tone: string): void {
@@ -481,8 +468,6 @@ export class EchoInkHomeView extends ItemView {
     status.createEl("strong", { text: card.status });
     const actions = item.createDiv({ cls: "codex-home-card-actions" });
     this.addCardAction(actions, HOME_CARD_ACTION_LABELS[0], "external-link", () => void this.openVaultFile(card.path));
-    this.addCardAction(actions, HOME_CARD_ACTION_LABELS[1], "pen-line", () => void this.openRefineCommand(card));
-    this.addCardAction(actions, HOME_CARD_ACTION_LABELS[2], "upload", () => void this.openReviewCommand(card));
     this.addIconButton(actions, "more-horizontal", "更多", (event) => this.openHomeCardMenu(event, card));
   }
 
@@ -491,54 +476,6 @@ export class EchoInkHomeView extends ItemView {
     setIcon(button.createSpan(), iconName);
     button.createSpan({ text: label });
     button.onclick = onClick;
-  }
-
-  private async runKnowledgeMaintenance(mode: "lint" | "maintain"): Promise<void> {
-    const manager = this.plugin.getKnowledgeBaseManager();
-    if (!manager) {
-      new Notice("知识库管理器还没有准备好");
-      return;
-    }
-    const result = await manager.runMaintenance(mode);
-    if (result.status === "success") await this.refresh();
-  }
-
-  private async openKnowledgeCommand(command: string): Promise<void> {
-    await this.plugin.activateKnowledgeBaseChannel();
-    this.plugin.getCodexView()?.fillKnowledgeBaseCommand(command);
-  }
-
-  private async openRefineCommand(card: HomeCard): Promise<void> {
-    const command = homeRefineCommandForCard(card);
-    if (card.kind === "raw") {
-      await this.submitKnowledgeBaseCommand(command);
-      return;
-    }
-    await this.openKnowledgeCommand(command);
-  }
-
-  private async openReviewCommand(card: HomeCard): Promise<void> {
-    const command = `/week 复盘 ${card.path}`;
-    await this.openKnowledgeCommand(command);
-  }
-
-  private async openBatchMaintainCommand(): Promise<void> {
-    const preview = buildHomeRawBatchPreview(buildHomeCards(this.snapshot));
-    if (!preview) {
-      await this.submitKnowledgeBaseCommand("/maintain");
-      return;
-    }
-    new HomeRawBatchConfirmModal(this.app, preview, (command) => void this.submitKnowledgeBaseCommand(command)).open();
-  }
-
-  private async submitKnowledgeBaseCommand(command: string): Promise<void> {
-    await this.plugin.activateKnowledgeBaseChannel();
-    const view = this.plugin.getCodexView();
-    if (!view) {
-      new Notice("知识库频道还没有准备好");
-      return;
-    }
-    await view.submitKnowledgeBaseCommand(command);
   }
 
   private openHomeCardMenu(event: MouseEvent, card: HomeCard): void {
@@ -626,40 +563,6 @@ export class EchoInkHomeView extends ItemView {
       return;
     }
     new Notice(`没有在当前 Obsidian 仓库找到：${relativePath}`);
-  }
-}
-
-class HomeRawBatchConfirmModal extends Modal {
-  constructor(
-    app: App,
-    private readonly preview: HomeRawBatchPreview,
-    private readonly onConfirm: (command: string) => void
-  ) {
-    super(app);
-  }
-
-  onOpen(): void {
-    const { contentEl } = this;
-    contentEl.empty();
-    contentEl.createEl("h2", { text: "确认批量提炼" });
-    contentEl.createEl("p", { text: `将处理 ${this.preview.count} 个 Raw，先进入可见知识库任务。` });
-    const list = contentEl.createEl("ul");
-    for (const item of this.preview.previewPaths) {
-      list.createEl("li", { text: item });
-    }
-    if (this.preview.remainingCount > 0) {
-      list.createEl("li", { text: `另有 ${this.preview.remainingCount} 个未展开显示` });
-    }
-    contentEl.createEl("p", { text: `命令：${this.preview.command}` });
-    const actions = contentEl.createDiv({ cls: "modal-button-container" });
-    const cancel = actions.createEl("button", { text: "取消", attr: { type: "button" } });
-    cancel.onclick = () => this.close();
-    const confirm = actions.createEl("button", { text: "开始提炼", cls: "mod-cta", attr: { type: "button" } });
-    confirm.onclick = () => {
-      const command = this.preview.command;
-      this.close();
-      this.onConfirm(command);
-    };
   }
 }
 

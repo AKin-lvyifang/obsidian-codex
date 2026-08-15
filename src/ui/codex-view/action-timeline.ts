@@ -14,8 +14,13 @@ export type ActionGroupKind =
 
 export type ActionStatus =
   | "running"
+  | "waiting_approval"
+  | "approved"
+  | "verifying"
   | "completed"
   | "failed"
+  | "denied"
+  | "uncertain"
   | "blocked"
   | "canceled"
   | "unconfirmed"
@@ -201,6 +206,11 @@ function canAppendToGroup(group: ActionGroupViewModel, item: ActionItemViewModel
 
 function sameStatusFamily(a: ActionStatus, b: ActionStatus): boolean {
   if (a === "failed" || b === "failed") return a === b;
+  if (a === "denied" || b === "denied") return a === b;
+  if (a === "uncertain" || b === "uncertain") return a === b;
+  if (a === "waiting_approval" || b === "waiting_approval") return a === b;
+  if (a === "approved" || b === "approved") return a === b;
+  if (a === "verifying" || b === "verifying") return a === b;
   if (a === "blocked" || b === "blocked") return a === b;
   if (a === "recovery-pending" || b === "recovery-pending") return a === b;
   if (a === "recovery-blocked" || b === "recovery-blocked") return a === b;
@@ -214,7 +224,12 @@ function statusForItems(items: ActionItemViewModel[]): ActionStatus {
   if (items.some((item) => item.status === "running")) return "running";
   if (items.some((item) => item.status === "recovery-blocked")) return "recovery-blocked";
   if (items.some((item) => item.status === "recovery-pending")) return "recovery-pending";
+  if (items.some((item) => item.status === "uncertain")) return "uncertain";
   if (items.some((item) => item.status === "failed")) return "failed";
+  if (items.some((item) => item.status === "denied")) return "denied";
+  if (items.some((item) => item.status === "waiting_approval")) return "waiting_approval";
+  if (items.some((item) => item.status === "verifying")) return "verifying";
+  if (items.some((item) => item.status === "approved")) return "approved";
   if (items.some((item) => item.status === "blocked")) return "blocked";
   if (items.some((item) => item.status === "interrupted")) return "interrupted";
   if (items.some((item) => item.status === "canceled")) return "canceled";
@@ -224,9 +239,14 @@ function statusForItems(items: ActionItemViewModel[]): ActionStatus {
 
 function normalizeStatus(status: string | undefined): ActionStatus {
   if (status === "running" || status === "in_progress" || status === "inProgress") return "running";
+  if (status === "waiting_approval") return "waiting_approval";
+  if (status === "approved") return "approved";
+  if (status === "verifying") return "verifying";
   if (status === "recovery-pending") return "recovery-pending";
   if (status === "recovery-blocked") return "recovery-blocked";
   if (status === "error" || status === "failed") return "failed";
+  if (status === "denied") return "denied";
+  if (status === "uncertain") return "uncertain";
   if (status === "blocked" || status === "approval") return "blocked";
   if (status === "interrupted") return "interrupted";
   if (status === "unconfirmed") return "unconfirmed";
@@ -235,8 +255,19 @@ function normalizeStatus(status: string | undefined): ActionStatus {
 }
 
 function applyDefaultExpanded(groups: ActionGroupViewModel[]): void {
-  const target = groups.find((group) => group.status === "failed" || group.status === "recovery-blocked")
-    ?? groups.find((group) => group.status === "running" || group.status === "blocked" || group.status === "recovery-pending");
+  const target = groups.find((group) =>
+    group.status === "failed"
+    || group.status === "uncertain"
+    || group.status === "denied"
+    || group.status === "recovery-blocked"
+  ) ?? groups.find((group) =>
+    group.status === "running"
+    || group.status === "waiting_approval"
+    || group.status === "approved"
+    || group.status === "verifying"
+    || group.status === "blocked"
+    || group.status === "recovery-pending"
+  );
   for (const group of groups) group.defaultExpanded = group === target;
 }
 
@@ -249,18 +280,27 @@ function actionTimelineStateId(items: ActionItemViewModel[]): string {
 
 function actionSummaryTitle(count: number, status: ActionStatus = "completed"): string {
   if (status === "running") return `正在处理 ${count} 个动作`;
+  if (status === "waiting_approval") return `${count} 个动作等待确认`;
+  if (status === "approved") return `${count} 个动作已批准`;
+  if (status === "verifying") return `${count} 个动作正在验证`;
   if (status === "recovery-pending") return `${count} 个动作等待恢复`;
   if (status === "recovery-blocked") return `${count} 个动作恢复受阻`;
   if (status === "failed") return `${count} 个动作失败`;
+  if (status === "denied") return `${count} 个动作已拒绝`;
+  if (status === "uncertain") return `${count} 个动作结果不确定`;
   if (status === "blocked") return `${count} 个动作等待确认`;
   if (status === "unconfirmed") return `${count} 个动作状态未回传`;
-  if (status === "interrupted" || status === "canceled") return `${count} 个动作已中断`;
+  if (status === "interrupted") return `${count} 个动作已中断`;
+  if (status === "canceled") return `${count} 个动作已取消`;
   return count === 1 ? "已处理 1 个动作" : `已处理 ${count} 个动作`;
 }
 
 function activeLabelForItems(items: ActionItemViewModel[], status: ActionStatus): string {
   const active = items.slice().reverse().find((item) =>
     item.status === "running"
+    || item.status === "waiting_approval"
+    || item.status === "approved"
+    || item.status === "verifying"
     || item.status === "blocked"
     || item.status === "unconfirmed"
     || item.status === "interrupted"
@@ -272,11 +312,20 @@ function activeLabelForItems(items: ActionItemViewModel[], status: ActionStatus)
     const failed = items.slice().reverse().find((item) => item.status === "failed") ?? active;
     return liveLabelForItem(failed, "failed");
   }
-  if (status === "running" || status === "blocked") return liveLabelForItem(active, status);
+  if (
+    status === "running"
+    || status === "waiting_approval"
+    || status === "approved"
+    || status === "verifying"
+    || status === "denied"
+    || status === "uncertain"
+    || status === "blocked"
+  ) return liveLabelForItem(active, status);
   if (status === "recovery-pending") return "等待恢复上次维护过程";
   if (status === "recovery-blocked") return "上次维护恢复受阻";
   if (status === "unconfirmed") return "工具状态未回传";
-  if (status === "interrupted" || status === "canceled") return "过程已中断";
+  if (status === "interrupted") return "过程已中断";
+  if (status === "canceled") return "过程已取消";
   return actionSummaryTitle(items.length, status);
 }
 
@@ -289,6 +338,11 @@ function liveLabelForItem(item: ActionItemViewModel, status: ActionStatus): stri
     if (item.kind === "agent") return `智能体动作失败${suffix}`;
     return `动作失败${suffix}`;
   }
+  if (status === "waiting_approval") return `等待确认${suffix}`;
+  if (status === "approved") return `已批准，等待执行${suffix}`;
+  if (status === "verifying") return `正在核对结果${suffix}`;
+  if (status === "denied") return `已拒绝${suffix}`;
+  if (status === "uncertain") return `结果不确定${suffix}`;
   if (status === "blocked") return `等待确认${suffix}`;
   if (item.kind === "read") return `正在读取${suffix}`;
   if (item.kind === "search") return `正在检索${suffix}`;

@@ -1,0 +1,344 @@
+import { Buffer } from "node:buffer";
+import type {
+  Api,
+  AssistantMessage,
+  AssistantMessageEventStream,
+  Context,
+  Message,
+  Model,
+  TextContent,
+  ToolCall,
+  Usage
+} from "@earendil-works/pi-ai";
+import type {
+  ControlledPiStreamInput
+} from "./production-pi-model-resolver";
+
+const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
+
+export interface ProviderSseResponse {
+  readonly statusCode: number;
+  readonly headers: Readonly<Record<string, string>>;
+  readonly body: string;
+}
+
+export function buildDeepSeekBody(
+  input: ControlledPiStreamInput
+): Readonly<Record<string, unknown>> {
+  const body: Record<string, unknown> = {
+    model: input.provider.modelRef,
+    messages: contextMessages(input.context),
+    stream: true,
+    temperature: input.options.temperature,
+    max_tokens: input.options.maxTokens
+  };
+  if (input.context.tools?.length) {
+    body.tools = input.context.tools.map((tool) => ({
+      type: "function",
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: structuredClone(tool.parameters)
+      }
+    }));
+  }
+  return deepFreeze(body);
+}
+
+function contextMessages(context: Context): unknown[] {
+  const result: unknown[] = [];
+  if (typeof context.systemPrompt === "string" && context.systemPrompt) {
+    result.push({ role: "system", content: context.systemPrompt });
+  }
+  for (const message of context.messages) {
+    result.push(toDeepSeekMessage(message));
+  }
+  return result;
+}
+
+function toDeepSeekMessage(message: Message): unknown {
+  if (message.role === "user") {
+    return { role: "user", content: textOnlyContent(message.content) };
+  }
+  if (message.role === "toolResult") {
+    return {
+      role: "tool",
+      tool_call_id: message.toolCallId,
+      content: textOnlyContent(message.content)
+    };
+  }
+  const text = message.content
+    .filter((entry): entry is TextContent => entry.type === "text")
+    .map((entry) => entry.text)
+    .join("");
+  const toolCalls = message.content
+    .filter((entry): entry is ToolCall => entry.type === "toolCall")
+    .map((entry) => ({
+      id: entry.id,
+      type: "function",
+      function: {
+        name: entry.name,
+        arguments: JSON.stringify(entry.arguments)
+      }
+    }));
+  return {
+    role: "assistant",
+    content: text || null,
+    ...(toolCalls.length ? { tool_calls: toolCalls } : {})
+  };
+}
+
+function textOnlyContent(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) {
+    throw new Error("deepseek_non_text_content_unsupported");
+  }
+  const parts: string[] = [];
+  for (const entry of content as unknown[]) {
+    if (
+      !isPlainRecord(entry)
+      || entry.type !== "text"
+      || typeof entry.text !== "string"
+    ) {
+      throw new Error("deepseek_non_text_content_unsupported");
+    }
+    parts.push(entry.text);
+  }
+  return parts.join("");
+}
+
+export function parseDeepSeekSseResponse(
+  response: ProviderSseResponse,
+  model: Model<Api>,
+  timestamp: number
+): AssistantMessage {
+  if (
+    !Number.isFinite(timestamp)
+    || !/^text\/event-stream(?:;|$)/iu.test(
+      response.headers["content-type"] ?? ""
+    )
+    || Buffer.byteLength(response.body, "utf8") > MAX_RESPONSE_BYTES
+  ) {
+    throw new Error("deepseek_sse_invalid");
+  }
+  let text = "";
+  let finishReason = "";
+  let responseId: string | undefined;
+  let responseModel: string | undefined;
+  let usage = emptyUsage();
+  let sawDone = false;
+  const toolCalls = new Map<number, {
+    id: string;
+    name: string;
+    argumentsText: string;
+  }>();
+
+  const blocks = response.body
+    .replace(/\r\n?/gu, "\n")
+    .split("\n\n");
+  for (const block of blocks) {
+    const data = block
+      .split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart())
+      .join("\n");
+    if (!data) continue;
+    if (data === "[DONE]") {
+      sawDone = true;
+      continue;
+    }
+    const chunk = parseRecord(data);
+    if (typeof chunk.id === "string" && chunk.id) responseId ??= chunk.id;
+    if (typeof chunk.model === "string" && chunk.model) {
+      responseModel ??= chunk.model;
+    }
+    if (isPlainRecord(chunk.usage)) usage = parseUsage(chunk.usage);
+    const choice: unknown = Array.isArray(chunk.choices)
+      ? (chunk.choices as unknown[])[0]
+      : null;
+    if (!isPlainRecord(choice)) continue;
+    if (typeof choice.finish_reason === "string") {
+      finishReason = choice.finish_reason;
+    }
+    if (!isPlainRecord(choice.delta)) continue;
+    if (typeof choice.delta.content === "string") {
+      text += choice.delta.content;
+    }
+    if (Array.isArray(choice.delta.tool_calls)) {
+      for (const candidate of choice.delta.tool_calls) {
+        appendToolCallDelta(toolCalls, candidate);
+      }
+    }
+  }
+  if (!sawDone || !finishReason) {
+    throw new Error("deepseek_sse_incomplete");
+  }
+
+  const content: Array<TextContent | ToolCall> = [];
+  if (text) content.push({ type: "text", text });
+  for (const [, tool] of [...toolCalls.entries()].sort(
+    ([left], [right]) => left - right
+  )) {
+    content.push({
+      type: "toolCall",
+      id: tool.id,
+      name: tool.name,
+      arguments: parseRecord(tool.argumentsText || "{}")
+    });
+  }
+  const stopReason = toolCalls.size > 0
+    ? "toolUse" as const
+    : finishReason === "length"
+      ? "length" as const
+      : finishReason === "stop"
+        ? "stop" as const
+        : (() => {
+            throw new Error("deepseek_finish_reason_invalid");
+          })();
+  return deepFreeze({
+    role: "assistant" as const,
+    content,
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+    ...(responseModel ? { responseModel } : {}),
+    ...(responseId ? { responseId } : {}),
+    usage,
+    stopReason,
+    timestamp
+  });
+}
+
+function appendToolCallDelta(
+  tools: Map<number, { id: string; name: string; argumentsText: string }>,
+  value: unknown
+): void {
+  if (
+    !isPlainRecord(value)
+    || !Number.isSafeInteger(value.index)
+    || Number(value.index) < 0
+    || Number(value.index) > 128
+  ) {
+    throw new Error("deepseek_tool_delta_invalid");
+  }
+  const index = Number(value.index);
+  const current = tools.get(index) ?? { id: "", name: "", argumentsText: "" };
+  if (typeof value.id === "string" && value.id) current.id = value.id;
+  if (isPlainRecord(value.function)) {
+    if (typeof value.function.name === "string" && value.function.name) {
+      current.name += value.function.name;
+    }
+    if (typeof value.function.arguments === "string") {
+      current.argumentsText += value.function.arguments;
+    }
+  }
+  if (
+    current.id.length > 256
+    || current.name.length > 256
+    || current.argumentsText.length > 1_000_000
+  ) {
+    throw new Error("deepseek_tool_delta_invalid");
+  }
+  tools.set(index, current);
+}
+
+export function emitBufferedMessage(
+  stream: AssistantMessageEventStream,
+  message: AssistantMessage
+): void {
+  const empty = structuredClone({ ...message, content: [] });
+  stream.push({ type: "start", partial: empty });
+  for (let index = 0; index < message.content.length; index += 1) {
+    const content = message.content[index];
+    const partial = structuredClone(message);
+    if (content.type === "text") {
+      stream.push({ type: "text_start", contentIndex: index, partial });
+      stream.push({
+        type: "text_delta",
+        contentIndex: index,
+        delta: content.text,
+        partial
+      });
+      stream.push({
+        type: "text_end",
+        contentIndex: index,
+        content: content.text,
+        partial
+      });
+    } else if (content.type === "toolCall") {
+      stream.push({ type: "toolcall_start", contentIndex: index, partial });
+      stream.push({
+        type: "toolcall_delta",
+        contentIndex: index,
+        delta: JSON.stringify(content.arguments),
+        partial
+      });
+      stream.push({
+        type: "toolcall_end",
+        contentIndex: index,
+        toolCall: content,
+        partial
+      });
+    }
+  }
+  stream.push({
+    type: "done",
+    reason: message.stopReason as "stop" | "length" | "toolUse",
+    message
+  });
+}
+
+function parseUsage(value: Record<string, unknown>): Usage {
+  const input = nonNegativeInteger(value.prompt_tokens);
+  const output = nonNegativeInteger(value.completion_tokens);
+  const total = nonNegativeInteger(value.total_tokens);
+  if (total < input + output) throw new Error("deepseek_usage_invalid");
+  return {
+    input,
+    output,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: total,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+  };
+}
+
+function emptyUsage(): Usage {
+  return {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+  };
+}
+
+function nonNegativeInteger(value: unknown): number {
+  if (!Number.isSafeInteger(value) || Number(value) < 0) {
+    throw new Error("deepseek_usage_invalid");
+  }
+  return Number(value);
+}
+
+function parseRecord(value: string): Record<string, unknown> {
+  const parsed: unknown = JSON.parse(value);
+  if (!isPlainRecord(parsed)) throw new Error("deepseek_json_invalid");
+  return parsed;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const prototype = Reflect.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const child of Object.values(value)) deepFreeze(child);
+  }
+  return value;
+}

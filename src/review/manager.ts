@@ -1,4 +1,5 @@
 import * as fsp from "fs/promises";
+import type { Dirent } from "fs";
 import * as path from "path";
 import { Notice, normalizePath } from "obsidian";
 import type CodexForObsidianPlugin from "../main";
@@ -40,11 +41,6 @@ export class ReviewManager {
       name: "复盘：生成 Agent 对话周报",
       callback: () => void this.runReview("agent-chat")
     });
-    this.plugin.addCommand({
-      id: "review-open-latest-html",
-      name: "复盘：打开最近 HTML 看板",
-      callback: () => void this.openLatestHtml()
-    });
     this.plugin.app.workspace.onLayoutReady(() => {
       this.armSchedule();
       void this.runCatchUpIfNeeded();
@@ -72,9 +68,6 @@ export class ReviewManager {
     this.running = true;
     const targetRange = range ?? reviewRangeForMode(this.plugin.settings.review.rangeMode);
     const state = this.stateForKind(kind);
-    state.lastRunStatus = "running";
-    state.lastError = "";
-    await this.plugin.saveSettings(true);
     try {
       const evidence = kind === "knowledge-base"
         ? collectKnowledgeBaseReviewEvidence(this.plugin.settings, targetRange, {
@@ -90,28 +83,21 @@ export class ReviewManager {
       const htmlPath = normalizePath(`${outputPath}/${documents.htmlFileName}`);
       await fsp.writeFile(path.join(this.plugin.getVaultPath(), markdownPath), documents.markdown, "utf8");
       await fsp.writeFile(path.join(this.plugin.getVaultPath(), htmlPath), documents.html, "utf8");
-      state.lastRunAt = Date.now();
-      state.lastRunStatus = "success";
       state.lastRangeKey = reviewRangeKey(targetRange);
-      state.lastMarkdownPath = markdownPath;
-      state.lastHtmlPath = htmlPath;
-      state.lastError = "";
-      state.lastSummary = documents.summary.slice(0, 1000);
       await this.plugin.saveSettings(true);
       new Notice(`已生成${kindLabel(kind)}周报：${markdownPath}`);
       if (this.plugin.settings.review.openHtmlAfterRun) await this.plugin.openReviewHtmlPreview(htmlPath);
-      return { status: "success", markdownPath, htmlPath, summary: state.lastSummary };
+      return { status: "success", markdownPath, htmlPath, summary: documents.summary.slice(0, 1000) };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      state.lastRunAt = Date.now();
-      state.lastRunStatus = "failed";
-      state.lastError = message;
-      await this.plugin.saveSettings(true);
-      new Notice(`${kindLabel(kind)}周报生成失败：${message}`);
+      new Notice(this.plugin.settings.settingsLanguage === "en"
+        ? "Review report generation failed. Check the output directory and try again."
+        : "周报生成失败。请检查输出目录后重试。"
+      );
       return {
         status: "failed",
-        markdownPath: state.lastMarkdownPath,
-        htmlPath: state.lastHtmlPath,
+        markdownPath: "",
+        htmlPath: "",
         summary: "",
         error: message
       };
@@ -135,20 +121,6 @@ export class ReviewManager {
     }
   }
 
-  async openLatestHtml(kind?: ReviewReportKind): Promise<void> {
-    const states = kind
-      ? [this.stateForKind(kind)]
-      : [this.plugin.settings.review.reports.knowledgeBase, this.plugin.settings.review.reports.agentChat]
-        .filter((state) => state.lastHtmlPath)
-        .sort((left, right) => right.lastRunAt - left.lastRunAt);
-    const state = states[0];
-    if (!state?.lastHtmlPath) {
-      new Notice("还没有可打开的复盘 HTML 看板");
-      return;
-    }
-    await this.plugin.openReviewHtmlPreview(state.lastHtmlPath);
-  }
-
   private armSchedule(): void {
     if (this.scheduleTimer) window.clearInterval(this.scheduleTimer);
     this.scheduleTimer = window.setInterval(() => void this.runScheduledIfDue(), 60 * 1000);
@@ -167,7 +139,7 @@ export class ReviewManager {
   }
 
   private async readKnowledgeDashboardEvidence(): Promise<KnowledgeBaseDashboardEvidence> {
-    const snapshot = await this.plugin.getKnowledgeBaseManager()?.getDashboardSnapshot().catch(() => null);
+    const snapshot = await this.plugin.getKnowledgeSurfaceService()?.getDashboardSnapshot().catch(() => null);
     if (!snapshot) return {};
     return {
       healthScore: snapshot.health.score,
@@ -205,7 +177,8 @@ export class ReviewManager {
 }
 
 async function readMaintenanceReportEntries(dir: string, relativeDir: string): Promise<Array<{ path: string }>> {
-  const entries = await fsp.readdir(dir, { withFileTypes: true }).catch(emptyArrayOnMissingPathOrWarn("read review report entries"));
+  const entries = await fsp.readdir(dir, { withFileTypes: true })
+    .catch((error): Dirent[] => emptyArrayOnMissingPathOrWarn("read review report entries")(error));
   return entries
     .filter((entry) => entry.isFile() && /^kb-maintenance-\d{4}-\d{2}-\d{2}\.md$/.test(entry.name))
     .map((entry) => ({ path: `${relativeDir}/${entry.name}` }));

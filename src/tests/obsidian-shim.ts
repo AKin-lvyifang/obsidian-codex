@@ -13,6 +13,27 @@ export class TFile {
 
 export class App {}
 
+export class Plugin {}
+
+export class PluginSettingTab {
+  readonly app: App;
+  readonly containerEl: HTMLElement;
+
+  constructor(app: App, readonly plugin: unknown) {
+    this.app = app;
+    this.containerEl = document.createElement("div");
+  }
+
+  display(): void {}
+  hide(): void {}
+}
+
+export class FileSystemAdapter {
+  getFullPath(relativePath: string): string {
+    return relativePath;
+  }
+}
+
 export class Component {
   registerDomEvent(): void {}
   registerEvent(): void {}
@@ -63,32 +84,152 @@ export class Menu {
 }
 
 export class Modal {
+  modalEl = document.createElement("div");
+  titleEl = document.createElement("div");
   contentEl = document.createElement("div");
-  constructor(public readonly app: App) {}
-  open(): void {}
-  close(): void {}
+  private opened = false;
+  constructor(public readonly app: App) {
+    this.modalEl.append(this.titleEl, this.contentEl);
+  }
+  open(): void {
+    if (this.opened) return;
+    this.opened = true;
+    this.onOpen();
+  }
+  close(): void {
+    if (!this.opened) return;
+    this.opened = false;
+    this.onClose();
+  }
   onOpen(): void {}
   onClose(): void {}
 }
 
 export class Setting {
-  constructor(public readonly containerEl: HTMLElement) {}
-  setName(): this { return this; }
-  setDesc(): this { return this; }
-  addText(callback: (component: { setPlaceholder: (value: string) => any; setValue: (value: string) => any; onChange: (handler: (value: string) => any) => any }) => any): this {
-    callback({
-      setPlaceholder: () => this,
-      setValue: () => this,
-      onChange: () => this
-    });
+  readonly settingEl: HTMLElement;
+  readonly infoEl: HTMLElement;
+  readonly nameEl: HTMLElement;
+  readonly descEl: HTMLElement;
+  readonly controlEl: HTMLElement;
+
+  constructor(public readonly containerEl: HTMLElement) {
+    this.settingEl = containerEl.createDiv({ cls: "setting-item" });
+    this.infoEl = this.settingEl.createDiv({ cls: "setting-item-info" });
+    this.nameEl = this.infoEl.createDiv({ cls: "setting-item-name" });
+    this.descEl = this.infoEl.createDiv({ cls: "setting-item-description" });
+    this.controlEl = this.settingEl.createDiv({ cls: "setting-item-control" });
+  }
+  setName(value: string): this { this.nameEl.setText(value); return this; }
+  setDesc(value: string): this { this.descEl.setText(value); return this; }
+  setClass(value: string): this { this.settingEl.addClass(value); return this; }
+  addText(callback: (component: { inputEl: HTMLInputElement; setPlaceholder: (value: string) => any; setValue: (value: string) => any; onChange: (handler: (value: string) => any) => any }) => any): this {
+    const inputEl = this.controlEl.createEl("input", {
+      attr: { type: "text" }
+    }) as HTMLInputElement;
+    const component = {
+      inputEl,
+      setPlaceholder: (value: string) => {
+        inputEl.placeholder = value;
+        return component;
+      },
+      setValue: (value: string) => {
+        inputEl.value = value;
+        return component;
+      },
+      onChange: (handler: (value: string) => any) => {
+        inputEl.onchange = () => handler(inputEl.value);
+        return component;
+      }
+    };
+    callback(component);
     return this;
   }
-  addButton(callback: (component: { setButtonText: (value: string) => any; setCta: () => any; onClick: (handler: () => any) => any }) => any): this {
-    callback({
-      setButtonText: () => this,
-      setCta: () => this,
-      onClick: () => this
+  addToggle(callback: (component: { toggleEl: HTMLElement; inputEl: HTMLInputElement; setValue: (value: boolean) => any; onChange: (handler: (value: boolean) => any) => any }) => any): this {
+    const toggleEl = this.controlEl.createDiv({
+      cls: "checkbox-container"
     });
+    const inputEl = toggleEl.createEl("input", {
+      attr: { type: "checkbox", tabindex: "0" }
+    }) as HTMLInputElement;
+    const component = {
+      toggleEl,
+      inputEl,
+      setValue: (value: boolean) => {
+        inputEl.checked = value;
+        return component;
+      },
+      onChange: (handler: (value: boolean) => any) => {
+        inputEl.onchange = () => handler(inputEl.checked);
+        return component;
+      }
+    };
+    callback(component);
+    return this;
+  }
+  addDropdown(callback: (component: { selectEl: HTMLSelectElement; addOption: (value: string, label: string) => any; setValue: (value: string) => any; onChange: (handler: (value: string) => any) => any }) => any): this {
+    const selectEl = this.controlEl.createEl("select") as HTMLSelectElement;
+    const options: HTMLOptionElement[] = [];
+    Object.defineProperty(selectEl, "options", { configurable: true, value: options });
+    const component = {
+      selectEl,
+      addOption: (value: string, label: string) => {
+        const option = selectEl.createEl("option", { text: label, attr: { value } });
+        option.value = value;
+        options.push(option);
+        return component;
+      },
+      setValue: (value: string) => {
+        selectEl.value = value;
+        return component;
+      },
+      onChange: (handler: (value: string) => any) => {
+        selectEl.onchange = () => handler(selectEl.value);
+        return component;
+      }
+    };
+    callback(component);
+    return this;
+  }
+  addButton(callback: (component: {
+    buttonEl: HTMLButtonElement;
+    setButtonText: (value: string) => any;
+    setTooltip: (value: string) => any;
+    setDisabled: (value: boolean) => any;
+    setWarning: () => any;
+    setCta: () => any;
+    onClick: (handler: () => any) => any;
+  }) => any): this {
+    const buttonEl = this.controlEl.createEl("button", {
+      attr: { type: "button" }
+    }) as HTMLButtonElement;
+    const component = {
+      buttonEl,
+      setButtonText: (value: string) => {
+        buttonEl.textContent = value;
+        return component;
+      },
+      setTooltip: (value: string) => {
+        buttonEl.title = value;
+        return component;
+      },
+      setDisabled: (value: boolean) => {
+        buttonEl.disabled = value;
+        return component;
+      },
+      setWarning: () => {
+        buttonEl.addClass("mod-warning");
+        return component;
+      },
+      setCta: () => {
+        buttonEl.addClass("mod-cta");
+        return component;
+      },
+      onClick: (handler: () => any) => {
+        buttonEl.onclick = handler;
+        return component;
+      }
+    };
+    callback(component);
     return this;
   }
 }
@@ -102,6 +243,12 @@ export const Platform = {
 };
 
 export function setIcon(_element: Element, _icon: string): void {}
+
+export function setTooltip(
+  _element: HTMLElement,
+  _tooltip: string,
+  _options?: unknown
+): void {}
 
 export async function requestUrl(): Promise<{ text: string }> {
   throw new Error("requestUrl is not available in unit tests");

@@ -1,4 +1,4 @@
-import type { ResourceRef } from "../contracts/run";
+import type { ResourceRef } from "../../resources/types";
 
 export function resourceRefToUri(ref: ResourceRef): string {
   const id = encodeResourcePart(ref.resourceId);

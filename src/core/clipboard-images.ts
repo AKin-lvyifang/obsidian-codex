@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import type { StoredAttachment } from "../settings/settings";
-import { pluginDataDir } from "./raw-message-store";
+import { pluginDataDir } from "../plugin/plugin-data-paths";
 
 interface ClipboardItemLike {
   kind?: string;

@@ -1,0 +1,164 @@
+import { Setting, setIcon } from "obsidian";
+
+export type SettingsStateTone = "neutral" | "error" | "success";
+
+export interface SettingsPageOptions {
+  readonly title: string;
+  readonly headingId?: string;
+  readonly description?: string;
+  readonly detail?: boolean;
+  readonly onBack?: () => void;
+  readonly backLabel?: string;
+}
+
+export interface SettingsSectionOptions {
+  readonly title?: string;
+  readonly description?: string;
+  readonly surface?: "flat" | "group";
+}
+
+export interface SettingsNavigationRowOptions {
+  readonly title: string;
+  readonly description?: string;
+  readonly value?: string;
+  readonly actionLabel: string;
+  readonly focusKey?: string;
+  readonly onActivate: () => void;
+}
+
+export function createSettingsPage(
+  container: HTMLElement,
+  options: SettingsPageOptions
+): HTMLElement {
+  const page = container.createDiv({
+    cls: `echoink-settings-page${options.detail ? " is-detail" : ""}`
+  });
+  const header = page.createDiv({ cls: "echoink-settings-page-header" });
+  if (options.onBack) {
+    const back = header.createEl("button", {
+      cls: "echoink-settings-back",
+      attr: {
+        type: "button",
+        "aria-label": options.backLabel ?? "Back",
+        "data-echoink-focus-key": "settings-detail:back"
+      }
+    });
+    setIcon(back, "chevron-left");
+    back.onclick = options.onBack;
+  }
+  const heading = header.createDiv({ cls: "echoink-settings-page-heading" });
+  heading.createEl("h2", {
+    text: options.title,
+    attr: options.headingId ? { id: options.headingId } : undefined
+  });
+  if (options.description) {
+    heading.createDiv({
+      cls: "echoink-settings-page-description",
+      text: options.description
+    });
+  }
+  return page;
+}
+
+export function createSettingsSection(
+  page: HTMLElement,
+  options: SettingsSectionOptions = {}
+): HTMLElement {
+  const section = page.createEl("section", {
+    cls: `echoink-settings-section is-${options.surface ?? "flat"}`
+  });
+  if (options.title || options.description) {
+    const header = section.createDiv({ cls: "echoink-settings-section-header" });
+    if (options.title) header.createEl("h3", { text: options.title });
+    if (options.description) {
+      header.createDiv({
+        cls: "echoink-settings-section-description",
+        text: options.description
+      });
+    }
+  }
+  return section;
+}
+
+export function createSettingsGroup(section: HTMLElement): HTMLElement {
+  return section.createDiv({ cls: "echoink-settings-group" });
+}
+
+export function applySettingsRow(setting: Setting): Setting {
+  const settingEl = (setting as unknown as { settingEl?: HTMLElement }).settingEl;
+  settingEl?.addClass("echoink-settings-row");
+  return setting;
+}
+
+export function createSettingsFeatureCard(
+  section: HTMLElement,
+  title: string,
+  description?: string
+): HTMLElement {
+  const card = section.createDiv({ cls: "echoink-settings-feature-card" });
+  const copy = card.createDiv({ cls: "echoink-settings-feature-copy" });
+  copy.createDiv({ cls: "echoink-settings-feature-title", text: title });
+  if (description) {
+    copy.createDiv({ cls: "echoink-settings-feature-description", text: description });
+  }
+  return card;
+}
+
+export function createSettingsNavigationRow(
+  section: HTMLElement,
+  options: SettingsNavigationRowOptions
+): HTMLButtonElement {
+  const row = section.createEl("button", {
+    cls: "echoink-settings-navigation-row",
+    attr: {
+      type: "button",
+      "aria-label": `${options.title}，${options.actionLabel}`,
+      "data-echoink-focus-key": options.focusKey ?? `navigation:${options.title}`
+    }
+  });
+  const copy = row.createDiv({ cls: "echoink-settings-navigation-copy" });
+  copy.createDiv({ cls: "echoink-settings-navigation-title", text: options.title });
+  if (options.description) {
+    copy.createDiv({
+      cls: "echoink-settings-navigation-description",
+      text: options.description
+    });
+  }
+  const trailing = row.createDiv({ cls: "echoink-settings-navigation-trailing" });
+  if (options.value) {
+    trailing.createSpan({ cls: "echoink-settings-navigation-value", text: options.value });
+  }
+  trailing.createSpan({ cls: "echoink-settings-navigation-action", text: options.actionLabel });
+  const icon = trailing.createSpan({ cls: "echoink-settings-navigation-icon" });
+  setIcon(icon, "chevron-right");
+  row.onclick = options.onActivate;
+  return row;
+}
+
+export function createSettingsCompactList(section: HTMLElement): HTMLElement {
+  return section.createDiv({ cls: "echoink-settings-compact-list" });
+}
+
+export function createSettingsState(
+  container: HTMLElement,
+  message: string,
+  tone: SettingsStateTone = "neutral",
+  action?: { label: string; onActivate: () => void }
+): HTMLElement {
+  const state = container.createDiv({
+    cls: `echoink-settings-state is-${tone}`,
+    attr: tone === "error"
+      ? { role: "alert" }
+      : { role: "status", "aria-live": "polite" }
+  });
+  state.createDiv({ cls: "echoink-settings-state-message", text: message });
+  if (action) {
+    const button = state.createEl("button", {
+      cls: "echoink-settings-state-action",
+      text: action.label,
+      attr: { type: "button" }
+    });
+    button.onclick = action.onActivate;
+  }
+  return state;
+}

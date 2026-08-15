@@ -1,5 +1,5 @@
-import { Notice, normalizePath, Platform, setIcon, TFile, type App, type Component } from "obsidian";
-import type { AgentBackendMode, ChatMessage, DiffSummary, SettingsLanguage, StoredAttachment } from "../../settings/settings";
+import { Notice, normalizePath, Platform, setIcon, TFile, type App, type Component, type Editor } from "obsidian";
+import type { ChatMessage, DiffSummary, SettingsLanguage, StoredAttachment } from "../../settings/settings";
 import type { KnowledgeBaseCitation, KnowledgeBaseCitationBucket, KnowledgeBaseCitationSummary, KnowledgeWorkflowEvent, KnowledgeWorkflowPhaseId } from "../../knowledge-base/types";
 import type { ProcessFileRef, TokenUsage } from "../../types/app-server";
 import { showItemInFinder } from "../../core/electron";
@@ -14,7 +14,20 @@ import { openImageOverlay, renderRichText } from "../render-message";
 import { buildActionTimeline, isActionTimelineItem, type ActionGroupKind, type ActionItemViewModel } from "./action-timeline";
 import { buildAgentTurnProjection, formatAgentTurnDuration, isAgentAnswerMessage, isAgentProcessItemType, type CompletedAgentTurn } from "./agent-turn-process";
 import { copyAnswerMarkdown } from "./answer-copy";
-import { agentRecoveryCopy, missingAgentCliBackend } from "../codex-recovery";
+import { piEntryIdFromProjectedMessageId } from "../../harness/pi-native/pi-chat-ui-projector";
+import type { KnowledgeReference } from "../../knowledge-base/types";
+import {
+  knowledgeUsageMessageData,
+  mergeKnowledgeUsageMessageData,
+  type KnowledgeUsageMessageData
+} from "../../knowledge-base/usage";
+import {
+  taskPlanCurrentStep,
+  taskPlanProgress,
+  type EchoInkTaskPlanStatus
+} from "../../types/task-plan";
+import { renderProviderBrandIcon, type ProviderBrandId } from "../../settings/provider-brand-icons";
+import { API_PROVIDER_PRESETS } from "../../settings/provider-presets";
 
 type MessageRenderRow =
   | { id: string; kind: "message"; message: ChatMessage; showAgentHeader: boolean; showAgentFooter: boolean; processExpanded: boolean }
@@ -33,16 +46,19 @@ export interface MessageListRenderInput {
   messagesEl: HTMLElement;
   virtualListEl: HTMLElement;
   sessionId: string;
-  knowledgeSession: boolean;
+  showWelcome: boolean;
   settingsLanguage: SettingsLanguage;
   messages: ChatMessage[];
-  hiddenKnowledgeMessageCount: number;
   tokenUsage?: TokenUsage;
   vaultPath: string;
   readRawMessageText: (rawRef: string) => Promise<string>;
-  onOpenKnowledgeHistory: () => void;
-  onAutoRepairAgent: (backend: AgentBackendMode) => void;
-  onOpenAgentSettings: (backend: AgentBackendMode) => void;
+  onDerivePiConversation?: (entryId: string) => Promise<void>;
+  piConversationDeriveDisabled?: boolean;
+  onTaskPlanAction?: (
+    planId: string,
+    action: "execute" | "continue" | "pause" | "cancel"
+  ) => Promise<void>;
+  onModifyTaskPlan?: (planId: string, title: string) => void;
   onScheduleMeasure: (forceBottom?: boolean) => void;
   onScheduleRunProgress: () => void;
   shouldFollowBottom?: () => boolean;
@@ -164,6 +180,17 @@ export function shouldPinMessageListBottom(options: MessageListRenderOptions, ne
   return Boolean(options.forceBottom) || (!options.fromScroll && !options.preserveScroll && nearBottom);
 }
 
+export function shouldRenderEchoInkWelcome(showWelcome: boolean): boolean {
+  return showWelcome;
+}
+
+export function piConversationDeriveActionLabel(
+  message: Pick<ChatMessage, "role">
+): "从这条回复新建会话" | null {
+  if (message.role === "assistant") return "从这条回复新建会话";
+  return null;
+}
+
 export function knowledgeBaseMaintainSectionOpenState(storedOpen: boolean | undefined, initiallyOpen: boolean): boolean {
   return storedOpen ?? initiallyOpen;
 }
@@ -188,6 +215,7 @@ export class CodexMessageListRenderer {
   private openCompletedTurns = new Map<string, boolean>();
   private openKnowledgeBaseCitations = new Map<string, boolean>();
   private openKnowledgeBaseReportSections = new Map<string, boolean>();
+  private openTaskPlans = new Map<string, boolean>();
   private env: MessageListEnvironment | null = null;
   private virtualRerenderScheduled = false;
   private virtualRerenderBurst = 0;
@@ -200,7 +228,7 @@ export class CodexMessageListRenderer {
   render(input: MessageListRenderInput): void {
     const env: MessageListEnvironment = { ...input, options: input.options ?? {} };
     this.env = env;
-    const { messagesEl, virtualListEl, knowledgeSession, messages, hiddenKnowledgeMessageCount } = env;
+    const { messagesEl, virtualListEl, messages } = env;
     this.observeMessageViewport(messagesEl);
     if (this.virtualSessionId !== env.sessionId) {
       this.virtualSessionId = env.sessionId;
@@ -213,20 +241,12 @@ export class CodexMessageListRenderer {
     virtualListEl.empty();
     if (messages.length === 0) {
       virtualListEl.setCssStyles({ height: "100%" });
-      const welcome = virtualListEl.createDiv({ cls: "codex-welcome" });
-      welcome.createDiv({ cls: "codex-welcome-title", text: knowledgeSession ? "知识库管理" : "What's new?" });
-      if (knowledgeSession) {
-        welcome.createDiv({
-          cls: "codex-resource-note",
-          text: hiddenKnowledgeMessageCount ? `当前页面已清空，隐藏 ${hiddenKnowledgeMessageCount} 条本地历史；输入 /history 查看。` : "输入 /help 查看命令；也可以直接说只体检一下、维护知识库、写周报、收集这个链接。"
-        });
-        if (hiddenKnowledgeMessageCount) {
-          const historyButton = welcome.createEl("button", { cls: "codex-kb-history-inline-button", text: "查看历史", attr: { type: "button" } });
-          historyButton.onclick = env.onOpenKnowledgeHistory;
-        }
-      } else {
-        welcome.createDiv({ cls: "codex-resource-note", text: "普通会话需要先选择工作区；添加笔记只作为本轮上下文。" });
+      if (!shouldRenderEchoInkWelcome(env.showWelcome)) {
+        return;
       }
+      const welcome = virtualListEl.createDiv({ cls: "codex-welcome" });
+      welcome.createDiv({ cls: "codex-welcome-title", text: "What's new?" });
+      welcome.createDiv({ cls: "codex-resource-note", text: "当前 Conversation 需要先选择工作区；添加笔记只作为本轮上下文。" });
       return;
     }
 
@@ -554,10 +574,11 @@ export class CodexMessageListRenderer {
       this.renderActionStreamItem(container, row.message, row.showAgentHeader);
       return;
     }
+    if (row.message.role === "user") container.addClass("codex-virtual-row-user-message");
     this.renderMessage(container, row.message, { showAgentHeader: row.showAgentHeader, showAgentFooter: row.showAgentFooter, processExpanded: row.processExpanded });
   }
 
-  private renderMessage(container: HTMLElement, message: ChatMessage, options: { showAgentHeader: boolean; showAgentFooter: boolean; processExpanded?: boolean } = { showAgentHeader: false, showAgentFooter: false }): void {
+  private renderMessage(container: HTMLElement, message: ChatMessage, options: { showAgentHeader: boolean; showAgentFooter: boolean; processExpanded?: boolean; allowConversationDerive?: boolean } = { showAgentHeader: false, showAgentFooter: false }): void {
     const env = this.requireEnv();
     const wrapper = container.createDiv({ cls: `codex-message codex-message-${message.role}` });
     wrapper.dataset.messageId = message.id;
@@ -566,9 +587,8 @@ export class CodexMessageListRenderer {
     const emptyRunningAnswer = isAgentAnswerMessage(message) && message.status === "running" && !displayTextForMessage(message).trim();
     wrapper.toggleClass("codex-message-empty-running", emptyRunningAnswer);
     wrapper.toggleClass("has-agent-header", options.showAgentHeader);
-    const missingBackend = missingAgentCliBackend(message);
-    if (missingBackend) {
-      this.renderMissingAgentRecovery(wrapper, message, missingBackend);
+    if (message.taskPlan) {
+      this.renderTaskPlanCard(wrapper, message);
       return;
     }
     if (options.showAgentHeader) this.renderAgentHeader(wrapper, {
@@ -613,6 +633,7 @@ export class CodexMessageListRenderer {
     }
     if (isProcessItemType(message.itemType)) {
       this.renderProcessMessage(content, message, false, options.processExpanded === true);
+      this.renderKnowledgeUsageCards(wrapper, message.id, knowledgeUsageMessageData(message));
       return;
     }
     const displayText = displayTextForMessage(message);
@@ -622,28 +643,282 @@ export class CodexMessageListRenderer {
     if (message.rawRef) this.renderRawMessageExpander(content, message);
     if (message.itemType === "knowledgeBase" && message.details) this.renderKnowledgeBaseContextNote(wrapper, message.details);
     if (message.citations) this.renderKnowledgeBaseCitations(wrapper, message.id, message.citations);
-    if (options.showAgentFooter) this.renderAgentFooter(wrapper, message);
+    this.renderKnowledgeUsageCards(wrapper, message.id, knowledgeUsageMessageData(message));
+    if (message.role === "user") this.renderMessageCopyAction(wrapper, message, true);
+    const footerActions = options.showAgentFooter
+      ? this.renderAgentFooter(wrapper, message)
+      : null;
+    if (options.allowConversationDerive !== false) {
+      this.renderPiConversationDeriveAction(
+        footerActions ?? wrapper,
+        message,
+        Boolean(footerActions)
+      );
+    }
   }
 
-  private renderMissingAgentRecovery(container: HTMLElement, message: ChatMessage, backend: AgentBackendMode): void {
+  private renderTaskPlanCard(
+    container: HTMLElement,
+    message: ChatMessage
+  ): void {
     const env = this.requireEnv();
-    const copy = agentRecoveryCopy(env.settingsLanguage, backend);
-    container.addClass("codex-cli-recovery");
-    const mark = container.createSpan({ cls: "codex-cli-recovery-icon", attr: { "aria-hidden": "true" } });
-    setIcon(mark, "terminal");
-    const body = container.createDiv({ cls: "codex-cli-recovery-body" });
-    body.createDiv({ cls: "codex-cli-recovery-title", text: copy.title });
-    body.createDiv({ cls: "codex-cli-recovery-detail", text: copy.detail });
-    const actions = body.createDiv({ cls: "codex-cli-recovery-actions" });
-    const repair = actions.createEl("button", { cls: "codex-cli-recovery-primary", text: copy.repair, attr: { type: "button" } });
-    repair.onclick = () => env.onAutoRepairAgent(backend);
-    const settings = actions.createEl("button", { cls: "codex-cli-recovery-secondary", text: copy.settings, attr: { type: "button" } });
-    settings.onclick = () => env.onOpenAgentSettings(backend);
-    const diagnostic = body.createEl("details", { cls: "codex-cli-recovery-diagnostic" });
-    diagnostic.createEl("summary", { text: copy.diagnostic });
-    diagnostic.createEl("pre", {
-      text: [message.title, displayTextForMessage(message), message.details].filter(Boolean).join("\n\n")
+    const plan = message.taskPlan;
+    if (!plan) return;
+    container.addClass("codex-message-task-plan");
+    const progress = taskPlanProgress(plan);
+    const currentStep = taskPlanCurrentStep(plan);
+    const defaultExpanded = plan.status === "pending"
+      ? plan.steps.length <= 8
+      : plan.status === "in_progress"
+        ? plan.steps.length <= 6
+        : false;
+    const expanded = this.openTaskPlans.get(message.id) ?? defaultExpanded;
+    const stepsId = `codex-task-plan-steps-${safeDomIdentity(message.id)}`;
+    const card = container.createDiv({
+      cls: `codex-task-plan-card is-${plan.status}`,
+      attr: {
+        "aria-label": `任务计划：${plan.title}`
+      }
     });
+    const header = card.createEl("button", {
+      cls: "codex-task-plan-header",
+      attr: {
+        type: "button",
+        "aria-expanded": String(expanded),
+        "aria-controls": stepsId,
+        title: expanded ? "收起任务步骤" : "展开任务步骤"
+      }
+    });
+    this.renderTaskPlanStatusIcon(
+      header.createSpan({ cls: "codex-task-plan-status" }),
+      plan.status
+    );
+    const heading = header.createSpan({ cls: "codex-task-plan-heading" });
+    heading.createSpan({ cls: "codex-task-plan-title", text: plan.title });
+    heading.createSpan({
+      cls: "codex-task-plan-progress",
+      text: `第 ${progress.current} / ${progress.total} 步`
+    });
+    const disclosure = header.createSpan({
+      cls: "codex-task-plan-disclosure",
+      attr: { "aria-hidden": "true" }
+    });
+    setIcon(disclosure, expanded ? "chevron-up" : "chevron-down");
+    header.onclick = () => {
+      this.openTaskPlans.set(message.id, !expanded);
+      env.onScheduleMeasure();
+      this.render({
+        ...env,
+        options: { preserveScroll: true }
+      });
+    };
+
+    const steps = card.createDiv({
+      cls: "codex-task-plan-steps",
+      attr: { id: stepsId }
+    });
+    if (expanded) {
+      for (const step of plan.steps) {
+        const row = steps.createDiv({
+          cls: `codex-task-plan-step is-${step.status}`
+        });
+        this.renderTaskPlanStatusIcon(
+          row.createSpan({ cls: "codex-task-plan-step-status" }),
+          step.status
+        );
+        const copy = row.createDiv({ cls: "codex-task-plan-step-copy" });
+        copy.createDiv({ cls: "codex-task-plan-step-text", text: step.text });
+        if (step.reason) {
+          copy.createDiv({
+            cls: "codex-task-plan-step-reason",
+            text: step.reason
+          });
+        }
+      }
+    } else if (currentStep) {
+      const row = steps.createDiv({
+        cls: `codex-task-plan-step codex-task-plan-step-current is-${currentStep.status}`
+      });
+      this.renderTaskPlanStatusIcon(
+        row.createSpan({ cls: "codex-task-plan-step-status" }),
+        currentStep.status
+      );
+      const copy = row.createDiv({ cls: "codex-task-plan-step-copy" });
+      copy.createDiv({
+        cls: "codex-task-plan-step-text",
+        text: currentStep.text
+      });
+      if (currentStep.reason) {
+        copy.createDiv({
+          cls: "codex-task-plan-step-reason",
+          text: currentStep.reason
+        });
+      }
+    }
+    if (plan.reason) {
+      card.createDiv({ cls: "codex-task-plan-reason", text: plan.reason });
+    }
+    this.renderTaskPlanActions(card, plan.planId, plan.title, plan.status);
+  }
+
+  private renderTaskPlanStatusIcon(
+    container: HTMLElement,
+    status: EchoInkTaskPlanStatus
+  ): void {
+    container.addClass(`is-${status}`);
+    container.setAttribute("role", "img");
+    container.setAttribute("aria-label", taskPlanStatusLabel(status));
+    setIcon(container, taskPlanStatusIcon(status));
+  }
+
+  private renderTaskPlanActions(
+    card: HTMLElement,
+    planId: string,
+    title: string,
+    status: EchoInkTaskPlanStatus
+  ): void {
+    const env = this.requireEnv();
+    const actions = card.createDiv({ cls: "codex-task-plan-actions" });
+    const addAction = (
+      label: string,
+      action: "execute" | "continue" | "pause" | "cancel",
+      tone: "primary" | "secondary" | "danger"
+    ) => {
+      if (!env.onTaskPlanAction) return;
+      const button = actions.createEl("button", {
+        cls: `codex-task-plan-action is-${tone}`,
+        text: label,
+        attr: { type: "button" }
+      });
+      button.onclick = async () => {
+        if (button.disabled) return;
+        setTaskPlanActionsBusy(actions, true);
+        try {
+          await env.onTaskPlanAction?.(planId, action);
+        } finally {
+          setTaskPlanActionsBusy(actions, false);
+        }
+      };
+    };
+    const addModify = () => {
+      if (!env.onModifyTaskPlan) return;
+      const button = actions.createEl("button", {
+        cls: "codex-task-plan-action is-secondary",
+        text: "修改计划",
+        attr: { type: "button" }
+      });
+      button.onclick = () => env.onModifyTaskPlan?.(planId, title);
+    };
+
+    if (status === "pending") {
+      addAction("执行", "execute", "primary");
+      addModify();
+      addAction("取消", "cancel", "danger");
+    } else if (status === "in_progress") {
+      addAction("暂停/中止", "pause", "danger");
+    } else if (status === "paused") {
+      addAction("继续", "continue", "primary");
+      addModify();
+      addAction("取消", "cancel", "danger");
+    }
+    if (!actions.childElementCount) actions.remove();
+  }
+
+  private renderPiConversationDeriveAction(
+    container: HTMLElement,
+    message: ChatMessage,
+    inline: boolean
+  ): void {
+    const env = this.requireEnv();
+    const entryId = piEntryIdFromProjectedMessageId(message.id);
+    const label = piConversationDeriveActionLabel(message);
+    if (!entryId || !label || !env.onDerivePiConversation) return;
+    const actions = inline
+      ? container
+      : container.createDiv({ cls: "codex-message-derive-actions" });
+    const button = actions.createEl("button", {
+      cls: "codex-message-action codex-message-derive-action",
+      attr: {
+        type: "button",
+        title: label,
+        "aria-label": label,
+        "aria-busy": "false"
+      }
+    });
+    button.disabled = Boolean(env.piConversationDeriveDisabled);
+    const icon = button.createSpan({
+      cls: "codex-message-action-icon codex-message-derive-action-icon",
+      attr: { "aria-hidden": "true" }
+    });
+    setIcon(icon, "git-fork");
+    button.onclick = async () => {
+      if (button.disabled) return;
+      button.disabled = true;
+      button.setAttribute("aria-busy", "true");
+      try {
+        await env.onDerivePiConversation?.(entryId);
+      } finally {
+        button.setAttribute("aria-busy", "false");
+        button.disabled = Boolean(env.piConversationDeriveDisabled);
+      }
+    };
+  }
+
+  private renderMessageCopyAction(
+    container: HTMLElement,
+    message: ChatMessage,
+    userMessage: boolean
+  ): HTMLButtonElement {
+    const env = this.requireEnv();
+    const idleLabel = userMessage ? "复制消息" : "复制回答";
+    const successLabel = userMessage ? "消息已复制" : "回答已复制";
+    const failureLabel = userMessage ? "消息复制失败" : "回答复制失败";
+    const copyButton = container.createEl("button", {
+      cls: `codex-message-action ${userMessage ? "codex-user-message-copy" : "codex-answer-copy"}`,
+      attr: {
+        type: "button",
+        title: idleLabel,
+        "aria-label": idleLabel,
+        "aria-live": "polite"
+      }
+    });
+    const icon = copyButton.createSpan({
+      cls: "codex-message-action-icon",
+      attr: { "aria-hidden": "true" }
+    });
+    const renderIcon = (name: string) => {
+      icon.empty();
+      setIcon(icon, name);
+    };
+    renderIcon("copy");
+    copyButton.onclick = async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (copyButton.disabled) return;
+      copyButton.disabled = true;
+      const result = await copyAnswerMarkdown(
+        message,
+        env.readRawMessageText,
+        (text) => navigator.clipboard.writeText(text)
+      );
+      if (result.status === "success") {
+        renderIcon("check");
+        copyButton.setAttr("title", "已复制");
+        copyButton.setAttr("aria-label", successLabel);
+      } else {
+        renderIcon("triangle-alert");
+        copyButton.setAttr("title", "复制失败");
+        copyButton.setAttr("aria-label", failureLabel);
+        new Notice(`复制失败：${result.error instanceof Error ? result.error.message : String(result.error)}`);
+      }
+      window.setTimeout(() => {
+        renderIcon("copy");
+        copyButton.setAttr("title", idleLabel);
+        copyButton.setAttr("aria-label", idleLabel);
+        copyButton.disabled = false;
+      }, 1400);
+    };
+    return copyButton;
   }
 
   private renderAgentHeader(container: HTMLElement, input: { message?: ChatMessage; statusLabel: string; compact: boolean }): void {
@@ -659,44 +934,29 @@ export class CodexMessageListRenderer {
     if (input.statusLabel) main.createDiv({ cls: "codex-agent-status-line", text: input.statusLabel });
   }
 
-  private renderAgentFooter(container: HTMLElement, message: ChatMessage): void {
-    const env = this.requireEnv();
-    const items = agentFooterItems(message);
+  private renderAgentFooter(
+    container: HTMLElement,
+    message: ChatMessage
+  ): HTMLElement {
     const footer = container.createDiv({ cls: "codex-agent-footer" });
-    const meta = footer.createDiv({ cls: "codex-agent-footer-meta" });
-    for (const item of items) meta.createSpan({ cls: "codex-agent-footer-item", text: item });
-    const copyButton = footer.createEl("button", {
-      cls: "codex-answer-copy",
-      attr: { type: "button", title: "复制回答", "aria-label": "复制回答" }
+    const actions = footer.createDiv({ cls: "codex-agent-footer-actions" });
+    this.renderMessageCopyAction(actions, message, false);
+    const runtime = footer.createSpan({
+      cls: "codex-agent-footer-runtime",
+      attr: { title: message.providerId || "历史消息未记录 Provider 身份" }
     });
-    setIcon(copyButton, "copy");
-    copyButton.onclick = async (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      if (copyButton.disabled) return;
-      copyButton.disabled = true;
-      const result = await copyAnswerMarkdown(message, env.readRawMessageText, (text) => navigator.clipboard.writeText(text));
-      copyButton.empty();
-      if (result.status === "success") {
-        setIcon(copyButton, "check");
-        copyButton.createSpan({ text: "已复制" });
-        copyButton.setAttr("title", "已复制");
-        copyButton.setAttr("aria-label", "回答已复制");
-      } else {
-        setIcon(copyButton, "triangle-alert");
-        copyButton.createSpan({ text: "复制失败" });
-        copyButton.setAttr("title", "复制失败");
-        copyButton.setAttr("aria-label", "回答复制失败");
-        new Notice(`复制失败：${result.error instanceof Error ? result.error.message : String(result.error)}`);
-      }
-      window.setTimeout(() => {
-        copyButton.empty();
-        setIcon(copyButton, "copy");
-        copyButton.setAttr("title", "复制回答");
-        copyButton.setAttr("aria-label", "复制回答");
-        copyButton.disabled = false;
-      }, 1400);
-    };
+    const providerIcon = runtime.createSpan({
+      cls: "codex-agent-footer-provider-icon",
+      attr: { "aria-hidden": "true" }
+    });
+    renderProviderBrandIcon(providerIcon, providerBrandForMessage(message));
+    runtime.createSpan({
+      cls: "codex-agent-footer-model",
+      text: message.modelId?.trim() || "未知模型"
+    });
+    const time = formatAnswerFooterTime(message.completedAt ?? message.createdAt);
+    if (time) footer.createSpan({ cls: "codex-agent-footer-time", text: time });
+    return actions;
   }
 
   private renderKnowledgeBaseResultContent(container: HTMLElement, message: ChatMessage, text: string): boolean {
@@ -858,6 +1118,115 @@ export class CodexMessageListRenderer {
     new Notice(`没有在当前 Obsidian 仓库找到：${path}`);
   }
 
+  private renderKnowledgeUsageCards(
+    container: HTMLElement,
+    messageId: string,
+    usage: KnowledgeUsageMessageData
+  ): void {
+    if (!usage.references.length && !usage.producedPaths.length) return;
+    const stateKey = `knowledge-usage:${messageId}`;
+    const details = container.createEl("details", {
+      cls: "codex-kb-citations codex-knowledge-references"
+    });
+    details.open = this.openKnowledgeBaseCitations.get(stateKey) ?? false;
+    details.ontoggle = () => {
+      this.openKnowledgeBaseCitations.set(stateKey, details.open);
+      this.requireEnv().onScheduleMeasure();
+    };
+    const summary = details.createEl("summary", { cls: "codex-kb-citations-summary" });
+    summary.createSpan({ cls: "codex-kb-citations-title", text: "本次引用" });
+    const counts = summary.createSpan({ cls: "codex-kb-citation-buckets" });
+    if (usage.references.length) {
+      counts.createSpan({
+        cls: "codex-kb-source-count",
+        text: `${usage.references.length} 个本地来源`
+      });
+    }
+    if (usage.producedPaths.length) {
+      counts.createSpan({
+        cls: "codex-kb-source-count",
+        text: `${usage.producedPaths.length} 个产物`
+      });
+    }
+    const body = details.createDiv({ cls: "codex-kb-citations-body" });
+    for (const reference of usage.references) {
+      this.renderKnowledgeReferenceItem(body, reference);
+    }
+    for (const producedPath of usage.producedPaths) {
+      this.renderKnowledgeProducedPath(body, producedPath);
+    }
+  }
+
+  private renderKnowledgeReferenceItem(
+    container: HTMLElement,
+    reference: KnowledgeReference
+  ): void {
+    const item = container.createDiv({ cls: "codex-kb-citation-item codex-knowledge-reference-item" });
+    const header = item.createDiv({ cls: "codex-kb-citation-header" });
+    const title = header.createEl("button", {
+      cls: "codex-kb-citation-title",
+      text: reference.title || noteNameForPath(reference.vaultRelativePath),
+      attr: {
+        type: "button",
+        title: `打开 ${reference.vaultRelativePath} 第 ${reference.lineStart}-${reference.lineEnd} 行`
+      }
+    });
+    const openReference = (event: MouseEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void this.openKnowledgeReference(reference);
+    };
+    title.onclick = openReference;
+    const quote = item.createDiv({ cls: "codex-kb-citation-quote" });
+    for (const line of reference.excerpt.split(/\r\n|\n|\r/u)) {
+      quote.createDiv({ cls: "codex-kb-citation-line", text: line });
+    }
+  }
+
+  private renderKnowledgeProducedPath(container: HTMLElement, producedPath: string): void {
+    const item = container.createDiv({ cls: "codex-kb-citation-item codex-knowledge-produced-path" });
+    const header = item.createDiv({ cls: "codex-kb-citation-header" });
+    const title = header.createEl("button", {
+      cls: "codex-kb-citation-title",
+      text: noteNameForPath(producedPath),
+      attr: { type: "button", title: `打开 ${producedPath}` }
+    });
+    title.onclick = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void this.openKnowledgeBasePath(producedPath);
+    };
+  }
+
+  private async openKnowledgeReference(reference: KnowledgeReference): Promise<void> {
+    const env = this.requireEnv();
+    const normalized = normalizePath(reference.vaultRelativePath);
+    const file = env.app.vault.getAbstractFileByPath(normalized);
+    if (!(file instanceof TFile)) {
+      new Notice(`没有在当前 Obsidian 仓库找到：${reference.vaultRelativePath}`);
+      return;
+    }
+    const leaf = env.app.workspace.getLeaf("tab");
+    const firstLine = Math.max(0, reference.lineStart - 1);
+    await leaf.openFile(file, {
+      active: true,
+      eState: { line: firstLine }
+    });
+    const editor = (leaf.view as { editor?: Editor }).editor;
+    if (!editor) return;
+    const availableLastLine = Math.max(0, editor.lineCount() - 1);
+    const clampedFirstLine = Math.min(firstLine, availableLastLine);
+    const lastLine = Math.min(
+      Math.max(clampedFirstLine, reference.lineEnd - 1),
+      availableLastLine
+    );
+    const from = { line: clampedFirstLine, ch: 0 };
+    const to = { line: lastLine, ch: editor.getLine(lastLine).length };
+    editor.setSelection(from, to);
+    editor.scrollIntoView({ from, to }, true);
+    editor.focus();
+  }
+
   private renderKnowledgeBaseContextNote(container: HTMLElement, details: string): void {
     const normalized = details.trim();
     if (!normalized) return;
@@ -894,10 +1263,9 @@ export class CodexMessageListRenderer {
   private renderKnowledgeBaseCitationItem(container: HTMLElement, citation: KnowledgeBaseCitation): void {
     const item = container.createDiv({ cls: `codex-kb-citation-item codex-kb-citation-${citation.bucket}` });
     const header = item.createDiv({ cls: "codex-kb-citation-header" });
-    header.createSpan({ cls: `codex-kb-citation-badge codex-kb-source-${citation.bucket}`, text: kbBucketLabel(citation.bucket) });
     const title = header.createEl("button", {
       cls: "codex-kb-citation-title",
-      text: citation.title || citation.path,
+      text: citation.title || noteNameForPath(citation.path),
       attr: {
         type: "button",
         title: `打开 ${citation.path}`
@@ -908,26 +1276,10 @@ export class CodexMessageListRenderer {
       event.stopPropagation();
       void this.openKnowledgeBaseCitation(citation);
     };
-    header.createSpan({ cls: `codex-kb-citation-relevance codex-kb-evidence-${citation.relevance}`, text: citation.relevance === "strong" ? "强证据" : "弱相关" });
-    const open = header.createEl("button", {
-      cls: "codex-kb-citation-open",
-      text: "打开",
-      attr: {
-        type: "button",
-        title: citation.path
-      }
-    });
-    open.onclick = (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      void this.openKnowledgeBaseCitation(citation);
-    };
-    item.createDiv({ cls: "codex-kb-citation-path", text: citation.path });
     const quote = item.createDiv({ cls: "codex-kb-citation-quote" });
     for (const line of citation.excerptLines.length ? citation.excerptLines : ["无可用引用片段"]) {
       quote.createDiv({ cls: "codex-kb-citation-line", text: line });
     }
-    item.createDiv({ cls: "codex-kb-citation-reason", text: `为什么相关：${citation.reason}` });
   }
 
   private async openKnowledgeBaseCitation(citation: KnowledgeBaseCitation): Promise<void> {
@@ -947,6 +1299,7 @@ export class CodexMessageListRenderer {
     });
     const region = wrapper.createDiv({ cls: "codex-action-region codex-action-stream" });
     this.renderActionItem(region, item, { standalone: false });
+    this.renderKnowledgeUsageCards(wrapper, message.id, knowledgeUsageMessageData(message));
   }
 
   private renderCompletedTurnProcess(container: HTMLElement, turn: CompletedAgentTurn, showAgentHeader: boolean): void {
@@ -974,9 +1327,15 @@ export class CodexMessageListRenderer {
       this.requireEnv().onScheduleMeasure();
       this.rerenderPreservingScroll();
     };
-    if (!open) return;
-    const body = region.createDiv({ cls: "codex-turn-process-body", attr: { id: bodyId } });
-    for (const message of turn.processMessages) this.renderTurnProcessMessage(body, message);
+    if (open) {
+      const body = region.createDiv({ cls: "codex-turn-process-body", attr: { id: bodyId } });
+      for (const message of turn.processMessages) this.renderTurnProcessMessage(body, message);
+    }
+    this.renderKnowledgeUsageCards(
+      wrapper,
+      `turn:${stateId}`,
+      mergeKnowledgeUsageMessageData(turn.processMessages)
+    );
   }
 
   private renderTurnProcessMessage(container: HTMLElement, message: ChatMessage): void {
@@ -985,7 +1344,12 @@ export class CodexMessageListRenderer {
       if (item) this.renderActionItem(container.createDiv({ cls: "codex-action-region codex-action-stream" }), item, { standalone: false });
       return;
     }
-    this.renderMessage(container, message, { showAgentHeader: false, showAgentFooter: false, processExpanded: true });
+    this.renderMessage(container, message, {
+      showAgentHeader: false,
+      showAgentFooter: false,
+      processExpanded: true,
+      allowConversationDerive: false
+    });
   }
 
   private renderActionItem(container: HTMLElement, item: ActionItemViewModel, options: { standalone: boolean }): void {
@@ -995,8 +1359,8 @@ export class CodexMessageListRenderer {
     }
     const row = container.createDiv({ cls: `codex-action-item codex-action-item-${item.kind}` });
     row.toggleClass("is-standalone", options.standalone);
-    row.toggleClass("is-failed", item.status === "failed");
-    row.toggleClass("is-running", item.status === "running");
+    row.toggleClass("is-failed", isAttentionActionStatus(item.status));
+    row.toggleClass("is-running", isActiveActionStatus(item.status));
     const head = row.createDiv({ cls: "codex-action-item-head" });
     this.renderActionItemHead(head, item);
   }
@@ -1005,9 +1369,10 @@ export class CodexMessageListRenderer {
     const detailId = stableDomId(`codex-action-detail-${item.id}`);
     const details = container.createEl("details", { cls: `codex-action-item codex-action-item-${item.kind} codex-action-item-expandable` });
     details.toggleClass("is-standalone", options.standalone);
-    details.toggleClass("is-failed", item.status === "failed");
-    details.toggleClass("is-running", item.status === "running");
-    details.open = this.openActionItemDetails.get(item.id) ?? (item.status === "failed" && item.kind !== "edit");
+    details.toggleClass("is-failed", isAttentionActionStatus(item.status));
+    details.toggleClass("is-running", isActiveActionStatus(item.status));
+    details.open = this.openActionItemDetails.get(item.id)
+      ?? (isAttentionActionStatus(item.status) && item.kind !== "edit");
     let summary: HTMLElement | null = null;
     let caret: HTMLElement | null = null;
     let body: HTMLElement | null = null;
@@ -1121,7 +1486,7 @@ export class CodexMessageListRenderer {
     if (message.status === "running") {
       const row = shell.createDiv({ cls: "codex-thinking-live" });
       row.createSpan({ cls: "codex-thinking-dot" });
-      row.createSpan({ text: COLD_START_STATUS_TEXT });
+      row.createSpan({ text: message.text || COLD_START_STATUS_TEXT });
       row.createSpan({ cls: "codex-agent-live-copy", text: ` · ${rotatingChoice(COLD_START_COPY_TEXTS, message.createdAt)}` });
       env.onScheduleRunProgress();
       return;
@@ -1131,12 +1496,15 @@ export class CodexMessageListRenderer {
 
   private renderProcessMessage(container: HTMLElement, message: ChatMessage, nested = false, forceOpen = false): void {
     const details = container.createEl("details", { cls: `codex-structured codex-process codex-process-${message.itemType ?? "item"}` });
-    details.toggleClass("is-running", message.status === "running");
+    details.toggleClass("is-running", isActiveProcessStatus(message.status));
     details.toggleClass("is-completed", message.status === "completed");
-    details.toggleClass("is-error", message.status === "error" || message.status === "failed");
+    details.toggleClass("is-error", isAttentionProcessStatus(message.status));
     details.toggleClass("is-nested", nested);
     if (message.processKind) details.toggleClass(`codex-process-kind-${message.processKind}`, true);
-    const defaultOpen = forceOpen || (!nested && (message.itemType === "plan" || message.status === "error" || message.status === "failed"));
+    const defaultOpen = forceOpen || (!nested && (
+      message.itemType === "plan"
+      || isAttentionProcessStatus(message.status)
+    ));
     details.open = forceOpen ? true : this.openProcessItems.get(message.id) ?? defaultOpen;
     let body: HTMLElement | null = null;
     const renderBody = () => {
@@ -1516,49 +1884,8 @@ export function messageProvenanceMetaItems(message: ChatMessage): string[] {
   const backend = message.backendId ? backendDisplayName(message.backendId) : "";
   const agent = [backend, message.modelId, message.profileId].filter(Boolean).join(" · ");
   if (agent) items.push(agent);
-  if (message.contextMode) items.push(`Context ${message.contextMode}`);
-  if (message.nativeLeaseStatus || message.nativeLeaseId) {
-    const leaseParts = [
-      `Lease ${message.nativeLeaseStatus ?? "unknown"}`,
-      message.nativeLeaseReused ? "reused" : message.nativeLeaseId ? "created" : "",
-      message.nativeLeaseTurnCount ? `turn ${message.nativeLeaseTurnCount}` : ""
-    ].filter(Boolean);
-    items.push(leaseParts.join(" · "));
-  }
-  if (message.nativeLocalCommitStatus) {
-    items.push(NATIVE_LOCAL_COMMIT_LABELS[message.nativeLocalCommitStatus]);
-  }
-  if (message.nativeCleanupStatus) {
-    items.push(NATIVE_CLEANUP_LABELS[message.nativeCleanupStatus]);
-  }
   return items;
 }
-
-const NATIVE_LOCAL_COMMIT_LABELS: Record<
-  NonNullable<ChatMessage["nativeLocalCommitStatus"]>,
-  string
-> = {
-  pending: "本地记录等待提交",
-  committed: "本地记录已保存",
-  failed: "本地记录保存失败"
-};
-
-const NATIVE_CLEANUP_LABELS: Record<
-  NonNullable<ChatMessage["nativeCleanupStatus"]>,
-  string
-> = {
-  quarantined: "原生记录已隔离",
-  failed: "原生记录清理失败",
-  "retained-for-recovery": "原生记录已保留，等待恢复",
-  disposing: "原生记录清理中",
-  "awaiting-local-commit": "原生记录等待本地提交",
-  pending: "原生记录等待清理",
-  aborted: "原生记录清理已中止",
-  unsupported: "原生记录不支持自动清理",
-  retained: "原生记录已保留",
-  disposed: "原生记录已清理",
-  "not-needed": "原生记录无需清理"
-};
 
 const ACTIVE_ANSWER_FOOTER_STATUSES = new Set(["running", "in_progress", "inProgress", "approval", "blocked"]);
 const FAILED_ANSWER_STATUSES = new Set(["failed", "error", "canceled", "cancelled", "interrupted"]);
@@ -1583,8 +1910,44 @@ function agentRunHeaderKey(message: ChatMessage): string {
 }
 
 function isAgentHeaderCandidate(message: ChatMessage): boolean {
-  if (message.role === "user" || message.itemType === "knowledgeBase") return false;
+  if (
+    message.role === "user"
+    || message.itemType === "knowledgeBase"
+    || message.itemType === "taskPlan"
+  ) return false;
   return message.itemType !== "thinking" && message.itemType !== "contextCompaction";
+}
+
+function taskPlanStatusLabel(status: EchoInkTaskPlanStatus): string {
+  if (status === "pending") return "待执行";
+  if (status === "in_progress") return "进行中";
+  if (status === "completed") return "已完成";
+  if (status === "failed") return "失败";
+  if (status === "paused") return "已暂停";
+  return "已取消";
+}
+
+function taskPlanStatusIcon(status: EchoInkTaskPlanStatus): string {
+  if (status === "pending") return "circle";
+  if (status === "in_progress") return "loader-circle";
+  if (status === "completed") return "circle-check";
+  if (status === "failed") return "circle-alert";
+  if (status === "paused") return "circle-pause";
+  return "circle-x";
+}
+
+function setTaskPlanActionsBusy(
+  container: HTMLElement,
+  busy: boolean
+): void {
+  container.toggleClass("is-busy", busy);
+  for (const button of Array.from(
+    container.querySelectorAll<HTMLButtonElement>("button")
+  )) button.disabled = busy;
+}
+
+function safeDomIdentity(value: string): string {
+  return value.replace(/[^A-Za-z0-9_-]/gu, "-").slice(-160);
 }
 
 export function shouldRenderMessageTitle(message: ChatMessage, hasAgentHeader: boolean): boolean {
@@ -1605,19 +1968,25 @@ export function agentFooterItems(message: ChatMessage): string[] {
   const items: string[] = [];
   const time = formatAnswerFooterTime(message.completedAt ?? message.createdAt);
   if (time) items.push(time);
-  const totalTokens = message.runUsage?.totalTokens ?? 0;
-  if (totalTokens > 0) items.push(`本轮 ${formatCompactNumber(totalTokens)} tokens`);
   return items;
+}
+
+function providerBrandForMessage(message: ChatMessage): ProviderBrandId {
+  const identity = message.providerId?.trim();
+  if (!identity) return "custom";
+  return API_PROVIDER_PRESETS.find((preset) =>
+    preset.id === identity || preset.runtimeProviderId === identity
+  )?.id ?? "custom";
+}
+
+function noteNameForPath(path: string): string {
+  return basename(path).replace(/\.md$/iu, "") || path;
 }
 
 function formatAnswerFooterTime(value: number): string {
   return formatMessageHeaderTime(value)
     .replace(/^星期/, "周")
     .replace(/([一二三四五六日天])(?=\d{2}:\d{2}$)/, "$1 ");
-}
-
-function formatCompactNumber(value: number): string {
-  return Math.round(value).toLocaleString("en-US");
 }
 
 function rotatingChoice<T>(items: readonly T[], createdAt?: number): T {
@@ -1630,9 +1999,6 @@ function rotatingIndex(createdAt?: number): number {
 }
 
 function backendDisplayName(backendId: string): string {
-  if (backendId === "codex-cli") return "Codex";
-  if (backendId === "opencode") return "OpenCode";
-  if (backendId === "hermes") return "Hermes";
   return backendId;
 }
 
@@ -1699,7 +2065,13 @@ function actionItemDetailLabel(item: ActionItemViewModel): string {
 
 export function actionVerb(item: ActionItemViewModel): string {
   if (item.status === "unconfirmed") return statusActionVerb(item.kind, "状态未回传");
-  if (item.status === "interrupted" || item.status === "canceled") return statusActionVerb(item.kind, "已中断");
+  if (item.status === "interrupted") return statusActionVerb(item.kind, "已中断");
+  if (item.status === "canceled") return statusActionVerb(item.kind, "已取消");
+  if (item.status === "waiting_approval") return statusActionVerb(item.kind, "等待确认");
+  if (item.status === "approved") return statusActionVerb(item.kind, "已批准");
+  if (item.status === "verifying") return statusActionVerb(item.kind, "验证中");
+  if (item.status === "denied") return statusActionVerb(item.kind, "已拒绝");
+  if (item.status === "uncertain") return statusActionVerb(item.kind, "结果不确定");
   if (item.status === "recovery-pending") return statusActionVerb(item.kind, "等待恢复");
   if (item.status === "recovery-blocked") return statusActionVerb(item.kind, "恢复受阻");
   if (item.status === "running" || item.status === "blocked") return runningActionVerb(item.kind);
@@ -1746,7 +2118,8 @@ function runningActionVerb(kind: ActionGroupKind): string {
 }
 
 function iconForActionKind(kind: ActionGroupKind, status?: string): string {
-  if (status === "failed" || status === "recovery-blocked") return "triangle-alert";
+  if (status === "failed" || status === "uncertain" || status === "recovery-blocked") return "triangle-alert";
+  if (status === "denied" || status === "canceled") return "circle-slash";
   const icons: Record<ActionGroupKind, string> = {
     read: "book-open",
     search: "search",
@@ -1828,10 +2201,16 @@ function titleForItemType(message: ChatMessage): string {
 function labelForStatus(status: string): string {
   const labels: Record<string, string> = {
     running: "进行中",
+    waiting_approval: "等待确认",
+    approved: "已批准",
+    verifying: "验证中",
     completed: "完成",
     error: "失败",
     failed: "失败",
+    denied: "已拒绝",
+    uncertain: "结果不确定",
     canceled: "已取消",
+    cancelled: "已取消",
     blocked: "等待确认",
     interrupted: "中断",
     unconfirmed: "状态未回传",
@@ -1839,6 +2218,31 @@ function labelForStatus(status: string): string {
     "recovery-blocked": "恢复受阻"
   };
   return labels[status] ?? status;
+}
+
+function isActiveActionStatus(status: ActionItemViewModel["status"]): boolean {
+  return status === "running"
+    || status === "waiting_approval"
+    || status === "approved"
+    || status === "verifying";
+}
+
+function isAttentionActionStatus(status: ActionItemViewModel["status"]): boolean {
+  return status === "failed" || status === "denied" || status === "uncertain";
+}
+
+function isActiveProcessStatus(status: string | undefined): boolean {
+  return status === "running"
+    || status === "waiting_approval"
+    || status === "approved"
+    || status === "verifying";
+}
+
+function isAttentionProcessStatus(status: string | undefined): boolean {
+  return status === "error"
+    || status === "failed"
+    || status === "denied"
+    || status === "uncertain";
 }
 
 function labelForDiffKind(kind: string): string {
@@ -1913,9 +2317,6 @@ export function knowledgeBaseMaintainExecutionItems(
   else if (payload.completion === "recovered") items.push("自动恢复完成");
   else if (payload.completion === "full") items.push("完整完成");
 
-  const backend = payload.winnerBackend ?? payload.backend;
-  if (backend) items.push(backendDisplayName(backend));
-  if (payload.attemptCount) items.push(`${payload.attemptCount} 次尝试`);
   if (payload.performance) {
     items.push(formatKnowledgeBaseRunDuration(payload.performance.totalMs));
     if (!payload.performance.agentCalled) items.push("未调用 Agent");

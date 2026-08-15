@@ -3,6 +3,8 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 
+const stagedOnly = process.argv.includes("--staged");
+
 function trackedFiles() {
   const output = execFileSync("git", ["ls-files", "-z"], { encoding: "utf8" });
   return output
@@ -12,50 +14,42 @@ function trackedFiles() {
     .filter((file) => existsSync(file));
 }
 
+function stagedFiles() {
+  const output = execFileSync("git", ["ls-files", "--cached", "-z"], {
+    encoding: "utf8"
+  });
+  return output
+    .split("\0")
+    .filter(Boolean)
+    .map((file) => file.replace(/\\/g, "/"));
+}
+
 const rules = [
   {
-    reason: "private Codex collaboration state",
+    reason: "private local collaboration or memory state",
     matches: (file) =>
-      file === "AGENTS.md"
-      || file.endsWith("/AGENTS.md")
+      /(?:^|\/)(?:AGENT|AGENTS|USER|MEMORY|CONTEXT)\.md$/i.test(file)
       || file.startsWith(".codex-memory/")
       || file.startsWith(".omx/")
   },
   {
-    reason: "private release context or design QA",
-    matches: (file) => /(?:^|\/)(?:CONTEXT|design-qa)\.md$/i.test(file)
+    reason: "private project documentation",
+    matches: (file) => file.startsWith("docs/")
   },
   {
-    reason: "internal implementation documentation",
-    matches: (file) => file.startsWith("docs/implementation/")
+    reason: "private experiment material",
+    matches: (file) => file.startsWith("experiments/")
+  },
+  {
+    reason: "private Agent Evals material",
+    matches: (file) =>
+      /^scripts\/agent-evals-.*\.mjs$/i.test(file)
+      || file.startsWith("src/tests/agent-evals/")
+      || file.startsWith("src/tests/fixtures/agent-evals-v1/")
   },
   {
     reason: "internal prototype source or artifact",
     matches: (file) => /(?:^|\/)prototypes?\//i.test(file)
-  },
-  {
-    reason: "internal Superpowers execution documents",
-    matches: (file) => file.startsWith("docs/superpowers/")
-  },
-  {
-    reason: "private internal documentation",
-    matches: (file) => file.startsWith("docs/internal/")
-  },
-  {
-    reason: "internal documentation directory",
-    matches: (file) => /^docs\/(?:.+\/)?(?:plans|specs|design|architecture)\//i.test(file)
-  },
-  {
-    reason: "internal documentation filename",
-    matches: (file) =>
-      file.startsWith("docs/") &&
-      /(?:^|\/)(?:PRD|test-cases|[^/]*-prd)[^/]*\.md$/i.test(file)
-  },
-  {
-    reason: "internal planning or draft document",
-    matches: (file) =>
-      file.startsWith("docs/") &&
-      /(?:^|\/)[^/]*(?:plan|spec|idea|草稿|手稿|思路|方案|计划|内部)[^/]*\.md$/i.test(file)
   }
 ];
 
@@ -93,12 +87,14 @@ const contentRules = [
 ];
 
 function readTextFile(file) {
-  const buffer = readFileSync(file);
+  const buffer = stagedOnly
+    ? execFileSync("git", ["show", `:${file}`], { maxBuffer: 64 * 1024 * 1024 })
+    : readFileSync(file);
   if (buffer.includes(0)) return null;
   return buffer.toString("utf8");
 }
 
-const files = trackedFiles();
+const files = stagedOnly ? stagedFiles() : trackedFiles();
 const blocked = [];
 
 for (const file of files) {
@@ -112,11 +108,11 @@ for (const file of files) {
 }
 
 if (blocked.length > 0) {
-  console.error("Public repository guard failed. Remove these internal files before committing or pushing:");
+  console.error(`Public repository guard failed for ${stagedOnly ? "staged changes" : "tracked files"}.`);
   for (const item of blocked) {
     console.error(`- ${item.file} (${item.reason})`);
   }
   process.exit(1);
 }
 
-console.log(`Public repository guard passed: ${files.length} tracked files checked.`);
+console.log(`Public repository guard passed: ${files.length} ${stagedOnly ? "staged" : "tracked"} file(s) checked.`);

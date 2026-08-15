@@ -1,16 +1,20 @@
 import { Notice, type App } from "obsidian";
 import type CodexForObsidianPlugin from "../../main";
-import { swallowError } from "../../core/error-handling";
-import { clearKnowledgeBaseVisibleHistory } from "../../knowledge-base/session-history";
-import { sessionBackendBinding } from "../../harness/kernel/session-service";
-import type { EchoInkSessionContextRotationResult } from "../../plugin/session-context-lifecycle";
-import { ensureKnowledgeBaseSession, isKnowledgeBaseSession as isKnowledgeSession, newId, type StoredAttachment, type StoredSession } from "../../settings/settings";
+import type {
+  PiConversationCatalogEntry,
+  PiConversationProjection
+} from "../../harness/pi-native/contracts";
+import { newId, selectActiveConversationSession, type StoredAttachment, type StoredSession } from "../../settings/settings";
 import { RuntimeTurnQueue } from "../turn-queue";
 import { confirmModal, textInputModal } from "../modals";
-import { KnowledgeBaseHistoryModal } from "./history-modal";
 import { openSessionMenu as showSessionMenu } from "./menus";
 import { renderCodexTabs } from "./tabs";
 import type { EchoInkResource } from "../../resources/types";
+import {
+  refreshPiConversationSupport,
+  rememberPiConversationProjection
+} from "./pi-conversation-support";
+import { piEntryIdFromProjectedMessageId } from "../../harness/pi-native/pi-chat-ui-projector";
 
 export interface CodexSessionHost {
   readonly app: App;
@@ -26,16 +30,26 @@ export interface CodexSessionHost {
   renderTabs(): void;
   renderMessages(options?: { forceBottom?: boolean; fromScroll?: boolean; preserveScroll?: boolean }): void;
   renderToolbar(): void;
-  renderKnowledgeDashboard(): void;
-  refreshKnowledgeDashboard(force?: boolean): Promise<void>;
   updateInputPlaceholder(): void;
   closeComposerMenus(): void;
   renameSession(session: StoredSession): Promise<void>;
+  archiveSession(sessionId: string): Promise<void>;
   deleteSession(sessionId: string): Promise<void>;
-  createSession(title?: string): StoredSession;
-  isKnowledgeBaseSession(session: StoredSession): boolean;
-  openKnowledgeBaseHistory(session: StoredSession): Promise<void>;
+  createSession(title?: string): Promise<StoredSession>;
 }
+
+const conversationTransitionLanes = new WeakMap<
+  CodexSessionHost,
+  Promise<void>
+>();
+const conversationSelectionGenerations = new WeakMap<
+  CodexSessionHost,
+  number
+>();
+const conversationSelectionTargets = new WeakMap<
+  CodexSessionHost,
+  string
+>();
 
 export function renderTabsView(host: CodexSessionHost): void {
   ensureSession(host);
@@ -43,39 +57,27 @@ export function renderTabsView(host: CodexSessionHost): void {
     host.tabBarEl,
     host.plugin.settings.sessions,
     host.plugin.settings.activeSessionId,
-    host.plugin.settings.knowledgeBase.sessionId,
     {
       onActivate: (session) => void (async () => {
-        host.plugin.settings.activeSessionId = session.id;
-        host.updateInputPlaceholder();
-        await host.plugin.saveSettings(true);
-        host.resetVirtualWindow();
-        host.renderTabs();
-        host.renderMessages({ forceBottom: true });
-        host.renderToolbar();
-        host.renderKnowledgeDashboard();
-        void host.refreshKnowledgeDashboard();
-        host.updateInputPlaceholder();
+        try {
+          await activateSession(host, session);
+        } catch (error) {
+          new Notice(`打开会话失败：${errorMessage(error)}`);
+        } finally {
+          renderConversationShellChange(host);
+        }
       })(),
       onContextMenu: (event, session) => openSessionMenuView(host, event, session),
-      onRename: (session, knowledgeSession) => {
-        if (knowledgeSession) {
-          new Notice("知识库管理频道是常驻频道，不能重命名");
-          return;
-        }
-        void host.renameSession(session);
-      },
+      onRename: (session) => void host.renameSession(session),
       onDeleteSessions: (sessionIds) => void confirmDeleteSessions(host, sessionIds),
       onCreateSession: () => void (async () => {
-        host.createSession();
-        host.resetVirtualWindow();
-        await host.plugin.saveSettings(true);
-        host.renderTabs();
-        host.renderMessages({ forceBottom: true });
-        host.renderToolbar();
-        host.renderKnowledgeDashboard();
-        void host.refreshKnowledgeDashboard();
-        host.updateInputPlaceholder();
+        try {
+          await host.createSession();
+        } catch (error) {
+          new Notice(`新建会话失败：${errorMessage(error)}`);
+        } finally {
+          renderConversationShellChange(host);
+        }
       })()
     },
     host.running ? host.activeRunSessionId : ""
@@ -83,13 +85,15 @@ export function renderTabsView(host: CodexSessionHost): void {
 }
 
 export function openSessionMenuView(host: CodexSessionHost, event: MouseEvent, session: StoredSession): void {
-  showSessionMenu(event, host.isKnowledgeBaseSession(session), {
-    onRename: () => void host.renameSession(session),
-    onResetCache: () => void resetSessionNativeCache(host, session),
-    onClearRecords: () =>
-      void clearSessionConversationRecords(host, session),
-    onDelete: () => void confirmDeleteSessions(host, [session.id])
-  });
+  showSessionMenu(
+    event,
+    {
+      onRename: () => void host.renameSession(session),
+      onArchive: () => void host.archiveSession(session.id),
+      onResetCache: () => void resetSessionNativeCache(host, session),
+      onDelete: () => void confirmDeleteSessions(host, [session.id])
+    }
+  );
 }
 
 export async function resetSessionNativeCache(host: CodexSessionHost, session: StoredSession): Promise<void> {
@@ -98,38 +102,364 @@ export async function resetSessionNativeCache(host: CodexSessionHost, session: S
     return;
   }
   try {
-    const rotation = await host.plugin.rotateEchoInkSessionContext(session, {
-      reason: "agent-cache-reset",
-      advanceContext: false,
-      precondition: () => {
-        if (host.running && host.activeRunSessionId === session.id) {
-          throw new Error("当前会话正在运行，结束后再重置 agent 缓存");
-        }
-      },
-      mutate: (candidate) => {
-        delete candidate.tokenUsage;
-      }
-    });
-    new Notice(`Agent 缓存已重置${contextRotationCleanupNoticeSuffix(rotation)}`);
+    await host.plugin.releasePiConversation(session.id);
+    delete session.tokenUsage;
+    await persistPiConversationShells(host);
+    new Notice("Agent 运行实例已释放，下次打开会从同一会话记录恢复");
   } catch (error) {
-    new Notice(`重置 Agent 缓存失败：${error instanceof Error ? error.message : String(error)}`);
+    new Notice(`重置 Agent 缓存失败：${errorMessage(error)}`);
   }
+}
+
+export async function refreshPiConversationShells(
+  host: CodexSessionHost
+): Promise<void> {
+  const before = conversationShellFingerprint(host);
+  let catalogEntries = await host.plugin.listPiConversations(["active"]);
+  if (catalogEntries.length === 0) {
+    catalogEntries = [await host.plugin.createPiConversation({
+      conversationId: newId("conversation"),
+      title: "新会话",
+      cwd: host.plugin.getVaultPath(),
+      defaultMemoryMode: "normal"
+    })];
+  }
+  const existingChatShells = new Map(
+    host.plugin.settings.sessions.map((session) => [session.id, session])
+  );
+  const chatShells = catalogEntries.map((entry) =>
+    applyPiCatalogEntryToShell(
+      existingChatShells.get(entry.conversationId)
+        ?? createPiConversationShell(host, entry),
+      entry
+    )
+  );
+  host.plugin.settings.sessions = chatShells;
+  selectActiveConversationSession(host.plugin.settings);
+  if (before !== conversationShellFingerprint(host)) {
+    await persistPiConversationShells(host);
+  }
+}
+
+export function activateSession(
+  host: CodexSessionHost,
+  session: StoredSession
+): Promise<void> {
+  const generation = beginConversationSelection(host, session.id);
+  // Keep projection reads and activation intent ordering in one short lane so
+  // a late read cannot enqueue an obsolete AgentSession after a newer choice.
+  // Settings persistence happens after this lane and has its own save queue.
+  return completeSessionActivation(
+    host,
+    enqueueConversationTransition(
+      host,
+      async () => await activateSessionInTransitionLane(
+        host,
+        session,
+        generation
+      )
+    )
+  );
+}
+
+type ConversationSelectionOutcome =
+  | Readonly<{ status: "stale" }>
+  | Readonly<{ status: "selected"; error?: unknown }>;
+
+async function completeSessionActivation(
+  host: CodexSessionHost,
+  selection: Promise<ConversationSelectionOutcome>
+): Promise<void> {
+  const outcome = await selection;
+  if (outcome.status === "stale") return;
+  await persistPiConversationShells(host);
+  if ("error" in outcome) throw outcome.error;
+}
+
+async function activateSessionInTransitionLane(
+  host: CodexSessionHost,
+  session: StoredSession,
+  generation: number
+): Promise<ConversationSelectionOutcome> {
+  if (!isCurrentConversationSelection(host, generation)) {
+    return { status: "stale" };
+  }
+  const previous = host.plugin.settings.sessions.find(
+    (candidate) => candidate.id === host.plugin.settings.activeSessionId
+  );
+  try {
+    const projection = await host.plugin.switchPiConversation(
+      previous?.id ?? null,
+      session.id,
+      {
+        isStillCurrent: () =>
+          isCurrentConversationSelection(host, generation)
+      }
+    );
+    if (!isCurrentConversationSelection(host, generation)) {
+      return { status: "stale" };
+    }
+    applyPiConversationProjectionToShell(host, session, projection);
+    host.plugin.settings.activeSessionId = session.id;
+    host.updateInputPlaceholder();
+    renderConversationShellChange(host);
+    return { status: "selected" };
+  } catch (error) {
+    if (!isCurrentConversationSelection(host, generation)) {
+      return { status: "stale" };
+    }
+    await refreshPiConversationSupport(host.plugin, session.id)
+      .catch(() => undefined);
+    if (!isCurrentConversationSelection(host, generation)) {
+      return { status: "stale" };
+    }
+    host.plugin.settings.activeSessionId = session.id;
+    host.updateInputPlaceholder();
+    renderConversationShellChange(host);
+    return { status: "selected", error };
+  }
+}
+
+function isCurrentConversationSelection(
+  host: CodexSessionHost,
+  generation: number
+): boolean {
+  return conversationSelectionGenerations.get(host) === generation;
+}
+
+function beginConversationSelection(
+  host: CodexSessionHost,
+  targetConversationId?: string
+): number {
+  const generation = (conversationSelectionGenerations.get(host) ?? 0) + 1;
+  conversationSelectionGenerations.set(host, generation);
+  if (targetConversationId) {
+    conversationSelectionTargets.set(host, targetConversationId);
+  } else {
+    conversationSelectionTargets.delete(host);
+  }
+  return generation;
+}
+
+function bindConversationSelectionTarget(
+  host: CodexSessionHost,
+  generation: number,
+  targetConversationId: string
+): boolean {
+  if (!isCurrentConversationSelection(host, generation)) return false;
+  conversationSelectionTargets.set(host, targetConversationId);
+  return true;
+}
+
+function isConversationSelectionTarget(
+  host: CodexSessionHost,
+  conversationId: string
+): boolean {
+  return conversationSelectionTargets.get(host) === conversationId;
+}
+
+export function derivePiConversationFromMessage(
+  host: CodexSessionHost,
+  session: StoredSession,
+  targetEntryId: string
+): Promise<void> {
+  return enqueueConversationTransition(
+    host,
+    async () => await derivePiConversationInTransitionLane(
+      host,
+      session,
+      targetEntryId
+    )
+  );
+}
+
+async function derivePiConversationInTransitionLane(
+  host: CodexSessionHost,
+  session: StoredSession,
+  targetEntryId: string
+): Promise<void> {
+  if (session.bodyAuthority !== "pi_session_only") return;
+  if (host.running) {
+    new Notice("当前任务运行中，结束后再新建会话");
+    return;
+  }
+  const entryId = targetEntryId.trim();
+  if (!entryId) return;
+
+  let derivation: Awaited<
+    ReturnType<CodexForObsidianPlugin["derivePiConversation"]>
+  >;
+  try {
+    derivation = await host.plugin.derivePiConversation({
+      sourceConversationId: session.id,
+      targetConversationId: newId("conversation"),
+      anchorEntryId: entryId,
+      title: derivedConversationTitle(session, entryId)
+    });
+  } catch (error) {
+    new Notice(`新建会话失败：${errorMessage(error)}`);
+    return;
+  }
+  if (
+    derivation.sourceConversationId !== session.id
+    || derivation.projection.catalog.conversationId === session.id
+  ) {
+    new Notice("新建会话失败：派生结果没有独立会话身份");
+    return;
+  }
+
+  const targetId = derivation.projection.catalog.conversationId;
+  let derived = host.plugin.settings.sessions.find(
+    (candidate) => candidate.id === targetId
+  );
+  if (!derived) {
+    derived = createPiConversationShell(host, derivation.projection.catalog);
+    host.plugin.settings.sessions.push(derived);
+  }
+  applyPiConversationProjectionToShell(host, derived, derivation.projection);
+  host.plugin.settings.activeSessionId = derived.id;
+  host.inputEl.value = derivation.editorText;
+  host.closeComposerMenus();
+  host.attachments = [];
+  host.selectedSkill = null;
+  host.inputEl.focus();
+  host.inputEl.setSelectionRange(
+    derivation.editorText.length,
+    derivation.editorText.length
+  );
+  renderConversationShellChange(host);
+  try {
+    await persistPiConversationShells(host);
+  } catch (error) {
+    new Notice(`新会话已创建，但界面状态保存失败：${errorMessage(error)}`);
+  }
+  if (derivation.activation.status === "failed") {
+    new Notice(
+      `会话已创建，但 Agent 暂未激活：${derivation.activation.message}`
+    );
+    return;
+  }
+  new Notice(derivation.anchorRole === "user"
+    ? "已新建会话，可编辑原提问后发送"
+    : "已从所选回复新建会话");
+}
+
+function enqueueConversationTransition<T>(
+  host: CodexSessionHost,
+  transition: () => Promise<T>
+): Promise<T> {
+  const previous = conversationTransitionLanes.get(host);
+  let result: Promise<T>;
+  try {
+    result = previous ? previous.then(transition) : transition();
+  } catch (error) {
+    result = Promise.reject(error instanceof Error
+      ? error
+      : new Error(String(error)));
+  }
+  const settled = result.then(
+    () => undefined,
+    () => undefined
+  );
+  conversationTransitionLanes.set(host, settled);
+  void settled.then(() => {
+    if (conversationTransitionLanes.get(host) === settled) {
+      conversationTransitionLanes.delete(host);
+    }
+  });
+  return result;
 }
 
 export async function renameSession(host: CodexSessionHost, session: StoredSession): Promise<void> {
   const name = await textInputModal(host.app, "重命名会话", "名称", session.title);
-  if (!name) return;
-  await host.plugin.withEchoInkConversationMutation(session.id, async () => {
-    session.title = name;
-    await host.plugin.saveSettings(true);
-  });
-  const threadId = sessionBackendBinding(session, "codex-cli")?.nativeThreadId ?? session.threadId;
-  if (threadId) await host.plugin.setCodexHarnessThreadName(threadId, name).catch(swallowError("rename Codex chat thread"));
+  const title = name?.trim();
+  if (!title) return;
+  const catalogEntry = await host.plugin.renamePiConversation(
+    session.id,
+    title
+  );
+  applyPiCatalogEntryToShell(session, catalogEntry);
+  await persistPiConversationShells(host);
   host.renderTabs();
+}
+
+export async function archiveSession(
+  host: CodexSessionHost,
+  sessionId: string,
+  options: ConversationRecordMutationUiOptions = {}
+): Promise<void> {
+  const session = host.plugin.settings.sessions.find(
+    (candidate) => candidate.id === sessionId
+  );
+  if (!session) return;
+  if (host.running && host.activeRunSessionId === session.id) {
+    new Notice("当前会话正在运行，结束后再归档");
+    return;
+  }
+  const confirm = options.confirm ?? defaultRecordMutationConfirm(host);
+  const accepted = await confirm(
+    `归档会话“${session.title}”？`,
+    "会话会从当前列表隐藏，但 Pi Session JSONL 和完整时间线会保留。",
+    "归档",
+    "取消"
+  );
+  if (!accepted) return;
+  const fallbackGeneration =
+    host.plugin.settings.activeSessionId === session.id
+      || isConversationSelectionTarget(host, session.id)
+      ? beginConversationSelection(host)
+      : undefined;
+  await host.plugin.setPiConversationStatus(session.id, "archived");
+  host.turnQueue.clearSessionQueue(session.id);
+  removeConversationShell(host, session.id);
+  const fallbackError = await activateFallbackConversation(
+    host,
+    fallbackGeneration
+  );
+  await persistPiConversationShells(host);
+  renderConversationShellChange(host);
+  new Notice(
+    fallbackError
+      ? `会话已归档；打开后续会话失败：${errorMessage(fallbackError)}`
+      : "会话已归档，Pi Session 记录已保留"
+  );
 }
 
 export async function deleteSession(host: CodexSessionHost, sessionId: string): Promise<void> {
   await deleteSessions(host, [sessionId]);
+}
+
+export async function restoreArchivedConversation(
+  host: CodexSessionHost,
+  entry: Readonly<PiConversationCatalogEntry>
+): Promise<boolean> {
+  const restored = await host.plugin.setPiConversationStatus(entry.conversationId, "active");
+  const existing = host.plugin.settings.sessions.find(
+    (session) => session.id === restored.conversationId
+  );
+  if (existing) applyPiCatalogEntryToShell(existing, restored);
+  else host.plugin.settings.sessions.push(createPiConversationShell(host, restored));
+  await persistPiConversationShells(host);
+  new Notice(`已恢复会话“${entry.title}”`);
+  return true;
+}
+
+export async function deleteArchivedConversation(
+  host: CodexSessionHost,
+  entry: Readonly<PiConversationCatalogEntry>,
+  options: ConversationRecordMutationUiOptions = {}
+): Promise<boolean> {
+  const confirm = options.confirm ?? defaultRecordMutationConfirm(host);
+  const accepted = await confirm(
+    `删除已归档会话“${entry.title}”？`,
+    "会话会从 EchoInk 列表移除，但 Pi Session JSONL 不会删除。",
+    "删除",
+    "取消"
+  );
+  if (!accepted) return false;
+  await host.plugin.setPiConversationStatus(entry.conversationId, "deleted");
+  new Notice(`已删除“${entry.title}”；Pi Session JSONL 已保留`);
+  return true;
 }
 
 type ConversationRecordMutationConfirm = (
@@ -141,79 +471,6 @@ type ConversationRecordMutationConfirm = (
 
 interface ConversationRecordMutationUiOptions {
   confirm?: ConversationRecordMutationConfirm;
-}
-
-export async function clearSessionConversationRecords(
-  host: CodexSessionHost,
-  session: StoredSession,
-  options: ConversationRecordMutationUiOptions = {}
-): Promise<void> {
-  if (host.isKnowledgeBaseSession(session)) {
-    new Notice("知识库记录请在知识库历史管理中单独处理");
-    return;
-  }
-  if (host.running && host.activeRunSessionId === session.id) {
-    new Notice("当前会话正在运行，结束后再清空记录");
-    return;
-  }
-  const confirm = options.confirm ?? defaultRecordMutationConfirm(host);
-  try {
-    const preview =
-      await host.plugin.previewEchoInkConversationRecordClear(session);
-    if (preview.blockers.length) {
-      new Notice(
-        `“${session.title}”暂时不能安全清空：`
-        + recordMutationBlockerDetail(preview.blockers)
-      );
-      return;
-    }
-    const accepted = await confirm(
-      `清空会话“${session.title}”的记录？`,
-      recordMutationConfirmationBody(
-        session,
-        "clear-conversation-records",
-        preview.disposition.retainMemoryIds.length,
-        preview.disposition.retainArtifactIds.length
-      ),
-      "安全清空",
-      "取消"
-    );
-    if (!accepted) return;
-    if (host.running && host.activeRunSessionId === session.id) {
-      new Notice("当前会话正在运行，已跳过清空");
-      return;
-    }
-    const receipt = await host.plugin.clearEchoInkConversationRecords(
-      session,
-      preview.disposition
-    );
-    if (receipt.localState === "committed") {
-      host.turnQueue.clearSessionQueue(session.id);
-      renderCommittedConversationRecordMutation(host);
-      const pending =
-        receipt.projection === "awaiting-recovery"
-        || receipt.nativeRetirement === "awaiting-recovery";
-      new Notice(
-        pending
-          ? "会话记录已提交清空；后台清理或界面投影等待恢复"
-          : "会话记录已安全清空；关联 Agent 记录按后端能力后台清理"
-      );
-      return;
-    }
-    if (receipt.localState === "awaiting-recovery") {
-      new Notice("会话记录清空已进入恢复队列，暂不重复操作");
-      return;
-    }
-    new Notice(
-      `清空“${session.title}”失败，记录已安全恢复：`
-      + (receipt.error ?? "未知错误")
-    );
-  } catch (error) {
-    new Notice(
-      `清空“${session.title}”失败：`
-      + (error instanceof Error ? error.message : String(error))
-    );
-  }
 }
 
 export async function confirmDeleteSessions(host: CodexSessionHost, sessionIds: string[]): Promise<void> {
@@ -232,25 +489,13 @@ export async function deleteSessions(
   }
   const confirm = options.confirm ?? defaultRecordMutationConfirm(host);
   let committedCount = 0;
-  let pendingRecoveryCount = 0;
+  let fallbackGeneration: number | undefined;
   for (const session of candidates) {
     try {
-      const preview =
-        await host.plugin.previewEchoInkSessionDeletion(session);
-      if (preview.blockers.length) {
-        const detail = recordMutationBlockerDetail(preview.blockers);
-        new Notice(`“${session.title}”暂时不能安全删除：${detail}`);
-        continue;
-      }
       const accepted = await confirm(
         `删除会话“${session.title}”？`,
-        recordMutationConfirmationBody(
-          session,
-          "delete-conversation",
-          preview.disposition.retainMemoryIds.length,
-          preview.disposition.retainArtifactIds.length
-        ),
-        "安全删除",
+        "会话会从 EchoInk 列表移除，但 Pi Session JSONL 不会删除。",
+        "删除",
         "取消"
       );
       if (!accepted) continue;
@@ -261,43 +506,33 @@ export async function deleteSessions(
         new Notice(`“${session.title}”正在运行，已跳过删除`);
         continue;
       }
-      const receipt = await host.plugin.commitEchoInkSessionDeletion(
-        session,
-        preview.disposition
-      );
-      if (receipt.localState === "committed") {
-        committedCount += 1;
-        host.turnQueue.clearSessionQueue(session.id);
-        if (
-          receipt.projection === "awaiting-recovery"
-          || receipt.nativeRetirement === "awaiting-recovery"
-        ) {
-          pendingRecoveryCount += 1;
-        }
-        continue;
+      if (
+        host.plugin.settings.activeSessionId === session.id
+        || isConversationSelectionTarget(host, session.id)
+      ) {
+        fallbackGeneration = beginConversationSelection(host);
       }
-      if (receipt.localState === "awaiting-recovery") {
-        pendingRecoveryCount += 1;
-        new Notice(
-          `“${session.title}”的删除已进入恢复队列，暂不重复操作`
-        );
-        continue;
-      }
-      new Notice(
-        `删除“${session.title}”失败，记录已安全恢复：${receipt.error ?? "未知错误"}`
-      );
+      await host.plugin.setPiConversationStatus(session.id, "deleted");
+      committedCount += 1;
+      host.turnQueue.clearSessionQueue(session.id);
+      removeConversationShell(host, session.id);
     } catch (error) {
       new Notice(
-        `删除“${session.title}”失败：${error instanceof Error ? error.message : String(error)}`
+        `删除“${session.title}”失败：${errorMessage(error)}`
       );
     }
   }
   if (committedCount) {
-    renderCommittedConversationRecordMutation(host);
+    const fallbackError = await activateFallbackConversation(
+      host,
+      fallbackGeneration
+    );
+    await persistPiConversationShells(host);
+    renderConversationShellChange(host);
     new Notice(
-      pendingRecoveryCount
-        ? `已提交 ${committedCount} 个会话删除；${pendingRecoveryCount} 个后台清理或界面投影等待恢复`
-        : `已安全删除 ${committedCount} 个会话；关联 Agent 记录按后端能力后台清理`
+      fallbackError
+        ? `已删除 ${committedCount} 个会话并保留 Pi Session；打开后续会话失败：${errorMessage(fallbackError)}`
+        : `已删除 ${committedCount} 个会话；Pi Session JSONL 已保留`
     );
   }
 }
@@ -315,226 +550,109 @@ function defaultRecordMutationConfirm(
     );
 }
 
-function recordMutationBlockerDetail(
-  blockers: ReadonlyArray<{ code: string; subjectId: string }>
-): string {
-  return blockers
-    .slice(0, 3)
-    .map((blocker) => `${blocker.code}:${blocker.subjectId}`)
-    .join("；");
-}
-
-function renderCommittedConversationRecordMutation(
+function renderConversationShellChange(
   host: CodexSessionHost
 ): void {
   host.resetVirtualWindow();
   host.renderTabs();
   host.renderMessages({ forceBottom: true });
   host.renderToolbar();
-  host.renderKnowledgeDashboard();
-  void host.refreshKnowledgeDashboard();
   host.updateInputPlaceholder();
-}
-
-function recordMutationConfirmationBody(
-  session: StoredSession,
-  operation: "clear-conversation-records" | "delete-conversation",
-  retainedMemoryCount: number,
-  retainedArtifactCount: number
-): string {
-  const retained = [
-    retainedMemoryCount
-      ? `${retainedMemoryCount} 条待确认长期记忆`
-      : "",
-    retainedArtifactCount
-      ? `${retainedArtifactCount} 个正式产物`
-      : ""
-  ].filter(Boolean).join("、");
-  const sourceMarker = operation === "delete-conversation"
-    ? "来源会话已删除"
-    : "来源会话记录已清空";
-  const retention = retained
-    ? (
-        `会保留${retained}，并标记${sourceMarker}。`
-        + "如需丢弃，请先在对应的 Memory 或产物管理中单独处理。"
-      )
-    : "没有需要额外确认保留的长期记忆或正式产物。";
-  const localEffect = operation === "delete-conversation"
-    ? (
-        `将删除“${session.title}”的 Conversation、消息、快照、`
-        + "独占 Raw 和策略选中的运行明细。"
-      )
-    : (
-        `将保留“${session.title}”的会话入口，但删除消息、快照、`
-        + "独占 Raw 和策略选中的运行明细，并开启空上下文。"
-      );
-  return (
-    localEffect
-    + `${retention}关联 Agent thread/session 的清理由独立收据跟踪，失败不会把已提交的本地操作伪装成失败。`
-  );
 }
 
 function deletableSessions(host: CodexSessionHost, sessionIds: string[]): StoredSession[] {
   const requested = new Set(sessionIds);
   return host.plugin.settings.sessions.filter((session) => {
-    if (!requested.has(session.id) || host.isKnowledgeBaseSession(session)) return false;
+    if (!requested.has(session.id)) return false;
     return !(host.running && host.activeRunSessionId === session.id);
   });
 }
 
-export async function clearKnowledgeBasePage(host: CodexSessionHost, session: StoredSession): Promise<void> {
-  if (!host.isKnowledgeBaseSession(session)) return;
-  if (host.running || host.plugin.getKnowledgeBaseManager()?.isRunning) {
-    new Notice("知识库任务运行中，结束后再清空页面");
-    return;
-  }
-  const rotatedAt = Date.now();
-  let hiddenCount = 0;
-  let rotation: EchoInkSessionContextRotationResult;
-  try {
-    rotation = await host.plugin.rotateEchoInkSessionContext(session, {
-      reason: "start-new-context",
-      precondition: () => {
-        if (host.running || host.plugin.getKnowledgeBaseManager()?.isRunning) {
-          throw new Error("知识库任务运行中，结束后再清空页面");
-        }
-      },
-      workspace: {
-        vaultPath: host.plugin.getVaultPath(),
-        cwd: session.cwd || host.plugin.getVaultPath()
-      },
-      now: () => rotatedAt,
-      mutate: (candidate) => {
-        hiddenCount = clearKnowledgeBaseVisibleHistory(candidate, rotatedAt).hiddenCount;
-      }
-    });
-  } catch (error) {
-    new Notice(`开启知识库新上下文失败：${error instanceof Error ? error.message : String(error)}`);
-    return;
-  }
-  host.inputEl.value = "";
-  host.closeComposerMenus();
-  host.attachments = [];
-  host.selectedSkill = null;
-  host.resetVirtualWindow();
-  host.renderTabs();
-  host.renderMessages({ forceBottom: true });
-  host.renderToolbar();
-  host.updateInputPlaceholder();
-  const primary = hiddenCount
-    ? `已清空当前页面，${hiddenCount} 条历史仍可在 /history 查看`
-    : "已开启新的知识库上下文";
-  new Notice(`${primary}${contextRotationCleanupNoticeSuffix(rotation)}`);
-}
-
-export async function openKnowledgeBaseHistory(host: CodexSessionHost, session: StoredSession): Promise<void> {
-  if (!host.isKnowledgeBaseSession(session)) return;
-  await host.plugin.saveSettings(true);
-  const index = await host.plugin.readKnowledgeBaseHistoryIndex().catch((error) => {
-    console.error("Codex knowledge history read failed", error);
-    return null;
-  });
-  const historySession = index?.sessions.find((item) => item.sessionId === session.id);
-  const days = historySession?.days ?? [];
-  if (!days.length) {
-    new Notice("没有知识库历史");
-    return;
-  }
-  new KnowledgeBaseHistoryModal(
-    host.app,
-    days,
-    (date) => host.plugin.readKnowledgeBaseHistoryDay(session.id, date),
-    (date) => restoreKnowledgeBaseHistoryDate(host, session, date)
-  ).open();
-}
-
-export async function restoreKnowledgeBaseHistoryDate(host: CodexSessionHost, session: StoredSession, date: string): Promise<void> {
-  if (host.running || host.plugin.getKnowledgeBaseManager()?.isRunning) {
-    new Notice("知识库任务运行中，结束后再恢复历史");
-    return;
-  }
-  const messages = await host.plugin.readKnowledgeBaseHistoryDay(session.id, date);
-  if (!messages.length) {
-    new Notice("这一天没有可恢复的历史");
-    return;
-  }
-  if (host.running || host.plugin.getKnowledgeBaseManager()?.isRunning) {
-    new Notice("知识库任务运行中，结束后再恢复历史");
-    return;
-  }
-  const restoredThroughMessageId = messages.at(-1)?.id;
-  let rotation: EchoInkSessionContextRotationResult;
-  try {
-    rotation = await host.plugin.rotateEchoInkSessionContext(session, {
-      reason: "history-restore",
-      precondition: () => {
-        if (host.running || host.plugin.getKnowledgeBaseManager()?.isRunning) {
-          throw new Error("知识库任务运行中，结束后再恢复历史");
-        }
-      },
-      contextStartsAfterMessageId: restoredThroughMessageId,
-      mutate: (candidate) => {
-        candidate.messages = messages;
-        candidate.historyActiveDate = date;
-        delete candidate.messagesHiddenBefore;
-        delete candidate.tokenUsage;
-      }
-    });
-  } catch (error) {
-    new Notice(`恢复知识库历史失败：${error instanceof Error ? error.message : String(error)}`);
-    return;
-  }
-  host.resetVirtualWindow();
-  host.renderMessages({ forceBottom: true });
-  host.renderToolbar();
-  new Notice(`已把这一天恢复到页面显示；模型上下文会从恢复内容之后开始${contextRotationCleanupNoticeSuffix(rotation)}`);
-}
-
-export function contextRotationCleanupNoticeSuffix(
-  rotation: EchoInkSessionContextRotationResult
-): string {
-  if (rotation.retirementPromotion === "awaiting-recovery") {
-    return "；原生记录已保留，等待恢复对账";
-  }
-  return rotation.retirementPromotion === "promoted"
-    ? "；原生记录已登记，后台按后端能力处置"
-    : "";
-}
-
 export function ensureSession(host: CodexSessionHost): StoredSession {
-  const sessionCountBefore = host.plugin.settings.sessions.length;
-  const knowledgeSession = ensureKnowledgeBaseSession(
-    host.plugin.settings,
-    host.plugin.getVaultPath()
-  );
-  if (host.plugin.settings.sessions.length > sessionCountBefore) {
-    host.plugin.registerEchoInkPristineConversationSession(knowledgeSession);
-  }
-  const activeId = host.plugin.settings.activeSessionId;
-  const active = host.plugin.settings.sessions.find((session) => session.id === activeId);
-  if (active) return active;
-  return host.createSession();
+  const session = selectActiveConversationSession(host.plugin.settings);
+  if (session) return session;
+  throw new Error("Pi Conversation Catalog 中没有可打开的普通会话");
 }
 
-export function isKnowledgeBaseSession(host: CodexSessionHost, session: StoredSession): boolean {
-  return isKnowledgeSession(session, host.plugin.settings.knowledgeBase.sessionId);
-}
-
-export function createSession(host: CodexSessionHost, title = "新会话"): StoredSession {
-  const session: StoredSession = {
-    id: newId("session"),
-    title,
-    cwd: "",
-    revision: 1,
-    generation: 1,
-    messages: [],
-    createdAt: Date.now(),
-    updatedAt: Date.now()
+export async function ensureInitialConversation(
+  host: CodexSessionHost
+): Promise<{ session: StoredSession; created: boolean }> {
+  const existing = selectActiveConversationSession(host.plugin.settings);
+  if (existing) return { session: existing, created: false };
+  return {
+    session: await createSession(host),
+    created: true
   };
+}
+
+export async function createSession(
+  host: CodexSessionHost,
+  title = "新会话"
+): Promise<StoredSession> {
+  return await createSessionForSelection(
+    host,
+    title,
+    beginConversationSelection(host)
+  );
+}
+
+async function createSessionForSelection(
+  host: CodexSessionHost,
+  title: string,
+  generation: number
+): Promise<StoredSession> {
+  const conversationId = newId("conversation");
+  bindConversationSelectionTarget(host, generation, conversationId);
+  const catalogEntry = await host.plugin.createPiConversation({
+    conversationId,
+    title,
+    cwd: host.plugin.getVaultPath(),
+    defaultMemoryMode: "normal"
+  });
+  const session = createPiConversationShell(host, catalogEntry);
   host.plugin.settings.sessions.push(session);
-  host.plugin.settings.activeSessionId = session.id;
-  host.plugin.registerEchoInkPristineConversationSession(session);
+  const outcome = await enqueueConversationTransition(
+    host,
+    async () => await activateSessionInTransitionLane(
+      host,
+      session,
+      generation
+    )
+  );
+  await persistPiConversationShells(host);
+  if (outcome.status === "selected" && "error" in outcome) {
+    throw outcome.error;
+  }
   return session;
+}
+
+function derivedConversationTitle(
+  source: StoredSession,
+  anchorEntryId: string
+): string {
+  const anchorIndex = source.messages.findIndex(
+    (message) => piEntryIdFromProjectedMessageId(message.id) === anchorEntryId
+  );
+  const anchor = source.messages[anchorIndex];
+  const intent = anchor?.role === "user"
+    ? anchor
+    : source.messages
+      .slice(0, Math.max(0, anchorIndex + 1))
+      .reverse()
+      .find((message) => message.role === "user");
+  const preview = (intent?.text || intent?.previewText || "")
+    .replace(/\s+/gu, " ")
+    .trim();
+  if (preview) {
+    const clipped = preview.length > 28
+      ? `${preview.slice(0, 27)}…`
+      : preview;
+    return `新会话 · ${clipped}`;
+  }
+  const sourceTitle = source.title.trim();
+  return !sourceTitle || sourceTitle === "新会话"
+    ? "新会话"
+    : `继续 · ${sourceTitle}`;
 }
 
 export function sessionById(host: CodexSessionHost, sessionId: string): StoredSession | null {
@@ -546,7 +664,117 @@ export function activeRunSession(host: CodexSessionHost): StoredSession {
   return active ?? ensureSession(host);
 }
 
-export function sessionForThread(host: CodexSessionHost, threadId?: string): StoredSession | null {
-  if (!threadId) return null;
-  return host.plugin.settings.sessions.find((session) => session.threadId === threadId) ?? null;
+function createPiConversationShell(
+  host: CodexSessionHost,
+  catalogEntry: Readonly<PiConversationCatalogEntry>
+): StoredSession {
+  return applyPiCatalogEntryToShell({
+    id: catalogEntry.conversationId,
+    title: catalogEntry.title,
+    cwd: host.plugin.getVaultPath(),
+    messages: [],
+    createdAt: catalogEntry.createdAt,
+    updatedAt: catalogEntry.updatedAt
+  }, catalogEntry);
+}
+
+function applyPiCatalogEntryToShell(
+  shell: StoredSession,
+  catalogEntry: Readonly<PiConversationCatalogEntry>
+): StoredSession {
+  shell.title = catalogEntry.title;
+  shell.piSessionId = catalogEntry.piSessionId;
+  shell.defaultMemoryMode = catalogEntry.defaultMemoryMode;
+  shell.bodyAuthority = "pi_session_only";
+  shell.createdAt = catalogEntry.createdAt;
+  shell.updatedAt = catalogEntry.updatedAt;
+  return shell;
+}
+
+function applyPiConversationProjectionToShell(
+  host: CodexSessionHost,
+  shell: StoredSession,
+  projection: Readonly<PiConversationProjection>
+): void {
+  rememberPiConversationProjection(host.plugin, projection);
+  applyPiCatalogEntryToShell(shell, projection.catalog);
+  shell.messages = structuredClone(projection.messages);
+  if (projection.contextLedger) {
+    shell.contextLedger = structuredClone(projection.contextLedger);
+  } else {
+    delete shell.contextLedger;
+  }
+}
+
+function removeConversationShell(
+  host: CodexSessionHost,
+  conversationId: string
+): void {
+  host.plugin.settings.sessions = host.plugin.settings.sessions.filter(
+    (session) => session.id !== conversationId
+  );
+}
+
+async function activateFallbackConversation(
+  host: CodexSessionHost,
+  selectionGeneration?: number
+): Promise<Error | null> {
+  const active = host.plugin.settings.sessions.find(
+    (session) => session.id === host.plugin.settings.activeSessionId
+  );
+  if (active) return null;
+  const generation = selectionGeneration
+    ?? beginConversationSelection(host);
+  if (!isCurrentConversationSelection(host, generation)) return null;
+  const fallback = host.plugin.settings.sessions[0];
+  if (!fallback) {
+    try {
+      await createSessionForSelection(host, "新会话", generation);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error : new Error(String(error));
+    }
+  }
+  if (!bindConversationSelectionTarget(host, generation, fallback.id)) {
+    return null;
+  }
+  const outcome = await enqueueConversationTransition(
+    host,
+    async () => await activateSessionInTransitionLane(
+      host,
+      fallback,
+      generation
+    )
+  );
+  if (outcome.status === "stale" || !("error" in outcome)) return null;
+  return outcome.error instanceof Error
+    ? outcome.error
+    : new Error(String(outcome.error));
+}
+
+async function persistPiConversationShells(
+  host: CodexSessionHost
+): Promise<void> {
+  await host.plugin.saveSettings(true, {
+    flushConversationStore: false
+  });
+}
+
+function conversationShellFingerprint(host: CodexSessionHost): string {
+  return JSON.stringify({
+    activeSessionId: host.plugin.settings.activeSessionId,
+    sessions: host.plugin.settings.sessions.map((session) => ({
+      id: session.id,
+      title: session.title,
+      piSessionId: session.piSessionId,
+      defaultMemoryMode: session.defaultMemoryMode,
+      bodyAuthority: session.bodyAuthority,
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt
+    }))
+  });
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

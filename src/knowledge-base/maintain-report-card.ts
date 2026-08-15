@@ -1,4 +1,3 @@
-import type { AgentBackendKind } from "../agent/types";
 import type {
   KnowledgeBaseCommandUiMode,
   KnowledgeBaseRunCompletion,
@@ -6,7 +5,6 @@ import type {
   KnowledgeBaseRunResult,
   KnowledgeBaseRunWarning,
   KnowledgeBaseSource,
-  KnowledgeRunAttemptRecord,
   KnowledgeWorkflowEvent,
   StructureNormalizationResult
 } from "./types";
@@ -35,15 +33,7 @@ export interface KnowledgeBaseMaintainReportPayload {
   mode: KnowledgeBaseCommandUiMode;
   status: KnowledgeBaseRunResult["status"];
   runId?: string;
-  backend?: AgentBackendKind;
-  selectedBackend?: AgentBackendKind;
-  winnerBackend?: AgentBackendKind | null;
-  terminalPhase?: KnowledgeBaseRunResult["terminalPhase"];
-  commitState?: KnowledgeBaseRunResult["commitState"];
-  failureCode?: string | null;
   completion?: KnowledgeBaseRunCompletion;
-  attemptCount?: number;
-  attempts?: KnowledgeRunAttemptRecord[];
   pendingSourceCount?: number;
   warnings?: KnowledgeBaseRunWarning[];
   performance?: KnowledgeBaseRunPerformance;
@@ -128,41 +118,13 @@ export function buildKnowledgeBaseRunPayload(mode: KnowledgeBaseCommandUiMode): 
 export function buildKnowledgeBaseMaintainReportPayload(mode: KnowledgeBaseCommandUiMode, result: KnowledgeBaseRunResult): KnowledgeBaseMaintainReportPayload {
   const structureCount = structureOperationCount(result.structure);
   const externalRawCount = result.externalRawAdditions?.length ?? 0;
-  const attempts = result.attempts?.length ? [...result.attempts] : [];
   const runId = maintenanceResultRunId(result);
-  const backend = maintenanceResultBackend(result, attempts);
-  const hasAttempts = Object.prototype.hasOwnProperty.call(result, "attempts");
-  const hasWinnerBackend = Object.prototype.hasOwnProperty.call(
-    result,
-    "winnerBackend"
-  );
-  const hasFailureCode = Object.prototype.hasOwnProperty.call(
-    result,
-    "failureCode"
-  );
   return {
     kind: "maintain-report",
     mode,
     status: result.status,
     ...(runId ? { runId } : {}),
-    ...(backend ? { backend } : {}),
-    ...(result.selectedBackend
-      ? { selectedBackend: result.selectedBackend }
-      : {}),
-    ...(hasWinnerBackend
-      ? { winnerBackend: result.winnerBackend ?? null }
-      : {}),
-    ...(result.terminalPhase
-      ? { terminalPhase: result.terminalPhase }
-      : {}),
-    ...(result.commitState
-      ? { commitState: result.commitState }
-      : {}),
-    ...(hasFailureCode
-      ? { failureCode: result.failureCode ?? null }
-      : {}),
     ...(result.completion ? { completion: result.completion } : {}),
-    ...(hasAttempts ? { attemptCount: attempts.length, attempts } : {}),
     ...(result.pendingSources?.length ? { pendingSourceCount: result.pendingSources.length } : {}),
     ...(result.warnings?.length ? { warnings: result.warnings } : {}),
     ...(result.performance ? { performance: result.performance } : {}),
@@ -200,19 +162,6 @@ function maintenanceResultRunId(result: KnowledgeBaseRunResult): string | undefi
   if (result.workflowRunId?.trim()) return result.workflowRunId.trim();
   const value = (result as KnowledgeBaseRunResult & { runId?: unknown }).runId;
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function maintenanceResultBackend(
-  result: KnowledgeBaseRunResult,
-  attempts: KnowledgeRunAttemptRecord[]
-): AgentBackendKind | undefined {
-  if (Object.prototype.hasOwnProperty.call(result, "winnerBackend")) {
-    return result.winnerBackend ?? undefined;
-  }
-  const explicit = (result as KnowledgeBaseRunResult & { backend?: unknown }).backend;
-  if (explicit === "codex-cli" || explicit === "opencode" || explicit === "hermes") return explicit;
-  const completed = [...attempts].reverse().find((attempt) => attempt.terminal?.status === "completed");
-  return completed?.backend ?? attempts.at(-1)?.backend;
 }
 
 function buildCareItems(mode: KnowledgeBaseCommandUiMode, result: KnowledgeBaseRunResult, structureCount: number, externalRawCount: number): KnowledgeBaseMaintainCareItem[] {
@@ -284,10 +233,9 @@ function buildOutcomeCareItems(result: KnowledgeBaseRunResult): KnowledgeBaseMai
         : "本轮部分完成，未提交的来源已安全留待下轮。"
     });
   } else if (result.completion === "recovered") {
-    const attempts = result.attempts?.length ?? 0;
     items.push({
       tone: "success",
-      text: attempts > 1 ? `本轮经过自动恢复后完成，共尝试 ${attempts} 个 Agent。` : "本轮经过自动恢复后完成。"
+      text: "本轮经过自动恢复后完成。"
     });
   } else if (result.completion === "noop") {
     items.push({ tone: "info", text: "本轮没有待消化来源，未调用 Agent；Harness 已完成状态核对。" });

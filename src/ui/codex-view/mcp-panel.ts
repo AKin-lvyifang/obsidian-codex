@@ -1,43 +1,70 @@
-import { Notice } from "obsidian";
-import type { McpServerStatus } from "../../types/app-server";
+export interface McpPanelResourceState {
+  total: number;
+  enabled: number;
+}
+
+export async function loadMcpPanelView(input: {
+  readonly container: HTMLElement;
+  readonly loadResources: () => Readonly<McpPanelResourceState>;
+}): Promise<void> {
+  const render = (error: string | null, resources: Readonly<McpPanelResourceState>) => {
+    renderMcpPanelView(input.container, error, resources, {
+      onRetry: () => { void loadMcpPanelView(input); }
+    });
+  };
+  try {
+    render(null, input.loadResources());
+  } catch (error) {
+    render(
+      error instanceof Error ? error.message : String(error),
+      { total: 0, enabled: 0 }
+    );
+  }
+}
 
 export function renderMcpPanelView(
   container: HTMLElement,
-  servers: McpServerStatus[],
   error: string | null,
-  mcpEnabled: boolean,
-  callbacks: { onRetry: () => void; onLogin: (serverName: string) => Promise<string | null | undefined> }
+  resources: Readonly<McpPanelResourceState>,
+  callbacks: { onRetry: () => void }
 ): void {
   container.empty();
-  container.createDiv({ cls: "codex-mcp-title", text: "MCP 状态" });
+  const titleId = "echoink-mcp-panel-title";
+  container.setAttribute("role", "region");
+  container.setAttribute("aria-labelledby", titleId);
+  container.createDiv({
+    cls: "codex-mcp-title",
+    text: "MCP 状态",
+    attr: { id: titleId }
+  });
   if (error) {
-    container.createDiv({ cls: "codex-mcp-error", text: `读取失败：${error}` });
-    const retry = container.createEl("button", { cls: "codex-mcp-retry", text: "重新读取 MCP", attr: { type: "button" } });
+    container.createDiv({
+      cls: "codex-mcp-error",
+      text: `读取失败：${error}`,
+      attr: { role: "alert" }
+    });
+    const retry = container.createEl("button", {
+      cls: "codex-mcp-retry",
+      text: "重新读取 MCP",
+      attr: { type: "button", "aria-label": "重新读取 MCP" }
+    });
     retry.onclick = callbacks.onRetry;
-  }
-  if (!mcpEnabled && servers.length) {
-    container.createDiv({ cls: "codex-mcp-empty", text: "已读取到 MCP 服务。聊天 MCP 总开关关闭，下一轮对话暂不调用 MCP。" });
-  }
-  if (!servers.length) {
-    if (!error) container.createDiv({ cls: "codex-mcp-empty", text: "没有读取到 MCP 服务器。" });
     return;
   }
-  for (const server of servers) renderMcpServer(container, server, callbacks);
-}
-
-function renderMcpServer(container: HTMLElement, server: McpServerStatus, callbacks: { onLogin: (serverName: string) => Promise<string | null | undefined> }): void {
-  const row = container.createDiv({ cls: "codex-mcp-row" });
-  row.createDiv({ cls: "codex-mcp-name", text: server.name });
-  row.createDiv({ cls: "codex-mcp-meta", text: `${Object.keys(server.tools ?? {}).length} 个工具 · ${server.authStatus ?? "unknown"}` });
-  if (server.authStatus !== "notLoggedIn") return;
-  const login = row.createEl("button", { cls: "codex-toolbar-button", text: "登录", attr: { type: "button" } });
-  login.onclick = async () => {
-    try {
-      const url = await callbacks.onLogin(server.name);
-      if (url) window.open(url);
-      else new Notice("没有拿到 MCP 登录链接");
-    } catch (error) {
-      new Notice(`MCP 登录失败：${error instanceof Error ? error.message : String(error)}`);
-    }
-  };
+  if (resources.total > 0) {
+    container.createDiv({
+      cls: "codex-mcp-empty",
+      text: resources.enabled > 0
+        ? `当前已启用 ${resources.enabled} / ${resources.total} 个 MCP 资源；下一轮对话仍按 Server 与 Tool 信任策略加载。`
+        : `当前 ${resources.total} 个 MCP 资源均已关闭；下一轮对话不加载 MCP。`,
+      attr: { role: "status", "aria-live": "polite" }
+    });
+  }
+  if (resources.total === 0) {
+    container.createDiv({
+      cls: "codex-mcp-empty",
+      text: "当前没有 MCP 资源。",
+      attr: { role: "status", "aria-live": "polite" }
+    });
+  }
 }

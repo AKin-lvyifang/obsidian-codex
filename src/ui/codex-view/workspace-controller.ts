@@ -1,13 +1,12 @@
 import { Notice, type App } from "obsidian";
 import type CodexForObsidianPlugin from "../../main";
-import type { TurnOptions } from "../../core/codex-service";
-import { getActiveApiProvider, getApiProviderModels, type AgentBackendMode, type StoredSession } from "../../settings/settings";
+import type { TurnOptions } from "../turn-options";
+import { getActiveApiProvider, getApiProviderModels, type StoredSession } from "../../settings/settings";
 import { buildActiveEchoInkResourceCatalog, hasEnabledMcpResources, workspaceResourcesFromEchoInkResources } from "../../resources/registry";
 import type { EchoInkResource } from "../../resources/types";
 import type { PermissionMode, ReasoningEffort, ServiceTierChoice, UiMode } from "../../types/app-server";
 import { showItemInFinder } from "../../core/electron";
 import { textInputModal } from "../modals";
-import { contextRotationCleanupNoticeSuffix } from "./session-controller";
 import { openWorkspaceMenu as showWorkspaceMenu } from "./menus";
 import { normalizeWorkspacePath, pickWorkspaceDirectory, workspaceDirectoryExists, workspaceDisplayName } from "./workspace-utils";
 
@@ -21,7 +20,6 @@ export interface CodexWorkspaceHost {
   selectedPermission: PermissionMode;
   selectedMode: UiMode;
   ensureSession(): StoredSession;
-  isKnowledgeBaseSession(session: StoredSession): boolean;
   renderToolbar(): void;
   renderMessages(options?: { forceBottom?: boolean; fromScroll?: boolean; preserveScroll?: boolean }): void;
   updateInputPlaceholder(): void;
@@ -58,14 +56,9 @@ export async function chooseChatWorkspace(host: CodexWorkspaceHost, session: Sto
     return false;
   }
   const changed = normalizeWorkspacePath(session.cwd) !== workspacePath;
-  let cleanupNotice = "";
   if (changed) {
     try {
-      cleanupNotice = await commitChatWorkspaceSelection(
-        host,
-        session,
-        workspacePath
-      );
+      await commitChatWorkspaceSelection(host, session, workspacePath);
     } catch (error) {
       new Notice(`切换工作区失败：${error instanceof Error ? error.message : String(error)}`);
       return false;
@@ -75,7 +68,7 @@ export async function chooseChatWorkspace(host: CodexWorkspaceHost, session: Sto
   host.updateInputPlaceholder();
   host.renderMessages();
   new Notice(changed
-    ? `工作区已设为：${workspaceDisplayName(workspacePath)}，下一轮将开启新上下文${cleanupNotice}`
+    ? `工作区已设为：${workspaceDisplayName(workspacePath)}`
     : `工作区已设为：${workspaceDisplayName(workspacePath)}`);
   return true;
 }
@@ -85,54 +78,23 @@ export async function clearChatWorkspace(host: CodexWorkspaceHost, session: Stor
     new Notice("当前会话运行中，结束后再清除工作区");
     return;
   }
-  let cleanupNotice = "";
-  try {
-    await host.plugin.ensureEchoInkConversationSessionCreated(session);
-    const rotation = await host.plugin.rotateEchoInkSessionContext(session, {
-      reason: "workspace-clear",
-      precondition: () => {
-        if (host.running) {
-          throw new Error("当前会话运行中，结束后再清除工作区");
-        }
-      },
-      workspace: null,
-      mutate: (candidate) => {
-        delete candidate.tokenUsage;
-      }
-    });
-    cleanupNotice = contextRotationCleanupNoticeSuffix(rotation);
-  } catch (error) {
-    new Notice(`清除工作区失败：${error instanceof Error ? error.message : String(error)}`);
-    return;
-  }
+  session.cwd = "";
+  delete session.tokenUsage;
+  await host.plugin.saveSettings(true);
   host.renderToolbar();
   host.updateInputPlaceholder();
   host.renderMessages();
-  new Notice(`已清除工作区${cleanupNotice}`);
+  new Notice("已清除工作区");
 }
 
 export async function commitChatWorkspaceSelection(
   host: CodexWorkspaceHost,
   session: StoredSession,
   workspacePath: string
-): Promise<string> {
-  await host.plugin.ensureEchoInkConversationSessionCreated(session);
-  const rotation = await host.plugin.rotateEchoInkSessionContext(session, {
-    reason: "workspace-switch",
-    precondition: () => {
-      if (host.running) {
-        throw new Error("当前会话运行中，结束后再切换工作区");
-      }
-    },
-    workspace: {
-      vaultPath: host.plugin.getVaultPath(),
-      cwd: workspacePath
-    },
-    mutate: (candidate) => {
-      delete candidate.tokenUsage;
-    }
-  });
-  return contextRotationCleanupNoticeSuffix(rotation);
+): Promise<void> {
+  session.cwd = workspacePath;
+  delete session.tokenUsage;
+  await host.plugin.saveSettings(true);
 }
 
 export async function ensureChatWorkspaceSelected(host: CodexWorkspaceHost, session: StoredSession): Promise<boolean> {
@@ -144,11 +106,9 @@ export async function ensureChatWorkspaceSelected(host: CodexWorkspaceHost, sess
 }
 
 export function currentTurnOptions(host: CodexWorkspaceHost, session?: StoredSession): TurnOptions {
-  const knowledgeSession = session ? host.isKnowledgeBaseSession(session) : false;
-  const cwd = session && !knowledgeSession ? normalizeWorkspacePath(session.cwd) : "";
+  const cwd = session ? normalizeWorkspacePath(session.cwd) : "";
   const catalog = currentEchoInkResourceCatalog(host);
-  const resourceScope = knowledgeSession ? "knowledge" : "chat";
-  const workspaceResources = workspaceResourcesFromEchoInkResources(catalog, resourceScope, host.plugin.settings.resources.enabledByScope);
+  const workspaceResources = workspaceResourcesFromEchoInkResources(catalog);
   return {
     ...(cwd ? { cwd } : {}),
     model: host.effectiveModel(),
@@ -156,7 +116,7 @@ export function currentTurnOptions(host: CodexWorkspaceHost, session?: StoredSes
     serviceTier: host.selectedServiceTier,
     permission: host.selectedPermission,
     mode: host.selectedMode,
-    mcpEnabled: hasEnabledMcpResources(catalog, resourceScope, host.plugin.settings.resources.enabledByScope),
+    mcpEnabled: hasEnabledMcpResources(catalog),
     workspaceResources
   };
 }
@@ -169,11 +129,6 @@ export function activeProviderModels(host: CodexWorkspaceHost): string[] {
   if (host.plugin.settings.providerMode !== "custom-api") return [];
   const provider = getActiveApiProvider(host.plugin.settings);
   return provider ? getApiProviderModels(provider) : [];
-}
-
-export function resolvedKnowledgeBackend(host: CodexWorkspaceHost): AgentBackendMode {
-  const configured = host.plugin.settings.knowledgeBase.backend;
-  return configured === "default" ? host.plugin.settings.agentBackend : configured;
 }
 
 export function effectiveModel(host: CodexWorkspaceHost): string {

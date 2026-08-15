@@ -1,8 +1,26 @@
 import type { ChatMessage } from "../../settings/settings";
 
-const ACTIVE_STATUSES = new Set(["running", "in_progress", "inProgress", "approval", "blocked"]);
+const ACTIVE_STATUSES = new Set([
+  "running",
+  "in_progress",
+  "inProgress",
+  "approval",
+  "blocked",
+  "waiting_approval",
+  "approved",
+  "verifying"
+]);
 const FAILED_STATUSES = new Set(["failed", "error", "canceled", "cancelled", "interrupted"]);
-const ATTENTION_PROCESS_STATUSES = new Set(["unconfirmed", "interrupted", "failed", "error", "canceled", "cancelled"]);
+const ATTENTION_PROCESS_STATUSES = new Set([
+  "unconfirmed",
+  "interrupted",
+  "failed",
+  "error",
+  "canceled",
+  "cancelled",
+  "denied",
+  "uncertain"
+]);
 
 export interface CompletedAgentTurn {
   key: string;
@@ -35,7 +53,10 @@ export function isAgentProcessItemType(itemType?: string): boolean {
 
 export function isAgentAnswerMessage(message: ChatMessage): boolean {
   if (message.role !== "assistant") return false;
-  if (message.itemType === "knowledgeBase") return false;
+  if (
+    message.itemType === "knowledgeBase"
+    || message.itemType === "taskPlan"
+  ) return false;
   return !isAgentProcessItemType(message.itemType);
 }
 

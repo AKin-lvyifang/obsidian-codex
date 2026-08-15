@@ -85,7 +85,7 @@ export function pickKnowledgeBaseFiles(host: CodexAttachmentHost): void {
       });
     }
     void host.runKnowledgeBaseShortcut("文件收藏", async () => {
-      const paths = await host.plugin.getKnowledgeBaseManager()?.captureExternalFiles(attachments);
+      const paths = await host.plugin.getKnowledgeSurfaceService()?.captureExternalFiles(attachments);
       return paths?.length ? `已收藏文件：\n${paths.map((item) => `- ${item}`).join("\n")}` : "未选择文件。";
     });
   };

@@ -1,0 +1,2135 @@
+import {
+  extractProcessFileRefs,
+  summarizeProcessEvent
+} from "../../core/mapping";
+import type { ChatMessage } from "../../settings/settings";
+import type { KnowledgeReference } from "../../knowledge-base/types";
+import type { KnowledgeBaseMaintainReportPayload } from "../../knowledge-base/maintain-report-card";
+import {
+  knowledgeMaintenanceEnvelopeFromToolResult,
+  knowledgeMaintenanceReportPayloadFromToolResult
+} from "../../knowledge-base/knowledge-maintenance-result";
+import type { ProcessEventKind } from "../../types/app-server";
+import type {
+  PiChatRuntimeEvent,
+  PiConversationDiagnostic,
+  PiKnowledgeObservation,
+  PiProductRunTerminalState
+} from "./contracts";
+import {
+  resolvePiChatUiToolProductStatus,
+  type PiChatUiToolApprovalView,
+  type PiChatUiToolProductProjectionInput,
+  type PiChatUiToolProductStatus,
+  type PiChatUiToolReceiptView
+} from "./pi-tool-product-state";
+import {
+  isEchoInkTaskPlanTerminal,
+  taskPlanFromSessionEntry,
+  taskPlanFromToolResult,
+  type EchoInkTaskPlanSnapshot
+} from "../../types/task-plan";
+import { PI_TASK_UPDATE_TOOL_ID } from "./pi-task-plan";
+
+export type {
+  PiChatUiToolApprovalStatus,
+  PiChatUiToolApprovalView,
+  PiChatUiToolProductProjectionInput,
+  PiChatUiToolProductStatus,
+  PiChatUiToolReceiptStatus,
+  PiChatUiToolReceiptView
+} from "./pi-tool-product-state";
+
+/**
+ * The narrow, structural subset of a Pi content block needed by the UI.
+ * Values returned by SessionManager.getBranch() satisfy this shape without the
+ * projector importing a package-internal SessionEntry path.
+ */
+export interface PiSessionContentBlockView {
+  readonly type: string;
+  readonly text?: string;
+  readonly thinking?: string;
+  readonly id?: string;
+  readonly toolCallId?: string;
+  readonly name?: string;
+  readonly arguments?: unknown;
+}
+
+/** Structural, read-only subset of a Pi AgentMessage. */
+export interface PiSessionMessageView {
+  readonly role: string;
+  readonly content?: string | readonly PiSessionContentBlockView[];
+  readonly timestamp?: number;
+  readonly provider?: string;
+  readonly model?: string;
+  readonly stopReason?: string;
+  readonly errorMessage?: string;
+  readonly toolCallId?: string;
+  readonly toolName?: string;
+  readonly details?: unknown;
+  readonly isError?: boolean;
+  readonly command?: string;
+  readonly output?: string;
+  readonly exitCode?: number;
+  readonly cancelled?: boolean;
+  readonly display?: boolean;
+  readonly customType?: string;
+  readonly summary?: string;
+  readonly fromId?: string;
+  readonly tokensBefore?: number;
+}
+
+/**
+ * The only Pi Session Entry surface consumed by this module. The caller must
+ * pass the already-selected active Branch in root-to-leaf order.
+ */
+export interface PiSessionBranchEntryView {
+  readonly type: string;
+  readonly id: string;
+  readonly parentId: string | null;
+  readonly timestamp: string;
+  readonly message?: PiSessionMessageView;
+  readonly summary?: string;
+  readonly firstKeptEntryId?: string;
+  readonly tokensBefore?: number;
+  readonly fromId?: string;
+  readonly customType?: string;
+  readonly data?: unknown;
+  readonly details?: unknown;
+  readonly content?: string | readonly PiSessionContentBlockView[];
+  readonly display?: boolean;
+}
+
+export type PiChatUiRunState =
+  | "idle"
+  | "running"
+  | "finalizing"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "interrupted";
+
+/** Optional ProductRun identities let a durable rebuild retain UI turn groups. */
+export interface PiChatUiRunIdentity {
+  readonly productRunId: string;
+  readonly userEntryId: string;
+  readonly assistantEntryId?: string;
+  readonly toolCallIds?: readonly string[];
+  readonly knowledgeWorkflow?: PiKnowledgeObservation["workflow"];
+}
+
+export interface PiChatUiViewModel {
+  piSessionId: string;
+  activeLeafId: string | null;
+  productRunId?: string;
+  runState: PiChatUiRunState;
+  messages: ChatMessage[];
+  diagnostics: PiConversationDiagnostic[];
+  queuedSteering: string[];
+  queuedFollowUp: string[];
+  /** UI items created from live events that still need a Branch readback. */
+  provisionalMessageIds: string[];
+  /** Tool calls visible on the active Branch without a durable Tool Result. */
+  pendingToolCallIds: string[];
+  updatedAt: number;
+}
+
+export interface PiChatUiBranchProjectionInput
+  extends PiChatUiToolProductProjectionInput {
+  readonly piSessionId: string;
+  readonly activeLeafId: string | null;
+  readonly entries: readonly PiSessionBranchEntryView[];
+  readonly diagnostics?: readonly PiConversationDiagnostic[];
+  readonly runState?: PiChatUiRunState;
+  readonly productRunId?: string;
+  readonly runIdentities?: readonly PiChatUiRunIdentity[];
+  readonly queuedSteering?: readonly string[];
+  readonly queuedFollowUp?: readonly string[];
+  readonly vaultPath?: string;
+  readonly now?: number;
+}
+
+export interface PiChatUiRuntimeProjectionInput
+  extends PiChatUiToolProductProjectionInput {
+  readonly current: Readonly<PiChatUiViewModel>;
+  readonly event: Readonly<PiChatRuntimeEvent>;
+  readonly vaultPath?: string;
+}
+
+export interface PiChatUiBranchReconciliationInput
+  extends Omit<
+    PiChatUiBranchProjectionInput,
+    "piSessionId" | "runState" | "productRunId" | "queuedSteering" | "queuedFollowUp"
+  > {
+  readonly current: Readonly<PiChatUiViewModel>;
+}
+
+export interface PiChatUiMessageDecoration {
+  readonly piSessionId?: string;
+  readonly entryId?: string;
+  readonly toolCallId?: string;
+  readonly status?: string;
+  readonly title?: string;
+  readonly details?: string;
+  readonly citations?: ChatMessage["citations"];
+  readonly diffSummary?: ChatMessage["diffSummary"];
+  readonly files?: ChatMessage["files"];
+  readonly knowledgeReferences?: readonly KnowledgeReference[];
+  readonly knowledgeProducedPaths?: readonly string[];
+}
+
+interface BranchProjectionContext {
+  readonly scope: string;
+  readonly piSessionId: string;
+  readonly vaultPath: string;
+  readonly entryRuns: ReadonlyMap<string, string>;
+  readonly toolRuns: ReadonlyMap<string, string>;
+  readonly privacySafeToolRuns: ReadonlySet<string>;
+  currentRunId?: string;
+}
+
+interface ToolCallProjection {
+  readonly toolCallId: string;
+  readonly toolName: string;
+  readonly args: unknown;
+}
+
+/**
+ * Stateless translation from live Pi events or a durable active Branch into
+ * the existing ChatMessage view contract. Every method returns a fresh model.
+ */
+export class PiChatUiProjector {
+  createEmpty(input: {
+    readonly piSessionId: string;
+    readonly activeLeafId?: string | null;
+    readonly now?: number;
+  }): PiChatUiViewModel {
+    return {
+      piSessionId: requireIdentity(input.piSessionId, "piSessionId"),
+      activeLeafId: input.activeLeafId ?? null,
+      runState: "idle",
+      messages: [],
+      diagnostics: [],
+      queuedSteering: [],
+      queuedFollowUp: [],
+      provisionalMessageIds: [],
+      pendingToolCallIds: [],
+      updatedAt: finiteTime(input.now, 0)
+    };
+  }
+
+  projectSessionBranch(input: PiChatUiBranchProjectionInput): PiChatUiViewModel {
+    const piSessionId = requireIdentity(input.piSessionId, "piSessionId");
+    const runState = input.runState ?? "idle";
+    const scope = projectionScope(piSessionId, input.activeLeafId);
+    const {
+      entryRuns,
+      toolRuns,
+      privacySafeToolRuns
+    } = buildRunIdentityMaps(input.runIdentities ?? []);
+    const context: BranchProjectionContext = {
+      scope,
+      piSessionId,
+      vaultPath: input.vaultPath ?? "",
+      entryRuns,
+      toolRuns,
+      privacySafeToolRuns,
+      currentRunId: input.productRunId
+    };
+    const messages: ChatMessage[] = [];
+    const pendingTools = new Set<string>();
+
+    for (const entry of input.entries) {
+      this.projectDurableEntry(messages, pendingTools, entry, context);
+    }
+    settleUnfinishedDurableTools(messages, pendingTools, runState);
+
+    const diagnostics = dedupeDiagnostics(
+      (input.diagnostics ?? []).filter((item) => item.piSessionId === piSessionId)
+    );
+    for (const diagnostic of diagnostics) {
+      if (diagnostic.code === "runtime_resource_warning") continue;
+      upsertMessage(messages, diagnosticMessage(scope, diagnostic));
+    }
+    const durableUpdatedAt = Math.max(
+      0,
+      ...input.entries.map(entryTime),
+      ...diagnostics.map((diagnostic) => diagnostic.createdAt)
+    );
+    const projectionTime = finiteTime(input.now, durableUpdatedAt);
+    appendRehydratedTerminalMarker(
+      messages,
+      scope,
+      input.productRunId,
+      runState,
+      projectionTime
+    );
+
+    const updatedAt = latestProjectionTime(
+      messages,
+      diagnostics,
+      projectionTime
+    );
+    const view: PiChatUiViewModel = {
+      piSessionId,
+      activeLeafId: input.activeLeafId,
+      productRunId: input.productRunId,
+      runState,
+      messages: dedupeMessages(messages),
+      diagnostics,
+      queuedSteering: [...(input.queuedSteering ?? [])],
+      queuedFollowUp: [...(input.queuedFollowUp ?? [])],
+      provisionalMessageIds: [],
+      pendingToolCallIds: Array.from(pendingTools),
+      updatedAt
+    };
+    applyToolProductStates(view, input);
+    return view;
+  }
+
+  projectRuntimeEvent(input: PiChatUiRuntimeProjectionInput): PiChatUiViewModel {
+    const event = input.event;
+    if (event.piSessionId !== input.current.piSessionId) {
+      return cloneView(input.current);
+    }
+    if (
+      input.current.productRunId
+      && input.current.productRunId !== event.productRunId
+      && (input.current.runState === "running" || input.current.runState === "finalizing")
+    ) {
+      return cloneView(input.current);
+    }
+
+    if (event.type === "branch_changed") {
+      return this.projectBranchChange(input.current, event);
+    }
+
+    const view = cloneView(input.current);
+    if (!view.productRunId || !isActiveRunState(view.runState)) {
+      view.productRunId = event.productRunId;
+    }
+    if (view.activeLeafId === null && event.activeLeafId !== null) {
+      view.activeLeafId = event.activeLeafId;
+    }
+    const scope = projectionScope(view.piSessionId, view.activeLeafId);
+    view.updatedAt = Math.max(view.updatedAt, finiteTime(event.occurredAt, view.updatedAt));
+
+    switch (event.type) {
+      case "knowledge_progress":
+        this.projectKnowledgeProgress(view, scope, event);
+        break;
+      case "memory_recall_progress":
+        this.projectMemoryRecallProgress(view, scope, event);
+        break;
+      case "message_start":
+        if (!runtimeEventIsPrivate(event) && event.role !== "tool") {
+          this.projectRuntimeMessageStart(view, scope, event);
+        }
+        break;
+      case "message_update":
+        if (!runtimeEventIsPrivate(event)) {
+          this.projectRuntimeMessageUpdate(view, scope, event);
+        }
+        break;
+      case "message_end":
+        if (!runtimeEventIsPrivate(event) && event.role !== "tool") {
+          this.projectRuntimeMessageEnd(view, scope, event);
+        }
+        break;
+      case "message_entry_resolved":
+        this.resolveRuntimeMessageEntry(view, scope, event.messageKey, event.entryId);
+        break;
+      case "tool_execution_start":
+        this.projectRuntimeToolStart(view, scope, event, input.vaultPath ?? "");
+        break;
+      case "tool_execution_update":
+        this.projectRuntimeToolUpdate(view, scope, event, input.vaultPath ?? "");
+        break;
+      case "tool_execution_end":
+        this.projectRuntimeToolEnd(view, scope, event, input.vaultPath ?? "");
+        break;
+      case "compaction_start":
+        this.projectRuntimeCompactionStart(view, scope, event);
+        break;
+      case "compaction_end":
+        this.projectRuntimeCompactionEnd(view, scope, event);
+        break;
+      case "queue_update":
+        view.queuedSteering = [...event.steering];
+        view.queuedFollowUp = [...event.followUp];
+        break;
+      case "agent_end":
+        // A lower-level loop may still retry, compact, or consume a queue.
+        if (view.runState === "idle") view.runState = "running";
+        break;
+      case "agent_settled":
+        view.runState = "finalizing";
+        break;
+      case "diagnostic":
+        this.projectRuntimeDiagnostic(view, scope, event.diagnostic);
+        break;
+      case "product_run_settled":
+        this.projectProductSettlement(view, scope, event.terminalState, event.occurredAt);
+        break;
+    }
+    view.messages = dedupeMessages(view.messages);
+    view.provisionalMessageIds = uniqueStrings(view.provisionalMessageIds);
+    view.pendingToolCallIds = uniqueStrings(view.pendingToolCallIds);
+    applyToolProductStates(view, input);
+    return view;
+  }
+
+  /**
+   * Rebuilds durable items, then retains only live items that the readback has
+   * not yet proven durable. This is the agent_settled correction boundary.
+   */
+  reconcileSessionBranch(input: PiChatUiBranchReconciliationInput): PiChatUiViewModel {
+    const current = input.current;
+    const rebuilt = this.projectSessionBranch({
+      ...input,
+      piSessionId: current.piSessionId,
+      productRunId: current.productRunId,
+      runState: current.runState,
+      queuedSteering: current.queuedSteering,
+      queuedFollowUp: current.queuedFollowUp
+    });
+    const durableEntryIds = new Set(input.entries.map((entry) => entry.id));
+    const durableToolResultIds = toolResultIdsFromEntries(input.entries);
+
+    const unresolved: string[] = [];
+    for (const provisionalId of current.provisionalMessageIds) {
+      const live = current.messages.find((message) => message.id === provisionalId);
+      if (!live) continue;
+      const identity = projectionIdentity(live.id);
+      if (identity?.kind === "entry" && durableEntryIds.has(identity.value)) continue;
+      if (identity?.kind === "tool" && durableToolResultIds.has(identity.value)) continue;
+      const nextId = reScopeMessageId(live.id, projectionScope(current.piSessionId, input.activeLeafId));
+      const retained = { ...live, id: nextId };
+      upsertMessage(rebuilt.messages, retained);
+      unresolved.push(nextId);
+    }
+
+    rebuilt.diagnostics = dedupeDiagnostics([
+      ...rebuilt.diagnostics,
+      ...current.diagnostics.filter((item) => item.piSessionId === current.piSessionId)
+    ]);
+    rebuilt.provisionalMessageIds = uniqueStrings(unresolved);
+    rebuilt.pendingToolCallIds = uniqueStrings([
+      ...rebuilt.pendingToolCallIds,
+      ...unresolved.flatMap((id) => {
+        const identity = projectionIdentity(id);
+        return identity?.kind === "tool" ? [identity.value] : [];
+      })
+    ]);
+    rebuilt.updatedAt = Math.max(rebuilt.updatedAt, current.updatedAt);
+    rebuilt.messages = dedupeMessages(rebuilt.messages);
+    applyToolProductStates(rebuilt, input);
+    return rebuilt;
+  }
+
+  /** Applies Approval/Receipt state to existing Pi-owned Tool cards only. */
+  decorateToolProductState(
+    current: Readonly<PiChatUiViewModel>,
+    input: PiChatUiToolProductProjectionInput
+  ): PiChatUiViewModel {
+    const view = cloneView(current);
+    applyToolProductStates(view, input);
+    return view;
+  }
+
+  /** Adds product-owned display metadata without changing Pi-owned content. */
+  decorate(
+    current: Readonly<PiChatUiViewModel>,
+    decorations: readonly PiChatUiMessageDecoration[]
+  ): PiChatUiViewModel {
+    const view = cloneView(current);
+    const byIdentity = new Map<string, PiChatUiMessageDecoration>();
+    for (const decoration of decorations) {
+      if (decoration.piSessionId && decoration.piSessionId !== view.piSessionId) {
+        continue;
+      }
+      if (decoration.toolCallId) {
+        byIdentity.set(`tool:${decoration.toolCallId}`, decoration);
+      } else if (decoration.entryId) {
+        byIdentity.set(`entry:${decoration.entryId}`, decoration);
+      }
+    }
+    view.messages = view.messages.map((message) => {
+      const identity = projectionIdentity(message.id);
+      const decoration = identity
+        ? byIdentity.get(`${identity.kind}:${identity.value}`)
+        : undefined;
+      if (!decoration) return message;
+      return {
+        ...message,
+        ...(decoration.status === undefined ? {} : { status: decoration.status }),
+        ...(decoration.title === undefined ? {} : { title: decoration.title }),
+        ...(decoration.details === undefined ? {} : { details: decoration.details }),
+        ...(decoration.citations === undefined ? {} : { citations: decoration.citations }),
+        ...(decoration.diffSummary === undefined ? {} : { diffSummary: decoration.diffSummary }),
+        ...(decoration.files === undefined ? {} : { files: decoration.files }),
+        ...(decoration.knowledgeReferences === undefined
+          ? {}
+          : { knowledgeReferences: decoration.knowledgeReferences.map((reference) => ({ ...reference })) }),
+        ...(decoration.knowledgeProducedPaths === undefined
+          ? {}
+          : { knowledgeProducedPaths: [...decoration.knowledgeProducedPaths] })
+      };
+    });
+    return view;
+  }
+
+  private projectDurableEntry(
+    messages: ChatMessage[],
+    pendingTools: Set<string>,
+    entry: PiSessionBranchEntryView,
+    context: BranchProjectionContext
+  ): void {
+    const createdAt = entryTime(entry);
+    if (entry.type === "message" && entry.message) {
+      this.projectDurableMessage(messages, pendingTools, entry, entry.message, createdAt, context);
+      return;
+    }
+    if (entry.type === "compaction") {
+      upsertMessage(messages, {
+        id: entryMessageId(context.scope, entry.id),
+        role: "system",
+        itemType: "contextCompaction",
+        processKind: "other",
+        title: "上下文已压缩",
+        details: entry.tokensBefore && entry.tokensBefore > 0
+          ? `压缩前 ${entry.tokensBefore} tokens`
+          : undefined,
+        text: visibleText(entry.summary) || "上下文压缩完成",
+        status: "completed",
+        runId: context.currentRunId,
+        turnId: context.currentRunId,
+        createdAt,
+        completedAt: createdAt
+      });
+      return;
+    }
+    if (entry.type === "branch_summary") {
+      upsertMessage(messages, {
+        id: entryMessageId(context.scope, entry.id),
+        role: "system",
+        itemType: "contextCompaction",
+        processKind: "other",
+        title: "已切换对话分支",
+        details: visibleText(entry.fromId) ? `来源节点 ${entry.fromId}` : undefined,
+        text: visibleText(entry.summary) || "已从所选节点继续对话",
+        status: "completed",
+        runId: context.currentRunId,
+        turnId: context.currentRunId,
+        createdAt,
+        completedAt: createdAt
+      });
+      return;
+    }
+    if (entry.type === "custom_message" && entry.display !== false) {
+      const text = textFromContent(entry.content);
+      if (!text) return;
+      upsertMessage(messages, {
+        id: entryMessageId(context.scope, entry.id),
+        role: "system",
+        itemType: "assistant",
+        title: visibleText(entry.customType) || "会话信息",
+        text,
+        status: "completed",
+        runId: context.currentRunId,
+        turnId: context.currentRunId,
+        createdAt,
+        completedAt: createdAt
+      });
+      return;
+    }
+    if (entry.type === "custom") {
+      const taskPlan = taskPlanFromSessionEntry(entry, context.piSessionId);
+      if (taskPlan) {
+        upsertTaskPlanMessage(messages, context.scope, taskPlan, createdAt);
+        return;
+      }
+      const diagnostic = diagnosticFromCustomEntry(entry, context);
+      if (diagnostic) upsertMessage(messages, diagnostic);
+    }
+  }
+
+  private projectDurableMessage(
+    messages: ChatMessage[],
+    pendingTools: Set<string>,
+    entry: PiSessionBranchEntryView,
+    message: PiSessionMessageView,
+    createdAt: number,
+    context: BranchProjectionContext
+  ): void {
+    const role = normalizedRole(message.role);
+    if (role === "user") {
+      context.currentRunId = context.entryRuns.get(entry.id)
+        ?? syntheticRunId(context.scope, entry.id);
+      const text = textFromContent(message.content);
+      if (!text) return;
+      upsertMessage(messages, {
+        id: entryMessageId(context.scope, entry.id),
+        role: "user",
+        itemType: "user",
+        text,
+        status: "completed",
+        runId: context.currentRunId,
+        turnId: context.currentRunId,
+        createdAt: messageTime(message, createdAt),
+        completedAt: messageTime(message, createdAt)
+      });
+      return;
+    }
+    if (role === "assistant") {
+      const runId = context.entryRuns.get(entry.id) ?? context.currentRunId;
+      const text = textFromContent(message.content);
+      const failure = assistantFailure(message);
+      if (text || failure.text) {
+        upsertMessage(messages, {
+          id: entryMessageId(context.scope, entry.id),
+          role: "assistant",
+          itemType: failure.itemType,
+          title: failure.itemType === "error" ? failure.title : undefined,
+          text: text || failure.text,
+          status: failure.status,
+          providerId: visibleText(message.provider) || undefined,
+          modelId: visibleText(message.model) || undefined,
+          runId,
+          turnId: runId,
+          createdAt: messageTime(message, createdAt),
+          completedAt: messageTime(message, createdAt)
+        });
+      }
+      for (const toolCall of toolCallsFromContent(message.content)) {
+        if (toolCall.toolName === PI_TASK_UPDATE_TOOL_ID) continue;
+        const toolRunId = context.toolRuns.get(toolCall.toolCallId) ?? runId;
+        upsertMessage(messages, toolMessage({
+          scope: context.scope,
+          toolCallId: toolCall.toolCallId,
+          toolName: toolCall.toolName,
+          args: toolCall.args,
+          privacySafe: context.privacySafeToolRuns.has(toolCall.toolCallId),
+          status: initialPiToolCallStatus(toolCall.toolName),
+          runId: toolRunId,
+          createdAt: messageTime(message, createdAt),
+          vaultPath: context.vaultPath
+        }));
+        pendingTools.add(toolCall.toolCallId);
+      }
+      return;
+    }
+    if (role === "toolresult" || role === "tool") {
+      const toolCallId = requireLooseIdentity(message.toolCallId, entry.id);
+      const toolName = visibleText(message.toolName) || "tool";
+      if (toolName === PI_TASK_UPDATE_TOOL_ID) return;
+      const resultText = textFromContent(message.content);
+      const cancelled = isCancelledResult(message.details);
+      const status = cancelled ? "interrupted" : message.isError ? "failed" : "completed";
+      const runId = context.toolRuns.get(toolCallId) ?? context.currentRunId;
+      const existing = findByIdentity(messages, "tool", toolCallId);
+      const projected = toolMessage({
+        scope: context.scope,
+        toolCallId,
+        toolName,
+        args: existing?.processInput,
+        result: message.details ?? resultText,
+        resultText,
+        privacySafe: context.privacySafeToolRuns.has(toolCallId),
+        status,
+        runId,
+        createdAt: existing?.createdAt ?? messageTime(message, createdAt),
+        completedAt: messageTime(message, createdAt),
+        vaultPath: context.vaultPath
+      });
+      const knowledgeBaseUi = projectKnowledgeMaintenanceReport({
+        toolName,
+        result: message.details,
+        isError: message.isError === true
+      });
+      if (knowledgeBaseUi) projected.knowledgeBaseUi = knowledgeBaseUi;
+      if (knowledgeBaseUi) projected.itemType = "knowledgeBase";
+      upsertMessage(messages, mergeToolMessages(existing, projected));
+      pendingTools.delete(toolCallId);
+      return;
+    }
+    if (role === "bashexecution") {
+      const status = message.cancelled
+        ? "interrupted"
+        : typeof message.exitCode === "number" && message.exitCode !== 0
+          ? "failed"
+          : "completed";
+      const toolCallId = `entry-${entry.id}`;
+      upsertMessage(messages, toolMessage({
+        scope: context.scope,
+        toolCallId,
+        toolName: "bash",
+        args: { command: message.command ?? "" },
+        resultText: message.output ?? "",
+        status,
+        runId: context.currentRunId,
+        createdAt: messageTime(message, createdAt),
+        completedAt: messageTime(message, createdAt),
+        vaultPath: context.vaultPath
+      }));
+      return;
+    }
+    if (role === "custom" && message.display !== false) {
+      const text = textFromContent(message.content);
+      if (!text) return;
+      upsertMessage(messages, {
+        id: entryMessageId(context.scope, entry.id),
+        role: "system",
+        itemType: "assistant",
+        title: visibleText(message.customType) || "会话信息",
+        text,
+        status: "completed",
+        runId: context.currentRunId,
+        turnId: context.currentRunId,
+        createdAt: messageTime(message, createdAt),
+        completedAt: messageTime(message, createdAt)
+      });
+      return;
+    }
+    if (role === "compactionsummary" || role === "branchsummary") {
+      const branch = role === "branchsummary";
+      upsertMessage(messages, {
+        id: entryMessageId(context.scope, entry.id),
+        role: "system",
+        itemType: "contextCompaction",
+        processKind: "other",
+        title: branch ? "已切换对话分支" : "上下文已压缩",
+        text: visibleText(message.summary) || (branch ? "已从所选节点继续对话" : "上下文压缩完成"),
+        status: "completed",
+        runId: context.currentRunId,
+        turnId: context.currentRunId,
+        createdAt: messageTime(message, createdAt),
+        completedAt: messageTime(message, createdAt)
+      });
+    }
+  }
+
+  private projectRuntimeMessageStart(
+    view: PiChatUiViewModel,
+    scope: string,
+    event: Extract<PiChatRuntimeEvent, { type: "message_start" }>
+  ): void {
+    const id = runtimeMessageId(scope, event.messageKey);
+    const existing = view.messages.find((message) => message.id === id);
+    if (!existing) {
+      upsertMessage(view.messages, {
+        id,
+        role: event.role === "user" ? "user" : "assistant",
+        itemType: event.role === "user" ? "user" : "assistant",
+        text: "",
+        status: event.role === "user" ? "completed" : "running",
+        runId: event.productRunId,
+        turnId: event.productRunId,
+        createdAt: event.occurredAt
+      });
+    }
+    addProvisional(view, id);
+    view.runState = "running";
+  }
+
+  private projectMemoryRecallProgress(
+    view: PiChatUiViewModel,
+    scope: string,
+    event: Extract<PiChatRuntimeEvent, { type: "memory_recall_progress" }>
+  ): void {
+    const id = `${scope}:memory-recall:${event.productRunId}`;
+    if (event.status === "completed") {
+      removeMessage(view.messages, id);
+      return;
+    }
+    upsertMessage(view.messages, {
+      id,
+      role: "assistant",
+      itemType: "thinking",
+      title: "正在回忆相关 Memory",
+      text: memoryRecallStageText(event.stage),
+      status: "running",
+      runId: event.productRunId,
+      turnId: event.productRunId,
+      createdAt: event.occurredAt
+    });
+    view.runState = "running";
+  }
+
+  private projectKnowledgeProgress(
+    view: PiChatUiViewModel,
+    scope: string,
+    event: Extract<PiChatRuntimeEvent, { type: "knowledge_progress" }>
+  ): void {
+    const id = knowledgeProgressMessageId(
+      scope,
+      event.productRunId,
+      event.stage
+    );
+    if (event.status === "completed") {
+      removeMessage(view.messages, id);
+      return;
+    }
+    const copy = knowledgeProgressCopy(event.stage);
+    upsertMessage(view.messages, {
+      id,
+      role: "assistant",
+      itemType: "thinking",
+      title: copy.title,
+      text: copy.text,
+      status: "running",
+      runId: event.productRunId,
+      turnId: event.productRunId,
+      createdAt: event.occurredAt
+    });
+    view.runState = "running";
+  }
+
+  private projectRuntimeMessageUpdate(
+    view: PiChatUiViewModel,
+    scope: string,
+    event: Extract<PiChatRuntimeEvent, { type: "message_update" }>
+  ): void {
+    const id = runtimeMessageId(scope, event.messageKey);
+    let message = view.messages.find((item) => item.id === id);
+    if (!message) {
+      message = {
+        id,
+        role: "assistant",
+        itemType: "assistant",
+        text: "",
+        status: "running",
+        runId: event.productRunId,
+        turnId: event.productRunId,
+        createdAt: event.occurredAt
+      };
+      upsertMessage(view.messages, message);
+    }
+    message.text = `${message.text}${event.textDelta}`;
+    if (event.textDelta.trim()) {
+      removeRuntimeProgressMessages(view, scope, event.productRunId);
+    }
+    message.status = "running";
+    delete message.completedAt;
+    addProvisional(view, id);
+    view.runState = "running";
+  }
+
+  private projectRuntimeMessageEnd(
+    view: PiChatUiViewModel,
+    scope: string,
+    event: Extract<PiChatRuntimeEvent, { type: "message_end" }>
+  ): void {
+    const provisionalId = runtimeMessageId(scope, event.messageKey);
+    const id = event.entryId ? entryMessageId(scope, event.entryId) : provisionalId;
+    const existing = view.messages.find((message) => message.id === provisionalId)
+      ?? view.messages.find((message) => message.id === id);
+    const status = runtimeMessageStatus(event.status);
+    const role = event.role === "user" ? "user" : "assistant";
+    const projected: ChatMessage = {
+      ...(existing ?? {
+        id,
+        role,
+        text: "",
+        createdAt: event.occurredAt
+      }),
+      id,
+      role,
+      itemType: role === "assistant" && status !== "completed" ? "error" : role,
+      title: role === "assistant" && status === "failed"
+        ? "回答失败"
+        : role === "assistant" && status === "interrupted"
+          ? "回答已停止"
+          : existing?.title,
+      text: event.text || existing?.text || runtimeEmptyMessageText(role, status),
+      status,
+      runId: event.productRunId,
+      turnId: event.productRunId,
+      completedAt: event.occurredAt
+    };
+    removeMessage(view.messages, provisionalId);
+    upsertMessage(view.messages, projected);
+    replaceProvisional(view, provisionalId, id);
+    if (role === "assistant" && projected.text.trim()) {
+      removeRuntimeProgressMessages(view, scope, event.productRunId);
+    }
+  }
+
+  private resolveRuntimeMessageEntry(
+    view: PiChatUiViewModel,
+    scope: string,
+    messageKey: string,
+    entryId: string
+  ): void {
+    const provisionalId = runtimeMessageId(scope, messageKey);
+    const resolvedId = entryMessageId(scope, entryId);
+    const provisional = view.messages.find((message) => message.id === provisionalId);
+    const resolved = view.messages.find((message) => message.id === resolvedId);
+    if (provisional) {
+      removeMessage(view.messages, provisionalId);
+      upsertMessage(view.messages, mergeResolvedMessage(resolved, { ...provisional, id: resolvedId }));
+    }
+    replaceProvisional(view, provisionalId, resolvedId);
+  }
+
+  private projectRuntimeToolStart(
+    view: PiChatUiViewModel,
+    scope: string,
+    event: Extract<PiChatRuntimeEvent, { type: "tool_execution_start" }>,
+    vaultPath: string
+  ): void {
+    if (event.toolName === PI_TASK_UPDATE_TOOL_ID) {
+      view.runState = "running";
+      return;
+    }
+    const existing = findByIdentity(view.messages, "tool", event.toolCallId);
+    const projected = toolMessage({
+      scope,
+      toolCallId: event.toolCallId,
+      toolName: event.toolName,
+      args: event.args,
+      privacySafe: event.privacySafe === true,
+      status: existing && terminalProcessStatus(existing.status)
+        ? existing.status!
+        : initialPiToolCallStatus(event.toolName),
+      runId: event.productRunId,
+      createdAt: existing?.createdAt ?? event.occurredAt,
+      vaultPath
+    });
+    upsertMessage(view.messages, mergeToolMessages(existing, projected));
+    addProvisional(view, projected.id);
+    addPendingTool(view, event.toolCallId);
+    view.runState = "running";
+  }
+
+  private projectRuntimeToolUpdate(
+    view: PiChatUiViewModel,
+    scope: string,
+    event: Extract<PiChatRuntimeEvent, { type: "tool_execution_update" }>,
+    vaultPath: string
+  ): void {
+    if (event.toolName === PI_TASK_UPDATE_TOOL_ID) return;
+    const existing = findByIdentity(view.messages, "tool", event.toolCallId);
+    const projected = toolMessage({
+      scope,
+      toolCallId: event.toolCallId,
+      toolName: event.toolName,
+      args: existing?.processInput,
+      result: event.update,
+      resultText: displayUnknown(event.update),
+      privacySafe: event.privacySafe === true,
+      status: runtimeToolProgressStatus(existing, event.update),
+      runId: event.productRunId,
+      createdAt: existing?.createdAt ?? event.occurredAt,
+      vaultPath
+    });
+    upsertMessage(view.messages, mergeToolMessages(existing, projected));
+    addProvisional(view, projected.id);
+    addPendingTool(view, event.toolCallId);
+  }
+
+  private projectRuntimeToolEnd(
+    view: PiChatUiViewModel,
+    scope: string,
+    event: Extract<PiChatRuntimeEvent, { type: "tool_execution_end" }>,
+    vaultPath: string
+  ): void {
+    if (event.toolName === PI_TASK_UPDATE_TOOL_ID) {
+      const taskPlan = taskPlanFromToolResult(event.result);
+      if (taskPlan) {
+        upsertTaskPlanMessage(
+          view.messages,
+          scope,
+          taskPlan,
+          event.occurredAt
+        );
+      }
+      return;
+    }
+    const existing = findByIdentity(view.messages, "tool", event.toolCallId);
+    const cancelled = isCancelledResult(event.result);
+    const status = cancelled ? "interrupted" : event.isError ? "failed" : "completed";
+    const projected = toolMessage({
+      scope,
+      toolCallId: event.toolCallId,
+      toolName: event.toolName,
+      args: existing?.processInput,
+      result: event.result,
+      resultText: displayUnknown(event.result),
+      privacySafe: event.privacySafe === true,
+      status,
+      runId: event.productRunId,
+      createdAt: existing?.createdAt ?? event.occurredAt,
+      completedAt: event.occurredAt,
+      vaultPath
+    });
+    const knowledgeBaseUi = projectKnowledgeMaintenanceReport({
+      toolName: event.toolName,
+      result: event.result,
+      isError: event.isError
+    });
+    if (knowledgeBaseUi) projected.knowledgeBaseUi = knowledgeBaseUi;
+    if (knowledgeBaseUi) projected.itemType = "knowledgeBase";
+    upsertMessage(view.messages, mergeToolMessages(existing, projected));
+    addProvisional(view, projected.id);
+    removePendingTool(view, event.toolCallId);
+  }
+
+  private projectRuntimeCompactionStart(
+    view: PiChatUiViewModel,
+    scope: string,
+    event: Extract<PiChatRuntimeEvent, { type: "compaction_start" }>
+  ): void {
+    const id = runtimeCompactionId(scope, event.productRunId, event.reason);
+    upsertMessage(view.messages, {
+      id,
+      role: "system",
+      itemType: "contextCompaction",
+      processKind: "other",
+      title: "正在压缩上下文",
+      details: compactionReasonLabel(event.reason),
+      text: "正在整理较早的对话，并保留近期原文。",
+      status: "running",
+      runId: event.productRunId,
+      turnId: event.productRunId,
+      createdAt: event.occurredAt
+    });
+    addProvisional(view, id);
+    view.runState = "running";
+  }
+
+  private projectRuntimeCompactionEnd(
+    view: PiChatUiViewModel,
+    scope: string,
+    event: Extract<PiChatRuntimeEvent, { type: "compaction_end" }>
+  ): void {
+    const provisionalId = runtimeCompactionId(scope, event.productRunId, event.reason);
+    const id = event.entryId ? entryMessageId(scope, event.entryId) : provisionalId;
+    const existing = view.messages.find((message) => message.id === provisionalId);
+    const status = event.aborted ? (event.error ? "failed" : "interrupted") : "completed";
+    removeMessage(view.messages, provisionalId);
+    upsertMessage(view.messages, {
+      ...(existing ?? {
+        id,
+        role: "system",
+        itemType: "contextCompaction",
+        processKind: "other",
+        text: "",
+        createdAt: event.occurredAt
+      }),
+      id,
+      title: event.aborted ? "上下文压缩未完成" : "上下文已压缩",
+      details: compactionReasonLabel(event.reason),
+      text: event.error || (event.aborted ? "本次上下文压缩已停止" : "上下文压缩完成"),
+      status,
+      completedAt: event.occurredAt
+    });
+    if (event.entryId) replaceProvisional(view, provisionalId, id);
+    else removeProvisional(view, provisionalId);
+  }
+
+  private projectRuntimeDiagnostic(
+    view: PiChatUiViewModel,
+    scope: string,
+    diagnostic: PiConversationDiagnostic
+  ): void {
+    if (diagnostic.piSessionId !== view.piSessionId) return;
+    view.diagnostics = dedupeDiagnostics([...view.diagnostics, diagnostic]);
+    upsertMessage(view.messages, diagnosticMessage(scope, diagnostic));
+  }
+
+  private projectProductSettlement(
+    view: PiChatUiViewModel,
+    scope: string,
+    terminalState: PiProductRunTerminalState,
+    occurredAt: number
+  ): void {
+    view.runState = terminalState;
+    const terminalStatus = terminalState === "completed"
+      ? "completed"
+      : terminalState === "cancelled"
+        ? "interrupted"
+        : "failed";
+    for (const message of view.messages) {
+      if (
+        message.runId !== view.productRunId
+        || !runtimeMessageStillActive(message.status)
+      ) continue;
+      message.status = message.role === "tool" && terminalState === "cancelled"
+        ? "cancelled"
+        : terminalStatus;
+      message.completedAt = occurredAt;
+    }
+    const runId = view.productRunId ?? "unknown-run";
+    const hasAnswer = view.messages.some((message) =>
+      message.runId === runId
+      && message.role === "assistant"
+      && message.itemType !== "contextCompaction"
+    );
+    if (terminalState === "completed" && !hasAnswer) {
+      upsertMessage(view.messages, {
+        id: terminalMessageId(scope, runId),
+        role: "assistant",
+        itemType: "assistant",
+        text: "Agent 未返回可显示内容",
+        status: "completed",
+        runId,
+        turnId: runId,
+        createdAt: occurredAt,
+        completedAt: occurredAt
+      });
+    }
+    if (terminalState !== "completed") {
+      upsertMessage(view.messages, {
+        id: terminalMessageId(scope, runId),
+        role: "system",
+        itemType: "error",
+        title: terminalState === "cancelled" ? "回答已停止" : "回答失败",
+        text: terminalState === "cancelled" ? "已停止生成" : "Agent 执行失败",
+        status: terminalStatus,
+        runId,
+        turnId: runId,
+        createdAt: occurredAt,
+        completedAt: occurredAt
+      });
+    }
+  }
+
+  private projectBranchChange(
+    current: Readonly<PiChatUiViewModel>,
+    event: Extract<PiChatRuntimeEvent, { type: "branch_changed" }>
+  ): PiChatUiViewModel {
+    const scope = projectionScope(current.piSessionId, event.activeLeafId);
+    return {
+      ...cloneView(current),
+      activeLeafId: event.activeLeafId,
+      productRunId: event.productRunId,
+      runState: "running",
+      messages: [{
+        id: branchChangeMessageId(scope),
+        role: "system",
+        itemType: "contextCompaction",
+        processKind: "other",
+        title: "正在切换对话分支",
+        details: event.previousLeafId
+          ? `原节点 ${event.previousLeafId}`
+          : undefined,
+        text: "正在从 Pi Session 的活动分支重新加载对话。",
+        status: "running",
+        runId: event.productRunId,
+        turnId: event.productRunId,
+        createdAt: event.occurredAt
+      }],
+      provisionalMessageIds: [],
+      pendingToolCallIds: [],
+      updatedAt: Math.max(current.updatedAt, event.occurredAt)
+    };
+  }
+}
+
+function toolMessage(input: {
+  readonly scope: string;
+  readonly toolCallId: string;
+  readonly toolName: string;
+  readonly args?: unknown;
+  readonly result?: unknown;
+  readonly resultText?: string;
+  readonly privacySafe?: boolean;
+  readonly status: string;
+  readonly runId?: string;
+  readonly createdAt: number;
+  readonly completedAt?: number;
+  readonly vaultPath: string;
+}): ChatMessage {
+  const privateCopy = input.privacySafe
+    ? privacySafeKnowledgeToolCopy(input.toolName, input.status)
+    : null;
+  if (privateCopy) {
+    return {
+      id: toolMessageId(input.scope, input.toolCallId),
+      role: "tool",
+      itemType: "dynamicToolCall",
+      processKind: privateCopy.processKind,
+      title: privateCopy.title,
+      details: privateCopy.details,
+      text: privateCopy.text,
+      processContentAvailability: input.status === "running"
+        ? "unavailable"
+        : "empty",
+      processInputAvailability: "empty",
+      processOutputAvailability: input.status === "running"
+        ? "unavailable"
+        : "empty",
+      status: input.status,
+      runId: input.runId,
+      turnId: input.runId,
+      createdAt: input.createdAt,
+      completedAt: input.completedAt
+    };
+  }
+  const itemType = toolItemType(input.toolName, input.args, input.result);
+  const processKind = toolProcessKind(input.toolName, itemType);
+  const processInput = displayUnknown(input.args);
+  const processOutput = input.resultText ?? displayUnknown(input.result);
+  const payload = {
+    tool: input.toolName,
+    input: input.args,
+    output: input.result,
+    result: input.result
+  };
+  const summary = summarizeProcessEvent(itemType, payload, input.vaultPath);
+  const files = extractProcessFileRefs(payload, input.vaultPath);
+  return {
+    id: toolMessageId(input.scope, input.toolCallId),
+    role: "tool",
+    itemType,
+    processKind: summary.kind === "other" ? processKind : summary.kind,
+    title: summary.title || input.toolName || "工具",
+    details: summary.detail || input.toolName || undefined,
+    text: processOutput || processInput,
+    processInput: processInput || undefined,
+    processOutput: processOutput || undefined,
+    processInputAvailability: processInput ? "provided" : "empty",
+    processOutputAvailability: processOutput
+      ? "provided"
+      : input.status === "running"
+        ? "unavailable"
+        : "empty",
+    processContentAvailability: processInput || processOutput
+      ? "provided"
+      : input.status === "running"
+        ? "unavailable"
+        : "empty",
+    files: files.length ? files : undefined,
+    status: input.status,
+    runId: input.runId,
+    turnId: input.runId,
+    createdAt: input.createdAt,
+    completedAt: input.completedAt
+  };
+}
+
+function projectKnowledgeMaintenanceReport(input: Readonly<{
+  toolName: string;
+  result: unknown;
+  isError: boolean;
+}>): KnowledgeBaseMaintainReportPayload | null {
+  if (input.toolName !== "knowledge_maintain") return null;
+  const envelope = knowledgeMaintenanceEnvelopeFromToolResult(input.result);
+  if (!envelope) return null;
+  if (
+    input.isError
+    && (envelope.status === "completed" || envelope.status === "noop")
+  ) return null;
+  return knowledgeMaintenanceReportPayloadFromToolResult(input.result);
+}
+
+function mergeToolMessages(existing: ChatMessage | undefined, projected: ChatMessage): ChatMessage {
+  if (!existing) return projected;
+  return {
+    ...existing,
+    ...projected,
+    processInput: projected.processInput || existing.processInput,
+    processInputAvailability: projected.processInputAvailability
+      ?? existing.processInputAvailability,
+    processOutput: projected.processOutput || existing.processOutput,
+    processOutputAvailability: projected.processOutputAvailability
+      ?? existing.processOutputAvailability,
+    text: projected.text || existing.text,
+    files: projected.files?.length ? projected.files : existing.files
+  };
+}
+
+const PHASE_TWO_READ_TOOL_IDS = new Set(["vault_search", "note_read"]);
+const PHASE_TWO_WRITE_TOOL_IDS = new Set([
+  "note_create",
+  "note_update",
+  "metadata_update",
+  "note_move",
+  "note_delete"
+]);
+const PHASE_THREE_BATCH_WRITE_TOOL_IDS = new Set(["knowledge_maintain"]);
+
+function initialPiToolCallStatus(toolName: string): string {
+  const toolId = normalizedToolName(toolName);
+  if (PHASE_THREE_BATCH_WRITE_TOOL_IDS.has(toolId)) return "running";
+  return (
+    PHASE_TWO_WRITE_TOOL_IDS.has(toolId)
+    || PHASE_THREE_BATCH_WRITE_TOOL_IDS.has(toolId)
+  )
+    ? "waiting_approval"
+    : "running";
+}
+
+function applyToolProductStates(
+  view: PiChatUiViewModel,
+  input: PiChatUiToolProductProjectionInput
+): void {
+  const approvals = productRecordsByIdentity(input.approvals ?? [], view.piSessionId);
+  const receipts = productRecordsByIdentity(input.receipts ?? [], view.piSessionId);
+  for (const message of view.messages) {
+    const identity = projectionIdentity(message.id);
+    if (identity?.kind !== "tool" || !message.runId) continue;
+    const key = toolProductIdentityKey(identity.value, message.runId);
+    const approval = approvals.get(key);
+    const receipt = receipts.get(key);
+    const toolId = projectedToolId(message);
+    const knownRead = PHASE_TWO_READ_TOOL_IDS.has(toolId);
+    const knownWrite = PHASE_TWO_WRITE_TOOL_IDS.has(toolId);
+    const knownBatchWrite = PHASE_THREE_BATCH_WRITE_TOOL_IDS.has(toolId);
+    if (
+      !knownRead
+      && !knownWrite
+      && !knownBatchWrite
+      && !approval
+      && !receipt
+    ) continue;
+
+    const hasDurableResult = !view.provisionalMessageIds.includes(message.id)
+      && !view.pendingToolCallIds.includes(identity.value);
+    let piStatus = piOwnedToolStatus(message.status, hasDurableResult, knownWrite);
+    if (
+      approval?.status === "approved"
+      && normalizedToken(message.status) === "waitingapproval"
+    ) piStatus = "approved";
+    const status = resolvePiChatUiToolProductStatus({
+      piSessionId: view.piSessionId,
+      toolCallId: identity.value,
+      productRunId: message.runId,
+      // The Phase 3 batch Tool Result is emitted only after its WAL and
+      // Readback complete. Unlike the five Phase 2 write Tools it has no
+      // separate DomainReceipt, so that durable Result is its final proof.
+      writeTool: knownBatchWrite && hasDurableResult
+        ? false
+        : knownWrite || knownBatchWrite
+          || (!knownRead && Boolean(approval || receipt)),
+      piStatus,
+      hasDurableResult,
+      approval,
+      receipt
+    });
+    message.status = status;
+    message.details = toolProductDetails(message.details, status, approval, receipt);
+    const updatedAt = latestProductRecordTime(approval, receipt);
+    if (updatedAt !== undefined) view.updatedAt = Math.max(view.updatedAt, updatedAt);
+    if (toolProductStatusIsTerminal(status)) {
+      message.completedAt ??= updatedAt ?? message.createdAt;
+    } else {
+      delete message.completedAt;
+    }
+  }
+}
+
+interface ToolProductRecordIdentity {
+  readonly piSessionId?: string;
+  readonly toolCallId: string;
+  readonly productRunId: string;
+  readonly updatedAt?: number;
+}
+
+function productRecordsByIdentity<T extends ToolProductRecordIdentity>(
+  records: readonly T[],
+  piSessionId: string
+): ReadonlyMap<string, T> {
+  const byIdentity = new Map<string, T>();
+  for (const record of records) {
+    if (record.piSessionId && record.piSessionId !== piSessionId) continue;
+    if (!visibleText(record.toolCallId) || !visibleText(record.productRunId)) continue;
+    const key = toolProductIdentityKey(record.toolCallId, record.productRunId);
+    const previous = byIdentity.get(key);
+    if (
+      !previous
+      || finiteProductRecordTime(record.updatedAt) >= finiteProductRecordTime(previous.updatedAt)
+    ) byIdentity.set(key, record);
+  }
+  return byIdentity;
+}
+
+function toolProductIdentityKey(toolCallId: string, productRunId: string): string {
+  return `${toolCallId}\u0000${productRunId}`;
+}
+
+function projectedToolId(message: ChatMessage): string {
+  const title = visibleText(message.title);
+  const prefix = "使用工具：";
+  if (title.startsWith(prefix)) return normalizedToolName(title.slice(prefix.length));
+  return normalizedToolName(title);
+}
+
+function piOwnedToolStatus(
+  status: string | undefined,
+  hasDurableResult: boolean,
+  writeTool: boolean
+): PiChatUiToolProductStatus {
+  const normalized = normalizedToken(status);
+  if (normalized === "waitingapproval") return "waiting_approval";
+  if (normalized === "approved") return "approved";
+  if (normalized === "failed" || normalized === "error") return "failed";
+  if (
+    normalized === "cancelled"
+    || normalized === "canceled"
+    || normalized === "interrupted"
+  ) return "cancelled";
+  if (hasDurableResult) return "completed";
+  if (writeTool && normalized === "completed") return "completed";
+  return "running";
+}
+
+function toolProductDetails(
+  existing: string | undefined,
+  status: PiChatUiToolProductStatus,
+  approval: PiChatUiToolApprovalView | undefined,
+  receipt: PiChatUiToolReceiptView | undefined
+): string | undefined {
+  const productDetail = visibleText(receipt?.readbackSummary)
+    || visibleText(receipt?.summary)
+    || visibleText(approval?.preview)
+    || visibleText(receipt?.target)
+    || visibleText(approval?.target);
+  if (productDetail) return productDetail;
+  if (status === "waiting_approval") return "等待确认精确目标与改动预览";
+  if (status === "approved") return "已批准，等待开始执行";
+  if (status === "denied") return "本次写操作未获授权";
+  if (status === "verifying") return "正在核对写后实际结果";
+  if (status === "uncertain") return "写后实际结果尚不确定，请勿自动重试";
+  if (status === "completed" && receipt?.readbackVerified) return "写后 Readback 已验证";
+  return existing;
+}
+
+function latestProductRecordTime(
+  approval: PiChatUiToolApprovalView | undefined,
+  receipt: PiChatUiToolReceiptView | undefined
+): number | undefined {
+  const times = [approval?.updatedAt, receipt?.updatedAt].filter(
+    (value): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0
+  );
+  return times.length ? Math.max(...times) : undefined;
+}
+
+function finiteProductRecordTime(value: number | undefined): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
+function toolProductStatusIsTerminal(status: PiChatUiToolProductStatus): boolean {
+  return status === "completed"
+    || status === "failed"
+    || status === "cancelled"
+    || status === "denied"
+    || status === "uncertain";
+}
+
+function settleUnfinishedDurableTools(
+  messages: ChatMessage[],
+  pendingTools: ReadonlySet<string>,
+  runState: PiChatUiRunState
+): void {
+  if (runState === "running" || runState === "finalizing") return;
+  for (const toolCallId of pendingTools) {
+    const message = findByIdentity(messages, "tool", toolCallId);
+    if (!message || !runtimeMessageStillActive(message.status)) continue;
+    message.status = runState === "cancelled" || runState === "interrupted"
+      ? "cancelled"
+      : "failed";
+    message.completedAt = message.createdAt;
+    if (!message.text) message.text = "工具调用在结果提交前中断";
+  }
+}
+
+function assistantFailure(message: PiSessionMessageView): {
+  readonly itemType: "assistant" | "error";
+  readonly status: "completed" | "failed" | "interrupted";
+  readonly title?: string;
+  readonly text: string;
+} {
+  const stopReason = normalizedToken(message.stopReason);
+  if (stopReason === "error") {
+    return {
+      itemType: "error",
+      status: "failed",
+      title: "回答失败",
+      text: visibleText(message.errorMessage) || "Agent 执行失败"
+    };
+  }
+  if (stopReason === "aborted" || stopReason === "cancelled" || stopReason === "canceled") {
+    return {
+      itemType: "error",
+      status: "interrupted",
+      title: "回答已停止",
+      text: visibleText(message.errorMessage) || "已停止生成"
+    };
+  }
+  return { itemType: "assistant", status: "completed", text: "" };
+}
+
+function toolCallsFromContent(
+  content: PiSessionMessageView["content"]
+): ToolCallProjection[] {
+  if (!Array.isArray(content)) return [];
+  const calls: ToolCallProjection[] = [];
+  const blocks = content as readonly PiSessionContentBlockView[];
+  for (const block of blocks) {
+    if (normalizedToken(block.type) !== "toolcall") continue;
+    const toolCallId = visibleText(block.id) || visibleText(block.toolCallId);
+    if (!toolCallId) continue;
+    calls.push({
+      toolCallId,
+      toolName: visibleText(block.name) || "tool",
+      args: block.arguments
+    });
+  }
+  return calls;
+}
+
+function toolResultIdsFromEntries(
+  entries: readonly PiSessionBranchEntryView[]
+): ReadonlySet<string> {
+  const toolCallIds = new Set<string>();
+  for (const entry of entries) {
+    if (entry.type !== "message" || !entry.message) continue;
+    const role = normalizedRole(entry.message.role);
+    if (role !== "toolresult" && role !== "tool") continue;
+    toolCallIds.add(requireLooseIdentity(entry.message.toolCallId, entry.id));
+  }
+  return toolCallIds;
+}
+
+function textFromContent(
+  content: string | readonly PiSessionContentBlockView[] | undefined
+): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  const blocks = content as readonly PiSessionContentBlockView[];
+  return blocks
+    .filter((block) => normalizedToken(block.type) === "text")
+    .map((block) => block.text ?? "")
+    .join("");
+}
+
+function diagnosticFromCustomEntry(
+  entry: PiSessionBranchEntryView,
+  context: BranchProjectionContext
+): ChatMessage | undefined {
+  const customType = normalizedToken(entry.customType);
+  if (!customType.includes("error") && !customType.includes("diagnostic")) return undefined;
+  const data = plainObject(entry.data);
+  const text = visibleText(data?.message) || visibleText(data?.error) || displayUnknown(entry.data);
+  if (!text) return undefined;
+  const createdAt = entryTime(entry);
+  return {
+    id: entryMessageId(context.scope, entry.id),
+    role: "system",
+    itemType: "error",
+    title: "会话诊断",
+    text,
+    status: "failed",
+    runId: context.currentRunId,
+    turnId: context.currentRunId,
+    createdAt,
+    completedAt: createdAt
+  };
+}
+
+function optionalVisibleFields(data: Record<string, unknown>): {
+  readonly title?: string;
+  readonly details?: string;
+  readonly itemType?: string;
+} {
+  const title = visibleText(data.title);
+  const details = visibleText(data.details);
+  const itemType = visibleText(data.itemType);
+  return {
+    ...(title ? { title } : {}),
+    ...(details ? { details } : {}),
+    ...(itemType ? { itemType } : {})
+  };
+}
+
+function strictIdentity(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function optionalString(value: unknown): boolean {
+  return value === undefined || typeof value === "string";
+}
+
+function isFiniteTime(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function diagnosticMessage(scope: string, diagnostic: PiConversationDiagnostic): ChatMessage {
+  return {
+    id: diagnosticMessageId(scope, diagnostic.diagnosticId),
+    role: "system",
+    itemType: "error",
+    title: "会话诊断",
+    details: diagnostic.code,
+    text: diagnostic.message,
+    status: diagnostic.code === "runtime_interrupted" ? "interrupted" : "failed",
+    createdAt: diagnostic.createdAt,
+    completedAt: diagnostic.createdAt
+  };
+}
+
+function appendRehydratedTerminalMarker(
+  messages: ChatMessage[],
+  scope: string,
+  productRunId: string | undefined,
+  runState: PiChatUiRunState,
+  createdAt: number
+): void {
+  if (runState !== "failed" && runState !== "cancelled" && runState !== "interrupted") return;
+  const status = runState === "failed" ? "failed" : "interrupted";
+  const alreadyVisible = messages.some((message) =>
+    message.itemType === "error"
+    && (message.status === status || (status === "interrupted" && message.status === "cancelled"))
+  );
+  if (alreadyVisible) return;
+  const runId = productRunId ?? "rehydrated-run";
+  upsertMessage(messages, {
+    id: terminalMessageId(scope, runId),
+    role: "system",
+    itemType: "error",
+    title: runState === "failed" ? "回答失败" : runState === "cancelled" ? "回答已停止" : "上次运行已中断",
+    text: runState === "failed"
+      ? "Agent 执行失败"
+      : runState === "cancelled"
+        ? "已停止生成"
+        : "插件关闭前本轮尚未完成；这里只显示 Pi Session 中已验证的内容。",
+    status,
+    runId,
+    turnId: runId,
+    createdAt,
+    completedAt: createdAt
+  });
+}
+
+function runtimeEventIsPrivate(event: Readonly<PiChatRuntimeEvent>): boolean {
+  const dynamic = event as Readonly<PiChatRuntimeEvent> & Readonly<Record<string, unknown>>;
+  const contentKind = normalizedToken(
+    dynamic.contentKind ?? dynamic.contentType ?? dynamic.visibility
+  );
+  if (contentKind === "reasoning" || contentKind === "thinking") return true;
+  if (contentKind === "private" || contentKind === "hidden" || contentKind === "internal") return true;
+  if ("messageKey" in event) {
+    return /(^|[.:/_-])(reasoning|thinking)([.:/_-]|$)/iu.test(event.messageKey);
+  }
+  return false;
+}
+
+function toolItemType(toolName: string, args: unknown, result: unknown): string {
+  const name = normalizedToolName(toolName);
+  const hinted = visibleText(plainObject(args)?.itemType)
+    || visibleText(plainObject(result)?.itemType);
+  if (
+    hinted === "commandExecution"
+    || hinted === "fileChange"
+    || hinted === "collabAgentToolCall"
+    || hinted === "dynamicToolCall"
+    || hinted === "mcpToolCall"
+  ) return hinted;
+  if (/(^|[./_-])mcp([./_-]|$)/u.test(name)) return "mcpToolCall";
+  if (/(^|[./_-])(shell|bash|terminal|command|exec|execute|run)([./_-]|$)/u.test(name)) return "commandExecution";
+  if (/(^|[./_-])(edit|write|patch|replace|filechange)([./_-]|$)/u.test(name)) return "fileChange";
+  if (/(^|[./_-])(agent|spawn|delegate|subagent)([./_-]|$)/u.test(name)) return "collabAgentToolCall";
+  return "dynamicToolCall";
+}
+
+function toolProcessKind(toolName: string, itemType: string): ProcessEventKind {
+  if (itemType === "commandExecution") return "command";
+  if (itemType === "fileChange") return "edit";
+  const name = normalizedToolName(toolName);
+  if (/(^|[./_-])(read|open|view|cat|fetch)([./_-]|$)/u.test(name)) return "view";
+  if (/(^|[./_-])(search|grep|find|glob|lookup|list)([./_-]|$)/u.test(name)) return "search";
+  return "tool";
+}
+
+function displayUnknown(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
+    return String(value);
+  }
+  const object = plainObject(value);
+  if (object) {
+    const content = object.content;
+    if (typeof content === "string") return content;
+    if (Array.isArray(content)) {
+      const text = textFromContent(content as PiSessionContentBlockView[]);
+      if (text) return text;
+    }
+    for (const key of ["text", "output", "message", "error"]) {
+      const direct = object[key];
+      if (typeof direct === "string" && direct) return direct;
+    }
+  }
+  try {
+    return JSON.stringify(value, null, 2) ?? "";
+  } catch {
+    return "无法显示结构化结果";
+  }
+}
+
+function isCancelledResult(value: unknown): boolean {
+  const object = plainObject(value);
+  if (!object) return false;
+  return object.cancelled === true
+    || object.canceled === true
+    || normalizedToken(object.status) === "cancelled"
+    || normalizedToken(object.status) === "canceled";
+}
+
+function runtimeToolProgressStatus(
+  existing: ChatMessage | undefined,
+  update: unknown
+): string {
+  if (existing && terminalProcessStatus(existing.status)) return existing.status!;
+  const object = plainObject(update);
+  const phase = normalizedToken(object?.phase ?? object?.status);
+  return phase === "approved" ? "approved" : "running";
+}
+
+function buildRunIdentityMaps(identities: readonly PiChatUiRunIdentity[]): {
+  readonly entryRuns: ReadonlyMap<string, string>;
+  readonly toolRuns: ReadonlyMap<string, string>;
+  readonly privacySafeToolRuns: ReadonlySet<string>;
+} {
+  const entryRuns = new Map<string, string>();
+  const toolRuns = new Map<string, string>();
+  const privacySafeToolRuns = new Set<string>();
+  for (const identity of identities) {
+    if (!identity.productRunId || !identity.userEntryId) continue;
+    entryRuns.set(identity.userEntryId, identity.productRunId);
+    if (identity.assistantEntryId) entryRuns.set(identity.assistantEntryId, identity.productRunId);
+    for (const toolCallId of identity.toolCallIds ?? []) {
+      if (!toolCallId) continue;
+      toolRuns.set(toolCallId, identity.productRunId);
+      if (identity.knowledgeWorkflow) privacySafeToolRuns.add(toolCallId);
+    }
+  }
+  return { entryRuns, toolRuns, privacySafeToolRuns };
+}
+
+function projectionScope(piSessionId: string, activeLeafId: string | null): string {
+  return `pi:${encodeIdentity(piSessionId)}:leaf:${encodeIdentity(activeLeafId ?? "root")}`;
+}
+
+function entryMessageId(scope: string, entryId: string): string {
+  return `${scope}:entry:${encodeIdentity(entryId)}`;
+}
+
+function toolMessageId(scope: string, toolCallId: string): string {
+  return `${scope}:tool:${encodeIdentity(toolCallId)}`;
+}
+
+function taskPlanMessageId(scope: string, planId: string): string {
+  return `${scope}:task-plan:${encodeIdentity(planId)}`;
+}
+
+function runtimeMessageId(scope: string, messageKey: string): string {
+  return `${scope}:provisional-message:${encodeIdentity(messageKey)}`;
+}
+
+function knowledgeProgressMessageId(
+  scope: string,
+  productRunId: string,
+  stage: Extract<
+    PiChatRuntimeEvent,
+    { type: "knowledge_progress" }
+  >["stage"]
+): string {
+  return `${scope}:knowledge-progress:${encodeIdentity(productRunId)}:${stage}`;
+}
+
+function runtimeCompactionId(scope: string, runId: string, reason: string): string {
+  return `${scope}:provisional-compaction:${encodeIdentity(runId)}:${encodeIdentity(reason)}`;
+}
+
+function diagnosticMessageId(scope: string, diagnosticId: string): string {
+  return `${scope}:diagnostic:${encodeIdentity(diagnosticId)}`;
+}
+
+function branchChangeMessageId(scope: string): string {
+  return `${scope}:branch-change`;
+}
+
+function terminalMessageId(scope: string, runId: string): string {
+  return `${scope}:terminal:${encodeIdentity(runId)}`;
+}
+
+function syntheticRunId(scope: string, userEntryId: string): string {
+  return `${scope}:turn:${encodeIdentity(userEntryId)}`;
+}
+
+function projectionIdentity(id: string): { readonly kind: "entry" | "tool"; readonly value: string } | undefined {
+  const match = /:(entry|tool):([^:]+)$/u.exec(id);
+  if (!match) return undefined;
+  return {
+    kind: match[1] as "entry" | "tool",
+    value: decodeIdentity(match[2])
+  };
+}
+
+export function piEntryIdFromProjectedMessageId(
+  messageId: string
+): string | undefined {
+  const identity = projectionIdentity(messageId);
+  return identity?.kind === "entry" ? identity.value : undefined;
+}
+
+function reScopeMessageId(id: string, scope: string): string {
+  const identity = projectionIdentity(id);
+  if (identity?.kind === "entry") return entryMessageId(scope, identity.value);
+  if (identity?.kind === "tool") return toolMessageId(scope, identity.value);
+  const provisionalMessage = /:provisional-message:([^:]+)$/u.exec(id);
+  if (provisionalMessage) return runtimeMessageId(scope, decodeIdentity(provisionalMessage[1]));
+  const provisionalCompaction = /:provisional-compaction:([^:]+):([^:]+)$/u.exec(id);
+  if (provisionalCompaction) {
+    return runtimeCompactionId(
+      scope,
+      decodeIdentity(provisionalCompaction[1]),
+      decodeIdentity(provisionalCompaction[2])
+    );
+  }
+  return id;
+}
+
+function findByIdentity(
+  messages: readonly ChatMessage[],
+  kind: "entry" | "tool",
+  value: string
+): ChatMessage | undefined {
+  return messages.find((message) => {
+    const identity = projectionIdentity(message.id);
+    return identity?.kind === kind && identity.value === value;
+  });
+}
+
+function mergeResolvedMessage(existing: ChatMessage | undefined, live: ChatMessage): ChatMessage {
+  if (!existing) return live;
+  return {
+    ...live,
+    ...existing,
+    text: existing.text || live.text,
+    createdAt: Math.min(existing.createdAt, live.createdAt)
+  };
+}
+
+function upsertMessage(messages: ChatMessage[], message: ChatMessage): void {
+  const index = messages.findIndex((item) => item.id === message.id);
+  if (index >= 0) messages[index] = { ...messages[index], ...message };
+  else messages.push(message);
+}
+
+function upsertTaskPlanMessage(
+  messages: ChatMessage[],
+  scope: string,
+  plan: Readonly<EchoInkTaskPlanSnapshot>,
+  observedAt: number
+): void {
+  const id = taskPlanMessageId(scope, plan.planId);
+  const existing = messages.find(
+    (message) => message.taskPlan?.planId === plan.planId
+  );
+  if (
+    existing?.taskPlan
+    && existing.taskPlan.version > plan.version
+  ) return;
+  if (existing && existing.id !== id) removeMessage(messages, existing.id);
+  const terminal = isEchoInkTaskPlanTerminal(plan.status);
+  upsertMessage(messages, {
+    id,
+    role: "assistant",
+    itemType: "taskPlan",
+    text: "",
+    status: plan.status,
+    taskPlan: plan,
+    runId: plan.productRunId,
+    turnId: plan.productRunId,
+    createdAt: existing?.createdAt ?? plan.createdAt ?? observedAt,
+    ...(terminal ? { completedAt: plan.updatedAt } : {})
+  });
+}
+
+function removeMessage(messages: ChatMessage[], id: string): void {
+  const index = messages.findIndex((message) => message.id === id);
+  if (index >= 0) messages.splice(index, 1);
+}
+
+function dedupeMessages(messages: readonly ChatMessage[]): ChatMessage[] {
+  const result: ChatMessage[] = [];
+  for (const message of messages) upsertMessage(result, { ...message });
+  return result;
+}
+
+function cloneView(current: Readonly<PiChatUiViewModel>): PiChatUiViewModel {
+  return {
+    ...current,
+    messages: current.messages.map(cloneProjectedMessage),
+    diagnostics: current.diagnostics.map((diagnostic) => ({ ...diagnostic })),
+    queuedSteering: [...current.queuedSteering],
+    queuedFollowUp: [...current.queuedFollowUp],
+    provisionalMessageIds: [...current.provisionalMessageIds],
+    pendingToolCallIds: [...current.pendingToolCallIds]
+  };
+}
+
+function cloneProjectedMessage(message: Readonly<ChatMessage>): ChatMessage {
+  return {
+    ...message,
+    ...(message.taskPlan
+      ? {
+        taskPlan: {
+          ...message.taskPlan,
+          steps: message.taskPlan.steps.map((step) => ({ ...step }))
+        }
+      }
+      : {})
+  };
+}
+
+function addProvisional(view: PiChatUiViewModel, id: string): void {
+  if (!view.provisionalMessageIds.includes(id)) view.provisionalMessageIds.push(id);
+}
+
+function removeProvisional(view: PiChatUiViewModel, id: string): void {
+  view.provisionalMessageIds = view.provisionalMessageIds.filter((item) => item !== id);
+}
+
+function replaceProvisional(view: PiChatUiViewModel, previousId: string, nextId: string): void {
+  const hadPrevious = view.provisionalMessageIds.includes(previousId);
+  removeProvisional(view, previousId);
+  if (hadPrevious || previousId === nextId) addProvisional(view, nextId);
+}
+
+function addPendingTool(view: PiChatUiViewModel, toolCallId: string): void {
+  if (!view.pendingToolCallIds.includes(toolCallId)) view.pendingToolCallIds.push(toolCallId);
+}
+
+function removePendingTool(view: PiChatUiViewModel, toolCallId: string): void {
+  view.pendingToolCallIds = view.pendingToolCallIds.filter((item) => item !== toolCallId);
+}
+
+function dedupeDiagnostics(
+  diagnostics: readonly PiConversationDiagnostic[]
+): PiConversationDiagnostic[] {
+  const byId = new Map<string, PiConversationDiagnostic>();
+  for (const diagnostic of diagnostics) byId.set(diagnostic.diagnosticId, { ...diagnostic });
+  return Array.from(byId.values()).sort((left, right) => left.createdAt - right.createdAt);
+}
+
+function normalizedRole(value: string): string {
+  return normalizedToken(value);
+}
+
+function normalizedToken(value: unknown): string {
+  return typeof value === "string"
+    ? value.trim().toLowerCase().replace(/[^a-z0-9]+/gu, "")
+    : "";
+}
+
+function normalizedToolName(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/gu, "_");
+}
+
+function visibleText(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function plainObject(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function entryTime(entry: PiSessionBranchEntryView): number {
+  const parsed = Date.parse(entry.timestamp);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function messageTime(message: PiSessionMessageView, fallback: number): number {
+  return finiteTime(message.timestamp, fallback);
+}
+
+function finiteTime(value: number | undefined, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+function latestProjectionTime(
+  messages: readonly ChatMessage[],
+  diagnostics: readonly PiConversationDiagnostic[],
+  fallback: number
+): number {
+  return Math.max(
+    fallback,
+    ...messages.map((message) => message.completedAt ?? message.createdAt),
+    ...diagnostics.map((diagnostic) => diagnostic.createdAt)
+  );
+}
+
+function runtimeMessageStatus(status: "completed" | "failed" | "cancelled" | undefined): string {
+  if (status === "failed") return "failed";
+  if (status === "cancelled") return "interrupted";
+  return "completed";
+}
+
+function runtimeEmptyMessageText(role: "user" | "assistant", status: string): string {
+  if (role === "user") return "";
+  if (status === "failed") return "Agent 执行失败";
+  if (status === "interrupted") return "已停止生成";
+  return "";
+}
+
+function memoryRecallStageText(
+  stage: Extract<PiChatRuntimeEvent, { type: "memory_recall_progress" }>["stage"]
+): string {
+  switch (stage) {
+    case "loading": return "正在读取 Memory 真源";
+    case "catalog": return "正在核对完整 Memory 索引";
+    case "matching": return "正在寻找相关历史";
+    case "budgeting": return "正在按上下文预算筛选";
+    case "assembling": return "正在组装本轮 Recall 上下文";
+  }
+}
+
+function knowledgeProgressCopy(
+  stage: Extract<
+    PiChatRuntimeEvent,
+    { type: "knowledge_progress" }
+  >["stage"]
+): Readonly<{ title: string; text: string }> {
+  switch (stage) {
+    case "searching":
+      return { title: "正在检索知识库", text: "正在查找相关本地知识" };
+    case "continuing_search":
+      return { title: "正在继续查找", text: "当前证据不足，继续读取后续结果" };
+    case "reading_knowledge":
+      return { title: "正在读取相关笔记", text: "正在核对可引用的真实内容" };
+    case "comparing_memory":
+      return { title: "正在比对历史偏好", text: "正在核对相关 Personal Memory" };
+    case "checking_conflicts_freshness":
+      return { title: "正在检查冲突与时效", text: "已发现来源变化或时效冲突信号" };
+    case "refining_knowledge":
+      return { title: "正在提炼知识", text: "正在锁定来源、核对冲突并生成知识候选" };
+    case "writing_and_readback":
+      return { title: "正在写入并回读", text: "正在通过 WAL 与 CAS 安全写入并核对最终文件" };
+  }
+}
+
+function privacySafeKnowledgeToolCopy(
+  toolName: string,
+  status: string
+): Readonly<{
+  processKind: ProcessEventKind;
+  title: string;
+  details: string;
+  text: string;
+}> | null {
+  const terminal = status !== "running" && status !== "waiting_approval"
+    && status !== "approved" && status !== "verifying";
+  switch (toolName) {
+    case "knowledge_search":
+    case "vault_search":
+      return {
+        processKind: "search",
+        title: terminal ? "知识库检索完成" : "正在检索知识库",
+        details: "Knowledge 索引",
+        text: terminal ? "已完成本次知识库检索" : "正在查找相关本地知识"
+      };
+    case "knowledge_read":
+    case "note_read":
+      return {
+        processKind: "view",
+        title: terminal ? "相关笔记读取完成" : "正在读取相关笔记",
+        details: "只读笔记",
+        text: terminal ? "已完成本次只读核对" : "正在核对可引用的真实内容"
+      };
+    case "memory_search":
+    case "memory_read":
+      return {
+        processKind: toolName === "memory_search" ? "search" : "view",
+        title: terminal ? "历史偏好比对完成" : "正在比对历史偏好",
+        details: "只读 Personal Memory",
+        text: terminal ? "已完成本次历史偏好核对" : "正在核对相关 Personal Memory"
+      };
+    case "knowledge_maintain":
+      return {
+        processKind: "other",
+        title: terminal ? "知识维护处理完成" : "正在处理知识维护",
+        details: "固定六步协议",
+        text: terminal ? "已完成本次维护 Tool" : "正在提炼、写入并回读验证"
+      };
+    default:
+      return {
+        processKind: "other",
+        title: terminal ? "Knowledge Agent 工具完成" : "Knowledge Agent 正在处理",
+        details: "隐私安全进度",
+        text: terminal ? "已完成本次受控处理" : "正在执行受控本地步骤"
+      };
+  }
+}
+
+function removeRuntimeProgressMessages(
+  view: PiChatUiViewModel,
+  scope: string,
+  productRunId: string
+): void {
+  removeMessage(view.messages, `${scope}:memory-recall:${productRunId}`);
+  view.messages = view.messages.filter((message) =>
+    !message.id.startsWith(
+      `${scope}:knowledge-progress:${encodeIdentity(productRunId)}:`
+    )
+  );
+}
+
+function terminalProcessStatus(status: string | undefined): boolean {
+  return status === "completed"
+    || status === "failed"
+    || status === "cancelled"
+    || status === "denied"
+    || status === "uncertain"
+    || status === "interrupted"
+    || status === "unconfirmed";
+}
+
+function runtimeMessageStillActive(status: string | undefined): boolean {
+  return status === "running"
+    || status === "waiting_approval"
+    || status === "approved"
+    || status === "verifying";
+}
+
+function isActiveRunState(state: PiChatUiRunState): boolean {
+  return state === "running" || state === "finalizing";
+}
+
+function compactionReasonLabel(reason: "manual" | "threshold" | "overflow"): string {
+  if (reason === "overflow") return "上下文溢出恢复";
+  if (reason === "threshold") return "达到模型上下文阈值";
+  return "手动压缩";
+}
+
+function uniqueStrings(values: readonly string[]): string[] {
+  return Array.from(new Set(values.filter(Boolean)));
+}
+
+function requireIdentity(value: string, label: string): string {
+  const normalized = value.trim();
+  if (!normalized) throw new Error(`${label} must be a non-empty string`);
+  return normalized;
+}
+
+function requireLooseIdentity(value: string | undefined, fallback: string): string {
+  return visibleText(value) || fallback;
+}
+
+function encodeIdentity(value: string): string {
+  return encodeURIComponent(value);
+}
+
+function decodeIdentity(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}

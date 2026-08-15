@@ -1,43 +1,48 @@
 import type {
-  EchoInkMcpBrokerSettings,
   EchoInkMcpConnectionConfig,
   EchoInkMcpConnectionRecords,
-  EchoInkMcpToolCallLogEntry,
-  EchoInkResource,
-  EchoInkResourceScope
+  EchoInkResource
 } from "./types";
 import { resolveMcpConnectionConfig } from "./mcp-connections";
 import { swallowError } from "../core/error-handling";
-import { JsonRpcStdioTransport, type JsonRpcMessage, type JsonRpcStdioLaunch } from "../core/json-rpc-stdio-transport";
+import { JsonRpcStdioTransport, type JsonRpcMessage, type JsonRpcStdioLaunch } from "./json-rpc-stdio-transport";
 
 export interface EchoInkMcpBrokerInvocation {
   resource: EchoInkResource;
-  scope: EchoInkResourceScope;
-  backend: string;
   toolName: string;
   arguments?: Record<string, unknown>;
   timeoutMs?: number;
-}
-
-export interface EchoInkMcpBrokerApprovalRequest {
-  resource: EchoInkResource;
-  scope: EchoInkResourceScope;
-  backend: string;
-  toolName: string;
-  arguments?: Record<string, unknown>;
+  signal?: AbortSignal;
 }
 
 export interface EchoInkMcpBrokerTransport {
-  request(method: string, params?: Record<string, unknown>, timeoutMs?: number): Promise<unknown>;
-  notify?(method: string, params?: Record<string, unknown>): Promise<void>;
+  request(
+    method: string,
+    params?: Record<string, unknown>,
+    timeoutMs?: number,
+    signal?: AbortSignal
+  ): Promise<unknown>;
+  notify?(
+    method: string,
+    params?: Record<string, unknown>,
+    signal?: AbortSignal
+  ): Promise<void>;
   close(): Promise<void>;
 }
 
 export interface EchoInkMcpBrokerOptions {
-  settings: EchoInkMcpBrokerSettings;
   connections?: EchoInkMcpConnectionRecords;
-  approval?: (request: EchoInkMcpBrokerApprovalRequest) => Promise<boolean>;
   transportFactory?: (config: EchoInkMcpConnectionConfig) => Promise<EchoInkMcpBrokerTransport>;
+  /** Resolves a SecretStorage reference into an ephemeral transport config. */
+  credentialResolver?: (
+    resource: EchoInkResource,
+    config: EchoInkMcpConnectionConfig
+  ) => Promise<EchoInkMcpConnectionConfig>;
+  /** Must contain only display-safe config identity, never the secret value. */
+  transportPoolKey?: (
+    resource: EchoInkResource,
+    config: EchoInkMcpConnectionConfig
+  ) => string;
 }
 
 export interface EchoInkMcpBrokerResult {
@@ -50,17 +55,22 @@ export interface EchoInkMcpToolListResult {
 
 const transportPool = new Map<string, Promise<EchoInkMcpBrokerTransport>>();
 
-export function defaultMcpBrokerSettings(): EchoInkMcpBrokerSettings {
-  return { approvalMode: "ask", callLog: [] };
-}
+export type EchoInkMcpBrokerErrorCode =
+  | "connection_failed"
+  | "authentication_failed"
+  | "schema_invalid"
+  | "disconnected"
+  | "timeout"
+  | "call_failed";
 
-export function normalizeMcpBrokerSettings(value: any): EchoInkMcpBrokerSettings {
-  return {
-    approvalMode: value?.approvalMode === "deny" ? "deny" : "ask",
-    callLog: Array.isArray(value?.callLog)
-      ? value.callLog.map(normalizeMcpToolCallLogEntry).filter((item: EchoInkMcpToolCallLogEntry | null): item is EchoInkMcpToolCallLogEntry => Boolean(item)).slice(-100)
-      : []
-  };
+export class EchoInkMcpBrokerError extends Error {
+  constructor(
+    readonly code: EchoInkMcpBrokerErrorCode,
+    safeMessage: string
+  ) {
+    super(safeMessage);
+    this.name = "EchoInkMcpBrokerError";
+  }
 }
 
 export function mcpBrokerConnectionConfig(resource: EchoInkResource): EchoInkMcpConnectionConfig | null {
@@ -79,64 +89,87 @@ export function mcpBrokerResourceStatus(resource: EchoInkResource, connections?:
 export class EchoInkMcpBroker {
   constructor(private readonly options: EchoInkMcpBrokerOptions) {}
 
-  async listTools(resource: EchoInkResource, timeoutMs = 30000): Promise<EchoInkMcpToolListResult> {
-    const config = resolveMcpConnectionConfig(resource, { mcpConnections: this.options.connections ?? {} } as any);
-    if (!config) throw new Error("MCP 资源没有 EchoInk broker 连接配置。");
-    const transport = await getPooledMcpTransport(config, this.options.transportFactory ?? createDefaultMcpTransport, timeoutMs);
+  async listTools(
+    resource: EchoInkResource,
+    timeoutMs = 30000,
+    signal?: AbortSignal
+  ): Promise<EchoInkMcpToolListResult> {
+    const publicConfig = resolveMcpConnectionConfig(resource, { mcpConnections: this.options.connections ?? {} } as any);
+    if (!publicConfig) throw brokerError("connection_failed", "MCP 资源没有 EchoInk broker 连接配置。");
+    const config = await this.resolveRuntimeConfig(resource, publicConfig);
+    throwIfMcpAborted(signal);
     try {
-      const result = await transport.request("tools/list", {}, timeoutMs);
-      const tools = Array.isArray((result as any)?.tools) ? (result as any).tools : [];
+      const transport = await getPooledMcpTransport(
+        config,
+        this.options.transportFactory ?? createDefaultMcpTransport,
+        timeoutMs,
+        signal,
+        this.poolKey(resource, publicConfig)
+      );
+      throwIfMcpAborted(signal);
+      const result = await transport.request(
+        "tools/list",
+        {},
+        timeoutMs,
+        signal
+      );
+      if (!result || typeof result !== "object" || !Array.isArray((result as any).tools)) {
+        throw brokerError("schema_invalid", "MCP tools/list 返回了非法 Schema。");
+      }
+      const tools = (result as any).tools;
       return { tools };
     } catch (error) {
-      await closePooledMcpTransport(config, "close MCP broker transport after listTools failure");
-      throw error;
+      await closePooledMcpTransport(config, "close MCP broker transport after listTools failure", this.poolKey(resource, publicConfig));
+      throw normalizeBrokerError(error, "connection_failed");
     }
   }
 
   async callTool(invocation: EchoInkMcpBrokerInvocation): Promise<EchoInkMcpBrokerResult> {
-    const config = resolveMcpConnectionConfig(invocation.resource, { mcpConnections: this.options.connections ?? {} } as any);
-    if (!config) {
-      this.record(invocation, "failed", "MCP 资源没有 EchoInk broker 连接配置。");
-      throw new Error("MCP 资源没有 EchoInk broker 连接配置。");
+    const publicConfig = resolveMcpConnectionConfig(invocation.resource, { mcpConnections: this.options.connections ?? {} } as any);
+    if (!publicConfig) {
+      throw brokerError("connection_failed", "MCP 资源没有 EchoInk broker 连接配置。");
     }
-    if (this.options.settings.approvalMode === "deny") {
-      this.record(invocation, "denied", "MCP broker 审批模式为拒绝。");
-      throw new Error("MCP broker 审批模式为拒绝。");
-    }
-    const approved = this.options.approval ? await this.options.approval(invocation) : false;
-    if (!approved) {
-      this.record(invocation, "denied", "用户未批准 MCP 工具调用。");
-      throw new Error("用户未批准 MCP 工具调用。");
-    }
-    this.record(invocation, "approved", "MCP 工具调用已批准。");
-    const transport = await getPooledMcpTransport(config, this.options.transportFactory ?? createDefaultMcpTransport, invocation.timeoutMs);
+    const config = await this.resolveRuntimeConfig(invocation.resource, publicConfig);
+    throwIfMcpAborted(invocation.signal);
     try {
-      const content = await transport.request("tools/call", {
-        name: invocation.toolName,
-        arguments: invocation.arguments ?? {}
-      }, invocation.timeoutMs);
-      this.record(invocation, "completed", "MCP 工具调用完成。");
+      const transport = await getPooledMcpTransport(
+        config,
+        this.options.transportFactory ?? createDefaultMcpTransport,
+        invocation.timeoutMs,
+        invocation.signal,
+        this.poolKey(invocation.resource, publicConfig)
+      );
+      const content = await transport.request(
+        "tools/call",
+        {
+          name: invocation.toolName,
+          arguments: invocation.arguments ?? {}
+        },
+        invocation.timeoutMs ?? 30000,
+        invocation.signal
+      );
       return { content };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.record(invocation, "failed", message);
-      await closePooledMcpTransport(config, "close MCP broker transport after callTool failure");
-      throw error;
+      await closePooledMcpTransport(config, "close MCP broker transport after callTool failure", this.poolKey(invocation.resource, publicConfig));
+      throw normalizeBrokerError(error, "call_failed");
     }
   }
 
-  private record(invocation: EchoInkMcpBrokerInvocation, status: EchoInkMcpToolCallLogEntry["status"], message: string): void {
-    recordMcpToolCall(this.options.settings, {
-      id: `mcp-call-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      createdAt: Date.now(),
-      resourceId: invocation.resource.id,
-      resourceName: invocation.resource.name,
-      scope: invocation.scope,
-      backend: invocation.backend,
-      toolName: invocation.toolName,
-      status,
-      message
-    });
+  private async resolveRuntimeConfig(
+    resource: EchoInkResource,
+    config: EchoInkMcpConnectionConfig
+  ): Promise<EchoInkMcpConnectionConfig> {
+    if (!this.options.credentialResolver) return config;
+    try {
+      return await this.options.credentialResolver(resource, config);
+    } catch (error) {
+      throw normalizeBrokerError(error, "authentication_failed");
+    }
+  }
+
+  private poolKey(resource: EchoInkResource, config: EchoInkMcpConnectionConfig): string {
+    return this.options.transportPoolKey?.(resource, config)
+      ?? mcpTransportPoolKey(config);
   }
 }
 
@@ -153,28 +186,39 @@ export async function closeMcpBrokerConnectionPool(): Promise<void> {
 async function getPooledMcpTransport(
   config: EchoInkMcpConnectionConfig,
   transportFactory: (config: EchoInkMcpConnectionConfig) => Promise<EchoInkMcpBrokerTransport>,
-  timeoutMs = 30000
+  timeoutMs = 30000,
+  signal?: AbortSignal,
+  safePoolKey?: string
 ): Promise<EchoInkMcpBrokerTransport> {
-  const key = mcpTransportPoolKey(config);
+  throwIfMcpAborted(signal);
+  const key = safePoolKey ?? mcpTransportPoolKey(config);
   let transportPromise = transportPool.get(key);
   if (!transportPromise) {
-    transportPromise = createInitializedMcpTransport(config, transportFactory, timeoutMs);
+    transportPromise = createInitializedMcpTransport(
+      config,
+      transportFactory,
+      timeoutMs,
+      signal
+    );
     transportPool.set(key, transportPromise);
     transportPromise.catch(() => {
       if (transportPool.get(key) === transportPromise) transportPool.delete(key);
     });
   }
-  return transportPromise;
+  const transport = await transportPromise;
+  throwIfMcpAborted(signal);
+  return transport;
 }
 
 async function createInitializedMcpTransport(
   config: EchoInkMcpConnectionConfig,
   transportFactory: (config: EchoInkMcpConnectionConfig) => Promise<EchoInkMcpBrokerTransport>,
-  timeoutMs: number
+  timeoutMs: number,
+  signal?: AbortSignal
 ): Promise<EchoInkMcpBrokerTransport> {
   const transport = await transportFactory(config);
   try {
-    await initializeMcpClient(transport, timeoutMs);
+    await initializeMcpClient(transport, timeoutMs, signal);
     return transport;
   } catch (error) {
     await transport.close().catch(swallowError("close MCP broker transport after initialize failure"));
@@ -182,8 +226,12 @@ async function createInitializedMcpTransport(
   }
 }
 
-async function closePooledMcpTransport(config: EchoInkMcpConnectionConfig, context: string): Promise<void> {
-  const key = mcpTransportPoolKey(config);
+async function closePooledMcpTransport(
+  config: EchoInkMcpConnectionConfig,
+  context: string,
+  safePoolKey?: string
+): Promise<void> {
+  const key = safePoolKey ?? mcpTransportPoolKey(config);
   const transportPromise = transportPool.get(key);
   if (!transportPromise) return;
   transportPool.delete(key);
@@ -205,17 +253,23 @@ function stableJson(value: unknown): unknown {
   );
 }
 
-async function initializeMcpClient(transport: EchoInkMcpBrokerTransport, timeoutMs = 30000): Promise<void> {
-  await transport.request("initialize", {
-    protocolVersion: "2025-06-18",
-    capabilities: {},
-    clientInfo: { name: "EchoInk", version: "1.0.0" }
-  }, timeoutMs);
-  await transport.notify?.("notifications/initialized", {});
-}
-
-export function recordMcpToolCall(settings: EchoInkMcpBrokerSettings, entry: EchoInkMcpToolCallLogEntry): void {
-  settings.callLog = [...(settings.callLog ?? []), entry].slice(-100);
+async function initializeMcpClient(
+  transport: EchoInkMcpBrokerTransport,
+  timeoutMs = 30000,
+  signal?: AbortSignal
+): Promise<void> {
+  await transport.request(
+    "initialize",
+    {
+      protocolVersion: "2025-06-18",
+      capabilities: {},
+      clientInfo: { name: "EchoInk", version: "1.0.0" }
+    },
+    timeoutMs,
+    signal
+  );
+  throwIfMcpAborted(signal);
+  await transport.notify?.("notifications/initialized", {}, signal);
 }
 
 async function createDefaultMcpTransport(config: EchoInkMcpConnectionConfig): Promise<EchoInkMcpBrokerTransport> {
@@ -225,35 +279,94 @@ async function createDefaultMcpTransport(config: EchoInkMcpConnectionConfig): Pr
 
 class HttpMcpTransport implements EchoInkMcpBrokerTransport {
   private nextId = 1;
+  private sessionId = "";
   constructor(private readonly config: Extract<EchoInkMcpConnectionConfig, { transport: "http" }>) {}
 
-  async request(method: string, params?: Record<string, unknown>, timeoutMs = 30000): Promise<unknown> {
+  async request(
+    method: string,
+    params?: Record<string, unknown>,
+    timeoutMs = 30000,
+    signal?: AbortSignal
+  ): Promise<unknown> {
+    throwIfMcpAborted(signal);
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const onAbort = () => controller.abort();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
     try {
       const response = await fetch(this.config.url, {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...(this.config.headers ?? {}) },
+        headers: this.headers(),
         body: JSON.stringify({ jsonrpc: "2.0", id: this.nextId++, method, params: params ?? {} }),
         signal: controller.signal
       });
-      const data = await response.json();
-      if (!response.ok || data?.error) throw new Error(String(data?.error?.message ?? `MCP HTTP ${response.status}`));
+      if (response.status === 401 || response.status === 403) {
+        throw brokerError("authentication_failed", "MCP 认证失败，请检查 Credential。 ");
+      }
+      if (!response.ok) {
+        throw brokerError("connection_failed", `MCP HTTP ${response.status}。`);
+      }
+      const returnedSessionId = response.headers.get("mcp-session-id")?.trim() ?? "";
+      if (returnedSessionId) {
+        if (!/^[\x21-\x7e]{1,256}$/u.test(returnedSessionId)) {
+          throw brokerError("schema_invalid", "MCP Server 返回了非法 Session ID。");
+        }
+        this.sessionId = returnedSessionId;
+      }
+      const data = await parseMcpHttpResponse(response);
+      if (data?.error) {
+        throw brokerError("call_failed", safeJsonRpcError(data.error));
+      }
       return data?.result;
+    } catch (error) {
+      if (timedOut) throw brokerError("timeout", `MCP 请求超时：${method}。`);
+      if (signal?.aborted) throw mcpAbortError();
+      throw normalizeBrokerError(error, "connection_failed");
     } finally {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
     }
   }
 
-  async notify(method: string, params?: Record<string, unknown>): Promise<void> {
-    await fetch(this.config.url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...(this.config.headers ?? {}) },
-      body: JSON.stringify({ jsonrpc: "2.0", method, params: params ?? {} })
-    }).catch(swallowError("send HTTP MCP notification"));
+  async notify(
+    method: string,
+    params?: Record<string, unknown>,
+    signal?: AbortSignal
+  ): Promise<void> {
+    throwIfMcpAborted(signal);
+    try {
+      const response = await fetch(this.config.url, {
+        method: "POST",
+        headers: this.headers(),
+        body: JSON.stringify({ jsonrpc: "2.0", method, params: params ?? {} }),
+        signal
+      });
+      if (response.status === 401 || response.status === 403) {
+        throw brokerError("authentication_failed", "MCP 认证失败，请检查 Credential。");
+      }
+      if (!response.ok && response.status !== 202) {
+        throw brokerError("connection_failed", `MCP HTTP ${response.status}。`);
+      }
+    } catch (error) {
+      throwIfMcpAborted(signal);
+      throw normalizeBrokerError(error, "connection_failed");
+    }
   }
 
   async close(): Promise<void> {}
+
+  private headers(): Record<string, string> {
+    return {
+      "Content-Type": "application/json",
+      Accept: "application/json, text/event-stream",
+      ...(this.sessionId ? { "Mcp-Session-Id": this.sessionId } : {}),
+      ...(this.config.headers ?? {})
+    };
+  }
 }
 
 class StdioMcpTransport extends JsonRpcStdioTransport implements EchoInkMcpBrokerTransport {
@@ -282,11 +395,60 @@ class StdioMcpTransport extends JsonRpcStdioTransport implements EchoInkMcpBroke
     };
   }
 
-  async request<T = unknown>(method: string, params?: Record<string, unknown>, timeoutMs = 30000): Promise<T> {
-    return await super.request<T>(method, params ?? {}, timeoutMs);
+  request<T = unknown>(
+    method: string,
+    params?: unknown,
+    timeoutMs?: number,
+    onWritten?: () => void
+  ): Promise<T>;
+  request<T = unknown>(
+    method: string,
+    params: Record<string, unknown>,
+    timeoutMs: number,
+    signal: AbortSignal
+  ): Promise<T>;
+  async request<T = unknown>(
+    method: string,
+    params: unknown = {},
+    timeoutMs = 30000,
+    completion?: (() => void) | AbortSignal
+  ): Promise<T> {
+    if (typeof completion === "function") {
+      return await super.request<T>(
+        method,
+        params,
+        timeoutMs,
+        completion
+      );
+    }
+    const signal = completion;
+    if (!signal) {
+      return await super.request<T>(method, params, timeoutMs);
+    }
+    throwIfMcpAborted(signal);
+    const operation = super.request<T>(method, params, timeoutMs);
+    let rejectAbort!: (error: Error) => void;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      rejectAbort = reject;
+    });
+    const onAbort = () => {
+      void this.dispose();
+      rejectAbort(mcpAbortError());
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      return await Promise.race([operation, aborted]);
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+    }
   }
 
-  async notify(method: string, params?: Record<string, unknown>): Promise<void> {
+  async notify(
+    method: string,
+    params?: Record<string, unknown>,
+    signal?: AbortSignal
+  ): Promise<void> {
+    throwIfMcpAborted(signal);
     super.notify(method, params ?? {});
   }
 
@@ -299,22 +461,82 @@ class StdioMcpTransport extends JsonRpcStdioTransport implements EchoInkMcpBroke
   }
 
   protected formatResponseError(message: JsonRpcMessage): Error {
-    return new Error(String(message.error?.message ?? "MCP request failed"));
+    return normalizeBrokerError(
+      new Error(safeJsonRpcError(message.error)),
+      "call_failed"
+    );
   }
 }
 
-function normalizeMcpToolCallLogEntry(value: any): EchoInkMcpToolCallLogEntry | null {
-  if (!value || typeof value !== "object" || typeof value.resourceId !== "string" || typeof value.toolName !== "string") return null;
-  const status = value.status === "approved" || value.status === "denied" || value.status === "completed" || value.status === "failed" ? value.status : "failed";
-  return {
-    id: typeof value.id === "string" ? value.id : `mcp-call-${Date.now()}`,
-    createdAt: typeof value.createdAt === "number" && Number.isFinite(value.createdAt) ? Math.max(0, value.createdAt) : Date.now(),
-    resourceId: value.resourceId,
-    resourceName: typeof value.resourceName === "string" ? value.resourceName : value.resourceId,
-    scope: value.scope === "chat" || value.scope === "knowledge" || value.scope === "editor-actions" ? value.scope : "chat",
-    backend: typeof value.backend === "string" ? value.backend : "",
-    toolName: value.toolName,
-    status,
-    message: typeof value.message === "string" ? value.message : ""
-  };
+async function parseMcpHttpResponse(response: Response): Promise<any> {
+  const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+  const text = await response.text();
+  if (!text.trim()) {
+    throw brokerError("schema_invalid", "MCP Server 返回了空响应。");
+  }
+  try {
+    if (contentType.includes("text/event-stream")) {
+      const payloads = text.split(/\r?\n/u)
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trim())
+        .filter((line) => line && line !== "[DONE]");
+      if (!payloads.length) {
+        throw brokerError("schema_invalid", "MCP SSE 响应没有 JSON-RPC data 事件。");
+      }
+      return JSON.parse(payloads[payloads.length - 1]);
+    }
+    return JSON.parse(text);
+  } catch (error) {
+    if (error instanceof EchoInkMcpBrokerError) throw error;
+    throw brokerError("schema_invalid", "MCP Server 返回了无法解析的 JSON-RPC 响应。");
+  }
+}
+
+function safeJsonRpcError(error: unknown): string {
+  const record = error && typeof error === "object" && !Array.isArray(error)
+    ? error as Record<string, unknown>
+    : null;
+  const raw = typeof record?.message === "string" ? record.message : "MCP request failed";
+  return sanitizeSingleLine(raw).slice(0, 300) || "MCP request failed";
+}
+
+function normalizeBrokerError(
+  error: unknown,
+  fallback: EchoInkMcpBrokerErrorCode
+): EchoInkMcpBrokerError | Error {
+  if (error instanceof EchoInkMcpBrokerError) return error;
+  if (error instanceof Error && error.name === "AbortError") return error;
+  const message = error instanceof Error ? error.message : String(error);
+  const safe = sanitizeSingleLine(message).slice(0, 300);
+  if (/unauthori[sz]ed|forbidden|authentication|credential|\b401\b|\b403\b/iu.test(safe)) {
+    return brokerError("authentication_failed", "MCP 认证失败，请检查 Credential。");
+  }
+  if (/timed? out|timeout/iu.test(safe)) {
+    return brokerError("timeout", "MCP 请求超时。");
+  }
+  if (/closed|exited|broken pipe|econnreset|disconnected/iu.test(safe)) {
+    return brokerError("disconnected", "MCP Server 已断线。");
+  }
+  return brokerError(fallback, safe || "MCP 请求失败。");
+}
+
+function sanitizeSingleLine(value: string): string {
+  return value.replaceAll("\u0000", " ").replace(/[\r\n]+/gu, " ").trim();
+}
+
+function brokerError(
+  code: EchoInkMcpBrokerErrorCode,
+  message: string
+): EchoInkMcpBrokerError {
+  return new EchoInkMcpBrokerError(code, message.trim());
+}
+
+function throwIfMcpAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw mcpAbortError();
+}
+
+function mcpAbortError(): Error {
+  const error = new Error("MCP 工具调用已取消。");
+  error.name = "AbortError";
+  return error;
 }

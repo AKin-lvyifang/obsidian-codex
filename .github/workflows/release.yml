@@ -110,33 +110,47 @@ jobs:
             exit 1
           fi
 
-          notes="docs/releases/$manifest_version.md"
-          if [ ! -f "$notes" ]; then
+          notes=".tmp/release-notes-$manifest_version.md"
+          if ! node - "$manifest_version" "$notes" <<'NODE'
+          const fs = require("fs");
+          const version = process.argv[2];
+          const output = process.argv[3];
+          const source = fs.readFileSync("CHANGELOG.md", "utf8");
+          const escaped = version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          const heading = new RegExp(`^## v?${escaped}(?: - .*)?$`, "m");
+          const match = heading.exec(source);
+          if (!match) process.exit(2);
+          const start = match.index;
+          const rest = source.slice(start + match[0].length);
+          const next = /^## /m.exec(rest);
+          const end = next ? start + match[0].length + next.index : source.length;
+          fs.mkdirSync(require("path").dirname(output), { recursive: true });
+          fs.writeFileSync(output, source.slice(start, end).trimEnd() + "\n");
+          NODE
+          then
             if [ "$ALLOW_MISSING_RELEASE_NOTES" = "true" ]; then
               echo "RELEASE_NOTES_FILE=" >> "$GITHUB_ENV"
-              echo "Historical rebuild: no release notes file found for $manifest_version."
+              echo "Historical rebuild: no matching CHANGELOG section found for $manifest_version."
               exit 0
             fi
-            echo "Missing $notes. Every new Release must include structured notes and a hero image."
+            echo "CHANGELOG.md must contain a section for $manifest_version with bilingual notes and a hero image."
             exit 1
           fi
 
-          grep -qx "## v$manifest_version" "$notes" || {
-            echo "$notes must start with the version heading: ## v$manifest_version"
+          grep -Eq "^## v?$manifest_version( - .*)?$" "$notes" || {
+            echo "$notes must start with the version heading for $manifest_version."
             exit 1
           }
-          grep -q '^### 中文$' "$notes" || {
+          zh_line="$(grep -n -m1 '^### 中文$' "$notes" | cut -d: -f1)"
+          en_line="$(grep -n -m1 '^### English$' "$notes" | cut -d: -f1)"
+          if [ -z "$zh_line" ] || [ -z "$en_line" ] || [ "$zh_line" -ge "$en_line" ]; then
             echo "$notes must contain the Chinese section before English."
             exit 1
-          }
-          grep -q '^### English$' "$notes" || {
-            echo "$notes must contain an English section."
-            exit 1
-          }
+          fi
 
-          hero_path="$(sed -n 's#.*raw.githubusercontent.com/AKin-lvyifang/codex-echoink/main/\(docs/images/[^)]*\)).*#\1#p' "$notes" | head -n 1)"
+          hero_path="$(sed -n 's#.*raw.githubusercontent.com/AKin-lvyifang/codex-echoink/[^/]*/\(assets/releases/[^)]*\)).*#\1#p' "$notes" | head -n 1)"
           if [ -z "$hero_path" ] || [ ! -f "$hero_path" ]; then
-            echo "$notes must reference a tracked Release hero under docs/images/."
+            echo "$notes must reference a tracked Release hero under assets/releases/."
             exit 1
           fi
           echo "RELEASE_NOTES_FILE=$notes" >> "$GITHUB_ENV"

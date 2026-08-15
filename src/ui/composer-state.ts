@@ -2,7 +2,7 @@ export type ComposerPrimaryAction = "send" | "enqueue" | "resume-queue" | "stop-
 
 export interface ComposerPrimaryActionState {
   viewRunning: boolean;
-  viewRunKind?: "chat" | "knowledge-base" | "editor" | "";
+  viewRunKind?: "chat" | "editor" | "";
   knowledgeTaskRunning: boolean;
   hasDraft?: boolean;
   hasQueuedItems?: boolean;
@@ -10,7 +10,7 @@ export interface ComposerPrimaryActionState {
 
 export interface ComposerRuntimeActionState {
   viewRunning: boolean;
-  viewRunKind?: "chat" | "knowledge-base" | "editor" | "";
+  viewRunKind?: "chat" | "editor" | "";
   globalKnowledgeTaskRunning: boolean;
   hasDraft?: boolean;
   hasQueuedItems?: boolean;
@@ -36,9 +36,8 @@ export function composerIsBusy(state: ComposerPrimaryActionState): boolean {
 
 export function composerPrimaryActionForState(state: ComposerPrimaryActionState): ComposerPrimaryAction {
   if (composerIsBusy(state) && state.hasDraft) return "enqueue";
-  if (state.viewRunning && state.viewRunKind !== "knowledge-base") return "stop-turn";
-  if (state.knowledgeTaskRunning) return "cancel-knowledge-task";
   if (state.viewRunning) return "stop-turn";
+  if (state.knowledgeTaskRunning) return "cancel-knowledge-task";
   if (state.hasQueuedItems && state.hasDraft) return "enqueue";
   if (state.hasQueuedItems) return "resume-queue";
   return "send";

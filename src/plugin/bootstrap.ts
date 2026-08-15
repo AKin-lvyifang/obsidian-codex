@@ -1,16 +1,18 @@
 import { Notice, type WorkspaceLeaf } from "obsidian";
 import type CodexForObsidianPlugin from "../main";
-import { EditorActionController } from "../editor-actions/controller";
 import { EchoInkHomeView, VIEW_TYPE_ECHOINK_HOME } from "../home/home-view";
-import { KnowledgeBaseManager } from "../knowledge-base/manager";
+import { EchoInkKnowledgeSurfaceService } from "./knowledge-surface-service";
 import { ReviewManager } from "../review/manager";
 import { ReviewPreviewView, VIEW_TYPE_REVIEW_PREVIEW } from "../review/preview-view";
 import { CodexSettingTab } from "../settings/settings-tab";
 import { CodexView, VIEW_TYPE_CODEX } from "../ui/codex-view";
+import {
+  captureTranslationSelection,
+  replaceTranslationSelectionIfUnchanged
+} from "../editor-actions/translation-selection";
 
 export interface EchoInkPluginControllers {
-  editorActions: EditorActionController;
-  knowledgeBase: KnowledgeBaseManager;
+  knowledgeBase: EchoInkKnowledgeSurfaceService;
   review: ReviewManager;
 }
 
@@ -41,23 +43,43 @@ export function registerEchoInkPluginFeatures(plugin: CodexForObsidianPlugin): E
       new Notice("已打开 EchoInk Agent，可点击 + 新建会话");
     }
   });
-  plugin.addCommand({
-    id: "test-hermes-connection",
-    name: "Agent：检测 Hermes 后端",
-    callback: () => void plugin.testHermesConnection()
-  });
-
-  registerEditorActionCommands(plugin);
   plugin.addSettingTab(new CodexSettingTab(plugin));
+  plugin.registerEvent(plugin.app.workspace.on(
+    "editor-menu",
+    (menu, editor) => {
+      const snapshot = captureTranslationSelection(editor);
+      if (!snapshot) return;
+      menu.addItem((item) => item
+        .setTitle("翻译成英文")
+        .setIcon("languages")
+        .onClick(() => {
+          void (async () => {
+            try {
+              const translation = await plugin.translateEditorSelectionToEnglish(
+                snapshot.text
+              );
+              if (!replaceTranslationSelectionIfUnchanged(
+                editor,
+                snapshot,
+                translation
+              )) {
+                new Notice("正文或选区已变化，未写入翻译结果。");
+              }
+            } catch (error) {
+              new Notice(error instanceof Error
+                ? error.message
+                : "翻译失败，正文未修改。");
+            }
+          })();
+        }));
+    }
+  ));
 
-  const editorActions = new EditorActionController(plugin);
-  editorActions.register();
-  const knowledgeBase = new KnowledgeBaseManager(plugin);
-  knowledgeBase.register();
+  const knowledgeBase = new EchoInkKnowledgeSurfaceService(plugin);
   const review = new ReviewManager(plugin);
   review.register();
 
-  return { editorActions, knowledgeBase, review };
+  return { knowledgeBase, review };
 }
 
 export function registerEchoInkStartupTasks(plugin: CodexForObsidianPlugin): void {
@@ -67,42 +89,4 @@ export function registerEchoInkStartupTasks(plugin: CodexForObsidianPlugin): voi
   if (plugin.settings.autoOpenHome) {
     plugin.app.workspace.onLayoutReady(() => void plugin.activateHomeView());
   }
-  if (plugin.settings.editorActions.enabled) {
-    plugin.app.workspace.onLayoutReady(() => {
-      window.setTimeout(() => void plugin.ensureCodexConnected(false, { silent: true }), 800);
-    });
-  }
-  plugin.app.workspace.onLayoutReady(() => {
-    if (plugin.isEchoInkConversationStoreV2MigrationRequired()) return;
-    void plugin.reconcileNativeExecutionsAtStartup().catch((error) => {
-      console.error("EchoInk Native startup reconciliation failed", error);
-    });
-    window.setTimeout(() => void plugin.runDeferredStartupMaintenance(), 1200);
-    if (plugin.settings.memory.enabled) {
-      window.setTimeout(() => void plugin.recoverEchoInkMemory().catch(() => undefined), 1500);
-    }
-  });
-}
-
-function registerEditorActionCommands(plugin: CodexForObsidianPlugin): void {
-  plugin.addCommand({
-    id: "editor-action-rewrite",
-    name: "改写选中文字",
-    editorCallback: (editor, view) => void plugin.getEditorActions()?.runEditorActionById(editor, view, "rewrite")
-  });
-  plugin.addCommand({
-    id: "editor-action-expand",
-    name: "扩写选中文字",
-    editorCallback: (editor, view) => void plugin.getEditorActions()?.runEditorActionById(editor, view, "expand")
-  });
-  plugin.addCommand({
-    id: "editor-action-continue",
-    name: "续写选中文字",
-    editorCallback: (editor, view) => void plugin.getEditorActions()?.runEditorActionById(editor, view, "continue")
-  });
-  plugin.addCommand({
-    id: "editor-action-translate",
-    name: "翻译选中文字为英文",
-    editorCallback: (editor, view) => void plugin.getEditorActions()?.runEditorActionById(editor, view, "translate")
-  });
 }

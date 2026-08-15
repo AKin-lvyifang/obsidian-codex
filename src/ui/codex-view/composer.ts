@@ -1,6 +1,19 @@
 import { setIcon } from "obsidian";
+import {
+  renderProviderBrandIcon,
+  type ProviderBrandId
+} from "../../settings/provider-brand-icons";
 import type { EchoInkResource } from "../../resources/types";
-import type { AgentBackendMode, StoredAttachment, StoredSession } from "../../settings/settings";
+import { enabledSkillResources } from "../../resources/registry";
+import { mcpConnectionStatus, mcpConnectionStatusLabel } from "../../resources/mcp-connections";
+import type { EchoInkResourceSettings } from "../../resources/types";
+import type {
+  PiConversationDiagnostic,
+  PiConversationSupportState
+} from "../../harness/pi-native/contracts";
+import type { PiContextLedger } from "../../harness/pi-native/pi-context-budget";
+import { formatContextTokenCount } from "../../core/mapping";
+import type { StoredAttachment, StoredSession } from "../../settings/settings";
 import type { PermissionMode, ReasoningEffort, UiMode } from "../../types/app-server";
 import { composerPrimaryActionForState, composerStateForRuntimeState } from "../composer-state";
 import { handleKnowledgeCommandMenuKeyDown } from "../knowledge-command-menu";
@@ -16,60 +29,76 @@ export interface ComposerShellRefs {
   promptEnhanceReviewEl: HTMLElement;
   skillMenuEl: HTMLElement;
   knowledgeCommandMenuEl: HTMLElement;
+  resourcePanelEl: HTMLElement;
   toolbarEl: HTMLElement;
 }
 
 export interface ComposerShellCallbacks {
   onInputChanged: () => void;
   onPasteFiles: (event: ClipboardEvent) => void;
-  onEnhancePrompt: () => void;
   onSendMessage: () => void;
   onDropFiles: (event: DragEvent) => void;
 }
 
 export interface ComposerToolbarState {
   session: StoredSession;
-  knowledgeSession: boolean;
   knowledgeTaskRunning: boolean;
-  knowledgeRecoveryState: "pending" | "ready" | "blocked";
-  knowledgeRecoveryMessage: string;
-  knowledgeBackend: AgentBackendMode;
   selectedSkill: EchoInkResource | null;
   selectedPermission: PermissionMode;
   selectedMode: UiMode;
   running: boolean;
   promptEnhancerRunning: boolean;
-  viewRunKind?: "chat" | "knowledge-base" | "editor" | "";
+  viewRunKind?: "chat" | "editor" | "";
+  activeRunSessionId?: string;
   hasDraft: boolean;
+  hasTextDraft: boolean;
   hasQueuedItems: boolean;
   currentComposerModel: string;
-  currentComposerReasoning: string;
+  currentComposerProviderBrand: ProviderBrandId;
   currentComposerSummaryTitle: string;
-  currentKnowledgeComposerSummaryTitle: string;
   workspacePath: string;
   workspaceDisplayName: string;
   workspaceValid: boolean;
+  contextLedger?: Readonly<PiContextLedger>;
+  contextPanelOpen: boolean;
 }
 
 export interface ComposerToolbarRefs {
+  addButtonEl?: HTMLButtonElement;
   contextEl?: HTMLElement;
   contextRingEl?: HTMLElement;
-  contextValueEl?: HTMLElement;
+}
+
+export interface ComposerResourcePanelState {
+  open: boolean;
+  selectedSkill: EchoInkResource | null;
+  selectedMode: UiMode;
+  resources: EchoInkResource[];
+  resourceSettings: Pick<EchoInkResourceSettings, "mcpConnections">;
+  language: "zh-CN" | "en";
+}
+
+export interface ComposerResourcePanelCallbacks {
+  onDismiss: (restoreFocus: boolean) => void;
+  onPickFiles: (imagesOnly: boolean) => void;
+  onAttachActiveFile: () => void;
+  onSelectPlanMode: () => void;
+  onSelectSkill: (skill: EchoInkResource) => void;
+  onOpenMcpSettings: () => void;
 }
 
 export interface ComposerToolbarCallbacks {
   onOpenAddMenu: (event: MouseEvent) => void;
-  onOpenSkillMenu: (event: MouseEvent) => void;
   onEnhancePrompt: () => void;
   onCaptureKnowledgeSource: () => void;
-  onOpenKnowledgeModelMenu: (event: MouseEvent) => void;
-  onOpenKnowledgeCommandMenu: (event: MouseEvent) => void;
   onPermissionChange: (value: PermissionMode) => void;
   onOpenWorkspaceMenu: (event: MouseEvent, session: StoredSession) => void;
   onOpenModelMenu: (event: MouseEvent) => void;
+  onToggleContextPanel: () => void;
   onMicInput: () => void;
   onCancelKnowledgeTask: () => void;
   onStopTurn: () => void;
+  onSteerPiChat: () => void;
   onEnqueueDraft: () => void;
   onResumeQueue: (sessionId: string) => void;
   onSendMessage: () => void;
@@ -82,6 +111,9 @@ export interface TurnQueueState {
   recoveryRequired: boolean;
   canRecover: boolean;
   draggedItemId: string;
+  piSupport: PiConversationSupportState | null;
+  piRecoveryPending: boolean;
+  canManagePiSupport: boolean;
 }
 
 export interface TurnQueueCallbacks {
@@ -91,6 +123,9 @@ export interface TurnQueueCallbacks {
   onDragEnd: () => void;
   onReorder: (sessionId: string, sourceId: string, targetIndex: number) => void;
   onRemove: (sessionId: string, itemId: string) => void;
+  onEditPiDraft: (draftId: string) => void;
+  onRemovePiDraft: (draftId: string) => void;
+  onRecoverPiConversation: (recoveryPath: string) => void;
 }
 
 export interface ComposerAttachmentsState {
@@ -103,8 +138,8 @@ export interface ComposerAttachmentsCallbacks {
   onRemoveAttachment: (path: string) => void;
 }
 
-export function shouldShowComposerPlanIndicator(knowledgeSession: boolean, selectedMode: UiMode): boolean {
-  return !knowledgeSession && selectedMode === "plan";
+export function shouldShowComposerPlanIndicator(selectedMode: UiMode): boolean {
+  return selectedMode === "plan";
 }
 
 export function renderComposerShell(rootEl: HTMLElement, callbacks: ComposerShellCallbacks): ComposerShellRefs {
@@ -121,14 +156,23 @@ export function renderComposerShell(rootEl: HTMLElement, callbacks: ComposerShel
       "aria-autocomplete": "list",
       "aria-haspopup": "listbox",
       "aria-expanded": "false",
-      "aria-controls": commandMenuId
+      "aria-controls": commandMenuId,
+      "aria-label": "输入消息、命令或已启用 Skill"
     }
   });
   const promptEnhanceReviewEl = inputWrap.createDiv({ cls: "codex-composer-enhance-review" });
   const skillMenuEl = inputWrap.createDiv({ cls: "codex-skill-menu" });
   const knowledgeCommandMenuEl = inputWrap.createDiv({
     cls: "codex-knowledge-command-menu",
-    attr: { id: commandMenuId, role: "listbox", "aria-label": "知识库命令" }
+    attr: { id: commandMenuId, role: "listbox", "aria-label": "命令与已启用 Skill" }
+  });
+  const resourcePanelEl = inputWrap.createDiv({
+    cls: "codex-composer-resource-panel",
+    attr: {
+      role: "menu",
+      "aria-label": "添加资源",
+      "aria-hidden": "true"
+    }
   });
   const toolbarEl = inputWrap.createDiv({ cls: "codex-toolbar" });
   inputEl.addEventListener("input", callbacks.onInputChanged);
@@ -159,6 +203,7 @@ export function renderComposerShell(rootEl: HTMLElement, callbacks: ComposerShel
     promptEnhanceReviewEl,
     skillMenuEl,
     knowledgeCommandMenuEl,
+    resourcePanelEl,
     toolbarEl
   };
 }
@@ -191,84 +236,56 @@ export function renderComposerToolbar(
 ): ComposerToolbarRefs {
   container.empty();
   workspaceContainer.empty();
-  workspaceContainer.toggleClass("is-visible", !state.knowledgeSession);
-  if (!state.knowledgeSession) {
-    addWorkspaceButton(workspaceContainer, state, callbacks);
-    if (shouldShowComposerPlanIndicator(state.knowledgeSession, state.selectedMode)) {
-      addPlanModeIndicator(workspaceContainer);
-    }
+  workspaceContainer.addClass("is-visible");
+  addWorkspaceButton(workspaceContainer, state, callbacks);
+  if (shouldShowComposerPlanIndicator(state.selectedMode)) {
+    addPlanModeIndicator(workspaceContainer);
   }
 
   const row = container.createDiv({ cls: "codex-composer-row" });
   const left = row.createDiv({ cls: "codex-composer-left" });
   const right = row.createDiv({ cls: "codex-composer-right" });
 
-  const addButton = createComposerIconButton(left, "plus", "添加内容");
+  const addButton = createComposerIconButton(left, "plus", "添加资源");
+  addButton.setAttribute("aria-haspopup", "menu");
+  addButton.setAttribute("aria-expanded", "false");
+  addButton.dataset.composerAddButton = "true";
   addButton.onclick = callbacks.onOpenAddMenu;
 
-  const skillButton = createComposerIconButton(left, "hammer", state.selectedSkill ? `Skill：${state.selectedSkill.name}` : "选择 Skill");
-  skillButton.toggleClass("is-active", Boolean(state.selectedSkill));
-  skillButton.onclick = callbacks.onOpenSkillMenu;
+  const refs: ComposerToolbarRefs = { addButtonEl: addButton };
+  const captureButton = createComposerIconButton(left, "bookmark-plus", "收藏到知识库");
+  captureButton.onclick = callbacks.onCaptureKnowledgeSource;
 
-  const enhanceButton = createComposerIconButton(left, "sparkles", "增强提示词");
-  enhanceButton.toggleClass("is-loading", state.promptEnhancerRunning);
-  enhanceButton.disabled = state.promptEnhancerRunning;
-  if (state.promptEnhancerRunning) {
-    setIcon(enhanceButton, "loader-circle");
-    enhanceButton.setAttribute("aria-busy", "true");
-    enhanceButton.setAttribute("title", "正在增强提示词");
-  }
-  enhanceButton.onclick = callbacks.onEnhancePrompt;
-
-  const refs: ComposerToolbarRefs = {};
-  if (state.knowledgeSession) {
-    const captureButton = createComposerIconButton(left, "bookmark-plus", "收藏");
-    captureButton.onclick = callbacks.onCaptureKnowledgeSource;
-
-    if (state.knowledgeBackend === "codex-cli") {
-      const modelButton = addModelButton(right, "知识库模型和思考强度", state.currentKnowledgeComposerSummaryTitle, state.currentComposerModel, state.currentComposerReasoning);
-      modelButton.onclick = callbacks.onOpenKnowledgeModelMenu;
+  addComposerSelect<PermissionMode>(left, "shield-check", ["read-only", "workspace-write", "danger-full-access"], state.selectedPermission, callbacks.onPermissionChange, "权限", "codex-permission-control");
+  refs.contextEl = right.createEl("button", {
+    cls: "codex-context-meter",
+    attr: {
+      type: "button",
+      title: "查看最近一次模型请求的上下文用量",
+      "aria-label": "查看上下文用量",
+      "aria-expanded": state.contextPanelOpen ? "true" : "false",
+      "aria-haspopup": "dialog"
     }
+  });
+  refs.contextRingEl = refs.contextEl.createSpan({ cls: "codex-context-ring", attr: { "aria-hidden": "true" } });
+  refs.contextRingEl.createSpan({ cls: "codex-context-ring-hole" });
+  refs.contextEl.onclick = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    callbacks.onToggleContextPanel();
+  };
 
-    const recoveryPending = state.knowledgeRecoveryState === "pending";
-    const recoveryBlocked = state.knowledgeRecoveryState === "blocked";
-    const kbChipLabel = state.knowledgeTaskRunning
-      ? "知识库运行中"
-      : recoveryPending
-        ? "正在恢复维护"
-        : recoveryBlocked
-          ? "维护恢复受阻"
-          : "知识库命令";
-    const kbChip = right.createEl("button", {
-      cls: "codex-composer-model-button codex-kb-channel-chip",
-      attr: {
-        type: "button",
-        title: state.knowledgeRecoveryMessage || "知识库常用命令"
-      }
-    });
-    kbChip.toggleClass("is-running", state.knowledgeTaskRunning);
-    kbChip.toggleClass("is-recovery-pending", recoveryPending);
-    kbChip.toggleClass("is-recovery-blocked", recoveryBlocked);
-    const kbIcon = kbChip.createSpan({ cls: "codex-composer-model-icon" });
-    setIcon(kbIcon, "library");
-    kbChip.createSpan({ cls: "codex-composer-model-text", text: kbChipLabel });
-    const chevron = kbChip.createSpan({ cls: "codex-composer-chevron" });
-    setIcon(chevron, "chevron-down");
-    kbChip.onclick = callbacks.onOpenKnowledgeCommandMenu;
-  } else {
-    addComposerSelect<PermissionMode>(left, "shield-check", ["read-only", "workspace-write", "danger-full-access"], state.selectedPermission, callbacks.onPermissionChange, "权限", "codex-permission-control");
+  const modelButton = addModelButton(
+    right,
+    "模型和运行参数",
+    state.currentComposerSummaryTitle,
+    state.currentComposerModel,
+    state.currentComposerProviderBrand
+  );
+  modelButton.onclick = callbacks.onOpenModelMenu;
 
-    refs.contextEl = right.createDiv({ cls: "codex-context-meter", attr: { title: "上下文容量" } });
-    refs.contextRingEl = refs.contextEl.createSpan({ cls: "codex-context-ring", attr: { "aria-hidden": "true" } });
-    refs.contextRingEl.createSpan({ cls: "codex-context-ring-hole" });
-    refs.contextValueEl = refs.contextEl.createSpan({ cls: "codex-context-value", text: "--" });
-
-    const modelButton = addModelButton(right, "模型和运行参数", state.currentComposerSummaryTitle, state.currentComposerModel, state.currentComposerReasoning);
-    modelButton.onclick = callbacks.onOpenModelMenu;
-
-    const micButton = createComposerIconButton(right, "mic", "语音输入");
-    micButton.onclick = callbacks.onMicInput;
-  }
+  const micButton = createComposerIconButton(right, "mic", "语音输入");
+  micButton.onclick = callbacks.onMicInput;
 
   const composerState = composerStateForRuntimeState({
     viewRunning: state.running,
@@ -278,12 +295,30 @@ export function renderComposerToolbar(
     hasQueuedItems: state.hasQueuedItems
   });
   const action = composerPrimaryActionForState(composerState);
+  if (shouldShowPiSteerAction(state)) {
+    const steerButton = row.createEl("button", {
+      cls: "codex-composer-steer-button",
+      attr: {
+        type: "button",
+        title: "立即调整当前 Pi 任务方向",
+        "aria-label": "调整方向"
+      }
+    });
+    const steerIcon = steerButton.createSpan({
+      cls: "codex-composer-steer-icon",
+      attr: { "aria-hidden": "true" }
+    });
+    setIcon(steerIcon, "git-branch");
+    steerButton.createSpan({ cls: "codex-composer-steer-label", text: "调整方向" });
+    steerButton.onclick = callbacks.onSteerPiChat;
+  }
   const sendButtonView = composerActionButtonView(action);
   const sendButton = row.createEl("button", {
     cls: "codex-send-button codex-composer-send-button",
     attr: { type: "button", "aria-label": sendButtonView.label, title: sendButtonView.title }
   });
   sendButton.toggleClass("is-queue-action", action === "enqueue" || action === "resume-queue");
+  sendButton.toggleClass("is-stop-action", action === "stop-turn" || action === "cancel-knowledge-task");
   sendButton.disabled = state.promptEnhancerRunning;
   if (state.promptEnhancerRunning) {
     sendButton.setAttribute("aria-label", "提示词增强中");
@@ -300,15 +335,272 @@ export function renderComposerToolbar(
   return refs;
 }
 
+export function renderComposerResourcePanel(
+  container: HTMLElement,
+  state: ComposerResourcePanelState,
+  callbacks: ComposerResourcePanelCallbacks
+): void {
+  container.empty();
+  container.toggleClass("is-visible", state.open);
+  container.setAttribute("aria-hidden", String(!state.open));
+  if (!state.open) return;
+
+  const addGroup = createResourcePanelGroup(container, "添加");
+  createResourcePanelRow(addGroup, "paperclip", "文件和文件夹", "", () => callbacks.onPickFiles(false));
+  createResourcePanelRow(addGroup, "file-text", "添加当前笔记", "", callbacks.onAttachActiveFile);
+  createResourcePanelRow(
+    addGroup,
+    "lightbulb",
+    "计划模式",
+    state.selectedMode === "plan" ? "已开启" : "",
+    callbacks.onSelectPlanMode,
+    state.selectedMode === "plan"
+  );
+  createResourcePanelRow(addGroup, "image", "添加图片", "", () => callbacks.onPickFiles(true));
+
+  const skillGroup = createResourcePanelGroup(container, "技能");
+  const skills = enabledSkillResources(state.resources);
+  if (skills.length) {
+    for (const skill of skills) {
+      createResourcePanelRow(
+        skillGroup,
+        "box",
+        skill.name,
+        skill.description || skill.contentPath || "已启用 Skill",
+        () => callbacks.onSelectSkill(skill),
+        state.selectedSkill?.id === skill.id
+      );
+    }
+  } else {
+    skillGroup.createDiv({ cls: "codex-composer-resource-empty", text: "暂无已启用 Skill" });
+  }
+
+  const mcpGroup = createResourcePanelGroup(container, "MCP");
+  const mcpResources = state.resources
+    .filter((resource) => resource.kind === "mcp-server")
+    .sort((left, right) => left.name.localeCompare(right.name, state.language === "en" ? "en" : "zh-CN"));
+  if (mcpResources.length) {
+    for (const resource of mcpResources) {
+      const status = mcpConnectionStatus(resource, state.resourceSettings);
+      createResourcePanelRow(
+        mcpGroup,
+        "blocks",
+        resource.name,
+        mcpConnectionStatusLabel(status, state.language),
+        callbacks.onOpenMcpSettings,
+        resource.enabled,
+        `is-mcp-status-${status}`
+      );
+    }
+  } else {
+    mcpGroup.createDiv({ cls: "codex-composer-resource-empty", text: "暂无已配置 MCP" });
+  }
+
+  container.onkeydown = (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      callbacks.onDismiss(true);
+      return;
+    }
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    const rows = Array.from(container.querySelectorAll<HTMLButtonElement>(".codex-composer-resource-row"));
+    if (!rows.length) return;
+    event.preventDefault();
+    const current = rows.indexOf(container.ownerDocument.activeElement as HTMLButtonElement);
+    const next = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? rows.length - 1
+        : event.key === "ArrowDown"
+          ? (current + 1 + rows.length) % rows.length
+          : (current - 1 + rows.length) % rows.length;
+    rows[next]?.focus();
+  };
+}
+
+function createResourcePanelGroup(container: HTMLElement, label: string): HTMLElement {
+  const group = container.createDiv({ cls: "codex-composer-resource-group", attr: { role: "group", "aria-label": label } });
+  group.createDiv({ cls: "codex-composer-resource-group-label", text: label });
+  return group;
+}
+
+function createResourcePanelRow(
+  container: HTMLElement,
+  iconName: string,
+  label: string,
+  description: string,
+  onActivate: () => void,
+  active = false,
+  extraClass = ""
+): HTMLButtonElement {
+  const row = container.createEl("button", {
+    cls: `codex-composer-resource-row${active ? " is-active" : ""}${extraClass ? ` ${extraClass}` : ""}`,
+    attr: { type: "button", role: "menuitem" }
+  });
+  const icon = row.createSpan({ cls: "codex-composer-resource-icon", attr: { "aria-hidden": "true" } });
+  setIcon(icon, iconName);
+  row.createSpan({ cls: "codex-composer-resource-name", text: label });
+  if (description) row.createSpan({ cls: "codex-composer-resource-description", text: description });
+  row.onclick = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    onActivate();
+  };
+  return row;
+}
+
+const CONTEXT_CATEGORY_LABELS: Readonly<Record<
+  PiContextLedger["categories"][number]["category"],
+  string
+>> = Object.freeze({
+  system: "系统提示词",
+  vault_tool_schema: "Obsidian 工具",
+  mcp_tool_schema: "连接器及 MCP",
+  skill: "技能",
+  conversation: "对话消息",
+  compaction: "上下文摘要",
+  memory: "长期记忆",
+  knowledge: "知识库",
+  temporary_materials: "临时材料"
+});
+
+export function contextCategoryLabel(
+  category: PiContextLedger["categories"][number]["category"]
+): string {
+  return CONTEXT_CATEGORY_LABELS[category];
+}
+
+export function renderContextPanel(
+  container: HTMLElement,
+  ledger: Readonly<PiContextLedger> | undefined,
+  onClose: () => void
+): void {
+  container.empty();
+  const header = container.createDiv({ cls: "codex-context-panel-header" });
+  header.createDiv({ cls: "codex-context-panel-title", text: "上下文用量" });
+  const closeButton = header.createEl("button", {
+    cls: "codex-context-panel-close",
+    attr: {
+      type: "button",
+      title: "关闭",
+      "aria-label": "关闭上下文用量"
+    }
+  });
+  setIcon(closeButton, "x");
+  closeButton.onclick = onClose;
+  if (!ledger) {
+    container.createDiv({
+      cls: "codex-context-panel-empty",
+      text: "发送一条消息后，这里会显示最近一次模型请求的真实上下文用量。"
+    });
+    return;
+  }
+
+  const percent = ledger.budget.effectiveInputBudget > 0
+    ? Math.min(100, (ledger.totalInputTokens / ledger.budget.effectiveInputBudget) * 100)
+    : 0;
+  const summary = container.createDiv({ cls: "codex-context-summary" });
+  summary.createEl("strong", {
+    cls: "codex-context-summary-percent",
+    text: `${Math.round(percent * 10) / 10}%`
+  });
+  summary.createSpan({
+    cls: "codex-context-summary-used",
+    text: `已用 ${formatContextTokenCount(ledger.totalInputTokens)} / ${formatContextTokenCount(ledger.budget.effectiveInputBudget)}`
+  });
+  const progress = container.createDiv({
+    cls: "codex-context-progress",
+    attr: {
+      role: "progressbar",
+      "aria-label": "有效输入预算使用率",
+      "aria-valuemin": "0",
+      "aria-valuemax": "100",
+      "aria-valuenow": String(Math.round(percent))
+    }
+  });
+  const usedBar = progress.createDiv({ cls: "codex-context-progress-used", attr: { "aria-hidden": "true" } });
+  usedBar.setCssProps({
+    "--codex-context-progress": `${percent}%`
+  });
+  const categoryTotal = ledger.categories.reduce((total, category) => total + category.tokens, 0);
+  for (const category of ledger.categories) {
+    if (category.tokens <= 0 || categoryTotal <= 0) continue;
+    usedBar.createDiv({
+      cls: `codex-context-progress-segment is-${category.category}`
+    }).setCssProps({
+      "--codex-context-segment": `${(category.tokens / categoryTotal) * 100}%`
+    });
+  }
+
+  const categories = container.createDiv({ cls: "codex-context-categories" });
+  for (const category of ledger.categories) {
+    const row = categories.createDiv({ cls: "codex-context-category" });
+    const label = row.createSpan({ cls: "codex-context-category-label" });
+    label.createSpan({
+      cls: `codex-context-category-dot is-${category.category}`,
+      attr: { "aria-hidden": "true" }
+    });
+    label.createSpan({ text: contextCategoryLabel(category.category) });
+    row.createSpan({
+      cls: "codex-context-category-value",
+      text: `${ledger.budget.effectiveInputBudget > 0
+        ? Math.round((category.tokens / ledger.budget.effectiveInputBudget) * 1000) / 10
+        : 0}%`
+    });
+  }
+}
+
+export function shouldShowPiSteerAction(
+  state: Pick<
+    ComposerToolbarState,
+    | "session"
+    | "running"
+    | "promptEnhancerRunning"
+    | "viewRunKind"
+    | "activeRunSessionId"
+    | "hasTextDraft"
+  >
+): boolean {
+  return Boolean(
+    state.session.bodyAuthority === "pi_session_only"
+    && state.running
+    && !state.promptEnhancerRunning
+    && state.viewRunKind === "chat"
+    && state.activeRunSessionId === state.session.id
+    && state.hasTextDraft
+  );
+}
+
 export function renderTurnQueue(container: HTMLElement, state: TurnQueueState, callbacks: TurnQueueCallbacks): void {
   container.empty();
+  const visibleDiagnostics = visiblePiConversationDiagnostics(state.piSupport);
+  const recovery = piConversationRecoveryCandidate(state.piSupport);
+  const piDrafts = state.piSupport?.drafts ?? [];
+  const hasLegacyQueue = Boolean(state.items.length) || state.recoveryRequired;
   container.toggleClass(
     "is-visible",
-    Boolean(state.items.length) || state.recoveryRequired
+    hasLegacyQueue || Boolean(piDrafts.length) || Boolean(visibleDiagnostics.length)
   );
   container.toggleClass("is-paused", state.paused);
   container.toggleClass("is-recovery-required", state.recoveryRequired);
-  if (!state.items.length && !state.recoveryRequired) return;
+  if (!hasLegacyQueue && !piDrafts.length && !visibleDiagnostics.length) return;
+
+  if (visibleDiagnostics.length) {
+    renderPiConversationDiagnostics(
+      container,
+      visibleDiagnostics,
+      recovery,
+      state,
+      callbacks
+    );
+  }
+
+  if (piDrafts.length) {
+    renderPiConversationDrafts(container, state, callbacks);
+  }
+
+  if (!hasLegacyQueue) return;
 
   const header = container.createDiv({ cls: "codex-turn-queue-header" });
   const title = header.createDiv({ cls: "codex-turn-queue-title" });
@@ -357,6 +649,141 @@ export function renderTurnQueue(container: HTMLElement, state: TurnQueueState, c
   }
 }
 
+export function piConversationRecoveryCandidate(
+  support: Readonly<PiConversationSupportState> | null
+): PiConversationDiagnostic | null {
+  const sessionFile = support?.catalog.sessionFile;
+  if (!support || !sessionFile) return null;
+  return support.diagnostics
+    .filter((diagnostic) =>
+      diagnostic.code === "session_recovered_prefix"
+      && diagnostic.sourcePath === sessionFile
+      && Boolean(diagnostic.recoveryPath)
+    )
+    .sort((left, right) =>
+      right.createdAt - left.createdAt
+      || right.diagnosticId.localeCompare(left.diagnosticId)
+    )[0] ?? null;
+}
+
+export function visiblePiConversationDiagnostics(
+  support: Readonly<PiConversationSupportState> | null
+): PiConversationDiagnostic[] {
+  if (!support) return [];
+  const sessionFile = support.catalog.sessionFile;
+  return support.diagnostics
+    .filter((diagnostic) => {
+      if (diagnostic.code === "session_recovered_prefix") return false;
+      if (
+        diagnostic.code === "session_jsonl_malformed"
+        || diagnostic.code === "session_jsonl_truncated"
+      ) {
+        return Boolean(sessionFile && diagnostic.sourcePath === sessionFile);
+      }
+      return true;
+    })
+    .sort((left, right) =>
+      right.createdAt - left.createdAt
+      || right.diagnosticId.localeCompare(left.diagnosticId)
+    );
+}
+
+function renderPiConversationDiagnostics(
+  container: HTMLElement,
+  diagnostics: readonly PiConversationDiagnostic[],
+  recovery: PiConversationDiagnostic | null,
+  state: TurnQueueState,
+  callbacks: TurnQueueCallbacks
+): void {
+  const panel = container.createDiv({
+    cls: "codex-pi-support-panel codex-pi-diagnostic-panel"
+  });
+  const header = panel.createDiv({ cls: "codex-turn-queue-header" });
+  const title = header.createDiv({ cls: "codex-turn-queue-title" });
+  const icon = title.createSpan({ cls: "codex-turn-queue-title-icon" });
+  setIcon(icon, recovery ? "shield-alert" : "triangle-alert");
+  title.createSpan({
+    text: recovery ? "Pi 会话记录需要修复" : "Pi 会话诊断"
+  });
+  if (recovery?.recoveryPath) {
+    const recover = header.createEl("button", {
+      cls: "codex-pi-support-action",
+      text: state.piRecoveryPending ? "正在恢复…" : "恢复可验证部分",
+      attr: {
+        type: "button",
+        title: "保留原文件，并把当前会话改绑到最后一个可验证 Entry"
+      }
+    });
+    recover.disabled = !state.canManagePiSupport || state.piRecoveryPending;
+    recover.onclick = () => callbacks.onRecoverPiConversation(
+      recovery.recoveryPath!
+    );
+  }
+  const list = panel.createDiv({ cls: "codex-pi-diagnostic-list" });
+  for (const diagnostic of diagnostics.slice(0, 3)) {
+    const item = list.createDiv({ cls: "codex-pi-diagnostic-item" });
+    item.createDiv({ cls: "codex-pi-diagnostic-message", text: diagnostic.message });
+    if (diagnostic.sourcePath) {
+      item.createDiv({
+        cls: "codex-pi-diagnostic-path",
+        text: diagnostic.sourcePath,
+        attr: { title: diagnostic.sourcePath }
+      });
+    }
+  }
+}
+
+function renderPiConversationDrafts(
+  container: HTMLElement,
+  state: TurnQueueState,
+  callbacks: TurnQueueCallbacks
+): void {
+  const drafts = state.piSupport?.drafts ?? [];
+  const panel = container.createDiv({
+    cls: "codex-pi-support-panel codex-pi-draft-panel"
+  });
+  const header = panel.createDiv({ cls: "codex-turn-queue-header" });
+  const title = header.createDiv({ cls: "codex-turn-queue-title" });
+  const icon = title.createSpan({ cls: "codex-turn-queue-title-icon" });
+  setIcon(icon, "file-pen-line");
+  title.createSpan({ text: `待确认草稿 · ${drafts.length}` });
+  const list = panel.createDiv({ cls: "codex-turn-queue-list" });
+  for (const draft of drafts) {
+    const row = list.createDiv({
+      cls: "codex-turn-queue-item codex-pi-draft-item"
+    });
+    const body = row.createDiv({ cls: "codex-turn-queue-body" });
+    body.createDiv({ cls: "codex-turn-queue-preview", text: draft.text });
+    body.createDiv({
+      cls: "codex-turn-queue-meta",
+      text: `${piDraftSourceLabel(draft.source)} · 尚未写入 Pi Session`
+    });
+    const edit = row.createEl("button", {
+      cls: "codex-pi-support-action",
+      text: "继续编辑",
+      attr: { type: "button", title: "放回输入框，由你确认后重新发送" }
+    });
+    edit.disabled = !state.canManagePiSupport;
+    edit.onclick = () => callbacks.onEditPiDraft(draft.draftId);
+    const remove = row.createEl("button", {
+      cls: "codex-turn-queue-remove",
+      attr: { type: "button", title: "删除草稿", "aria-label": "删除草稿" }
+    });
+    remove.disabled = !state.canManagePiSupport;
+    setIcon(remove, "x");
+    remove.onclick = () => callbacks.onRemovePiDraft(draft.draftId);
+  }
+}
+
+function piDraftSourceLabel(
+  source: PiConversationSupportState["drafts"][number]["source"]
+): string {
+  if (source === "steering") return "未消费的调整方向";
+  if (source === "follow_up") return "未消费的后续消息";
+  if (source === "abort") return "停止时保留";
+  return "重启后恢复";
+}
+
 export function renderComposerAttachments(container: HTMLElement, state: ComposerAttachmentsState, callbacks: ComposerAttachmentsCallbacks): void {
   container.empty();
   container.toggleClass("is-empty", !state.selectedSkill && state.attachments.length === 0);
@@ -390,7 +817,9 @@ export function labelFor(value: string): string {
     "workspace-write": "工作区可写",
     "danger-full-access": "完全访问权限",
     agent: "Agent",
-    plan: "Plan"
+    plan: "Plan",
+    normal: "使用长期记忆",
+    no_memory: "不使用长期 Memory"
   };
   return labels[value] ?? value;
 }
@@ -415,6 +844,17 @@ export function shortModelLabel(value: string): string {
     .replace(/\bmini\b/i, "Mini")
     .replace(/\bhigh\b/i, "High")
     .trim();
+}
+
+export function compactBrandedModelLabel(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "自动";
+
+  const separated = trimmed.match(/^(?:deepseek|kimi|qwen|gpt)[\s_:/-]+(.+)$/i);
+  if (separated?.[1]) return separated[1];
+
+  const adjacentVersion = trimmed.match(/^(?:qwen|gpt)(\d.*)$/i);
+  return adjacentVersion?.[1] ?? value;
 }
 
 function renderQueuedTurnItem(container: HTMLElement, item: QueuedTurnItem, index: number, state: TurnQueueState, callbacks: TurnQueueCallbacks): void {
@@ -472,13 +912,27 @@ function createComposerIconButton(container: HTMLElement, iconName: string, titl
   return button;
 }
 
-function addModelButton(container: HTMLElement, ariaLabel: string, title: string, model: string, reasoning: string): HTMLButtonElement {
+function addModelButton(
+  container: HTMLElement,
+  ariaLabel: string,
+  title: string,
+  model: string,
+  providerBrand: ProviderBrandId
+): HTMLButtonElement {
+  const fullModelName = model.trim() || "自动";
   const modelButton = container.createEl("button", {
     cls: "codex-composer-model-button codex-model-summary-button",
-    attr: { type: "button", "aria-label": ariaLabel, "aria-haspopup": "menu", "aria-expanded": "false", title }
+    attr: {
+      type: "button",
+      "aria-label": `${ariaLabel}：${fullModelName}`,
+      "aria-haspopup": "menu",
+      "aria-expanded": "false",
+      title
+    }
   });
-  modelButton.createSpan({ cls: "codex-composer-model-name", text: model });
-  modelButton.createSpan({ cls: "codex-composer-reasoning-label", text: reasoning });
+  const providerIcon = modelButton.createSpan({ cls: "codex-composer-model-icon" });
+  renderProviderBrandIcon(providerIcon, providerBrand);
+  modelButton.createSpan({ cls: "codex-composer-model-name", text: compactBrandedModelLabel(model) });
   const chevron = modelButton.createSpan({ cls: "codex-composer-chevron" });
   setIcon(chevron, "chevron-down");
   return modelButton;
@@ -493,11 +947,19 @@ function addComposerSelect<T extends string>(
   label: string,
   extraClass = ""
 ): void {
-  const control = container.createDiv({ cls: `codex-composer-select ${extraClass}`.trim(), attr: { title: label } });
-  control.toggleClass("is-danger", selected === "danger-full-access");
+  const selectedLabel = labelFor(selected);
+  const accessibleLabel = `${label}：${selectedLabel}`;
+  const control = container.createDiv({
+    cls: `codex-composer-select ${extraClass}`.trim(),
+    attr: { title: accessibleLabel }
+  });
+  control.dataset.value = selected;
   const icon = control.createSpan({ cls: "codex-composer-select-icon" });
   setIcon(icon, iconName);
-  const select = control.createEl("select", { cls: "codex-select codex-composer-native-select", attr: { "aria-label": label, title: label } });
+  const select = control.createEl("select", {
+    cls: "codex-select codex-composer-native-select",
+    attr: { "aria-label": accessibleLabel, title: accessibleLabel }
+  });
   for (const value of values) select.createEl("option", { text: labelFor(value), value });
   select.value = selected;
   select.onchange = () => onChange(select.value as T);
@@ -545,7 +1007,7 @@ function queuedTurnPreview(item: QueuedTurnItem): string {
 
 function queuedTurnMeta(item: QueuedTurnItem): string {
   const parts = [
-    item.kind === "knowledge-base" ? "知识库" : "对话",
+    "对话",
     item.turnOptions.model ? shortModelLabel(item.turnOptions.model) : "自动",
     compactReasoningLabel(item.turnOptions.reasoning)
   ];

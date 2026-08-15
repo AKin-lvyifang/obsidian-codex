@@ -1,9 +1,9 @@
 {
   "id": "codex-echoink",
   "name": "Codex EchoInk",
-  "version": "1.4.0",
-  "minAppVersion": "1.4.5",
-  "description": "Use Codex, OpenCode, or Hermes to manage knowledge, ask vault questions, and review local agent work.",
+  "version": "2.0.0",
+  "minAppVersion": "1.11.4",
+  "description": "Use one EchoInk Agent with your chosen API Provider and model to chat with and manage your Obsidian vault.",
   "author": "AKin-lvyifang",
   "isDesktopOnly": true
 }

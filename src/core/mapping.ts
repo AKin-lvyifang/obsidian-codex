@@ -11,6 +11,7 @@ import type {
   UiMode,
   UserInput
 } from "../types/app-server";
+import type { PiContextLedger } from "../harness/pi-native/pi-context-budget";
 import type { StoredAttachment } from "../settings/settings";
 import type { EchoInkResource } from "../resources/types";
 import { normalizeSlashes } from "./path-utils";
@@ -138,11 +139,8 @@ export function filterSkills<T extends { name: string; description?: string; pat
 }
 
 function codexNativeSkillPath(skill?: UserInputSkill | null): string {
-  if (!skill) return "";
-  const legacyPath = "path" in skill && typeof skill.path === "string" ? skill.path : "";
-  if (legacyPath) return legacyPath;
-  if (skill.source !== "codex-import") return "";
-  return typeof skill.contentPath === "string" ? skill.contentPath : "";
+  void skill;
+  return "";
 }
 
 export function contextPercent(totalTokens?: number, contextWindow?: number | null): number {
@@ -156,14 +154,40 @@ export function contextUsageTokens(tokenUsage?: TokenUsage): { currentTokens: nu
   return { currentTokens, cumulativeTokens };
 }
 
-export function contextUsageView(tokenUsage?: TokenUsage): {
+export function contextUsageView(tokenUsage?: TokenUsage, contextLedger?: Readonly<PiContextLedger>): {
   percent: number | null;
   label: string;
   totalTokens: number;
   contextWindow: number | null;
+  effectiveInputBudget: number | null;
+  remainingTokens: number | null;
+  accuracy: "exact" | "estimated" | null;
   angle: number;
   title: string;
 } {
+  if (contextLedger) {
+    const totalTokens = contextLedger.totalInputTokens;
+    const effectiveInputBudget = contextLedger.budget.effectiveInputBudget;
+    const rawPercent = effectiveInputBudget > 0
+      ? (totalTokens / effectiveInputBudget) * 100
+      : 0;
+    const percent = Math.max(0, Math.min(100, Math.round(rawPercent * 10) / 10));
+    const accuracyLabel = contextLedger.accuracy === "estimated" ? "估算" : "精确";
+    return {
+      percent,
+      label: `${formatContextTokenCount(totalTokens)} / ${formatContextTokenCount(effectiveInputBudget)}`,
+      totalTokens,
+      contextWindow: contextLedger.budget.contextWindow,
+      effectiveInputBudget,
+      remainingTokens: contextLedger.remainingInputTokens,
+      accuracy: contextLedger.accuracy,
+      angle: percent * 3.6,
+      title: [
+        `最近一次模型输入 ${formatContextTokenCount(totalTokens)} / ${formatContextTokenCount(effectiveInputBudget)} · ${percent}%（${accuracyLabel}）`,
+        `剩余 ${formatContextTokenCount(contextLedger.remainingInputTokens)}；输出预留 ${formatContextTokenCount(contextLedger.budget.maxOutputReserve)}`
+      ].join("\n")
+    };
+  }
   const { currentTokens, cumulativeTokens } = contextUsageTokens(tokenUsage);
   const contextWindow = tokenUsage?.modelContextWindow ?? null;
   if (!currentTokens || !contextWindow || contextWindow <= 0) {
@@ -172,6 +196,9 @@ export function contextUsageView(tokenUsage?: TokenUsage): {
       label: "--",
       totalTokens: currentTokens,
       contextWindow,
+      effectiveInputBudget: null,
+      remainingTokens: null,
+      accuracy: null,
       angle: 0,
       title: "暂未读取到上下文容量"
     };
@@ -184,9 +211,25 @@ export function contextUsageView(tokenUsage?: TokenUsage): {
     label: `${percent}%`,
     totalTokens: currentTokens,
     contextWindow,
+    effectiveInputBudget: contextWindow,
+    remainingTokens: Math.max(0, contextWindow - currentTokens),
+    accuracy: null,
     angle: percent * 3.6,
     title: titleLines.join("\n")
   };
+}
+
+export function formatContextTokenCount(tokens: number): string {
+  const value = Math.max(0, Number.isFinite(tokens) ? tokens : 0);
+  if (value >= 1_000_000) {
+    return `${trimTrailingZero(value / 1_000_000)}M`;
+  }
+  if (value >= 1_000) return `${trimTrailingZero(value / 1_000)}K`;
+  return String(Math.round(value));
+}
+
+function trimTrailingZero(value: number): string {
+  return value.toFixed(1).replace(/\.0$/u, "");
 }
 
 export function basename(filePath: string): string {

@@ -1,6 +1,5 @@
 import { Component, normalizePath, setIcon, TFile } from "obsidian";
 import type { App } from "obsidian";
-import { openPathInElectron } from "../core/electron";
 import { splitVaultNoteLinkSegments, type VaultNoteLinkSegment } from "../core/vault-note-links";
 
 export function renderRichText(app: App, component: Component, container: HTMLElement, text: string): void {
@@ -31,7 +30,7 @@ export function renderRichText(app: App, component: Component, container: HTMLEl
         tableLines.push(lines[index]);
         index += 1;
       }
-      renderTable(container, tableLines);
+      renderTable(app, component, container, tableLines);
       continue;
     }
 
@@ -57,7 +56,7 @@ function renderLine(app: App, component: Component, container: HTMLElement, line
   if (trimmed.startsWith("#")) {
     const level = Math.min(4, trimmed.match(/^#+/)?.[0].length ?? 2);
     const heading = container.createEl(`h${level}` as keyof HTMLElementTagNameMap, { cls: "codex-message-heading" });
-    heading.setText(trimmed.replace(/^#+\s*/, ""));
+    renderInline(app, component, heading, trimmed.replace(/^#+\s*/, ""));
     return;
   }
 
@@ -139,8 +138,8 @@ function renderSingleVaultNoteLink(app: App, component: Component, container: HT
 
 function renderVaultNoteLink(app: App, component: Component, container: HTMLElement, segment: Extract<VaultNoteLinkSegment, { kind: "noteLink" }>): boolean {
   const resolved = resolveVaultNoteFile(app, segment.targetPath);
-  if (!resolved && !isHiddenVaultMarkdownPath(segment.targetPath)) return false;
-  const targetPath = resolved?.targetPath ?? normalizePath(segment.targetPath);
+  if (!resolved) return false;
+  const targetPath = resolved.targetPath;
   const link = container.createEl("a", {
     cls: "codex-message-note-link",
     text: segment.text,
@@ -155,7 +154,6 @@ function renderVaultNoteLink(app: App, component: Component, container: HTMLElem
     event.stopPropagation();
     const current = app.vault.getAbstractFileByPath(targetPath);
     if (current instanceof TFile) await app.workspace.getLeaf("tab").openFile(current, { active: true });
-    else await openHiddenVaultMarkdown(app, targetPath);
   });
   return true;
 }
@@ -182,19 +180,6 @@ function knowledgeBaseLinkTargetCandidates(targetPath: string): string[] {
   if (/^outputs\/[^/]+instructions[^/]*\.md$/i.test(normalized)) candidates.push(`outputs/instructions/${basename}`);
   if (/^outputs\/[^/]*xhs[^/]*\.md$/i.test(normalized)) candidates.push(`outputs/publishing/xiaohongshu/${basename}`);
   return candidates;
-}
-
-function isHiddenVaultMarkdownPath(targetPath: string): boolean {
-  return /(^|\/)\.[^/]+\.md$/i.test(normalizePath(targetPath));
-}
-
-async function openHiddenVaultMarkdown(app: App, targetPath: string): Promise<void> {
-  const normalized = normalizePath(targetPath);
-  const exists = await app.vault.adapter.exists(normalized).catch(() => false);
-  if (!exists) return;
-  const basePath = vaultBasePath(app);
-  const absolutePath = basePath ? `${basePath}/${normalized}` : "";
-  if (absolutePath) await openPathInElectron(absolutePath);
 }
 
 function vaultBasePath(app: App): string {
@@ -224,25 +209,64 @@ function renderCodeBlock(container: HTMLElement, code: string, language: string)
   wrapper.createEl("pre").createEl("code", { text: code });
 }
 
-function renderTable(container: HTMLElement, lines: string[]): void {
-  const table = container.createEl("table", { cls: "codex-message-table" });
-  const headerCells = splitTableRow(lines[0]);
+function renderTable(app: App, component: Component, container: HTMLElement, lines: string[]): void {
+  const scroll = container.createDiv({ cls: "codex-message-table-scroll" });
+  const table = scroll.createEl("table", { cls: "codex-message-table" });
+  const headerCells = splitMessageTableRow(lines[0]);
   const thead = table.createEl("thead").createEl("tr");
-  for (const cell of headerCells) thead.createEl("th", { text: cell });
+  for (const cell of headerCells) renderInline(app, component, thead.createEl("th"), cell);
   const tbody = table.createEl("tbody");
   for (const line of lines.slice(2)) {
     const tr = tbody.createEl("tr");
-    for (const cell of splitTableRow(line)) tr.createEl("td", { text: cell });
+    for (const cell of splitMessageTableRow(line)) renderInline(app, component, tr.createEl("td"), cell);
   }
 }
 
-function splitTableRow(line: string): string[] {
-  return line
-    .trim()
-    .replace(/^\|/, "")
-    .replace(/\|$/, "")
-    .split("|")
-    .map((cell) => cell.trim());
+export function splitMessageTableRow(line: string): string[] {
+  const trimmed = line.trim();
+  const content = trimmed.startsWith("|")
+    ? trimmed.slice(1)
+    : trimmed;
+  const cells: string[] = [];
+  let current = "";
+  let insideWikiLink = false;
+  let insideCode = false;
+
+  for (let index = 0; index < content.length; index += 1) {
+    const character = content[index];
+    const next = content[index + 1] ?? "";
+    if (!insideCode && character === "[" && next === "[") {
+      insideWikiLink = true;
+      current += "[[";
+      index += 1;
+      continue;
+    }
+    if (!insideCode && insideWikiLink && character === "]" && next === "]") {
+      insideWikiLink = false;
+      current += "]]";
+      index += 1;
+      continue;
+    }
+    if (!insideWikiLink && character === "`") {
+      insideCode = !insideCode;
+      current += character;
+      continue;
+    }
+    if (!insideWikiLink && !insideCode && character === "\\" && next === "|") {
+      current += "|";
+      index += 1;
+      continue;
+    }
+    if (!insideWikiLink && !insideCode && character === "|") {
+      cells.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += character;
+  }
+
+  if (current.trim() || !content.endsWith("|")) cells.push(current.trim());
+  return cells;
 }
 
 function splitReadableParagraphs(line: string): string[] {

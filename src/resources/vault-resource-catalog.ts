@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
-import type { EchoInkMcpConnectionConfig, EchoInkResource, EchoInkResourceScope } from "./types";
+import type { EchoInkMcpConnectionConfig, EchoInkResource } from "./types";
 import {
   initializeVaultResourceStore,
   loadVaultResourceStore,
@@ -51,8 +51,6 @@ export function echoInkResourcesFromVaultResourceStore(store: VaultResourceStore
   const resources: EchoInkResource[] = [];
   const warnings: string[] = [...store.warnings];
   for (const item of store.catalog) {
-    const scopes = scopesForCatalogItem(store, item);
-    if (!scopes.length) continue;
     if (item.kind === "skill") {
       resources.push({
         id: localResourceId("skill", item.ref.resourceId),
@@ -61,10 +59,10 @@ export function echoInkResourcesFromVaultResourceStore(store: VaultResourceStore
         name: item.name || item.ref.resourceId,
         description: item.description || "",
         enabled: enabledForCatalogItem(store, item),
-        scopes,
         bridgeMode: "prompt-only",
-        contentPath: item.ref.resourceId,
+        contentPath: vaultSkillContentPath(item.ref.resourceId),
         metadata: {
+          resourceId: item.ref.resourceId,
           uri: item.uri,
           version: item.version,
           contentHash: item.contentHash
@@ -82,7 +80,6 @@ export function echoInkResourcesFromVaultResourceStore(store: VaultResourceStore
       name: item.name || item.ref.resourceId.replace(/^mcp\//, ""),
       description: item.description || "",
       enabled: enabledForCatalogItem(store, item),
-      scopes,
       bridgeMode: "structured-tools",
       contentPath: item.ref.resourceId,
       configPath: item.uri,
@@ -96,16 +93,11 @@ export function echoInkResourcesFromVaultResourceStore(store: VaultResourceStore
   return { resources, warnings };
 }
 
-function scopesForCatalogItem(store: VaultResourceStore, item: VaultResourceCatalogItem): EchoInkResourceScope[] {
-  const bindings = store.bindings.filter((binding) => sameResource(binding.uri, item.uri) && binding.enabled);
-  if (!bindings.length) return ["chat", "knowledge", "editor-actions"];
-  const scopes = new Set<EchoInkResourceScope>();
-  for (const binding of bindings) {
-    for (const scope of binding.scopes) {
-      if (scope === "chat" || scope === "knowledge" || scope === "editor-actions") scopes.add(scope);
-    }
-  }
-  return Array.from(scopes);
+export async function ensureVaultBindingForImportedResource(
+  vaultPath: string,
+  uri: string
+): Promise<void> {
+  await upsertVaultBinding(vaultPath, uri);
 }
 
 function enabledForCatalogItem(store: VaultResourceStore, item: VaultResourceCatalogItem): boolean {
@@ -153,6 +145,16 @@ function localResourceId(kind: EchoInkResource["kind"], resourceId: string): str
   return `echoink-local:${kind}:${normalizeResourceId(resourceId)}`;
 }
 
+function vaultSkillContentPath(resourceId: string): string {
+  return path.posix.join(
+    ".echoink",
+    "resources",
+    "skills",
+    resourceId,
+    "SKILL.md"
+  );
+}
+
 function normalizeResourceId(value: string): string {
   return value
     .trim()
@@ -169,7 +171,7 @@ async function importSkillResourceToVault(vaultPath: string, resource: EchoInkRe
   await assertMissing(skillPath, `EchoInk Skill 已存在：${resourceId}`);
   await mkdir(skillRoot, { recursive: true });
   await writeFile(skillPath, skillDocumentForImportedResource(resourceId, resource), "utf8");
-  await upsertVaultBinding(vaultPath, `echoink://vault/${resourceId}`, resource.scopes);
+  await upsertVaultBinding(vaultPath, `echoink://vault/${resourceId}`);
   return {
     resourceId,
     uri: `echoink://vault/${resourceId}`,
@@ -182,14 +184,18 @@ async function importMcpResourceToVault(vaultPath: string, resource: EchoInkReso
   const layout = vaultResourceLayout(vaultPath);
   const resourceId = normalizeResourceId(resource.name || resource.configPath || resource.id);
   const serverId = resourceId.replace(/^mcp-/, "");
-  const servers = await readJson<{ servers?: Record<string, unknown> }>(layout.mcpServers, { servers: {} });
+  const servers = await readJson<{ servers?: Record<string, unknown> }>(
+    layout.mcpServers,
+    { servers: {} },
+    { rejectBlankExisting: true }
+  );
   if (servers.servers?.[serverId]) throw new Error(`EchoInk MCP 已存在：${serverId}`);
   servers.servers = {
     ...(servers.servers ?? {}),
     [serverId]: mcpServerConfigForVault(connection)
   };
   await writeJson(layout.mcpServers, servers);
-  await upsertVaultBinding(vaultPath, `echoink://vault/mcp/${serverId}`, resource.scopes);
+  await upsertVaultBinding(vaultPath, `echoink://vault/mcp/${serverId}`);
   return {
     resourceId: `mcp/${serverId}`,
     uri: `echoink://vault/mcp/${serverId}`,
@@ -204,7 +210,6 @@ function skillDocumentForImportedResource(resourceId: string, resource: EchoInkR
     `name: ${yamlString(resource.name || resourceId)}`,
     "version: imported",
     `description: ${yamlString(resource.description || `Imported from ${resource.source}`)}`,
-    `scopes: [${resource.scopes.join(", ")}]`,
     "permissions: [vault-read]",
     "entry: instruction",
     "---",
@@ -233,33 +238,49 @@ function mcpServerConfigForVault(connection: EchoInkMcpConnectionConfig): Record
   };
 }
 
-async function upsertVaultBinding(vaultPath: string, uri: string, scopes: EchoInkResourceScope[]): Promise<void> {
+async function upsertVaultBinding(vaultPath: string, uri: string): Promise<void> {
   const layout = vaultResourceLayout(vaultPath);
-  const data = await readJson<{ bindings?: Array<{ ref?: string; scopes?: string[]; enabled?: boolean }> }>(layout.bindings, { bindings: [] });
-  const existing = data.bindings?.find((binding) => binding.ref === uri);
-  if (existing) {
-    existing.scopes = scopes;
-    existing.enabled = true;
-  } else {
-    data.bindings = [...(data.bindings ?? []), { ref: uri, scopes, enabled: true }];
-  }
+  const data = await readJson<Record<string, unknown> & {
+    bindings?: Array<Record<string, unknown> & { ref?: string; enabled?: boolean }>;
+  }>(layout.bindings, { bindings: [] }, { rejectBlankExisting: true });
+  const bindings = data.bindings ?? [];
+  const existing = bindings.find((binding) => binding.ref === uri);
+  if (existing) return;
+  data.bindings = [...bindings, { ref: uri, enabled: true }];
   await writeJson(layout.bindings, data);
 }
 
 async function assertMissing(filePath: string, message: string): Promise<void> {
-  const existing = await readFile(filePath, "utf8").catch((error) => {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
+  let exists = true;
+  await readFile(filePath, "utf8").catch((error) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      exists = false;
+      return "";
+    }
     throw error;
   });
-  if (existing) throw new Error(message);
+  if (exists) throw new Error(message);
 }
 
-async function readJson<T>(filePath: string, fallback: T): Promise<T> {
+async function readJson<T>(
+  filePath: string,
+  fallback: T,
+  options: { rejectBlankExisting?: boolean } = {}
+): Promise<T> {
+  let missing = false;
   const text = await readFile(filePath, "utf8").catch((error) => {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      missing = true;
+      return "";
+    }
     throw error;
   });
-  if (!text.trim()) return fallback;
+  if (!text.trim()) {
+    if (!missing && options.rejectBlankExisting) {
+      throw new SyntaxError(`${filePath} is empty; expected JSON`);
+    }
+    return fallback;
+  }
   return JSON.parse(text) as T;
 }
 

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readdir, readFile, stat } from "node:fs/promises";
 import * as path from "node:path";
-import type { ResourceRef } from "../contracts/run";
+import type { ResourceRef } from "../../resources/types";
 
 export interface LoadVaultSkillInput {
   vaultPath: string;
@@ -14,7 +14,6 @@ export interface VaultSkillFrontmatter {
   name: string;
   version: string;
   description: string;
-  scopes: string[];
   permissions: string[];
   entry: string;
 }
@@ -54,7 +53,6 @@ export async function loadVaultSkill(input: LoadVaultSkillInput): Promise<Loaded
       name: parsed.frontmatter.name || skillId,
       version: parsed.frontmatter.version || "",
       description: parsed.frontmatter.description || "",
-      scopes: parsed.frontmatter.scopes,
       permissions: parsed.frontmatter.permissions,
       entry: parsed.frontmatter.entry || "instruction"
     },
@@ -76,7 +74,10 @@ async function readSupportFiles(skillRoot: string, remainingBytes: number): Prom
   let budget = remainingBytes;
   for (const dir of ["references", "templates"] as const) {
     const root = safeJoin(skillRoot, dir);
-    const found = await listMarkdownFiles(root, dir).catch(() => []);
+    const found = await listMarkdownFiles(root, dir).catch((error) => {
+      if (isMissingFileSystemError(error)) return [];
+      throw error;
+    });
     for (const relativePath of found) {
       const fullPath = safeJoin(skillRoot, relativePath);
       const content = await readLimitedFile(fullPath, budget);
@@ -124,10 +125,14 @@ function parseSkillDocument(text: string): { frontmatter: VaultSkillFrontmatter;
   };
 }
 
+function isMissingFileSystemError(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | null)?.code === "ENOENT";
+}
+
 function parseFrontmatter(text: string): VaultSkillFrontmatter {
   const data = emptyFrontmatter();
   const lines = text.split(/\r?\n/);
-  let activeList: "scopes" | "permissions" | null = null;
+  let activeList: "permissions" | null = null;
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -141,7 +146,7 @@ function parseFrontmatter(text: string): VaultSkillFrontmatter {
     if (!match) continue;
     const key = match[1] as keyof VaultSkillFrontmatter;
     const value = stripQuotes(match[2].trim());
-    if (key === "scopes" || key === "permissions") {
+    if (key === "permissions") {
       activeList = key;
       if (value) data[key] = parseInlineList(value);
       continue;
@@ -172,7 +177,6 @@ function emptyFrontmatter(): VaultSkillFrontmatter {
     name: "",
     version: "",
     description: "",
-    scopes: [],
     permissions: [],
     entry: ""
   };

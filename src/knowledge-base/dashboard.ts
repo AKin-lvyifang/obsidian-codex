@@ -3,8 +3,6 @@ import * as fsp from "fs/promises";
 import * as path from "path";
 import { emptyArrayOnMissingPathOrWarn } from "../core/error-handling";
 import type { KnowledgeBaseHealthHistoryEntry, KnowledgeBaseMaintenanceHistoryEntry, KnowledgeBaseMaintenanceMode, KnowledgeBaseSettings } from "../settings/settings";
-import { DEFAULT_KNOWLEDGE_BASE_RULES_FILE } from "./constants";
-import { resolveKnowledgeBaseRulesFilePath } from "./rules-repair";
 import { rawDigestStateForRecord, rawDigestStateLabel } from "./digest-status";
 import { createKnowledgeBaseIoBudget, shouldReadKnowledgeBaseFileContent, type KnowledgeBaseIoBudget } from "./io-budget";
 import { isRawMarkdownPath, rawDigestFingerprint, rawDigestRecordFromMarkdown, rawDigestRecordIsTrusted, readRawDigestRegistry, type RawDigestFrontmatterRecord, type RawDigestRegistryEntry } from "./raw-digest";
@@ -130,14 +128,6 @@ export interface KnowledgeBaseDashboardSnapshot {
   generatedAt: number;
   vaultName: string;
   vaultPath: string;
-  rulesFilePath: string;
-  rulesFileExists: boolean;
-  initialization: {
-    status: string;
-    rulesFilePath: string;
-    templateVersion: string;
-    initializedAt: number;
-  };
   lastRun: {
     status: string;
     completion: KnowledgeBaseRunCompletion | "";
@@ -204,7 +194,6 @@ const RISK_HEALTH_PENALTY = 2;
 
 export async function buildKnowledgeBaseDashboardSnapshot(vaultPath: string, settings: KnowledgeBaseSettings, options: KnowledgeBaseDashboardOptions = {}): Promise<KnowledgeBaseDashboardSnapshot> {
   const generatedAt = Date.now();
-  const rulesFilePath = normalizeRelativePath(resolveKnowledgeBaseRulesFilePath(settings), DEFAULT_KNOWLEDGE_BASE_RULES_FILE);
   const processedSources = settings.processedSources ?? {};
   const raw = await scanDashboardDirectory(vaultPath, "raw", { skipHidden: true });
   const wiki = await scanDashboardDirectory(vaultPath, "wiki", { skipHidden: true });
@@ -212,7 +201,6 @@ export async function buildKnowledgeBaseDashboardSnapshot(vaultPath: string, set
   const inbox = await scanDashboardDirectory(vaultPath, "inbox", { skipHidden: true });
   const reportPath = await resolveLatestReportPath(vaultPath, settings.lastReportPath, outputs.files);
   const trackerPath = "outputs/.ingest-tracker.md";
-  const rulesFileExists = await exists(path.join(vaultPath, rulesFilePath));
   const trackerExists = await exists(path.join(vaultPath, trackerPath));
   const reportExists = reportPath ? await exists(path.join(vaultPath, reportPath)) : false;
   const wikiIndexExists = await exists(path.join(vaultPath, "wiki/index.md"));
@@ -239,7 +227,6 @@ export async function buildKnowledgeBaseDashboardSnapshot(vaultPath: string, set
   const inboxTodayCount = countFilesChangedToday(inbox.files, generatedAt);
   const wikiTodayCount = countFilesChangedToday(wiki.files.filter((file) => file.path !== "wiki/index.md"), generatedAt);
   const warnings = buildWarnings({
-    rulesFileExists,
     rawExists: raw.exists,
     wikiExists: wiki.exists,
     trackerExists,
@@ -273,7 +260,6 @@ export async function buildKnowledgeBaseDashboardSnapshot(vaultPath: string, set
     latestExternalCheckAt: 0,
     maintenanceHistory,
     latestReportFindings: reportFindings,
-    rulesFileExists,
     rawExists: raw.exists,
     wikiExists: wiki.exists,
     wikiIndexExists,
@@ -289,18 +275,10 @@ export async function buildKnowledgeBaseDashboardSnapshot(vaultPath: string, set
     generatedAt,
     vaultName: path.basename(vaultPath),
     vaultPath,
-    rulesFilePath,
-    rulesFileExists,
-    initialization: {
-      status: settings.initialization.status,
-      rulesFilePath: settings.initialization.rulesFilePath,
-      templateVersion: settings.initialization.templateVersion,
-      initializedAt: settings.initialization.initializedAt
-    },
     lastRun: {
       status: settings.lastRunStatus,
       completion: settings.lastCompletion ?? "",
-      attemptCount: settings.lastAttempts?.length ?? 0,
+      attemptCount: 0,
       pendingSourceCount: settings.lastPendingSources?.length ?? 0,
       at: settings.lastRunAt,
       reportPath,
@@ -978,7 +956,6 @@ interface HealthInput {
   latestExternalCheckAt: number;
   maintenanceHistory: KnowledgeBaseMaintenanceHistoryEntry[];
   latestReportFindings: ReportFindings;
-  rulesFileExists: boolean;
   rawExists: boolean;
   wikiExists: boolean;
   wikiIndexExists: boolean;
@@ -1011,7 +988,6 @@ function buildHealth(input: HealthInput): KnowledgeBaseDashboardHealth {
     });
   };
 
-  if (!input.rulesFileExists) addReason("critical", "规则文件缺失", "规则文件缺失", 1, "说明知识库边界规则无法确认。");
   if (!input.rawExists) addReason("critical", "raw 目录缺失", "raw 目录缺失", 1, "说明原始来源区不可用。");
   if (!input.wikiExists) addReason("critical", "wiki 目录缺失", "wiki 目录缺失", 1, "说明沉淀后的知识区不可用。");
   if (!input.wikiIndexExists) addReason("critical", "wiki/index.md 缺失", "wiki/index.md 缺失", 1, "说明知识库入口页不存在。");
@@ -1300,9 +1276,8 @@ function isRawProcessingSource(file: KnowledgeBaseDashboardFile): boolean {
   return RAW_PROCESSING_EXTENSIONS.has(path.extname(lower));
 }
 
-function buildWarnings(input: { rulesFileExists: boolean; rawExists: boolean; wikiExists: boolean; trackerExists: boolean; lastError: string; scanLimited: boolean }): string[] {
+function buildWarnings(input: { rawExists: boolean; wikiExists: boolean; trackerExists: boolean; lastError: string; scanLimited: boolean }): string[] {
   const warnings: string[] = [];
-  if (!input.rulesFileExists) warnings.push("规则文件缺失");
   if (!input.rawExists) warnings.push("raw 目录缺失");
   if (!input.wikiExists) warnings.push("wiki 目录缺失");
   if (!input.trackerExists) warnings.push("tracker 缺失");

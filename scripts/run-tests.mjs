@@ -1,52 +1,21 @@
-import esbuild from "esbuild";
-import { spawnSync } from "child_process";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
+import { spawnSync } from "node:child_process";
 
-fs.mkdirSync(".tmp", { recursive: true });
+const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+const suites = [
+  "test:provider-settings",
+  "test:conversation-ui",
+  "test:personal-memory",
+  "test:knowledge",
+  "test:mcp-vault"
+];
 
-const rootDir = fileURLToPath(new URL("../", import.meta.url));
-const obsidianShimPath = path.join(rootDir, "src", "tests", "obsidian-shim.ts");
-const openCodeBackendShimPath = path.join(rootDir, "src", "tests", "opencode-backend-shim.ts");
-
-await esbuild.build({
-  entryPoints: ["src/tests/run-tests.ts"],
-  bundle: true,
-  platform: "node",
-  target: "node22",
-  format: "esm",
-  outfile: ".tmp/run-tests.mjs",
-  logLevel: "silent",
-  plugins: [{
-    name: "test-shims",
-    setup(build) {
-      build.onResolve({ filter: /^obsidian$/ }, () => ({ path: obsidianShimPath }));
-      build.onResolve({ filter: /opencode-backend$/ }, () => ({ path: openCodeBackendShimPath }));
-    }
-  }]
-});
-
-await esbuild.build({
-  entryPoints: ["src/tests/opencode-backend-security-test.ts"],
-  bundle: true,
-  platform: "node",
-  target: "node22",
-  format: "cjs",
-  outfile: ".tmp/opencode-backend-security-test.cjs",
-  logLevel: "silent"
-});
-
-const result = spawnSync(process.execPath, [".tmp/run-tests.mjs"], {
-  env: { ...process.env, ECHOINK_DISABLE_ACP: "1" },
-  stdio: "inherit"
-});
-
-if (result.status !== 0) process.exit(result.status ?? 1);
-
-const openCodeSecurityResult = spawnSync(process.execPath, [".tmp/opencode-backend-security-test.cjs"], {
-  env: { ...process.env, ECHOINK_DISABLE_ACP: "1" },
-  stdio: "inherit"
-});
-
-process.exit(openCodeSecurityResult.status ?? 1);
+for (const suite of suites) {
+  const result = spawnSync(npm, ["run", suite], {
+    env: {
+      ...process.env,
+      PI_OFFLINE: "1"
+    },
+    stdio: "inherit"
+  });
+  if (result.status !== 0) process.exit(result.status ?? 1);
+}

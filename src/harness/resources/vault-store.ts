@@ -1,6 +1,6 @@
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import * as path from "node:path";
-import type { ResourceRef } from "../contracts/run";
+import type { ResourceRef } from "../../resources/types";
 import { parseResourceUri, resourceRefToUri } from "./resource-ref";
 import { loadVaultSkill } from "./skill-loader";
 
@@ -10,7 +10,6 @@ export interface VaultResourceManifest {
 }
 
 export type VaultResourceKind = "skill" | "mcp-server";
-export type VaultResourceScope = "chat" | "knowledge" | "editor-actions";
 
 export interface VaultResourceCatalogItem {
   ref: ResourceRef;
@@ -47,7 +46,6 @@ export interface VaultMcpConnection {
 export interface VaultResourceBinding {
   ref: ResourceRef;
   uri: string;
-  scopes: VaultResourceScope[];
   enabled: boolean;
   backendIds?: string[];
 }
@@ -130,11 +128,22 @@ export async function loadVaultResourceStore(input: LoadVaultResourceStoreInput)
 
 async function loadVaultSkillCatalog(vaultPath: string, maxSkillBytes: number): Promise<VaultResourceCatalogItem[]> {
   const skillsRoot = vaultResourceLayout(vaultPath).skills;
-  const entries = await readdir(skillsRoot, { withFileTypes: true }).catch(() => []);
+  const entries = await readdir(skillsRoot, { withFileTypes: true }).catch((error) => {
+    if (isMissingFileSystemError(error)) return [];
+    throw error;
+  });
   const catalog: VaultResourceCatalogItem[] = [];
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
-    const skill = await loadVaultSkill({ vaultPath, skillId: entry.name, maxBytes: maxSkillBytes });
+    const skill = await loadVaultSkill({
+      vaultPath,
+      skillId: entry.name,
+      maxBytes: maxSkillBytes
+    }).catch((error) => {
+      if (isMissingFileSystemError(error)) return null;
+      throw error;
+    });
+    if (!skill) continue;
     const uri = resourceRefToUri(skill.ref);
     catalog.push({
       ref: skill.ref,
@@ -181,7 +190,6 @@ async function loadVaultResourceBindings(filePath: string): Promise<VaultResourc
     return {
       ref,
       uri: resourceRefToUri(ref),
-      scopes: normalizeScopes(binding.scopes),
       enabled: binding.enabled !== false,
       backendIds: Array.isArray(binding.backendIds) ? binding.backendIds.map(String).filter(Boolean) : undefined
     };
@@ -269,19 +277,17 @@ function isSecretLike(key: string, value: string): boolean {
   );
 }
 
-function normalizeScopes(value: unknown): VaultResourceScope[] {
-  const scopes = Array.isArray(value) ? value : [];
-  return scopes.filter((scope): scope is VaultResourceScope => scope === "chat" || scope === "knowledge" || scope === "editor-actions");
-}
-
 function positiveInteger(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : fallback;
 }
 
 async function readJsonFile<T>(filePath: string, fallback: T): Promise<T> {
-  const exists = await pathExists(filePath);
-  if (!exists) return fallback;
-  return JSON.parse(await readFile(filePath, "utf8")) as T;
+  const missing = null;
+  const text = await readFile(filePath, "utf8").catch((error) => {
+    if (isMissingFileSystemError(error)) return missing;
+    throw error;
+  });
+  return text === missing ? fallback : JSON.parse(text) as T;
 }
 
 async function ensureDirectory(dir: string, created: string[], existing: string[]): Promise<void> {
@@ -304,5 +310,15 @@ async function ensureFile(filePath: string, content: string, created: string[], 
 }
 
 async function pathExists(filePath: string): Promise<boolean> {
-  return stat(filePath).then(() => true, () => false);
+  return stat(filePath).then(
+    () => true,
+    (error) => {
+      if (isMissingFileSystemError(error)) return false;
+      throw error;
+    }
+  );
+}
+
+export function isMissingFileSystemError(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | null)?.code === "ENOENT";
 }

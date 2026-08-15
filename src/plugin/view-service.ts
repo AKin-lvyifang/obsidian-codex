@@ -1,6 +1,6 @@
 import { Notice } from "obsidian";
 import type CodexForObsidianPlugin from "../main";
-import { ensureKnowledgeBaseSession, type AgentBackendMode, type ResourceManagementTab } from "../settings/settings";
+import type { ResourceManagementTab } from "../settings/settings";
 import { EchoInkHomeView, VIEW_TYPE_ECHOINK_HOME } from "../home/home-view";
 import { isReviewHtmlPath } from "../review/schedule";
 import { ReviewPreviewView, VIEW_TYPE_REVIEW_PREVIEW } from "../review/preview-view";
@@ -44,17 +44,6 @@ export class EchoInkViewService {
     this.getCodexView()?.focusInput();
   }
 
-  async activateKnowledgeBaseChannel(): Promise<void> {
-    const session = ensureKnowledgeBaseSession(this.plugin.settings, this.plugin.getVaultPath());
-    this.plugin.settings.activeSessionId = session.id;
-    await this.plugin.saveSettings(true, {
-      flushConversationStore: false,
-      flushKnowledgeBaseHistory: false
-    });
-    await this.activateView();
-    this.getCodexView()?.refreshActiveSession();
-  }
-
   applyComposerDefaultsToView(): void {
     this.getCodexView()?.applySavedComposerDefaults();
   }
@@ -76,36 +65,6 @@ export class EchoInkViewService {
     const setting = (this.plugin.app as { setting?: { open?: () => void; openTabById?: (id: string) => void } }).setting;
     if (!setting?.open || !setting?.openTabById) {
       new Notice("无法打开插件设置页");
-      return;
-    }
-    setting.open();
-    setting.openTabById(this.plugin.manifest.id);
-  }
-
-  async openCodexSetup(options: { autoRepair?: boolean } = {}): Promise<void> {
-    return this.openAgentSetup({ backend: "codex-cli", ...options });
-  }
-
-  async openAgentSetup(options: { backend: AgentBackendMode; autoRepair?: boolean }): Promise<void> {
-    this.plugin.settings.settingsTab = "general";
-    this.plugin.agentSetupTarget = options.backend;
-    this.plugin.agentSetupAutoRepair = options.autoRepair === true;
-    if (options.autoRepair && options.backend === "codex-cli") {
-      const status = await this.plugin.ensureCodexConnected(true, { silent: true, refreshLogin: true });
-      if (status.connected && status.loggedIn) {
-        this.plugin.agentSetupTarget = null;
-        this.plugin.agentSetupAutoRepair = false;
-        await this.plugin.saveSettings(true);
-        new Notice(this.plugin.settings.settingsLanguage === "en" ? "Codex connected automatically. You can continue." : "Codex 已自动连接，可以继续使用。");
-        return;
-      }
-    }
-    await this.plugin.saveSettings(true);
-    const setting = (this.plugin.app as { setting?: { open?: () => void; openTabById?: (id: string) => void } }).setting;
-    if (!setting?.open || !setting?.openTabById) {
-      this.plugin.agentSetupTarget = null;
-      this.plugin.agentSetupAutoRepair = false;
-      new Notice(this.plugin.settings.settingsLanguage === "en" ? "Unable to open plugin settings." : "无法打开插件设置页");
       return;
     }
     setting.open();

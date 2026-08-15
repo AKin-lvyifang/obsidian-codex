@@ -1,5 +1,5 @@
 import * as path from "path";
-import { mimeForKnowledgeFile, requiredModalityForMime } from "../core/opencode-models";
+import { mimeForKnowledgeFile, requiredModalityForMime } from "./source-media";
 import { createKnowledgeBaseIoBudget, shouldReadKnowledgeBaseFileContent } from "./io-budget";
 import { isRawMarkdownPath, rawDigestRecordFromMarkdown, rawDigestRecordIsTrusted, readRawDigestRegistry } from "./raw-digest";
 import { refreshKnowledgeBaseIndex } from "./incremental-index";

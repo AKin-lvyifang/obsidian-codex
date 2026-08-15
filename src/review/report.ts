@@ -5,8 +5,7 @@ import {
   type ReviewReportKind,
   type StoredSession
 } from "../settings/settings";
-import { isKnowledgeBaseSession } from "../settings/settings";
-import { parseKnowledgeBaseCommand } from "../knowledge-base/commands";
+import { routeKnowledgeConversationCommand } from "../knowledge-base/commands";
 import { renderReviewHtml, type ReviewHtmlData } from "./review-html-template";
 import { reviewRangeKey, type ReviewRange } from "./schedule";
 
@@ -53,15 +52,8 @@ export interface KnowledgeBaseReviewEvidence {
   assistantMessageCount: number;
   failedMessageCount: number;
   commandCounts: {
-    init: number;
     maintain: number;
-    lint: number;
     ask: number;
-    outputs: number;
-    inbox: number;
-    journal: number;
-    collect: number;
-    other: number;
   };
   dashboard: KnowledgeBaseDashboardEvidence;
   maintenanceReports: KnowledgeBaseMaintenanceReportEvidence[];
@@ -73,7 +65,7 @@ export interface KnowledgeBaseReviewEvidence {
 export type ReviewEvidence = AgentChatReviewEvidence | KnowledgeBaseReviewEvidence;
 
 export function collectAgentChatReviewEvidence(settings: CodexForObsidianSettings, range: ReviewRange): AgentChatReviewEvidence {
-  const sessions = settings.sessions.filter((session) => !isKnowledgeBaseSession(session, settings.knowledgeBase.sessionId));
+  const sessions = settings.sessions;
   const activeSessions = sessions.filter((session) => messagesInRange(session.messages, range).length > 0);
   const messages = activeSessions.flatMap((session) => messagesInRange(session.messages, range));
   const userMessages = messages.filter((message) => message.role === "user");
@@ -101,27 +93,19 @@ export function collectKnowledgeBaseReviewEvidence(
   range: ReviewRange,
   extras: { dashboard?: KnowledgeBaseDashboardEvidence; maintenanceReports?: KnowledgeBaseMaintenanceReportEvidence[] } = {}
 ): KnowledgeBaseReviewEvidence {
-  const session = settings.sessions.find((item) => isKnowledgeBaseSession(item, settings.knowledgeBase.sessionId));
-  const messages = session ? messagesInRange(session.messages, range) : [];
-  const userMessages = messages.filter((message) => message.role === "user");
+  const messages = settings.sessions.flatMap((session) => messagesInRange(session.messages, range));
+  const userMessages = messages.filter((message) => {
+    if (message.role !== "user") return false;
+    return routeKnowledgeConversationCommand(message.text).kind !== "chat";
+  });
   const commandCounts = {
-    init: 0,
     maintain: 0,
-    lint: 0,
-    ask: 0,
-    outputs: 0,
-    inbox: 0,
-    journal: 0,
-    collect: 0,
-    other: 0
+    ask: 0
   };
   for (const message of userMessages) {
-    const command = parseKnowledgeBaseCommand(message.text, message.attachments?.length ?? 0);
-    if (command.intent === "process-outputs") commandCounts.outputs += 1;
-    else if (command.intent === "process-inbox") commandCounts.inbox += 1;
-    else if (command.intent === "reingest") commandCounts.maintain += 1;
-    else if (command.intent in commandCounts) commandCounts[command.intent as keyof typeof commandCounts] += 1;
-    else commandCounts.other += 1;
+    const command = routeKnowledgeConversationCommand(message.text);
+    if (command.kind === "ask") commandCounts.ask += 1;
+    else if (command.kind === "maintain") commandCounts.maintain += 1;
   }
   return {
     kind: "knowledge-base",
@@ -241,21 +225,19 @@ function buildKnowledgeBaseHtmlData(range: ReviewRange, evidence: KnowledgeBaseR
       { label: "失败数", value: String(evidence.failedMessageCount) }
     ],
     scores: [
-      { label: "方向选择", rating: commandTotal ? "好" : "未发生", description: "只评价知识库频道，不混入普通 Agent 对话。" },
+      { label: "方向选择", rating: commandTotal ? "好" : "未发生", description: "只评价当前 Conversation 中明确的 /ask 与 /maintain。" },
       { label: "执行效率", rating: evidence.failedMessageCount ? "中" : "中上", description: evidence.failedMessageCount ? "存在失败记录。" : "失败信号少。" },
-      { label: "提示词质量", rating: evidence.commandCounts.ask || evidence.commandCounts.lint ? "中上" : "待观察", description: "命令越明确，越容易稳定复盘。" },
+      { label: "提示词质量", rating: evidence.commandCounts.ask ? "中上" : "待观察", description: "命令越明确，越容易稳定复盘。" },
       { label: "决策质量", rating: "中上", description: "知识库任务围绕 raw/wiki/outputs/inbox 展开。" },
       { label: "token 使用效率", rating: "中", description: "插件内只保留周报行为证据，不做精确账单判断。" },
-      { label: "使用方式", rating: commandTotal ? "好" : "待观察", description: commandTotal ? "已形成知识库频道使用记录。" : "样本不足。" }
+      { label: "使用方式", rating: commandTotal ? "好" : "待观察", description: commandTotal ? "已形成当前 Conversation 的 Knowledge 使用记录。" : "样本不足。" }
     ],
     distribution: [
-      { label: "体检", countLabel: `${evidence.commandCounts.lint} 次`, value: percentOf(evidence.commandCounts.lint, Math.max(1, commandTotal)), description: "检查断链、孤儿页和维护风险。" },
-      { label: "维护/重提炼", countLabel: `${evidence.commandCounts.maintain} 次`, value: percentOf(evidence.commandCounts.maintain, Math.max(1, commandTotal)), description: "消化 raw 或重新提炼资料。" },
-      { label: "问答", countLabel: `${evidence.commandCounts.ask} 次`, value: percentOf(evidence.commandCounts.ask, Math.max(1, commandTotal)), description: "只读查询 wiki 依据。" },
-      { label: "收集/日记/整理", countLabel: `${evidence.commandCounts.collect + evidence.commandCounts.journal + evidence.commandCounts.outputs + evidence.commandCounts.inbox} 次`, value: percentOf(evidence.commandCounts.collect + evidence.commandCounts.journal + evidence.commandCounts.outputs + evidence.commandCounts.inbox, Math.max(1, commandTotal)), description: "进入 raw、journal、outputs 或 inbox 的动作。" }
+      { label: "维护", countLabel: `${evidence.commandCounts.maintain} 次`, value: percentOf(evidence.commandCounts.maintain, Math.max(1, commandTotal)), description: "显式执行一次性知识库维护。" },
+      { label: "问答", countLabel: `${evidence.commandCounts.ask} 次`, value: percentOf(evidence.commandCounts.ask, Math.max(1, commandTotal)), description: "只读查询 Knowledge 依据。" }
     ],
     highQualityPrompts: [
-      { scene: "知识库频道", excerpt: "使用 /check、/ask、/maintain 等明确命令", judgement: "高质量", reason: "命令意图清楚，可复盘。" },
+      { scene: "当前 Conversation", excerpt: "使用 /ask 或 /maintain 明确命令", judgement: "高质量", reason: "命令意图清楚，可复盘。" },
       { scene: "体检任务", excerpt: "只体检、只看断链、只读问答", judgement: "高质量", reason: "能限制写入范围。" }
     ],
     lowEfficiencyPrompts: [

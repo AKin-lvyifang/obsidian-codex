@@ -1,102 +1,154 @@
 import type CodexForObsidianPlugin from "../main";
-import { confirmModal } from "../ui/modals";
-import { EchoInkMcpBroker } from "./mcp-broker";
-import { resolveMcpConnectionConfig } from "./mcp-connections";
-import type { EchoInkMcpConnectionRecord, EchoInkResource, EchoInkResourceScope } from "./types";
+import {
+  EchoInkMcpBroker,
+  type EchoInkMcpBrokerTransport
+} from "./mcp-broker";
+import {
+  EchoInkMcpCredentialStore,
+  materializeMcpCredential,
+  mcpSafeTransportPoolKey
+} from "./mcp-credential-store";
+import { resolveMcpConnectionRecord } from "./mcp-connections";
+import type {
+  EchoInkMcpConnectionConfig,
+  EchoInkMcpConnectionRecord,
+  EchoInkResource,
+  EchoInkResourceSettings
+} from "./types";
 
 export interface CallEchoInkMcpToolInput {
   resourceId: string;
-  scope: EchoInkResourceScope;
   backend: string;
   toolName: string;
   arguments?: Record<string, unknown>;
   timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+export interface EchoInkMcpBrokerPort {
+  listTools(
+    resource: EchoInkResource,
+    timeoutMs?: number,
+    signal?: AbortSignal
+  ): Promise<{ tools: unknown[] }>;
+  callTool(input: {
+    resource: EchoInkResource;
+    toolName: string;
+    arguments?: Record<string, unknown>;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+  }): Promise<{ content: unknown }>;
+}
+
+export interface EchoInkMcpBrokerServiceDependencies {
+  readonly transportFactory?: (
+    config: EchoInkMcpConnectionConfig
+  ) => Promise<EchoInkMcpBrokerTransport>;
+  readonly credentialResolver?: (
+    resource: EchoInkResource,
+    connection: EchoInkMcpConnectionRecord
+  ) => Promise<string>;
 }
 
 export class EchoInkMcpBrokerService {
-  constructor(private readonly plugin: CodexForObsidianPlugin) {}
+  private credentialStore: EchoInkMcpCredentialStore | null = null;
+  private readonly createBroker: (
+    connections: CodexForObsidianPlugin["settings"]["resources"]["mcpConnections"]
+  ) => EchoInkMcpBrokerPort;
 
-  async listTools(resourceId: string, timeoutMs = 30000): Promise<unknown[]> {
+  constructor(
+    private readonly plugin: CodexForObsidianPlugin,
+    private readonly dependencies: EchoInkMcpBrokerServiceDependencies = {}
+  ) {
+    this.createBroker = (connections) => this.createDefaultBroker(connections);
+  }
+
+  async listTools(
+    resourceId: string,
+    timeoutMs = 30000,
+    signal?: AbortSignal
+  ): Promise<unknown[]> {
     const resource = await this.currentResource(resourceId);
     if (!resource || resource.kind !== "mcp-server") throw new Error("找不到 EchoInk MCP 资源。");
-    const broker = new EchoInkMcpBroker({
-      settings: this.plugin.settings.resources.mcpBroker,
-      connections: this.plugin.settings.resources.mcpConnections
-    });
-    try {
-      const result = await broker.listTools(resource, timeoutMs);
-      this.recordConnectionSuccess(resource);
-      await this.plugin.saveSettings(true);
-      return result.tools;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.recordConnectionFailure(resource, message);
-      await this.plugin.saveSettings(true);
-      throw error;
-    }
+    const broker = this.createBroker(this.plugin.settings.resources.mcpConnections);
+    return (await broker.listTools(resource, timeoutMs, signal)).tools;
   }
 
   async callTool(input: CallEchoInkMcpToolInput): Promise<unknown> {
+    if (input.backend !== "pi-native") {
+      throw new Error("MCP protocol calls are only available to the Pi-native Chat runtime.");
+    }
     const resource = await this.currentResource(input.resourceId);
     if (!resource || resource.kind !== "mcp-server") throw new Error("找不到 EchoInk MCP 资源。");
-    const broker = new EchoInkMcpBroker({
-      settings: this.plugin.settings.resources.mcpBroker,
-      connections: this.plugin.settings.resources.mcpConnections,
-      approval: async (request) => {
-        const args = request.arguments ? `\n\n参数：${JSON.stringify(request.arguments, null, 2).slice(0, 2000)}` : "";
-        return await confirmModal(
-          this.plugin.app,
-          `MCP 工具调用：${request.toolName}`,
-          `资源：${request.resource.name}\n后端：${request.backend}\n范围：${request.scope}${args}`,
-          "允许",
-          "拒绝"
-        );
-      }
-    });
-    try {
-      const result = await broker.callTool({
-        resource,
-        scope: input.scope,
-        backend: input.backend,
-        toolName: input.toolName,
-        arguments: input.arguments,
-        timeoutMs: input.timeoutMs
-      });
-      this.recordConnectionSuccess(resource);
-      return result.content;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.recordConnectionFailure(resource, message);
-      throw error;
-    } finally {
-      await this.plugin.saveSettings(true);
+    const broker = this.createBroker(this.plugin.settings.resources.mcpConnections);
+    return (await broker.callTool({
+      resource,
+      toolName: input.toolName,
+      arguments: input.arguments,
+      timeoutMs: input.timeoutMs,
+      signal: input.signal
+    })).content;
+  }
+
+  async callToolFromResourceSnapshot(
+    input: CallEchoInkMcpToolInput,
+    snapshot: Readonly<EchoInkResourceSettings>
+  ): Promise<unknown> {
+    if (input.backend !== "pi-native") {
+      throw new Error("MCP protocol calls are only available to the Pi-native Chat runtime.");
     }
+    const resource = snapshot.catalog.find((candidate) =>
+      candidate.id === input.resourceId && candidate.kind === "mcp-server"
+    );
+    if (!resource) throw new Error("找不到 EchoInk MCP 资源。");
+    const broker = this.createBroker(snapshot.mcpConnections);
+    return (await broker.callTool({
+      resource,
+      toolName: input.toolName,
+      arguments: input.arguments,
+      timeoutMs: input.timeoutMs,
+      signal: input.signal
+    })).content;
   }
 
   private async currentResource(resourceId: string): Promise<EchoInkResource | null> {
     return (await this.plugin.buildRuntimeEchoInkResourceCatalog()).find((resource) => resource.id === resourceId) ?? null;
   }
 
-  private recordConnectionSuccess(resource: EchoInkResource): void {
-    const record = this.ensureConnectionRecord(resource);
-    if (!record) return;
-    record.verifiedAt = Date.now();
-    record.lastError = "";
+  private getCredentialStore(): EchoInkMcpCredentialStore {
+    if (!this.credentialStore) {
+      this.credentialStore = new EchoInkMcpCredentialStore({
+        app: this.plugin.app,
+        vaultPath: this.plugin.getVaultPath()
+      });
+    }
+    return this.credentialStore;
   }
 
-  private recordConnectionFailure(resource: EchoInkResource, message: string): void {
-    const record = this.ensureConnectionRecord(resource);
-    if (!record) return;
-    record.lastError = message;
+  private createDefaultBroker(
+    connections: CodexForObsidianPlugin["settings"]["resources"]["mcpConnections"]
+  ): EchoInkMcpBrokerPort {
+    const settings = { mcpConnections: connections };
+    return new EchoInkMcpBroker({
+      connections,
+      ...(this.dependencies.transportFactory
+        ? { transportFactory: this.dependencies.transportFactory }
+        : {}),
+      credentialResolver: async (resource, config) => {
+        const record = resolveMcpConnectionRecord(resource, settings);
+        if (!record?.credential) return config;
+        const secret = this.dependencies.credentialResolver
+          ? await this.dependencies.credentialResolver(resource, record)
+          : await this.getCredentialStore().resolve(resource, record);
+        return materializeMcpCredential(config, record.credential, secret);
+      },
+      transportPoolKey: (resource, config) =>
+        mcpSafeTransportPoolKey(
+          resource,
+          config,
+          resolveMcpConnectionRecord(resource, settings) ?? undefined
+        )
+    });
   }
 
-  private ensureConnectionRecord(resource: EchoInkResource): EchoInkMcpConnectionRecord | null {
-    const existing = this.plugin.settings.resources.mcpConnections[resource.id];
-    if (existing) return existing;
-    const config = resolveMcpConnectionConfig(resource, this.plugin.settings.resources);
-    if (!config) return null;
-    const record = { ...config };
-    this.plugin.settings.resources.mcpConnections[resource.id] = record;
-    return record;
-  }
 }

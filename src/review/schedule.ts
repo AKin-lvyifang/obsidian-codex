@@ -72,7 +72,9 @@ export function isReviewHtmlPath(value: string, outputDir = DEFAULT_REVIEW_OUTPU
     normalizeReviewOutputDir(outputDir, DEFAULT_REVIEW_OUTPUT_DIR),
     DEFAULT_REVIEW_OUTPUT_DIR
   ]));
-  return allowedDirs.some((dir) => normalized.startsWith(`${dir}/`));
+  return allowedDirs.some((dir) => dir === "."
+    ? !normalized.includes("/")
+    : normalized.startsWith(`${dir}/`));
 }
 
 function startOfLocalWeek(date: Date): Date {

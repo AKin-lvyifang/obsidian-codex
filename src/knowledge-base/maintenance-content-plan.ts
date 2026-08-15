@@ -1,12 +1,37 @@
 import { createHash } from "node:crypto";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
-import type {
-  MaintenanceWorkflowCasFile,
-  MaintenanceWorkflowFileCas,
-  MaintenanceWorkflowManagedUpsertDraft,
-  MaintenanceWorkflowManagedWriteKind
-} from "../harness/maintenance/workflow-wal";
+export interface MaintenanceWorkflowCasMissing {
+  kind: "missing";
+}
+
+export interface MaintenanceWorkflowCasFile {
+  kind: "file";
+  sha256: string;
+  size: number;
+  mode: number;
+}
+
+export type MaintenanceWorkflowFileCas =
+  | MaintenanceWorkflowCasMissing
+  | MaintenanceWorkflowCasFile;
+
+export type MaintenanceWorkflowManagedWriteKind =
+  | "index"
+  | "raw-metadata"
+  | "raw-registry"
+  | "report"
+  | "tracker";
+
+export interface MaintenanceWorkflowManagedUpsertDraft {
+  kind: MaintenanceWorkflowManagedWriteKind;
+  operation: "upsert";
+  relativePath: string;
+  expected: MaintenanceWorkflowFileCas;
+  expectedContent?: Buffer;
+  desiredContent: Buffer;
+  desiredMode: number;
+}
 
 export interface MaintenanceContentFileBaseline {
   relativePath: string;

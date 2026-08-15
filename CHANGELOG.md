@@ -1,6 +1,60 @@
 # Changelog
 
-## Unreleased
+## 2.0.0 - 2026-08-15
+
+![EchoInk 2.0](https://raw.githubusercontent.com/AKin-lvyifang/codex-echoink/2.0.0/assets/releases/echoink-2.0.0-release.png)
+
+### 中文
+
+#### 统一的会话与 Agent
+
+1. 对话主链统一为 Pi-native AgentSession。打开或切换会话时，本地历史恢复与 AgentSession 激活同时进行，可以直接继续聊天。
+2. 会话支持新建、重命名、归档、恢复和软删除。已归档会话从聊天弹窗移到 **设置 → EchoInk → 复盘**，原始 Pi Session JSONL 保留。
+3. 对话栏、消息操作与输入工具条重新整理；发送按钮尺寸收敛，低价值的 Agent 状态胶囊和知识库健康模块已移除。
+
+#### 可查看、可修正的长期记忆
+
+1. 当前 Memory 按事实、观点、决定、进行中和经历五类展示，每条记录包含标题、内容和召回情境，不暴露内部文件路径或 revision。
+2. 修正弹窗同时保留灰色原记忆、输入内容和浅青色修正后预览。生成预览时可以停止，且不会写入原记忆。
+3. 只有点击保存才创建新版本。输入变化会立即使旧预览失效；关闭、停止、生成失败、迟到结果和版本冲突都不会覆盖当前记忆。
+
+#### 更直接的知识维护与复盘
+
+1. `/maintain` 不带参数时执行全局维护；通过输入区 `+` 选择一篇 Raw 笔记时只维护该笔记；尾随名称时会模糊搜索相关 Raw 笔记。
+2. 已提炼且没有新变化的内容会以无写入结果结束。维护候选与目标版本绑定，生成期间目标发生变化时不会覆盖新内容。
+3. 周报生成与输出设置合并在复盘页，可选择 Agent 或知识库、统计周期、Vault 内输出文件夹，以及生成后是否打开 HTML；不再维护“最近报告”列表。
+
+#### Provider 与升级说明
+
+1. Provider 设置现在直接保存 API Key，不再要求额外的 Credential 配置步骤。升级后如果旧配置只有 Credential 引用，需要重新输入一次 API Key。
+2. 2.0 不读取或迁移已经退役的 Codex、OpenCode、Hermes 会话，以及旧 Cognitive、Reflection 或 Memory 数据，也不会主动删除这些旧文件。
+3. 最低 Obsidian 版本为 1.11.4，仅支持桌面端。升级前建议按自己的 Vault 备份习惯保留快照。
+
+### English
+
+#### One conversation and Agent path
+
+1. Conversations now use one Pi-native AgentSession path. Opening or switching a conversation restores local history while activating its AgentSession, so it is ready to continue.
+2. Conversations can be created, renamed, archived, restored, and soft-deleted. Archived conversations moved from the chat dialog to **Settings → EchoInk → Review**, while the original Pi Session JSONL remains intact.
+3. The conversation header, message actions, and composer toolbar were rebuilt. The send button is smaller, and low-value Agent status and knowledge-health widgets were removed.
+
+#### Visible, correctable long-term memory
+
+1. Current Memory is grouped into Facts, Views, Decisions, Active, and Episodes. Each record shows its title, content, and recall context without exposing internal paths or revisions.
+2. The correction dialog keeps the original memory, correction input, and cyan corrected preview visible together. Preview generation can be stopped and never writes the original record.
+3. Only Save creates a new version. Editing the input immediately invalidates an old preview; closing, stopping, failure, late results, and revision conflicts cannot overwrite current Memory.
+
+#### Direct knowledge maintenance and review
+
+1. `/maintain` without arguments runs globally. Selecting one Raw note with the composer's `+` targets that note, while trailing text fuzzy-searches related Raw notes.
+2. Already-refined content with no changes settles without another write. Candidates are bound to target revisions, preventing a generated result from overwriting newer content.
+3. Report generation and destination settings now share one Review page. Choose Agent or knowledge-base reports, the date range, any vault folder, and whether to open the generated HTML. The recent-report list has been removed.
+
+#### Providers and upgrade notes
+
+1. Provider setup now stores API keys directly and no longer requires a separate Credential step. Existing configurations that contain only a retired Credential reference require the API key to be entered once.
+2. EchoInk 2.0 does not read or migrate retired Codex, OpenCode, or Hermes conversations, or retired Cognitive, Reflection, and Memory data. It does not proactively delete those old files.
+3. Obsidian 1.11.4 or later is required, and EchoInk remains desktop-only. Keep a vault snapshot before upgrading, following your normal backup practice.
 
 ## v1.4.0 - 2026-07-23
 

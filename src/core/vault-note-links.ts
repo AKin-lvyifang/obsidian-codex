@@ -128,6 +128,7 @@ function normalizeVaultNoteCandidate(value: string): string {
   const withoutAlias = decodeUriPath(value.split("|")[0].split("#")[0].trim().replace(/^\.\//, ""));
   if (!/\.md$/i.test(withoutAlias) || /^https?:\/\//i.test(withoutAlias) || withoutAlias.startsWith("/")) return "";
   const normalized = normalizeVaultPath(withoutAlias);
+  if (normalized.split("/").some((part) => part === "." || part === "..")) return "";
   const root = normalized.split("/")[0] || "";
   if (!normalized.includes("/") || VAULT_NOTE_ROOTS.has(root)) return normalized;
   return "";

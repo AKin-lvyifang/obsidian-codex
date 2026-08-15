@@ -1,8 +1,8 @@
-import type { TurnOptions } from "../core/codex-service";
+import type { TurnOptions } from "./turn-options";
 import type { EchoInkResource } from "../resources/types";
 import type { StoredAttachment } from "../settings/settings";
 
-export type QueuedTurnKind = "chat" | "knowledge-base";
+export type QueuedTurnKind = "chat";
 export type QueueSettlement = "continue" | "paused" | "idle";
 
 export interface QueuedTurnItem {
@@ -14,6 +14,8 @@ export interface QueuedTurnItem {
   turnOptions: TurnOptions;
   kind: QueuedTurnKind;
   createdAt: number;
+  /** Catalog draft selected by the user; consumed only after Pi durably accepts it. */
+  piDraftId?: string;
 }
 
 export interface QueueStartState {

@@ -1,9 +1,9 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
-import type { ChatMessage, CodexForObsidianSettings } from "../settings/settings";
+import type { ChatMessage } from "../settings/settings";
+import { CURRENT_PLUGIN_ID, pluginDataDir } from "../plugin/plugin-data-paths";
 
-export const CURRENT_PLUGIN_ID = "codex-echoink";
-export const LEGACY_PLUGIN_IDS = ["obsidian-codex"];
+export { CURRENT_PLUGIN_ID, pluginDataDir } from "../plugin/plugin-data-paths";
 export const RAW_TEXT_THRESHOLD = 30_000;
 export const LARGE_MESSAGE_THRESHOLD = 80_000;
 export const RAW_PREVIEW_HEAD = 12_000;
@@ -12,12 +12,6 @@ export const RAW_PREVIEW_TAIL = 4_000;
 interface RawWrite {
   rawRef: string;
   text: string;
-}
-
-export function pluginDataDir(vaultPath: string, pluginDir = CURRENT_PLUGIN_ID): string {
-  const normalized = normalizePluginDir(pluginDir);
-  if (normalized.startsWith(".obsidian/plugins/")) return path.join(vaultPath, normalized);
-  return path.join(vaultPath, ".obsidian", "plugins", normalized);
 }
 
 export function rawStorageDir(vaultPath: string, pluginDir = CURRENT_PLUGIN_ID): string {
@@ -43,21 +37,7 @@ export async function writeRawText(vaultPath: string, rawRef: string, text: stri
 }
 
 export async function readRawText(vaultPath: string, rawRef: string, pluginDir = CURRENT_PLUGIN_ID): Promise<string> {
-  const currentPath = resolveRawRef(vaultPath, rawRef, pluginDir);
-  try {
-    return await readFile(currentPath, "utf8");
-  } catch (error) {
-    if (!isNotFoundError(error)) throw error;
-  }
-  for (const legacyId of LEGACY_PLUGIN_IDS) {
-    if (pluginDataDir(vaultPath, legacyId) === pluginDataDir(vaultPath, pluginDir)) continue;
-    try {
-      return await readFile(resolveRawRef(vaultPath, rawRef, legacyId), "utf8");
-    } catch (error) {
-      if (!isNotFoundError(error)) throw error;
-    }
-  }
-  return readFile(currentPath, "utf8");
+  return readFile(resolveRawRef(vaultPath, rawRef, pluginDir), "utf8");
 }
 
 export function prepareRawMessage(message: ChatMessage, fullText: string, threshold = thresholdForMessage(message)): RawWrite | null {
@@ -81,24 +61,6 @@ export function prepareRawMessage(message: ChatMessage, fullText: string, thresh
   message.rawLines = countLines(fullText);
   message.rawTruncatedForPreview = true;
   return { rawRef, text: fullText };
-}
-
-export async function externalizeLargeMessages(vaultPath: string, settings: CodexForObsidianSettings, pluginDir = CURRENT_PLUGIN_ID): Promise<number> {
-  let changed = 0;
-  for (const session of settings.sessions) {
-    for (const message of session.messages) {
-      if (message.rawRef) {
-        if (!message.previewText) message.previewText = message.text;
-        continue;
-      }
-      const fullText = message.text ?? "";
-      const write = prepareRawMessage(message, fullText);
-      if (!write) continue;
-      await writeRawText(vaultPath, write.rawRef, write.text, pluginDir);
-      changed += 1;
-    }
-  }
-  return changed;
 }
 
 export function displayTextForMessage(message: ChatMessage): string {
@@ -139,15 +101,4 @@ function sanitizeRawFileName(value: string): string {
 
 function isProcessItemType(itemType?: string): boolean {
   return itemType === "commandExecution" || itemType === "fileChange" || itemType === "mcpToolCall" || itemType === "dynamicToolCall" || itemType === "collabAgentToolCall";
-}
-
-function normalizePluginDir(value: string): string {
-  const normalized = value.trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
-  if (!normalized) return CURRENT_PLUGIN_ID;
-  if (normalized.split("/").includes("..")) throw new Error("非法插件目录");
-  return normalized;
-}
-
-function isNotFoundError(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT";
 }

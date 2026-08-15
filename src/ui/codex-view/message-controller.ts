@@ -3,7 +3,6 @@ import type CodexForObsidianPlugin from "../../main";
 import type { ChatMessage, StoredSession } from "../../settings/settings";
 import { swallowError } from "../../core/error-handling";
 import { settleStaleRunningMessages } from "../../core/message-state";
-import { getDisplayKnowledgeBaseMessages, getHiddenKnowledgeBaseMessages } from "../../knowledge-base/session-history";
 import { SessionMessageStore, type SessionMessageInput } from "./session-message-store";
 import { CodexMessageListRenderer } from "./message-list";
 import { MessageScrollFollowController, type MessageRenderScheduleOptions } from "./message-scroll-follow";
@@ -25,8 +24,15 @@ export interface CodexMessageHost {
   messageScrollFollow: MessageScrollFollowController;
   messagesBottomFollowPaused: boolean;
   ensureSession(): StoredSession;
-  isKnowledgeBaseSession(session: StoredSession): boolean;
-  openKnowledgeBaseHistory(session: StoredSession): Promise<void>;
+  derivePiConversationFromMessage(
+    session: StoredSession,
+    targetEntryId: string
+  ): Promise<void>;
+  handlePiTaskPlanAction(
+    planId: string,
+    action: "execute" | "continue" | "pause" | "cancel"
+  ): Promise<void>;
+  preparePiTaskPlanModification(planId: string, title: string): void;
   renderMessages(options?: { forceBottom?: boolean; fromScroll?: boolean; preserveScroll?: boolean }): void;
   scheduleRenderMessages(options?: MessageRenderScheduleOptions): void;
   scheduleMeasureVirtualRows(forceBottom?: boolean): void;
@@ -68,9 +74,7 @@ export function clearSessionMessageActiveRun(host: CodexMessageHost): void {
 export function renderMessages(host: CodexMessageHost, options: { forceBottom?: boolean; fromScroll?: boolean; preserveScroll?: boolean } = {}): void {
   const session = host.ensureSession();
   settleStaleMessages(host, session);
-  const knowledgeSession = host.isKnowledgeBaseSession(session);
-  const messages = knowledgeSession ? getDisplayKnowledgeBaseMessages(session) : session.messages;
-  const hiddenCount = knowledgeSession ? getHiddenKnowledgeBaseMessages(session).length : 0;
+  const messages = session.messages;
   const renderOptions = host.messagesBottomFollowPaused ? { ...options, forceBottom: false, preserveScroll: true } : options;
   host.messageListRenderer.render({
     app: host.app,
@@ -78,16 +82,29 @@ export function renderMessages(host: CodexMessageHost, options: { forceBottom?: 
     messagesEl: host.messagesEl,
     virtualListEl: host.virtualListEl,
     sessionId: session.id,
-    knowledgeSession,
+    showWelcome: host.plugin.settings.showWelcome,
     settingsLanguage: host.plugin.settings.settingsLanguage,
     messages,
-    hiddenKnowledgeMessageCount: hiddenCount,
     tokenUsage: session.tokenUsage,
     vaultPath: host.plugin.getVaultPath(),
     readRawMessageText: (rawRef) => host.plugin.readRawMessageText(rawRef),
-    onOpenKnowledgeHistory: () => void host.openKnowledgeBaseHistory(session),
-    onAutoRepairAgent: (backend) => void host.plugin.openAgentSetup({ backend, autoRepair: true }),
-    onOpenAgentSettings: (backend) => void host.plugin.openAgentSetup({ backend }),
+    ...(session.bodyAuthority === "pi_session_only"
+      ? {
+        onDerivePiConversation: (entryId: string) =>
+          host.derivePiConversationFromMessage(session, entryId),
+        piConversationDeriveDisabled: host.running
+      }
+      : {}),
+    ...(session.bodyAuthority === "pi_session_only"
+      ? {
+        onTaskPlanAction: (
+          planId: string,
+          action: "execute" | "continue" | "pause" | "cancel"
+        ) => host.handlePiTaskPlanAction(planId, action),
+        onModifyTaskPlan: (planId: string, title: string) =>
+          host.preparePiTaskPlanModification(planId, title)
+      }
+      : {}),
     onScheduleMeasure: (forceBottom) => host.scheduleMeasureVirtualRows(forceBottom),
     onScheduleRunProgress: () => host.scheduleKnowledgeBaseRunProgress(),
     shouldFollowBottom: () => !host.messagesBottomFollowPaused,
@@ -97,7 +114,6 @@ export function renderMessages(host: CodexMessageHost, options: { forceBottom?: 
 
 export function settleStaleMessages(host: CodexMessageHost, session: StoredSession): void {
   if (host.running) return;
-  if (host.isKnowledgeBaseSession(session) && host.plugin.getKnowledgeBaseManager()?.isRunning) return;
   const count = settleStaleRunningMessages(session.messages);
   if (!count) return;
   clearSessionMessageActiveRun(host);

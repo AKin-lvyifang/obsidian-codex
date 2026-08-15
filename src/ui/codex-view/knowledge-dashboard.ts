@@ -24,7 +24,6 @@ export interface KnowledgeDashboardRenderState {
 export interface KnowledgeDashboardActions {
   onRefresh: () => void;
   onToggleExpanded: () => void;
-  onOpenRulesFile: (snapshot: KnowledgeBaseDashboardSnapshot) => void;
 }
 
 export interface KnowledgeDashboardTooltipState {
@@ -94,7 +93,6 @@ export function renderKnowledgeDashboardView(
 
   const summary = header.createDiv({ cls: "codex-kb-dashboard-summary" });
   if (snapshot) {
-    addKnowledgeDashboardRulesMetric(summary, snapshot, actions);
     addKnowledgeDashboardMetric(summary, "Raw", `${snapshot.raw.fileCount}`);
     addKnowledgeDashboardMetric(summary, "Wiki", `${snapshot.wiki.fileCount}`);
     addKnowledgeDashboardMetric(summary, "Inbox", `${snapshot.inbox.fileCount}`);
@@ -192,25 +190,6 @@ function addKnowledgeDashboardMetric(container: HTMLElement, label: string, valu
   const metric = container.createSpan({ cls: "codex-kb-dashboard-metric" });
   metric.createSpan({ cls: "codex-kb-dashboard-metric-label", text: label });
   metric.createSpan({ cls: "codex-kb-dashboard-metric-value", text: value });
-}
-
-function addKnowledgeDashboardRulesMetric(container: HTMLElement, snapshot: KnowledgeBaseDashboardSnapshot, actions: KnowledgeDashboardActions): void {
-  const button = container.createEl("button", {
-    cls: "codex-kb-dashboard-metric codex-kb-dashboard-rule",
-    attr: {
-      type: "button",
-      title: snapshot.rulesFileExists ? `打开规则文件：${snapshot.rulesFilePath}` : "规则文件缺失，点击查看提示",
-      "aria-label": snapshot.rulesFileExists ? `打开规则文件 ${snapshot.rulesFilePath}` : "规则文件缺失"
-    }
-  });
-  button.toggleClass("is-missing", !snapshot.rulesFileExists);
-  button.createSpan({ cls: "codex-kb-dashboard-metric-label", text: "规则" });
-  button.createSpan({ cls: "codex-kb-dashboard-metric-value", text: snapshot.rulesFileExists ? snapshot.rulesFilePath : "缺失" });
-  button.onclick = (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    actions.onOpenRulesFile(snapshot);
-  };
 }
 
 function addKnowledgeDashboardHealthMetric(container: HTMLElement, health: KnowledgeBaseDashboardSnapshot["health"], tooltipState: KnowledgeDashboardTooltipState): void {

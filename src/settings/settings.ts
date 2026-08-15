@@ -1,43 +1,36 @@
 import type { CodexModel, CodexPluginInfo, CodexSkill, McpServerStatus, PermissionMode, ProcessEventKind, ProcessFileRef, ReasoningEffort, ServiceTierChoice, TokenUsage, UiMode } from "../types/app-server";
-import type { AgentBackendKind, AgentModelInfo, AgentProfileInfo } from "../agent/types";
-import type { CapabilityBackendChoice } from "../agent/registry";
-import type { BackendSessionBinding } from "../harness/contracts/run";
 import {
-  isSafeNativeExecutionTransport,
-  type NativeCleanupStatus,
-  type NativeExecutionRef,
-  type NativeLocalCommitStatus
-} from "../harness/contracts/native-execution";
-import type { ContextCompileMode, ContextSyncCursor, SessionContextSnapshot } from "../harness/contracts/context";
-import { workspaceFingerprint } from "../harness/kernel/session-service";
+  apiProviderApiKeyRequired,
+  apiProviderMaxOutputReserve,
+  getApiProviderPreset,
+  getApiProviderModelPreset,
+  isLoopbackApiProviderUrl,
+  normalizeApiProviderId,
+  normalizeApiProviderProtocol,
+  normalizeApiProviderBaseUrl,
+  type ApiProviderId,
+  type ApiProviderProtocol
+} from "./provider-presets";
+import {
+  parsePiContextLedger,
+  type PiContextLedger
+} from "../harness/pi-native/pi-context-budget";
 import { normalizeHarnessRunUsage, type HarnessRunUsage } from "../harness/contracts/event";
 import { defaultResourceSettings } from "../resources/registry";
-import { normalizeMcpBrokerSettings } from "../resources/mcp-broker";
 import { normalizeMcpConnectionRecords } from "../resources/mcp-connections";
 import type { EchoInkResourceSettings } from "../resources/types";
 import { AGENTS_RULES_FILE, DEFAULT_KNOWLEDGE_BASE_RULES_FILE, LEGACY_CLAUDE_RULES_FILE } from "../knowledge-base/constants";
-import { isSyntheticHermesDefaultModel } from "../core/hermes-models";
 import type {
   KnowledgeBaseCitationSummary,
-  KnowledgeBaseRunCommitState,
   KnowledgeBaseRunCompletion,
-  KnowledgeBaseRunTerminalPhase,
-  KnowledgeBaseRunWarning,
-  KnowledgeRunAttemptPhase,
-  KnowledgeRunAttemptRecord
+  KnowledgeBaseRunWarning
 } from "../knowledge-base/types";
 import type { KnowledgeBaseMessageUiPayload } from "../knowledge-base/maintain-report-card";
 import {
-  DEFAULT_EDITOR_ACTION_MODEL,
-  type ArticleUnderstandingCache,
-  type ArticleUnderstandingFingerprint,
-  type EditorActionModeConfig,
-  type EditorActionQualityMode,
-  type EditorAiActionConfig,
-  type EditorAiActionSettings,
-  type EditorAiStyleConfig
-} from "../editor-actions/types";
-export type { EditorActionModeConfig, EditorActionQualityMode, EditorAiActionConfig, EditorAiActionSettings, EditorAiStyleConfig };
+  normalizeEchoInkTaskPlanSnapshot,
+  type EchoInkTaskPlanSnapshot
+} from "../types/task-plan";
+import type { EchoInkConversationSessionShell } from "./current-conversation";
 
 export interface StoredAttachment {
   type: "file" | "image";
@@ -96,18 +89,10 @@ export interface ChatMessage {
   role: "user" | "assistant" | "system" | "tool";
   text: string;
   backendId?: string;
+  /** Exact runtime Provider identity captured from Pi; absent on historical messages. */
+  providerId?: string;
   modelId?: string;
   profileId?: string;
-  nativeExecutionIdHash?: string;
-  contextMode?: ContextCompileMode;
-  contextCompiledThroughMessageId?: string;
-  contextSnapshotVersion?: string;
-  nativeLeaseId?: string;
-  nativeLeaseStatus?: BackendSessionBinding["leaseStatus"];
-  nativeLeaseTurnCount?: number;
-  nativeLeaseReused?: boolean;
-  nativeLocalCommitStatus?: NativeLocalCommitStatus;
-  nativeCleanupStatus?: NativeCleanupStatus;
   runTerminalRecoveryPending?: "completed" | "cancelled" | "failed";
   echoInkRunTerminalRecovery?: EchoInkChatRunTerminalRecovery;
   runTerminalRecovered?: boolean;
@@ -136,131 +121,30 @@ export interface ChatMessage {
   files?: ProcessFileRef[];
   images?: StoredAttachment[];
   runUsage?: HarnessRunUsage;
+  /** Thin projection of a structured Pi Session task-plan entry. */
+  taskPlan?: Readonly<EchoInkTaskPlanSnapshot>;
   createdAt: number;
   completedAt?: number;
 }
 
-export type StoredSessionKind = "chat" | "knowledge-base";
-export const KNOWLEDGE_BASE_SESSION_TITLE = "知识库管理";
+export type StoredSession = EchoInkConversationSessionShell<
+  ChatMessage,
+  Readonly<PiContextLedger>,
+  TokenUsage
+>;
 
-export interface StoredSession {
-  id: string;
-  title: string;
-  kind?: StoredSessionKind;
-  threadId?: string;
-  backendBindings?: Record<string, BackendSessionBinding>;
-  revision?: number;
-  generation?: number;
-  contextId?: string;
-  contextStartsAfterMessageId?: string;
-  commitId?: string;
-  workspaceFingerprint?: string;
-  contextSnapshot?: SessionContextSnapshot;
-  cwd: string;
-  messages: ChatMessage[];
-  rollingSummary?: {
-    text: string;
-    updatedAt: number;
-  };
-  messagesHiddenBefore?: number;
-  historyActiveDate?: string;
-  tokenUsage?: TokenUsage;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export type SettingsTab = "agents" | "general" | "providers" | "resources" | "promptEnhancer" | "editorActions" | "knowledgeBase" | "review";
-export type ProviderMode = "codex-login" | "custom-api";
+export type SettingsTab = "general" | "providers" | "resources" | "knowledgeBase" | "review";
+export type ProviderMode = "custom-api";
 export type ResourceManagementTab = "plugins" | "mcp" | "skills";
-export type AgentBackendMode = AgentBackendKind;
-export type KnowledgeBaseBackendMode = "default" | AgentBackendMode;
-export type PromptEnhancerBackendMode = "default" | AgentBackendMode;
 export type KnowledgeBaseRunStatus = "idle" | "running" | "success" | "failed" | "canceled";
 export type KnowledgeBaseInitStatus = "not-started" | "preview-ready" | "initialized" | "failed";
 export type KnowledgeBaseCaptureTarget = "inbox" | "raw-articles" | "raw-attachments" | "journal";
 export type KnowledgeBaseHealthCheckStatus = "success" | "failed";
 export type KnowledgeBaseMaintenanceTerminalStatus = KnowledgeBaseHealthCheckStatus | "canceled";
 export type KnowledgeBaseMaintenanceMode = "maintain" | "lint" | "reingest" | "outputs" | "inbox" | "unknown";
-export type KnowledgeBaseManagedThreadKind = KnowledgeBaseMaintenanceMode | "ask" | "journal" | "review";
-export type KnowledgeBaseManagedThreadArchiveState = "running" | "pending-archive" | "archived" | "archive-failed";
 export type ReviewReportKind = "knowledge-base" | "agent-chat";
-export type ReviewRunStatus = "idle" | "running" | "success" | "failed";
 export type ReviewRangeMode = "previous-week" | "current-week";
 export type SettingsLanguage = "zh-CN" | "en";
-export type MemoryCuratorBackendMode = "default" | AgentBackendMode;
-
-export interface OpenCodeSettings {
-  cliPath: string;
-  serverUrl: string;
-  autoStart: boolean;
-  hostname: string;
-  port: number;
-  providerId: string;
-  modelId: string;
-  agent: string;
-  textEnabled: boolean;
-  imageEnabled: boolean;
-  pdfEnabled: boolean;
-  lastConnectedAt: number;
-  lastError: string;
-}
-
-export interface HermesAgentSettings {
-  cliPath: string;
-  serverUrl: string;
-  autoStart: boolean;
-  hostname: string;
-  port: number;
-  profile: string;
-  providerId: string;
-  modelId: string;
-  apiKey: string;
-  providerConfigured: boolean;
-  lastProviderCheckAt: number;
-  lastProviderError: string;
-  lastConnectedAt: number;
-  lastError: string;
-  version: string;
-}
-
-export interface CodexAgentSettings {
-  cliPath: string;
-  proxyEnabled: boolean;
-  proxyUrl: string;
-  providerMode: ProviderMode;
-  activeApiProviderId: string;
-  defaultModel: string;
-  defaultReasoning: ReasoningEffort;
-  defaultServiceTier: ServiceTierChoice;
-  defaultPermission: PermissionMode;
-  defaultMode: UiMode;
-}
-
-export interface AgentSettings {
-  defaultBackend: AgentBackendMode;
-  codex: CodexAgentSettings;
-  opencode: OpenCodeSettings;
-  hermes: HermesAgentSettings;
-}
-
-export interface CapabilityBackendSettings {
-  chatBackend: CapabilityBackendChoice;
-  knowledgeBackend: CapabilityBackendChoice;
-  editorActionBackend: CapabilityBackendChoice;
-}
-
-export interface PromptEnhancerSettings {
-  enabled: boolean;
-  backend: PromptEnhancerBackendMode;
-  providerId: string;
-  model: string;
-  customModelIds: Record<AgentBackendKind, string[]>;
-  reasoning: ReasoningEffort;
-  serviceTier: ServiceTierChoice;
-  agent: string;
-  timeoutMs: number;
-  maxInputChars: number;
-}
 
 export interface SetupSettings {
   completedAt: number;
@@ -270,9 +154,7 @@ export interface SetupSettings {
 
 export interface EchoInkMemorySettings {
   enabled: boolean;
-  autoSync: boolean;
-  curatorBackend: MemoryCuratorBackendMode;
-  curatorModel: string;
+  useLongTermMemory: boolean;
 }
 
 export interface KnowledgeBaseProcessedSource {
@@ -301,182 +183,28 @@ export interface KnowledgeBaseMaintenanceHistoryEntry {
   mode: KnowledgeBaseMaintenanceMode;
   reportPath: string;
   completion?: KnowledgeBaseRunCompletion;
-  /** Frozen selector value at workflow start. */
-  selectedBackend?: AgentBackendKind;
-  /** Null is meaningful for deterministic no-op and other zero-winner runs. */
-  winnerBackend?: AgentBackendKind | null;
-  attempts?: KnowledgeRunAttemptRecord[];
   pendingSources?: string[];
-  /** Null is the canonical success value on durable maintenance history. */
-  failureCode?: string | null;
-  terminalPhase?: KnowledgeBaseRunTerminalPhase;
-  /** Durable commit boundary captured for canonical maintain/reingest history. */
-  commitState?: KnowledgeBaseRunCommitState;
   /** @deprecated Read-only compatibility for pre-resilience history. */
   phase?: string;
   errorCode?: string;
   warnings?: KnowledgeBaseRunWarning[];
 }
 
-export interface KnowledgeBaseManagedThread {
-  threadId: string;
-  runId: string;
-  kind: KnowledgeBaseManagedThreadKind;
-  vaultPath: string;
-  archiveState: KnowledgeBaseManagedThreadArchiveState;
-  createdAt: number;
-  settledAt: number;
-  archivedAt: number;
-  attempts: number;
-  lastError: string;
-}
-
-export interface KnowledgeBaseNativeLifecycleRecoveryReceipt {
-  schemaVersion: 1;
-  issue: "local-persistence" | "native-cleanup";
-  warningId: "native-local-commit-recovery" | "native-cleanup-recovery";
-  localCommitStatus: "committed" | "failed" | "unknown";
-  cleanupStatuses: NativeCleanupStatus[];
-  cleanupAttempted: boolean;
-  recordIds: string[];
-  message: string;
-  firstObservedAt: number;
-  updatedAt: number;
-  projection: {
-    lastErrorBefore: string;
-    lastSummaryBefore: string;
-    lastErrorWithRecovery: string;
-    lastSummaryWithRecovery: string;
-  };
-}
-
 export interface KnowledgeBaseSettings {
-  enabled: boolean;
-  sessionId: string;
-  backend: KnowledgeBaseBackendMode;
   useCustomRulesFile: boolean;
   rulesFilePath: string;
-  scheduleTime: string;
-  catchUpOnStartup: boolean;
   lastRunAt: number;
   lastRunStatus: KnowledgeBaseRunStatus;
-  lastScheduledRunAt: number;
-  lastScheduledRunStatus: KnowledgeBaseRunStatus;
-  lastScheduledRunId: string;
-  scheduledAttemptCount: number;
-  scheduledNextRetryAt: number;
   lastReportPath: string;
   lastError: string;
   lastSummary: string;
   lastCompletion: KnowledgeBaseRunCompletion | "";
-  lastAttempts: KnowledgeRunAttemptRecord[];
   lastPendingSources: string[];
-  lastFailureCode: string;
   lastWarnings: KnowledgeBaseRunWarning[];
-  nativeLifecycleRecoveryReceipt?: KnowledgeBaseNativeLifecycleRecoveryReceipt | null;
-  historyRetentionDays: number;
-  legacyManagedThreads?: Record<string, KnowledgeBaseManagedThread>;
   initialization: KnowledgeBaseInitializationSettings;
   processedSources: Record<string, KnowledgeBaseProcessedSource>;
   healthHistory: KnowledgeBaseHealthHistoryEntry[];
   maintenanceHistory: KnowledgeBaseMaintenanceHistoryEntry[];
-}
-
-const KNOWLEDGE_BASE_NATIVE_RECOVERY_WARNING_IDS = new Set([
-  "native-local-commit-recovery",
-  "native-cleanup-recovery"
-]);
-
-export function ensureKnowledgeBaseNativeLifecycleRecoveryProjection(
-  settings: KnowledgeBaseSettings
-): boolean {
-  const receipt = settings.nativeLifecycleRecoveryReceipt;
-  if (!receipt) return false;
-  let changed = false;
-
-  if (!hasStructuredRecoveryProjection(
-    settings.lastError,
-    receipt.projection.lastErrorWithRecovery
-  )) {
-    receipt.projection.lastErrorBefore = settings.lastError.trim();
-    receipt.projection.lastErrorWithRecovery = appendStructuredKnowledgeBaseStatus(
-      receipt.projection.lastErrorBefore,
-      receipt.message
-    );
-    settings.lastError = receipt.projection.lastErrorWithRecovery;
-    changed = true;
-  }
-
-  const summaryMessage = receipt.issue === "local-persistence"
-    ? "自动维护结果尚未完全提交；本地持久化待恢复，Native Execution 恢复收据已保留。"
-    : "Native Execution 清理待恢复，不影响已保存的维护结果。";
-  if (!hasStructuredRecoveryProjection(
-    settings.lastSummary,
-    receipt.projection.lastSummaryWithRecovery
-  )) {
-    receipt.projection.lastSummaryBefore = settings.lastSummary.trim();
-    receipt.projection.lastSummaryWithRecovery = appendStructuredKnowledgeBaseStatus(
-      receipt.projection.lastSummaryBefore,
-      summaryMessage
-    );
-    settings.lastSummary = receipt.projection.lastSummaryWithRecovery;
-    changed = true;
-  }
-
-  const retainedWarnings = settings.lastWarnings.filter(
-    (entry) => !KNOWLEDGE_BASE_NATIVE_RECOVERY_WARNING_IDS.has(entry.id)
-  );
-  const projectedWarnings = [
-    ...retainedWarnings,
-    {
-      id: receipt.warningId,
-      message: receipt.message
-    }
-  ];
-  if (!sameKnowledgeBaseRunWarnings(settings.lastWarnings, projectedWarnings)) {
-    settings.lastWarnings = projectedWarnings;
-    changed = true;
-  }
-  if (
-    receipt.issue === "native-cleanup"
-    && Number.isSafeInteger(settings.lastRunAt)
-    && settings.lastRunAt > receipt.firstObservedAt
-  ) {
-    // A cleanup-only obligation may outlive the run that first exposed it.
-    // Once its projection is rebased onto a newer committed business result,
-    // the receipt timestamp must describe that new projection as well. Keeping
-    // the old timestamp creates a self-contradictory receipt that WAL correctly
-    // rejects as stale even though every terminal field matches the new run.
-    receipt.firstObservedAt = settings.lastRunAt;
-    receipt.updatedAt = Math.max(receipt.updatedAt, settings.lastRunAt);
-    changed = true;
-  }
-  return changed;
-}
-
-function hasStructuredRecoveryProjection(
-  current: string,
-  withRecovery: string
-): boolean {
-  return current === withRecovery || current.startsWith(`${withRecovery}；`);
-}
-
-function appendStructuredKnowledgeBaseStatus(
-  previous: string,
-  message: string
-): string {
-  const normalized = previous.trim();
-  return normalized ? `${normalized}；${message}` : message;
-}
-
-function sameKnowledgeBaseRunWarnings(
-  left: readonly KnowledgeBaseRunWarning[],
-  right: readonly KnowledgeBaseRunWarning[]
-): boolean {
-  return left.length === right.length && left.every(
-    (entry, index) => entry.id === right[index]?.id
-      && entry.message === right[index]?.message
-  );
 }
 
 export interface KnowledgeBaseInitializationSettings {
@@ -488,13 +216,7 @@ export interface KnowledgeBaseInitializationSettings {
 }
 
 export interface ReviewReportState {
-  lastRunAt: number;
-  lastRunStatus: ReviewRunStatus;
   lastRangeKey: string;
-  lastMarkdownPath: string;
-  lastHtmlPath: string;
-  lastError: string;
-  lastSummary: string;
 }
 
 export interface WeeklyReviewSettings {
@@ -514,10 +236,19 @@ export interface WeeklyReviewSettings {
 
 export interface ApiProviderConfig {
   id: string;
+  providerId?: ApiProviderId;
+  runtimeProviderId: string;
+  apiProtocol: ApiProviderProtocol;
   name: string;
   baseUrl: string;
   model: string;
   models: string[];
+  modelSelection: "auto" | "model";
+  toolCalling: boolean;
+  imageInput: boolean;
+  reasoning: boolean;
+  contextWindow: number;
+  maxOutputTokens: number;
   apiKey: string;
   queryParams?: Record<string, string>;
 }
@@ -541,19 +272,17 @@ export interface WorkspaceResourceCache {
 }
 
 export interface CodexForObsidianSettings {
+  productGeneration: "pi-agent-product-v1";
   settingsVersion: number;
   settingsLanguage: SettingsLanguage;
   settingsTab: SettingsTab;
-  agentBackend: AgentBackendMode;
-  agents: AgentSettings;
-  capabilities: CapabilityBackendSettings;
-  cliPath: string;
   proxyEnabled: boolean;
   proxyUrl: string;
+  proxyEndpoint: string;
+  proxyCredentialRef: string;
   providerMode: ProviderMode;
   activeApiProviderId: string;
   apiProviders: ApiProviderConfig[];
-  mcpEnabled: boolean;
   defaultModel: string;
   defaultReasoning: ReasoningEffort;
   defaultServiceTier: ServiceTierChoice;
@@ -562,12 +291,10 @@ export interface CodexForObsidianSettings {
   autoOpen: boolean;
   autoOpenHome: boolean;
   showContext: boolean;
+  showWelcome: boolean;
   setup: SetupSettings;
   memory: EchoInkMemorySettings;
   resourceManagementTab: ResourceManagementTab;
-  promptEnhancer: PromptEnhancerSettings;
-  editorActions: EditorAiActionSettings;
-  opencode: OpenCodeSettings;
   knowledgeBase: KnowledgeBaseSettings;
   review: WeeklyReviewSettings;
   resources: EchoInkResourceSettings;
@@ -577,257 +304,20 @@ export interface CodexForObsidianSettings {
   activeSessionId: string;
 }
 
-const LEGACY_EDITOR_ACTION_PROMPTS: Record<string, string> = {
-  rewrite: "请在保持原意的前提下改写选中文字，让表达更清楚、更自然。\n\n选中文字：\n{{selected_text}}\n\n写作风格：{{style}}",
-  expand: "请在保持原意的前提下扩写选中文字，补充必要细节、上下文或例子。\n\n选中文字：\n{{selected_text}}\n\n写作风格：{{style}}",
-  continue: "请基于选中文字和前后文继续写。不要重复原文，只返回续写候选正文。\n\n选中文字：\n{{selected_text}}\n\n选区前文：\n{{before_context}}\n\n选区后文：\n{{after_context}}\n\n写作风格：{{style}}"
-};
-
-const VERSION_9_EDITOR_ACTION_PROMPTS: Record<string, string> = {
-  rewrite: [
-    "请把选中文字改写成一个明显不同、表达更有质感的版本。",
-    "要求：",
-    "1. 保留核心事实和真实含义，不编造新信息。",
-    "2. 重组句式和表达节奏，不要只替换一两个词，也不要只加语气词。",
-    "3. 按写作风格要求重塑语气、画面感和信息重点。",
-    "4. 如果原文太平，要主动补足表达张力，但不要夸张油腻。",
-    "5. 只返回改写后的候选正文。",
-    "",
-    "选中文字：",
-    "{{selected_text}}",
-    "",
-    "写作风格：{{style}}"
-  ].join("\n"),
-  expand: [
-    "请把选中文字扩写成信息更完整、读起来更顺的版本。",
-    "要求：",
-    "1. 保留原意，并围绕原意增加动机、背景、过程、感受或具体细节。",
-    "2. 扩写后长度要明显增加，不能只是同义改写。",
-    "3. 按写作风格要求调整语气和表达方式。",
-    "4. 不要编造硬事实；不确定的信息用更稳妥的表达。",
-    "5. 只返回扩写后的候选正文。",
-    "",
-    "选中文字：",
-    "{{selected_text}}",
-    "",
-    "选区前文：",
-    "{{before_context}}",
-    "",
-    "选区后文：",
-    "{{after_context}}",
-    "",
-    "写作风格：{{style}}"
-  ].join("\n"),
-  continue: [
-    "请基于选中文字和前后文继续写一段自然衔接的内容。",
-    "要求：",
-    "1. 承接当前语气、主题和叙述方向，不要重复原文。",
-    "2. 续写内容要能直接接在选中文字后面。",
-    "3. 按写作风格要求增强表达，但不要跑题。",
-    "4. 不要总结解释，不要输出多个版本。",
-    "5. 只返回续写候选正文。",
-    "",
-    "选中文字：",
-    "{{selected_text}}",
-    "",
-    "选区前文：",
-    "{{before_context}}",
-    "",
-    "选区后文：",
-    "{{after_context}}",
-    "",
-    "写作风格：{{style}}"
-  ].join("\n")
-};
-
-const DEFAULT_EDITOR_ACTIONS: EditorAiActionConfig[] = [
-  {
-    id: "rewrite",
-    label: "改写",
-    enabled: true,
-    promptTemplate: [
-      "请把选中文字改写成一个明显不同、表达更有质感的版本。",
-      "要求：",
-      "1. 保留核心事实和真实含义，不编造新信息。",
-      "2. 重组句式和表达节奏，不要只替换一两个词，也不要只加语气词。",
-      "3. 按写作风格要求重塑语气、画面感和信息重点。",
-      "4. 如果原文太平，要主动补足表达张力，但不要夸张油腻。",
-      "5. 只返回改写后的候选正文。"
-    ].join("\n")
-  },
-  {
-    id: "expand",
-    label: "扩写",
-    enabled: true,
-    promptTemplate: [
-      "请把选中文字扩写成信息更完整、读起来更顺的版本。",
-      "要求：",
-      "1. 保留原意，并围绕原意增加动机、背景、过程、感受或具体细节。",
-      "2. 扩写后长度要明显增加，不能只是同义改写。",
-      "3. 按写作风格要求调整语气和表达方式。",
-      "4. 不要编造硬事实；不确定的信息用更稳妥的表达。",
-      "5. 输出一小段即可，不要写成长文。",
-      "6. 只返回扩写后的候选正文。"
-    ].join("\n")
-  },
-  {
-    id: "continue",
-    label: "续写",
-    enabled: true,
-    promptTemplate: [
-      "请基于选中文字和前后文继续写一段自然衔接的内容。",
-      "要求：",
-      "1. 承接当前语气、主题和叙述方向，不要重复原文。",
-      "2. 续写内容要能直接接在选中文字后面。",
-      "3. 按写作风格要求增强表达，但不要跑题。",
-      "4. 不要总结解释，不要输出多个版本。",
-      "5. 只返回续写候选正文。"
-    ].join("\n")
-  },
-  {
-    id: "translate",
-    label: "翻译成英文",
-    enabled: true,
-    promptTemplate: [
-      "请把选中文字翻译成英文。",
-      "要求：",
-      "1. 只返回英文译文，不要保留中文原文。",
-      "2. 准确保留原文含义、事实、数字、专有名词和语气。",
-      "3. 保留 Markdown 结构、链接、列表、加粗、代码片段和换行。",
-      "4. 不要解释，不要输出多个版本。",
-      "5. 如果原文已有英文，保持自然英文表达，可轻微润色但不要新增信息。"
-    ].join("\n")
-  }
-];
-
-const LEGACY_EDITOR_STYLE_INSTRUCTIONS: Record<string, string> = {
-  xiaohongshu: "表达更有分享感和吸引力，但不要夸张堆词。"
-};
-
-const DEFAULT_EDITOR_STYLES: EditorAiStyleConfig[] = [
-  { id: "clear", label: "清楚", instruction: "表达清楚、准确、自然，删掉含糊和绕弯，但保留原文的真实语气。" },
-  { id: "formal", label: "正式", instruction: "语气正式、稳重、有条理，适合方案、报告、文档和对外说明。" },
-  { id: "casual", label: "口语", instruction: "语气自然、像真实的人在表达，句子更顺口，但不要松散和啰嗦。" },
-  { id: "xiaohongshu", label: "小红书", instruction: "生活化、有画面感、有分享欲，适合笔记正文；可以增强情绪和场景，但避免夸张标题党、口水词和虚假承诺。" }
-];
-
 export const DEFAULT_REVIEW_OUTPUT_DIR = "outputs";
-export const DEFAULT_PROMPT_ENHANCER_MODEL = "";
-export const DEFAULT_CODEX_UTILITY_MODEL = "gpt-5.6-terra";
-export const DEFAULT_OPENCODE_UTILITY_PROVIDER = "opencode";
-export const DEFAULT_OPENCODE_UTILITY_MODEL = "opencode/deepseek-v4-flash-free";
-export const DEFAULT_HERMES_UTILITY_PROVIDER = "deepseek";
-export const DEFAULT_HERMES_UTILITY_MODEL = "deepseek-v4-flash";
-
-export const DEFAULT_EDITOR_ACTION_MODE_CONFIGS: Record<EditorActionQualityMode, EditorActionModeConfig> = {
-  fast: {
-    mode: "fast",
-    label: "快速",
-    model: DEFAULT_EDITOR_ACTION_MODEL,
-    contextCharsBefore: 500,
-    contextCharsAfter: 500
-  },
-  quality: {
-    mode: "quality",
-    label: "质量",
-    model: DEFAULT_EDITOR_ACTION_MODEL,
-    contextCharsBefore: 1000,
-    contextCharsAfter: 1000
-  },
-  strict: {
-    mode: "strict",
-    label: "严格",
-    model: DEFAULT_EDITOR_ACTION_MODEL,
-    contextCharsBefore: 1500,
-    contextCharsAfter: 1500
-  }
-};
-
-const DEFAULT_OPENCODE_SETTINGS: OpenCodeSettings = {
-  cliPath: "",
-  serverUrl: "",
-  autoStart: true,
-  hostname: "127.0.0.1",
-  port: 4096,
-  providerId: "",
-  modelId: "",
-  agent: "build",
-  textEnabled: true,
-  imageEnabled: false,
-  pdfEnabled: false,
-  lastConnectedAt: 0,
-  lastError: ""
-};
-
-const DEFAULT_PROMPT_ENHANCER_SETTINGS: PromptEnhancerSettings = {
-  enabled: true,
-  backend: "codex-cli",
-  providerId: "",
-  model: DEFAULT_PROMPT_ENHANCER_MODEL,
-  customModelIds: {
-    "codex-cli": [],
-    opencode: [],
-    hermes: []
-  },
-  reasoning: "medium",
-  serviceTier: "fast",
-  agent: "",
-  timeoutMs: 45000,
-  maxInputChars: 4000
-};
-
-const DEFAULT_HERMES_AGENT_SETTINGS: HermesAgentSettings = {
-  cliPath: "",
-  serverUrl: "",
-  autoStart: true,
-  hostname: "127.0.0.1",
-  port: 8642,
-  profile: "",
-  providerId: "",
-  modelId: "",
-  apiKey: "",
-  providerConfigured: false,
-  lastProviderCheckAt: 0,
-  lastProviderError: "",
-  lastConnectedAt: 0,
-  lastError: "",
-  version: ""
-};
 
 export const DEFAULT_SETTINGS: CodexForObsidianSettings = {
-  settingsVersion: 40,
+  productGeneration: "pi-agent-product-v1",
+  settingsVersion: 49,
   settingsLanguage: "zh-CN",
-  settingsTab: "general",
-  agentBackend: "codex-cli",
-  agents: {
-    defaultBackend: "codex-cli",
-    codex: {
-      cliPath: "",
-      proxyEnabled: false,
-      proxyUrl: "http://127.0.0.1:7890",
-      providerMode: "codex-login",
-      activeApiProviderId: "",
-      defaultModel: "",
-      defaultReasoning: "high",
-      defaultServiceTier: "fast",
-      defaultPermission: "workspace-write",
-      defaultMode: "agent"
-    },
-    opencode: DEFAULT_OPENCODE_SETTINGS,
-    hermes: DEFAULT_HERMES_AGENT_SETTINGS
-  },
-  capabilities: {
-    chatBackend: "default",
-    knowledgeBackend: "default",
-    editorActionBackend: "codex-cli"
-  },
-  cliPath: "",
+  settingsTab: "providers",
   proxyEnabled: false,
   proxyUrl: "http://127.0.0.1:7890",
-  providerMode: "codex-login",
+  proxyEndpoint: "",
+  proxyCredentialRef: "",
+  providerMode: "custom-api",
   activeApiProviderId: "",
-  apiProviders: [],
-  mcpEnabled: false,
+  apiProviders: [createDefaultApiProvider()],
   defaultModel: "",
   defaultReasoning: "high",
   defaultServiceTier: "fast",
@@ -836,6 +326,7 @@ export const DEFAULT_SETTINGS: CodexForObsidianSettings = {
   autoOpen: false,
   autoOpenHome: false,
   showContext: true,
+  showWelcome: true,
   setup: {
     completedAt: 0,
     lastCheckedAt: 0,
@@ -843,56 +334,20 @@ export const DEFAULT_SETTINGS: CodexForObsidianSettings = {
   },
   memory: {
     enabled: true,
-    autoSync: true,
-    curatorBackend: "default",
-    curatorModel: ""
+    useLongTermMemory: true
   },
   resourceManagementTab: "plugins",
-  promptEnhancer: DEFAULT_PROMPT_ENHANCER_SETTINGS,
-  editorActions: {
-    enabled: false,
-    statusSlotEnabled: true,
-    qualityMode: "quality",
-    showContextPanel: true,
-    model: DEFAULT_EDITOR_ACTION_MODEL,
-    defaultStyleId: "clear",
-    maxSelectedChars: 4000,
-    contextCharsBefore: 300,
-    contextCharsAfter: 300,
-    timeoutMs: 45000,
-    modeConfigs: DEFAULT_EDITOR_ACTION_MODE_CONFIGS,
-    articleUnderstandingCache: {},
-    summaryCacheEnabled: false,
-    summaryCache: {},
-    actions: DEFAULT_EDITOR_ACTIONS,
-    styles: DEFAULT_EDITOR_STYLES
-  },
-  opencode: DEFAULT_OPENCODE_SETTINGS,
   knowledgeBase: {
-    enabled: false,
-    sessionId: "",
-    backend: "default",
     useCustomRulesFile: true,
     rulesFilePath: DEFAULT_KNOWLEDGE_BASE_RULES_FILE,
-    scheduleTime: "09:00",
-    catchUpOnStartup: true,
     lastRunAt: 0,
     lastRunStatus: "idle",
-    lastScheduledRunAt: 0,
-    lastScheduledRunStatus: "idle",
-    lastScheduledRunId: "",
-    scheduledAttemptCount: 0,
-    scheduledNextRetryAt: 0,
     lastReportPath: "",
     lastError: "",
     lastSummary: "",
     lastCompletion: "",
-    lastAttempts: [],
     lastPendingSources: [],
-    lastFailureCode: "",
     lastWarnings: [],
-    nativeLifecycleRecoveryReceipt: null,
-    historyRetentionDays: 30,
     initialization: {
       status: "not-started",
       initializedAt: 0,
@@ -915,22 +370,10 @@ export const DEFAULT_SETTINGS: CodexForObsidianSettings = {
     openHtmlAfterRun: false,
     reports: {
       knowledgeBase: {
-        lastRunAt: 0,
-        lastRunStatus: "idle",
-        lastRangeKey: "",
-        lastMarkdownPath: "",
-        lastHtmlPath: "",
-        lastError: "",
-        lastSummary: ""
+        lastRangeKey: ""
       },
       agentChat: {
-        lastRunAt: 0,
-        lastRunStatus: "idle",
-        lastRangeKey: "",
-        lastMarkdownPath: "",
-        lastHtmlPath: "",
-        lastError: "",
-        lastSummary: ""
+        lastRangeKey: ""
       }
     }
   },
@@ -947,43 +390,53 @@ export const DEFAULT_SETTINGS: CodexForObsidianSettings = {
 
 export function normalizeSettingsData(input: unknown): { settings: CodexForObsidianSettings; changed: boolean } {
   const data = settingsRecord(input) ?? {};
-  const agentsData = settingsRecord(data.agents);
+  const retiredDataPresent = hasRetiredSettingsData(data);
+  const currentProductData = data.productGeneration === DEFAULT_SETTINGS.productGeneration;
+  const currentData = Object.fromEntries(
+    Object.keys(DEFAULT_SETTINGS)
+      .filter((key) => Object.prototype.hasOwnProperty.call(data, key))
+      .map((key) => [key, data[key]])
+  ) as Partial<CodexForObsidianSettings>;
   const previousVersion = typeof data?.settingsVersion === "number" ? data.settingsVersion : 0;
   const normalizedLanguage = normalizeSettingsLanguage(data?.settingsLanguage);
-  const normalizedAgentBackend = normalizeAgentBackendMode(data?.agentBackend ?? agentsData?.defaultBackend);
-  const normalizedOpenCode = normalizeOpenCodeSettings(data?.opencode ?? agentsData?.opencode);
-  const normalizedAgents = normalizeAgentSettings(data?.agents, data, normalizedAgentBackend, normalizedOpenCode);
   const settings: CodexForObsidianSettings = {
     ...DEFAULT_SETTINGS,
-    ...data,
+    ...currentData,
+    productGeneration: DEFAULT_SETTINGS.productGeneration,
     settingsLanguage: normalizedLanguage,
     settingsTab: normalizeSettingsTab(data?.settingsTab),
-    agentBackend: normalizedAgentBackend,
-    agents: normalizedAgents,
-    capabilities: normalizeCapabilityBackendSettings(data?.capabilities),
     providerMode: normalizeProviderMode(data?.providerMode),
     autoOpenHome: data?.autoOpenHome === true,
     activeApiProviderId: typeof data?.activeApiProviderId === "string" ? data.activeApiProviderId.trim() : "",
     apiProviders: normalizeApiProviders(data?.apiProviders),
+    showWelcome: data?.showWelcome !== false,
     setup: normalizeSetupSettings(data?.setup),
     memory: normalizeMemorySettings(data?.memory),
     resourceManagementTab: normalizeResourceManagementTab(data?.resourceManagementTab),
-    promptEnhancer: normalizePromptEnhancerSettings(data?.promptEnhancer, previousVersion),
-    editorActions: normalizeEditorActionSettings(data?.editorActions, previousVersion),
-    opencode: normalizedOpenCode,
     knowledgeBase: normalizeKnowledgeBaseSettings(data?.knowledgeBase),
     review: normalizeReviewSettings(data?.review),
     resources: normalizeEchoInkResourceSettings(data?.resources, data?.workspaceResources),
     workspaceResources: normalizeWorkspaceResources(data?.workspaceResources),
     workspaceResourceCache: normalizeWorkspaceResourceCache(data?.workspaceResourceCache),
-    sessions: normalizeStoredSessions(data?.sessions),
-    activeSessionId: typeof data?.activeSessionId === "string" ? data.activeSessionId : ""
+    sessions: currentProductData ? normalizeStoredSessions(data?.sessions) : [],
+    activeSessionId: currentProductData && typeof data?.activeSessionId === "string"
+      ? data.activeSessionId
+      : ""
   };
-  syncLegacyAgentFields(settings);
 
-  if (settings.knowledgeBase.sessionId) {
-    const session = settings.sessions.find((item) => item.id === settings.knowledgeBase.sessionId);
-    if (session) session.kind = "knowledge-base";
+  settings.knowledgeBase.lastRunAt = currentProductData ? settings.knowledgeBase.lastRunAt : 0;
+  settings.knowledgeBase.lastRunStatus = currentProductData ? settings.knowledgeBase.lastRunStatus : "idle";
+  settings.knowledgeBase.lastReportPath = currentProductData ? settings.knowledgeBase.lastReportPath : "";
+  settings.knowledgeBase.lastError = currentProductData ? settings.knowledgeBase.lastError : "";
+  settings.knowledgeBase.lastSummary = currentProductData ? settings.knowledgeBase.lastSummary : "";
+  settings.knowledgeBase.lastCompletion = currentProductData ? settings.knowledgeBase.lastCompletion : "";
+  settings.knowledgeBase.lastPendingSources = currentProductData ? settings.knowledgeBase.lastPendingSources : [];
+  settings.knowledgeBase.lastWarnings = currentProductData ? settings.knowledgeBase.lastWarnings : [];
+  settings.knowledgeBase.processedSources = currentProductData ? settings.knowledgeBase.processedSources : {};
+  settings.knowledgeBase.healthHistory = currentProductData ? settings.knowledgeBase.healthHistory : [];
+  settings.knowledgeBase.maintenanceHistory = currentProductData ? settings.knowledgeBase.maintenanceHistory : [];
+  if (!settings.sessions.some((session) => session.id === settings.activeSessionId)) {
+    settings.activeSessionId = settings.sessions[0]?.id ?? "";
   }
 
   if (previousVersion < 1) {
@@ -991,8 +444,11 @@ export function normalizeSettingsData(input: unknown): { settings: CodexForObsid
     if (data?.defaultReasoning === "high") settings.defaultReasoning = DEFAULT_SETTINGS.defaultReasoning;
     if (data?.defaultServiceTier === "standard") settings.defaultServiceTier = DEFAULT_SETTINGS.defaultServiceTier;
     settings.proxyEnabled = data?.proxyEnabled !== false;
-    settings.proxyUrl = typeof data?.proxyUrl === "string" && data.proxyUrl.trim() ? data.proxyUrl.trim() : DEFAULT_SETTINGS.proxyUrl;
-    settings.mcpEnabled = data?.mcpEnabled === true;
+    settings.proxyUrl = settings.proxyEndpoint || settings.proxyCredentialRef
+      ? ""
+      : typeof data?.proxyUrl === "string" && data.proxyUrl.trim()
+        ? data.proxyUrl.trim()
+        : DEFAULT_SETTINGS.proxyUrl;
   }
 
   if (previousVersion < 3) {
@@ -1017,51 +473,174 @@ export function normalizeSettingsData(input: unknown): { settings: CodexForObsid
     settings.defaultModel = "";
   }
 
-  if (previousVersion < 32) {
-    settings.editorActions.model = migrateLegacyEditorActionModel(settings.editorActions.model);
-    for (const config of Object.values(settings.editorActions.modeConfigs)) {
-      config.model = migrateLegacyEditorActionModel(config.model);
-    }
+  if (settings.proxyEndpoint || settings.proxyCredentialRef) {
+    settings.proxyUrl = "";
   }
-
-  if (previousVersion < 33) {
-    // v32 briefly applied the utility model to ordinary chat. Undo only that
-    // migration while keeping any older or custom chat model untouched.
-    if (previousVersion === 32 && settings.defaultModel === DEFAULT_CODEX_UTILITY_MODEL) {
-      settings.defaultModel = "";
-    }
-    if (previousVersion === 32
-      && settings.opencode.providerId === DEFAULT_OPENCODE_UTILITY_PROVIDER
-      && settings.opencode.modelId === DEFAULT_OPENCODE_UTILITY_MODEL) {
-      settings.opencode.providerId = "";
-      settings.opencode.modelId = "";
-    }
-    if (settings.capabilities.editorActionBackend === "default") {
-      settings.capabilities.editorActionBackend = "codex-cli";
-    }
-    if (settings.promptEnhancer.backend === "default") {
-      settings.promptEnhancer.backend = "codex-cli";
-    }
-  }
-
-  if (previousVersion < 39) {
-    // v39 deliberately removes the Agent-global resource mirror from EchoInk.
-    // This only clears plugin-owned copies/caches; Codex, Hermes and OpenCode
-    // global Skill/MCP configuration is never modified.
-    settings.resources = defaultResourceSettings();
-    settings.workspaceResources = { plugins: {}, mcpServers: {}, skills: {} };
-    settings.workspaceResourceCache = {};
-  }
-
-  syncAgentsFromLegacyFields(settings);
   normalizeApiProviderSelection(settings);
   settings.settingsVersion = DEFAULT_SETTINGS.settingsVersion;
   const languageChanged = data?.settingsLanguage !== normalizedLanguage;
-  return { settings, changed: previousVersion !== DEFAULT_SETTINGS.settingsVersion || languageChanged };
+  const sessionBoundaryChanged = currentProductData
+    && (
+      settings.activeSessionId !== data?.activeSessionId
+      || settings.sessions.length !== (Array.isArray(data?.sessions) ? data.sessions.length : 0)
+    );
+  return {
+    settings,
+    changed: previousVersion !== DEFAULT_SETTINGS.settingsVersion
+      || languageChanged
+      || !currentProductData
+      || sessionBoundaryChanged
+      || retiredDataPresent
+  };
 }
+
+function hasRetiredSettingsData(data: Record<string, unknown>): boolean {
+  const currentKeys = new Set(Object.keys(DEFAULT_SETTINGS));
+  if (Object.keys(data).some((key) => !currentKeys.has(key))) return true;
+  const knowledgeBase = settingsRecord(data.knowledgeBase);
+  if (knowledgeBase && Object.keys(knowledgeBase).some((key) => !KNOWLEDGE_BASE_SETTINGS_KEYS.has(key))) {
+    return true;
+  }
+  const resources = settingsRecord(data.resources);
+  if (!resources) return false;
+  if (Object.hasOwn(resources, "enabledByScope")) return true;
+  return Array.isArray(resources.catalog) && resources.catalog.some((resource) => {
+    const record = settingsRecord(resource);
+    return Boolean(record && Object.hasOwn(record, "scopes"));
+  });
+}
+
+const KNOWLEDGE_BASE_SETTINGS_KEYS = new Set<string>([
+  "useCustomRulesFile",
+  "rulesFilePath",
+  "lastRunAt",
+  "lastRunStatus",
+  "lastReportPath",
+  "lastError",
+  "lastSummary",
+  "lastCompletion",
+  "lastPendingSources",
+  "lastWarnings",
+  "initialization",
+  "processedSources",
+  "healthHistory",
+  "maintenanceHistory"
+]);
 
 export function getActiveApiProvider(settings: Pick<CodexForObsidianSettings, "activeApiProviderId" | "apiProviders">): ApiProviderConfig | null {
   return settings.apiProviders.find((provider) => provider.id === settings.activeApiProviderId) ?? null;
+}
+
+export function apiProviderHasUsableApiKey(provider: ApiProviderConfig): boolean {
+  const providerId = normalizeApiProviderId(
+    provider.providerId,
+    provider.baseUrl,
+    provider.name
+  );
+  return !apiProviderApiKeyRequired(providerId)
+    || Boolean(provider.apiKey.trim());
+}
+
+export function applyApiProviderPreset(
+  settings: Pick<
+    CodexForObsidianSettings,
+    | "providerMode"
+    | "activeApiProviderId"
+  >,
+  provider: ApiProviderConfig,
+  providerId: ApiProviderId
+): void {
+  const preset = getApiProviderPreset(providerId);
+  const modelPreset = preset.models[0];
+  provider.providerId = preset.id;
+  provider.runtimeProviderId = preset.runtimeProviderId;
+  provider.apiProtocol = preset.apiProtocol;
+  provider.name = preset.name;
+  provider.baseUrl = preset.baseUrl;
+  provider.model = preset.model;
+  provider.models = preset.models.map((model) => model.id);
+  provider.modelSelection = "auto";
+  provider.toolCalling = modelPreset?.toolCalling ?? true;
+  provider.imageInput = modelPreset?.imageInput ?? false;
+  provider.reasoning = modelPreset?.reasoning ?? false;
+  provider.contextWindow = modelPreset?.contextWindow ?? 64_000;
+  provider.maxOutputTokens = modelPreset?.maxOutputTokens ?? 8_192;
+  delete provider.queryParams;
+  clearApiProviderApiKey(settings, provider);
+  settings.providerMode = "custom-api";
+  settings.activeApiProviderId = provider.id;
+}
+
+export function createApiProviderConfig(
+  providerId: ApiProviderId = "deepseek",
+  id = newId("provider")
+): ApiProviderConfig {
+  const preset = getApiProviderPreset(providerId);
+  const modelPreset = preset.models[0];
+  return {
+    id,
+    providerId: preset.id,
+    runtimeProviderId: preset.runtimeProviderId,
+    apiProtocol: preset.apiProtocol,
+    name: preset.name,
+    baseUrl: preset.baseUrl,
+    model: preset.model,
+    models: preset.models.map((model) => model.id),
+    modelSelection: "auto",
+    toolCalling: modelPreset?.toolCalling ?? true,
+    imageInput: modelPreset?.imageInput ?? false,
+    reasoning: modelPreset?.reasoning ?? false,
+    contextWindow: modelPreset?.contextWindow ?? 64_000,
+    maxOutputTokens: modelPreset?.maxOutputTokens ?? 8_192,
+    apiKey: ""
+  };
+}
+
+export function applyApiProviderModelPreset(
+  provider: ApiProviderConfig,
+  modelId: string
+): boolean {
+  const providerId = normalizeApiProviderId(
+    provider.providerId,
+    provider.baseUrl,
+    provider.name
+  );
+  const modelPreset = getApiProviderModelPreset(providerId, modelId);
+  if (!modelPreset) return false;
+  provider.model = modelPreset.id;
+  provider.modelSelection = "model";
+  provider.toolCalling = modelPreset.toolCalling;
+  provider.imageInput = modelPreset.imageInput;
+  provider.reasoning = modelPreset.reasoning;
+  provider.contextWindow = modelPreset.contextWindow;
+  provider.maxOutputTokens = modelPreset.maxOutputTokens;
+  return true;
+}
+
+export function activateApiProvider(
+  settings: Pick<
+    CodexForObsidianSettings,
+    | "providerMode"
+    | "activeApiProviderId"
+    | "defaultModel"
+  >,
+  provider: ApiProviderConfig
+): void {
+  settings.providerMode = "custom-api";
+  settings.activeApiProviderId = provider.id;
+  settings.defaultModel = provider.model;
+}
+
+export function clearApiProviderApiKey(
+  settings: Pick<
+    CodexForObsidianSettings,
+    "providerMode" | "activeApiProviderId"
+  >,
+  provider: ApiProviderConfig
+): void {
+  provider.apiKey = "";
+  settings.providerMode = "custom-api";
+  settings.activeApiProviderId = provider.id;
 }
 
 export function getApiProviderModels(provider: Pick<ApiProviderConfig, "model"> & Partial<Pick<ApiProviderConfig, "models">>): string[] {
@@ -1074,13 +653,167 @@ export function providerModelLabel(provider: Pick<ApiProviderConfig, "model"> & 
   return models.length === 1 ? models[0] : language === "en" ? `${models[0]} + ${models.length - 1} more` : `${models[0]} 等 ${models.length} 个`;
 }
 
-export function validateApiProvider(provider: Pick<ApiProviderConfig, "name" | "baseUrl" | "model" | "apiKey"> & Partial<Pick<ApiProviderConfig, "models">>, language: SettingsLanguage = "zh-CN"): string[] {
+export function sanitizeCredentialSettingsForDataSave(
+  settings: CodexForObsidianSettings
+): void {
+  assertCredentialSettingsReadyForDataSave(settings);
+  if (
+    settings.proxyEndpoint
+    || settings.proxyCredentialRef
+  ) {
+    settings.proxyUrl = "";
+  }
+}
+
+export type CredentialSettingsPersistenceErrorCode =
+  "proxy_credential_plaintext_unmigrated";
+
+export class CredentialSettingsPersistenceError extends Error {
+  constructor(readonly code: CredentialSettingsPersistenceErrorCode) {
+    super(code);
+    this.name = "CredentialSettingsPersistenceError";
+  }
+}
+
+function assertCredentialSettingsReadyForDataSave(
+  settings: CodexForObsidianSettings
+): void {
+  const proxyUrls = [settings.proxyUrl];
+  const proxyEndpoints = [settings.proxyEndpoint];
+  if (proxyEndpoints.some(proxyUrlContainsCredential)) {
+    throw new CredentialSettingsPersistenceError(
+      "proxy_credential_plaintext_unmigrated"
+    );
+  }
+  if (!proxyUrls.some(proxyUrlContainsCredential)) return;
+
+  const topLevelCredentialRef = normalizeCredentialRef(
+    settings.proxyCredentialRef
+  );
+  const topLevelEndpoint = normalizeOptionalText(settings.proxyEndpoint);
+  if (
+    !topLevelCredentialRef
+    || !topLevelEndpoint
+  ) {
+    throw new CredentialSettingsPersistenceError(
+      "proxy_credential_plaintext_unmigrated"
+    );
+  }
+}
+
+function proxyUrlContainsCredential(value: unknown): boolean {
+  const raw = typeof value === "string" ? value : "";
+  if (!raw) return false;
+  if (
+    raw !== raw.trim()
+    || raw.includes("\\")
+    || [...raw].some((character) => {
+      const codePoint = character.codePointAt(0);
+      return codePoint !== undefined
+        && (codePoint <= 0x1f || codePoint === 0x7f);
+    })
+  ) {
+    throw new CredentialSettingsPersistenceError(
+      "proxy_credential_plaintext_unmigrated"
+    );
+  }
+  const candidate = /^[a-z][a-z0-9+.-]*:\/\//iu.test(raw)
+    ? raw
+    : `http://${raw}`;
+  try {
+    const parsed = new URL(candidate);
+    if (
+      (parsed.protocol !== "http:" && parsed.protocol !== "https:")
+      || !parsed.hostname
+      || (parsed.pathname !== "" && parsed.pathname !== "/")
+    ) {
+      throw new CredentialSettingsPersistenceError(
+        "proxy_credential_plaintext_unmigrated"
+      );
+    }
+    return (
+      parsed.username.length > 0
+      || parsed.password.length > 0
+      || parsed.search.length > 0
+      || parsed.hash.length > 0
+    );
+  } catch (error) {
+    if (error instanceof CredentialSettingsPersistenceError) {
+      throw error;
+    }
+    throw new CredentialSettingsPersistenceError(
+      "proxy_credential_plaintext_unmigrated"
+    );
+  }
+}
+
+export function validateApiProvider(provider: Pick<ApiProviderConfig,
+  | "name"
+  | "baseUrl"
+  | "model"
+  | "apiKey"
+  | "apiProtocol"
+  | "runtimeProviderId"
+  | "contextWindow"
+  | "maxOutputTokens"
+> & Partial<Pick<ApiProviderConfig,
+  "models" | "providerId"
+>>, language: SettingsLanguage = "zh-CN"): string[] {
   const errors: string[] = [];
+  const providerId = normalizeApiProviderId(
+    provider.providerId,
+    provider.baseUrl,
+    provider.name
+  );
   if (!provider.name.trim()) errors.push(language === "en" ? "Name is required" : "名称不能为空");
   if (!provider.baseUrl.trim()) errors.push(language === "en" ? "Base URL is required" : "Base URL 不能为空");
-  if (!getApiProviderModels(provider).length) errors.push(language === "en" ? "Model is required" : "模型不能为空");
-  if (!provider.apiKey.trim()) errors.push(language === "en" ? "API key is required" : "API key 不能为空");
+  if (provider.baseUrl.trim()) {
+    try {
+      normalizeApiProviderBaseUrl(
+        provider.baseUrl,
+        provider.apiProtocol
+      );
+    } catch {
+      errors.push(language === "en" ? "API URL must use HTTPS or exact loopback HTTP" : "API URL 必须使用 HTTPS；本地仅允许精确 loopback HTTP 地址");
+    }
+  }
+  if (
+    providerId === "ollama"
+    && provider.baseUrl.trim()
+    && !isLoopbackApiProviderUrl(provider.baseUrl)
+  ) {
+    errors.push(language === "en"
+      ? "Ollama must use an exact local loopback address"
+      : "Ollama 只允许使用精确的本机 loopback 地址");
+  }
+  if (!isValidApiProviderModelId(provider.model)) {
+    errors.push(language === "en"
+      ? "Model ID is invalid"
+      : "Model ID 无效");
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u.test(provider.runtimeProviderId)) {
+    errors.push(language === "en" ? "Runtime Provider ID is invalid" : "Runtime Provider ID 无效");
+  }
+  if (!Number.isSafeInteger(provider.contextWindow) || provider.contextWindow < 1_024 || provider.contextWindow > 2_000_000) {
+    errors.push(language === "en" ? "Input context is invalid" : "输入 Context 无效");
+  }
+  if (!Number.isSafeInteger(provider.maxOutputTokens) || provider.maxOutputTokens < 1 || provider.maxOutputTokens > Math.min(provider.contextWindow, 1_000_000)) {
+    errors.push(language === "en" ? "Output context is invalid" : "输出 Context 无效");
+  }
+  if (
+    apiProviderApiKeyRequired(providerId)
+    && !provider.apiKey.trim()
+  ) {
+    errors.push(language === "en" ? "API key is required" : "API key 不能为空");
+  }
   return errors;
+}
+
+export function isValidApiProviderModelId(value: unknown): boolean {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= 256
+    && !/[\s\p{Cc}]/u.test(value);
 }
 
 export function removeApiProvider(settings: Pick<CodexForObsidianSettings, "providerMode" | "activeApiProviderId" | "apiProviders">, providerId: string): boolean {
@@ -1091,76 +824,30 @@ export function removeApiProvider(settings: Pick<CodexForObsidianSettings, "prov
   if (wasActive) {
     const next = settings.apiProviders[Math.min(index, settings.apiProviders.length - 1)];
     settings.activeApiProviderId = next?.id ?? "";
-    if (!next) settings.providerMode = "codex-login";
+    if (!next) settings.providerMode = "custom-api";
   }
   return true;
 }
 
-export function isKnowledgeBaseSession(session: Pick<StoredSession, "kind" | "title" | "id"> | null | undefined, knowledgeBaseSessionId = ""): boolean {
-  if (!session) return false;
-  return session.kind === "knowledge-base" || Boolean(knowledgeBaseSessionId && session.id === knowledgeBaseSessionId);
-}
-
-export function ensureKnowledgeBaseSession(
-  settings: Pick<CodexForObsidianSettings, "sessions" | "knowledgeBase" | "activeSessionId">,
-  cwd: string,
-  idFactory: () => string = () => newId("session")
-): StoredSession {
-  let session = settings.sessions.find((item) => isKnowledgeBaseSession(item, settings.knowledgeBase.sessionId));
-  if (!session) {
-    session = {
-      id: idFactory(),
-      title: KNOWLEDGE_BASE_SESSION_TITLE,
-      kind: "knowledge-base",
-      cwd,
-      revision: 1,
-      generation: 1,
-      contextId: newId("context"),
-      commitId: newId("context-commit"),
-      workspaceFingerprint: workspaceFingerprint({ vaultPath: cwd, cwd }),
-      messages: [],
-      createdAt: Date.now(),
-      updatedAt: Date.now()
-    };
-    settings.sessions.unshift(session);
-  }
-  session.kind = "knowledge-base";
-  session.title = KNOWLEDGE_BASE_SESSION_TITLE;
-  settings.knowledgeBase.sessionId = session.id;
-  const currentIndex = settings.sessions.findIndex((item) => item.id === session.id);
-  if (currentIndex > 0) {
-    settings.sessions.splice(currentIndex, 1);
-    settings.sessions.unshift(session);
-  }
-  return session;
-}
-
-export function clearLegacyChatWorkspaceDefaults(
-  settings: Pick<CodexForObsidianSettings, "sessions" | "knowledgeBase">,
-  vaultPath: string,
-  previousVersion: number
-): number {
-  if (previousVersion >= 21) return 0;
-  const normalizedVaultPath = normalizeComparablePath(vaultPath);
-  if (!normalizedVaultPath) return 0;
-
-  let changed = 0;
-  for (const session of settings.sessions) {
-    if (isKnowledgeBaseSession(session, settings.knowledgeBase.sessionId)) continue;
-    if (normalizeComparablePath(session.cwd) !== normalizedVaultPath) continue;
-    session.cwd = "";
-    delete session.threadId;
-    delete session.tokenUsage;
-    changed += 1;
-  }
-  return changed;
+export function selectActiveConversationSession(
+  settings: Pick<
+    CodexForObsidianSettings,
+    "sessions" | "activeSessionId"
+  >
+): StoredSession | null {
+  const active = settings.sessions.find(
+    (session) => session.id === settings.activeSessionId
+  );
+  if (active) return active;
+  const fallback = settings.sessions[0] ?? null;
+  settings.activeSessionId = fallback?.id ?? "";
+  return fallback;
 }
 
 export function providerConnectionLabel(settings: Pick<CodexForObsidianSettings, "providerMode" | "activeApiProviderId" | "apiProviders">, language: SettingsLanguage = "zh-CN"): string {
-  if (settings.providerMode !== "custom-api") return language === "en" ? "Codex login" : "Codex 登录态";
   const provider = getActiveApiProvider(settings);
-  if (!provider) return language === "en" ? "Custom API not configured" : "自定义 API 未配置";
-  return language === "en" ? `Custom API: ${provider.name} · ${providerModelLabel(provider, language)}` : `自定义 API：${provider.name} · ${providerModelLabel(provider, language)}`;
+  if (!provider) return language === "en" ? "Provider not configured" : "Provider 未配置";
+  return `${provider.name} · ${providerModelLabel(provider, language)}`;
 }
 
 export function ensureModelChoices(models: CodexModel[], ...preferredModels: Array<string | null | undefined>): CodexModel[] {
@@ -1173,82 +860,6 @@ export function ensureModelChoices(models: CodexModel[], ...preferredModels: Arr
     preferred.push({ id: model, model, displayName: model });
   }
   return [...preferred, ...models];
-}
-
-export function normalizeEditorActionSettings(input: unknown, previousVersion = DEFAULT_SETTINGS.settingsVersion): EditorAiActionSettings {
-  const value = settingsRecord(input) ?? {};
-  const defaults = DEFAULT_SETTINGS.editorActions;
-  const actions = normalizeEditorActionConfigs(value?.actions, defaults.actions, previousVersion);
-  const styles = normalizeEditorActionStyles(value?.styles, defaults.styles, previousVersion);
-  const requestedDefaultStyleId = normalizeOptionalText(value?.defaultStyleId);
-  const defaultStyleId = requestedDefaultStyleId && styles.some((style) => style.id === requestedDefaultStyleId)
-    ? requestedDefaultStyleId
-    : defaults.defaultStyleId;
-  const legacyContextCharsBefore = normalizeEditorActionPerformanceNumber(value?.contextCharsBefore, defaults.contextCharsBefore, 1200, previousVersion, 0, 10000);
-  const legacyContextCharsAfter = normalizeEditorActionPerformanceNumber(value?.contextCharsAfter, defaults.contextCharsAfter, 1200, previousVersion, 0, 10000);
-  const legacyTimeoutMs = normalizeEditorActionTimeoutMs(value?.timeoutMs, defaults.timeoutMs, previousVersion);
-  const hasExistingEditorActionSettings = Boolean(settingsRecord(input));
-  const legacyUpgrade = hasExistingEditorActionSettings && previousVersion < 14;
-  const qualityMode = legacyUpgrade ? "fast" : normalizeEditorActionQualityMode(value?.qualityMode, defaults.qualityMode);
-  const modeConfigs = normalizeEditorActionModeConfigs(previousVersion < 14 ? null : value?.modeConfigs, defaults.modeConfigs, legacyUpgrade ? {
-    model: normalizeText(value?.model, defaults.model),
-    contextCharsBefore: legacyContextCharsBefore,
-    contextCharsAfter: legacyContextCharsAfter
-  } : undefined);
-  return {
-    enabled: typeof value?.enabled === "boolean" ? value.enabled : defaults.enabled,
-    statusSlotEnabled: typeof value?.statusSlotEnabled === "boolean" ? value.statusSlotEnabled : defaults.statusSlotEnabled,
-    qualityMode,
-    showContextPanel: typeof value?.showContextPanel === "boolean" ? value.showContextPanel : defaults.showContextPanel,
-    model: normalizeText(value?.model, defaults.model),
-    defaultStyleId,
-    maxSelectedChars: normalizePositiveInteger(value?.maxSelectedChars, defaults.maxSelectedChars, 200, 20000),
-    contextCharsBefore: legacyContextCharsBefore,
-    contextCharsAfter: legacyContextCharsAfter,
-    timeoutMs: legacyTimeoutMs,
-    modeConfigs,
-    articleUnderstandingCache: normalizeArticleUnderstandingCache(value?.articleUnderstandingCache, value?.summaryCache, modeConfigs.quality.model),
-    summaryCacheEnabled: previousVersion < 13 ? false : (typeof value?.summaryCacheEnabled === "boolean" ? value.summaryCacheEnabled : defaults.summaryCacheEnabled),
-    summaryCache: normalizeEditorActionSummaryCache(value?.summaryCache),
-    actions,
-    styles
-  };
-}
-
-export function normalizePromptEnhancerSettings(input: unknown, previousVersion = DEFAULT_SETTINGS.settingsVersion): PromptEnhancerSettings {
-  const value = settingsRecord(input) ?? {};
-  const defaults = DEFAULT_PROMPT_ENHANCER_SETTINGS;
-  const configuredAgent = normalizeOptionalText(value.agent);
-  return {
-    enabled: typeof value.enabled === "boolean" ? value.enabled : defaults.enabled,
-    backend: normalizePromptEnhancerBackendMode(value.backend),
-    providerId: normalizeOptionalText(value.providerId),
-    model: normalizeText(value.model, defaults.model),
-    customModelIds: normalizePromptEnhancerCustomModelIds(value.customModelIds),
-    reasoning: normalizeReasoningEffort(value.reasoning, defaults.reasoning),
-    serviceTier: normalizeServiceTierChoice(value.serviceTier, defaults.serviceTier),
-    agent: previousVersion < 31 && configuredAgent === "enhance-prompt" ? "" : configuredAgent,
-    timeoutMs: normalizePositiveInteger(value.timeoutMs, defaults.timeoutMs, 10000, 300000),
-    maxInputChars: normalizePositiveInteger(value.maxInputChars, defaults.maxInputChars, 100, 20000)
-  };
-}
-
-function normalizePromptEnhancerCustomModelIds(input: unknown): Record<AgentBackendKind, string[]> {
-  const value = settingsRecord(input) ?? {};
-  const normalize = (backend: AgentBackendKind): string[] => Array.from(new Set(
-    (Array.isArray(value[backend]) ? value[backend] : [])
-      .map((item) => parsePromptEnhancerModelId(backend, String(item ?? ""))?.id ?? "")
-      .filter(Boolean)
-  ));
-  return {
-    "codex-cli": normalize("codex-cli"),
-    opencode: normalize("opencode"),
-    hermes: normalize("hermes")
-  };
-}
-
-export function resolveEditorActionModeConfig(settings: EditorAiActionSettings, mode = settings.qualityMode): EditorActionModeConfig {
-  return settings.modeConfigs[mode] ?? settings.modeConfigs.quality ?? settings.modeConfigs.fast ?? DEFAULT_EDITOR_ACTION_MODE_CONFIGS.quality;
 }
 
 export function normalizeWorkspaceResources(input: unknown): WorkspaceResourceToggles {
@@ -1267,102 +878,6 @@ export function normalizeWorkspaceResourceCache(input: unknown): WorkspaceResour
     ...(normalizeCacheEntry(value?.mcp, normalizeCachedMcp) ? { mcp: normalizeCacheEntry(value?.mcp, normalizeCachedMcp) } : {}),
     ...(normalizeCacheEntry(value?.skills, normalizeCachedSkill) ? { skills: normalizeCacheEntry(value?.skills, normalizeCachedSkill) } : {})
   };
-}
-
-function normalizeEditorActionSummaryCache(value: unknown): EditorAiActionSettings["summaryCache"] {
-  const record = settingsRecord(value);
-  if (!record) return {};
-  const entries = Object.values(record)
-    .map((item: unknown) => {
-      const itemRecord = settingsRecord(item) ?? {};
-      const filePath = normalizeText(itemRecord.filePath, "");
-      const summary = normalizeText(itemRecord.summary, "");
-      const contentHash = normalizeText(itemRecord.contentHash, "");
-      if (!filePath || !summary || !contentHash) return null;
-      return {
-        filePath,
-        mtime: normalizeNonNegativeNumber(itemRecord.mtime),
-        size: normalizeNonNegativeNumber(itemRecord.size),
-        contentHash,
-        summary,
-        updatedAt: normalizeNonNegativeNumber(itemRecord.updatedAt),
-        lastUsedAt: normalizeNonNegativeNumber(itemRecord.lastUsedAt ?? itemRecord.updatedAt)
-      };
-    })
-    .filter((item): item is EditorAiActionSettings["summaryCache"][string] => Boolean(item))
-    .sort((left, right) => right.lastUsedAt - left.lastUsedAt)
-    .slice(0, 200);
-  return Object.fromEntries(entries.map((entry) => [entry.filePath, entry]));
-}
-
-function normalizeArticleUnderstandingCache(value: unknown, legacySummaryCache: unknown, fallbackModel: string): ArticleUnderstandingCache {
-  const direct = normalizeArticleUnderstandingCacheEntries(value);
-  if (Object.keys(direct).length) return direct;
-  const summaries = Object.values(normalizeEditorActionSummaryCache(legacySummaryCache))
-    .map((entry) => ({
-      filePath: entry.filePath,
-      mtime: entry.mtime,
-      size: entry.size,
-      contentHash: entry.contentHash,
-      model: fallbackModel || DEFAULT_EDITOR_ACTION_MODE_CONFIGS.quality.model,
-      mode: "quality" as EditorActionQualityMode,
-      understanding: entry.summary,
-      updatedAt: entry.updatedAt,
-      lastUsedAt: entry.lastUsedAt
-    }))
-    .filter((entry) => entry.filePath && entry.understanding)
-    .sort((left, right) => right.lastUsedAt - left.lastUsedAt)
-    .slice(0, 200);
-  return Object.fromEntries(summaries.map((entry) => [entry.filePath, entry]));
-}
-
-function normalizeArticleUnderstandingCacheEntries(value: unknown): ArticleUnderstandingCache {
-  const record = settingsRecord(value);
-  if (!record) return {};
-  const entries = Object.values(record)
-    .map((item: unknown) => {
-      const itemRecord = settingsRecord(item) ?? {};
-      const filePath = normalizeText(itemRecord.filePath, "");
-      const understanding = normalizeText(itemRecord.understanding, "");
-      const contentHash = normalizeText(itemRecord.contentHash, "");
-      const model = normalizeText(itemRecord.model, DEFAULT_EDITOR_ACTION_MODE_CONFIGS.quality.model);
-      const mode = normalizeEditorActionQualityMode(itemRecord.mode, "quality");
-      const fingerprint = normalizeArticleUnderstandingFingerprint(itemRecord.fingerprint);
-      if (!filePath || !understanding || !contentHash) return null;
-      return {
-        filePath,
-        mtime: normalizeNonNegativeNumber(itemRecord.mtime),
-        size: normalizeNonNegativeNumber(itemRecord.size),
-        contentHash,
-        model,
-        mode,
-        understanding,
-        ...(fingerprint ? { fingerprint } : {}),
-        updatedAt: normalizeNonNegativeNumber(itemRecord.updatedAt),
-        lastUsedAt: normalizeNonNegativeNumber(itemRecord.lastUsedAt ?? itemRecord.updatedAt)
-      };
-    })
-    .filter((item): item is ArticleUnderstandingCache[string] => Boolean(item))
-    .sort((left, right) => right.lastUsedAt - left.lastUsedAt)
-    .slice(0, 200);
-  return Object.fromEntries(entries.map((entry) => [entry.filePath, entry]));
-}
-
-function normalizeArticleUnderstandingFingerprint(input: unknown): ArticleUnderstandingFingerprint | null {
-  const value = settingsRecord(input);
-  if (!value) return null;
-  const stableLineHashes = Array.isArray(value.stableLineHashes)
-    ? value.stableLineHashes.map((item: unknown) => normalizeText(item, "")).filter(Boolean).slice(0, 12)
-    : [];
-  const fingerprint = {
-    textLength: normalizeNonNegativeNumber(value.textLength),
-    titleHash: normalizeText(value.titleHash, ""),
-    firstBlockHash: normalizeText(value.firstBlockHash, ""),
-    lastBlockHash: normalizeText(value.lastBlockHash, ""),
-    stableLineHashes
-  };
-  if (!fingerprint.textLength && !fingerprint.titleHash && !fingerprint.firstBlockHash && !fingerprint.lastBlockHash && !stableLineHashes.length) return null;
-  return fingerprint;
 }
 
 export function resourceEnabled(overrides: Record<string, boolean> | undefined, key: string, sourceEnabled = true): boolean {
@@ -1394,75 +909,6 @@ export function getKnowledgeBaseRulesFileChoices(paths: string[]): string[] {
   });
 }
 
-export function openCodeModelChoiceValue(model: Pick<AgentModelInfo, "providerId" | "modelId">): string {
-  return `${model.providerId}\u0000${model.modelId}`;
-}
-
-export function parseOpenCodeModelChoiceValue(value: string): { providerId: string; modelId: string } | null {
-  const [providerId, modelId, ...rest] = String(value ?? "").split("\u0000");
-  if (rest.length || !providerId?.trim() || !modelId?.trim()) return null;
-  return { providerId: providerId.trim(), modelId: modelId.trim() };
-}
-
-export function openCodeModelCapabilityLabel(model: Pick<AgentModelInfo, "inputModalities">, language: SettingsLanguage = "zh-CN"): string {
-  return language === "en"
-    ? `Text ${model.inputModalities.includes("text") ? "✓" : "×"} · Images ${model.inputModalities.includes("image") ? "✓" : "×"} · PDF ${model.inputModalities.includes("pdf") ? "✓" : "×"}`
-    : `文本 ${model.inputModalities.includes("text") ? "✓" : "×"} · 图片 ${model.inputModalities.includes("image") ? "✓" : "×"} · PDF ${model.inputModalities.includes("pdf") ? "✓" : "×"}`;
-}
-
-export function openCodeModelChoiceLabel(model: Pick<AgentModelInfo, "displayName" | "providerId" | "modelId" | "inputModalities">, language: SettingsLanguage = "zh-CN"): string {
-  return `${model.displayName || `${model.providerId}/${model.modelId}`} · ${openCodeModelCapabilityLabel(model, language)}`;
-}
-
-export function openCodeAgentModeLabel(agent: Pick<AgentProfileInfo, "mode">, language: SettingsLanguage = "zh-CN"): string {
-  if (agent.mode === "primary") return language === "en" ? "Primary agent" : "主 Agent";
-  if (agent.mode === "all") return language === "en" ? "Universal agent" : "通用 Agent";
-  return language === "en" ? "Subagent" : "子 Agent";
-}
-
-export function openCodeAgentChoiceValue(agent: Pick<AgentProfileInfo, "name">): string {
-  return agent.name;
-}
-
-export function parseOpenCodeAgentChoiceValue(value: string): string | null {
-  const agent = String(value ?? "").trim();
-  return agent ? agent : null;
-}
-
-export interface PromptEnhancerModelReference {
-  id: string;
-  providerId: string;
-  modelId: string;
-}
-
-export function parsePromptEnhancerModelId(backend: AgentBackendKind, value: string): PromptEnhancerModelReference | null {
-  const id = String(value ?? "").trim();
-  if (!id || /\s|\u0000/.test(id)) return null;
-  if (backend === "codex-cli") return { id, providerId: "", modelId: id };
-  const slash = id.indexOf("/");
-  if (slash <= 0 || slash === id.length - 1) return null;
-  const providerId = id.slice(0, slash);
-  return {
-    id,
-    providerId,
-    modelId: backend === "opencode" ? id : id.slice(slash + 1)
-  };
-}
-
-export function promptEnhancerModelId(backend: AgentBackendKind, providerId: string, modelId: string): string {
-  const provider = providerId.trim();
-  const model = modelId.trim();
-  if (!model) return "";
-  if (backend === "codex-cli" || !provider) return model;
-  const prefix = `${provider}/`;
-  if (backend === "opencode") return model.startsWith(prefix) ? model : `${prefix}${model}`;
-  return `${prefix}${model.startsWith(prefix) ? model.slice(prefix.length) : model}`;
-}
-
-export function openCodeAgentChoiceLabel(agent: Pick<AgentProfileInfo, "name" | "mode" | "native">, language: SettingsLanguage = "zh-CN"): string {
-  return `${agent.name} · ${openCodeAgentModeLabel(agent, language)}${agent.native ? (language === "en" ? " · Built-in" : " · 内置") : ""}`;
-}
-
 export function newId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -1472,8 +918,14 @@ function normalizeResourceManagementTab(value: unknown): ResourceManagementTab {
 }
 
 function normalizeSettingsTab(value: unknown): SettingsTab {
-  if (value === "agents") return "general";
-  return value === "providers" || value === "resources" || value === "promptEnhancer" || value === "editorActions" || value === "knowledgeBase" || value === "review" || value === "general" ? value : DEFAULT_SETTINGS.settingsTab;
+  if (value === "agents") return "providers";
+  return value === "providers"
+    || value === "resources"
+    || value === "knowledgeBase"
+    || value === "review"
+    || value === "general"
+    ? value
+    : DEFAULT_SETTINGS.settingsTab;
 }
 
 export function normalizeSettingsLanguage(value: unknown): SettingsLanguage {
@@ -1484,39 +936,8 @@ function normalizeProviderMode(value: unknown): ProviderMode {
   return value === "custom-api" ? "custom-api" : DEFAULT_SETTINGS.providerMode;
 }
 
-export function normalizeAgentBackendMode(value: unknown): AgentBackendMode {
-  return value === "opencode" || value === "hermes" ? value : DEFAULT_SETTINGS.agentBackend;
-}
-
-export function normalizeKnowledgeBaseBackendMode(value: unknown): KnowledgeBaseBackendMode {
-  return value === "codex-cli" || value === "opencode" || value === "hermes" ? value : "default";
-}
-
-export function normalizePromptEnhancerBackendMode(value: unknown): PromptEnhancerBackendMode {
-  return value === "opencode" || value === "hermes" ? value : DEFAULT_PROMPT_ENHANCER_SETTINGS.backend;
-}
-
-function normalizeCapabilityBackendChoice(value: unknown): CapabilityBackendChoice {
-  return value === "codex-cli" || value === "opencode" || value === "hermes" ? value : "default";
-}
-
-function normalizeCapabilityBackendSettings(input: unknown): CapabilityBackendSettings {
-  const value = settingsRecord(input) ?? {};
-  return {
-    chatBackend: normalizeCapabilityBackendChoice(value?.chatBackend),
-    knowledgeBackend: normalizeCapabilityBackendChoice(value?.knowledgeBackend),
-    editorActionBackend: value?.editorActionBackend === "opencode" || value?.editorActionBackend === "hermes"
-      ? value.editorActionBackend
-      : DEFAULT_SETTINGS.capabilities.editorActionBackend
-  };
-}
-
 function normalizeKnowledgeBaseRunStatus(value: unknown): KnowledgeBaseRunStatus {
   return value === "running" || value === "success" || value === "failed" || value === "canceled" ? value : "idle";
-}
-
-function normalizeReviewRunStatus(value: unknown): ReviewRunStatus {
-  return value === "running" || value === "success" || value === "failed" ? value : "idle";
 }
 
 function normalizeKnowledgeBaseInitStatus(value: unknown): KnowledgeBaseInitStatus {
@@ -1541,149 +962,56 @@ function rulesFileChoiceRank(value: string): number {
   return value.includes("/") ? 3 : 2;
 }
 
-function normalizeOpenCodeSettings(input: unknown): OpenCodeSettings {
-  const value = settingsRecord(input) ?? {};
-  const fallback = DEFAULT_OPENCODE_SETTINGS;
-  return {
-    cliPath: normalizeOptionalText(value?.cliPath),
-    serverUrl: normalizeOptionalText(value?.serverUrl),
-    autoStart: typeof value?.autoStart === "boolean" ? value.autoStart : fallback.autoStart,
-    hostname: normalizeText(value?.hostname, fallback.hostname),
-    port: normalizePositiveInteger(value?.port, fallback.port, 1024, 65535),
-    providerId: normalizeOptionalText(value?.providerId),
-    modelId: normalizeOptionalText(value?.modelId),
-    agent: normalizeText(value?.agent, fallback.agent),
-    textEnabled: value?.textEnabled !== false,
-    imageEnabled: value?.imageEnabled === true,
-    pdfEnabled: value?.pdfEnabled === true,
-    lastConnectedAt: normalizeNonNegativeNumber(value?.lastConnectedAt),
-    lastError: normalizeOptionalText(value?.lastError)
-  };
-}
-
-function normalizeHermesAgentSettings(input: unknown): HermesAgentSettings {
-  const value = settingsRecord(input) ?? {};
-  const fallback = DEFAULT_HERMES_AGENT_SETTINGS;
-  const providerId = normalizeOptionalText(value?.providerId);
-  const modelId = normalizeOptionalText(value?.modelId);
-  const hasSyntheticDefault = isSyntheticHermesDefaultModel(providerId, modelId);
-  return {
-    cliPath: normalizeOptionalText(value?.cliPath),
-    serverUrl: normalizeOptionalText(value?.serverUrl).replace(/\/$/, ""),
-    autoStart: typeof value?.autoStart === "boolean" ? value.autoStart : fallback.autoStart,
-    hostname: normalizeText(value?.hostname, fallback.hostname),
-    port: normalizePositiveInteger(value?.port, fallback.port, 1024, 65535),
-    profile: normalizeOptionalText(value?.profile),
-    providerId: hasSyntheticDefault ? "" : providerId,
-    modelId: hasSyntheticDefault ? "" : modelId,
-    apiKey: normalizeOptionalText(value?.apiKey),
-    providerConfigured: hasSyntheticDefault ? false : value?.providerConfigured === true,
-    lastProviderCheckAt: hasSyntheticDefault ? 0 : normalizeNonNegativeNumber(value?.lastProviderCheckAt),
-    lastProviderError: hasSyntheticDefault ? "" : normalizeOptionalText(value?.lastProviderError),
-    lastConnectedAt: normalizeNonNegativeNumber(value?.lastConnectedAt),
-    lastError: normalizeOptionalText(value?.lastError),
-    version: normalizeOptionalText(value?.version)
-  };
-}
-
-function normalizeCodexAgentSettings(agentValue: unknown, legacy: unknown): CodexAgentSettings {
-  const agent = settingsRecord(agentValue) ?? {};
-  const legacyRecord = settingsRecord(legacy) ?? {};
-  const proxyEnabled = agent.proxyEnabled ?? legacyRecord.proxyEnabled;
-  const fallback = DEFAULT_SETTINGS.agents.codex;
-  return {
-    cliPath: normalizeOptionalText(agent.cliPath ?? legacyRecord.cliPath),
-    proxyEnabled: typeof proxyEnabled === "boolean" ? proxyEnabled : fallback.proxyEnabled,
-    proxyUrl: normalizeText(agent.proxyUrl ?? legacyRecord.proxyUrl, fallback.proxyUrl),
-    providerMode: normalizeProviderMode(agent.providerMode ?? legacyRecord.providerMode),
-    activeApiProviderId: normalizeOptionalText(agent.activeApiProviderId ?? legacyRecord.activeApiProviderId),
-    defaultModel: normalizeOptionalText(agent.defaultModel ?? legacyRecord.defaultModel),
-    defaultReasoning: normalizeReasoningEffort(agent.defaultReasoning ?? legacyRecord.defaultReasoning, fallback.defaultReasoning),
-    defaultServiceTier: normalizeServiceTierChoice(agent.defaultServiceTier ?? legacyRecord.defaultServiceTier, fallback.defaultServiceTier),
-    defaultPermission: normalizePermissionMode(agent.defaultPermission ?? legacyRecord.defaultPermission, fallback.defaultPermission),
-    defaultMode: normalizeUiMode(agent.defaultMode ?? legacyRecord.defaultMode, fallback.defaultMode)
-  };
-}
-
-function normalizeAgentSettings(value: unknown, legacy: unknown, defaultBackend: AgentBackendMode, opencode: OpenCodeSettings): AgentSettings {
-  const record = settingsRecord(value) ?? {};
-  const legacyRecord = settingsRecord(legacy) ?? {};
-  return {
-    defaultBackend,
-    codex: normalizeCodexAgentSettings(record.codex, legacy),
-    opencode,
-    hermes: normalizeHermesAgentSettings(record.hermes ?? legacyRecord.hermes)
-  };
-}
-
-function syncLegacyAgentFields(settings: CodexForObsidianSettings): void {
-  settings.agentBackend = settings.agents.defaultBackend;
-  settings.cliPath = settings.agents.codex.cliPath;
-  settings.proxyEnabled = settings.agents.codex.proxyEnabled;
-  settings.proxyUrl = settings.agents.codex.proxyUrl;
-  settings.providerMode = settings.agents.codex.providerMode;
-  settings.activeApiProviderId = settings.agents.codex.activeApiProviderId;
-  settings.defaultModel = settings.agents.codex.defaultModel;
-  settings.defaultReasoning = settings.agents.codex.defaultReasoning;
-  settings.defaultServiceTier = settings.agents.codex.defaultServiceTier;
-  settings.defaultPermission = settings.agents.codex.defaultPermission;
-  settings.defaultMode = settings.agents.codex.defaultMode;
-  settings.opencode = settings.agents.opencode;
-}
-
-function syncAgentsFromLegacyFields(settings: CodexForObsidianSettings): void {
-  settings.agents.defaultBackend = settings.agentBackend;
-  settings.agents.codex = {
-    cliPath: settings.cliPath,
-    proxyEnabled: settings.proxyEnabled,
-    proxyUrl: settings.proxyUrl,
-    providerMode: settings.providerMode,
-    activeApiProviderId: settings.activeApiProviderId,
-    defaultModel: settings.defaultModel,
-    defaultReasoning: settings.defaultReasoning,
-    defaultServiceTier: settings.defaultServiceTier,
-    defaultPermission: settings.defaultPermission,
-    defaultMode: settings.defaultMode
-  };
-  settings.agents.opencode = settings.opencode;
-}
-
 function normalizeEchoInkResourceSettings(value: unknown, legacyWorkspaceResources: unknown): EchoInkResourceSettings {
+  void legacyWorkspaceResources;
   const record = settingsRecord(value) ?? {};
   const fallback = defaultResourceSettings();
   const enabledByScope = settingsRecord(record.enabledByScope) ?? {};
+  const legacyOverrides = Object.values(enabledByScope)
+    .map(normalizeBooleanMap);
   const importedFrom = settingsRecord(record.importedFrom);
-  const legacy = normalizeWorkspaceResources(legacyWorkspaceResources);
+  const catalog = Array.isArray(record.catalog)
+    ? record.catalog.filter(isEchoInkResourceLike).map((resource) => {
+        const legacyValues = legacyOverrides.flatMap((overrides) =>
+          typeof overrides[resource.id] === "boolean" ? [overrides[resource.id]] : []);
+        const enabled = legacyValues.includes(false)
+          ? false
+          : legacyValues.includes(true)
+            ? true
+            : resource.enabled !== false;
+        const { scopes: _legacyScopes, ...current } = resource as EchoInkResourceSettings["catalog"][number] & { scopes?: unknown };
+        return { ...current, enabled };
+      })
+    : [];
+  const catalogIds = new Set(catalog.map((resource) => resource.id));
+  const legacyEnabledOverrides = Object.fromEntries([
+    ...Object.entries(normalizeBooleanMap(record.legacyEnabledOverrides)),
+    ...legacyResourceDecisions(legacyOverrides)
+  ].filter(([resourceId]) => !catalogIds.has(resourceId)));
   return {
-    catalog: Array.isArray(record.catalog) ? record.catalog.filter(isEchoInkResourceLike) : [],
-    enabledByScope: {
-      chat: normalizeBooleanMap(enabledByScope.chat),
-      knowledge: {
-        ...normalizeBooleanMap(enabledByScope.knowledge),
-        ...Object.fromEntries(Object.entries(legacy.skills).map(([key, enabled]) => [`codex-import:skill:${resourceSlugFromLegacyKey(key)}`, enabled])),
-        ...Object.fromEntries(Object.entries(legacy.mcpServers).map(([key, enabled]) => [`codex-import:mcp-server:${resourceSlugFromLegacyKey(key)}`, enabled]))
-      },
-      "editor-actions": normalizeBooleanMap(enabledByScope["editor-actions"])
-    },
+    catalog,
+    ...(Object.keys(legacyEnabledOverrides).length ? { legacyEnabledOverrides } : {}),
     importedFrom: importedFrom
       ? Object.fromEntries(Object.entries(importedFrom).map(([key, raw]) => [key, normalizeNonNegativeNumber(raw)]))
       : fallback.importedFrom,
-    mcpBroker: normalizeMcpBrokerSettings(record.mcpBroker ?? fallback.mcpBroker),
     mcpConnections: normalizeMcpConnectionRecords(record.mcpConnections ?? fallback.mcpConnections),
     lastScannedAt: normalizeNonNegativeNumber(record.lastScannedAt),
     lastError: normalizeOptionalText(record.lastError)
   };
 }
 
-function resourceSlugFromLegacyKey(value: string): string {
-  const basename = String(value ?? "").split(/[\\/]/).filter(Boolean).pop() ?? value;
-  return basename
-    .replace(/\.md$/i, "")
-    .replace(/^SKILL$/i, String(value ?? "").split(/[\\/]/).filter(Boolean).slice(-2, -1)[0] ?? "skill")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "") || "resource";
+function legacyResourceDecisions(
+  overrides: Array<Record<string, boolean>>
+): Array<[string, boolean]> {
+  const ids = new Set<string>();
+  for (const values of overrides) {
+    for (const resourceId of Object.keys(values)) ids.add(resourceId);
+  }
+  return Array.from(ids).map((resourceId) => {
+    const values = overrides.flatMap((scope) =>
+      typeof scope[resourceId] === "boolean" ? [scope[resourceId]] : []);
+    return [resourceId, !values.includes(false) && values.includes(true)];
+  });
 }
 
 function normalizeReasoningEffort(value: unknown, fallback: ReasoningEffort): ReasoningEffort {
@@ -1715,59 +1043,29 @@ function normalizeMemorySettings(input: unknown): EchoInkMemorySettings {
   const value = settingsRecord(input) ?? {};
   return {
     enabled: value?.enabled !== false,
-    autoSync: value?.autoSync !== false,
-    curatorBackend: value?.curatorBackend === "codex-cli" || value?.curatorBackend === "opencode" || value?.curatorBackend === "hermes"
-      ? value.curatorBackend
-      : "default",
-    curatorModel: normalizeOptionalText(value?.curatorModel)
+    useLongTermMemory: value?.useLongTermMemory !== false
   };
 }
 
 function normalizeKnowledgeBaseSettings(input: unknown): KnowledgeBaseSettings {
   const value = settingsRecord(input) ?? {};
   const fallback = DEFAULT_SETTINGS.knowledgeBase;
-  const legacyScheduleEnabled = typeof value?.scheduleEnabled === "boolean" ? value.scheduleEnabled : true;
   const normalized: KnowledgeBaseSettings = {
-    enabled: value?.enabled === true && legacyScheduleEnabled !== false,
-    sessionId: normalizeOptionalText(value?.sessionId),
-    backend: normalizeKnowledgeBaseBackendMode(value?.backend),
     useCustomRulesFile: value?.useCustomRulesFile === true,
     rulesFilePath: normalizeKnowledgeBaseRulesPath(value?.rulesFilePath, fallback.rulesFilePath),
-    scheduleTime: normalizeScheduleTime(value?.scheduleTime, fallback.scheduleTime),
-    catchUpOnStartup: value?.catchUpOnStartup !== false,
     lastRunAt: normalizeNonNegativeNumber(value?.lastRunAt),
     lastRunStatus: normalizeKnowledgeBaseRunStatus(value?.lastRunStatus),
-    lastScheduledRunAt: normalizeNonNegativeNumber(value?.lastScheduledRunAt),
-    lastScheduledRunStatus: normalizeKnowledgeBaseRunStatus(value?.lastScheduledRunStatus),
-    lastScheduledRunId: normalizeLimitedText(value?.lastScheduledRunId, 512),
-    scheduledAttemptCount: normalizePositiveInteger(
-      value?.scheduledAttemptCount,
-      0,
-      0,
-      1000
-    ),
-    scheduledNextRetryAt: normalizeNonNegativeNumber(
-      value?.scheduledNextRetryAt
-    ),
     lastReportPath: normalizeOptionalText(value?.lastReportPath),
     lastError: normalizeOptionalText(value?.lastError),
     lastSummary: normalizeOptionalText(value?.lastSummary),
     lastCompletion: normalizeKnowledgeBaseRunCompletion(value?.lastCompletion),
-    lastAttempts: normalizeKnowledgeBaseRunAttempts(value?.lastAttempts),
     lastPendingSources: normalizeKnowledgeBasePendingSources(value?.lastPendingSources),
-    lastFailureCode: normalizeLimitedText(value?.lastFailureCode, 160),
     lastWarnings: normalizeKnowledgeBaseRunWarnings(value?.lastWarnings),
-    nativeLifecycleRecoveryReceipt: normalizeKnowledgeBaseNativeLifecycleRecoveryReceipt(
-      value?.nativeLifecycleRecoveryReceipt
-    ),
-    historyRetentionDays: normalizeKnowledgeBaseHistoryRetentionDays(value?.historyRetentionDays, fallback.historyRetentionDays),
-    ...legacyManagedThreadsFrom(value?.legacyManagedThreads ?? value?.managedThreads),
     initialization: normalizeKnowledgeBaseInitialization(value?.initialization),
     processedSources: normalizeKnowledgeBaseProcessedSources(value?.processedSources),
     healthHistory: normalizeKnowledgeBaseHealthHistory(value?.healthHistory),
-    maintenanceHistory: normalizeKnowledgeBaseMaintenanceHistory(value?.maintenanceHistory, value?.healthHistory)
+    maintenanceHistory: normalizeKnowledgeBaseMaintenanceHistory(value?.maintenanceHistory)
   };
-  ensureKnowledgeBaseNativeLifecycleRecoveryProjection(normalized);
   return normalized;
 }
 
@@ -1777,7 +1075,7 @@ function normalizeReviewSettings(input: unknown): WeeklyReviewSettings {
   const outputDir = normalizeReviewOutputDir(value?.outputDir, fallback.outputDir);
   const reports = settingsRecord(value?.reports) ?? {};
   return {
-    enabled: false,
+    enabled: value?.enabled === true,
     knowledgeBaseEnabled: typeof value?.knowledgeBaseEnabled === "boolean" ? value.knowledgeBaseEnabled : fallback.knowledgeBaseEnabled,
     agentChatEnabled: typeof value?.agentChatEnabled === "boolean" ? value.agentChatEnabled : fallback.agentChatEnabled,
     scheduleTime: normalizeScheduleTime(value?.scheduleTime, fallback.scheduleTime),
@@ -1786,22 +1084,16 @@ function normalizeReviewSettings(input: unknown): WeeklyReviewSettings {
     rangeMode: normalizeReviewRangeMode(value?.rangeMode, fallback.rangeMode),
     openHtmlAfterRun: value?.openHtmlAfterRun === true,
     reports: {
-      knowledgeBase: normalizeReviewReportState(reports.knowledgeBase, outputDir),
-      agentChat: normalizeReviewReportState(reports.agentChat, outputDir)
+      knowledgeBase: normalizeReviewReportState(reports.knowledgeBase),
+      agentChat: normalizeReviewReportState(reports.agentChat)
     }
   };
 }
 
-function normalizeReviewReportState(input: unknown, outputDir = DEFAULT_REVIEW_OUTPUT_DIR): ReviewReportState {
+function normalizeReviewReportState(input: unknown): ReviewReportState {
   const value = settingsRecord(input) ?? {};
   return {
-    lastRunAt: normalizeNonNegativeNumber(value?.lastRunAt),
-    lastRunStatus: normalizeReviewRunStatus(value?.lastRunStatus),
-    lastRangeKey: normalizeReviewRangeKey(value?.lastRangeKey),
-    lastMarkdownPath: normalizeReviewOutputPath(value?.lastMarkdownPath, ".md", outputDir),
-    lastHtmlPath: normalizeReviewOutputPath(value?.lastHtmlPath, ".html", outputDir),
-    lastError: normalizeOptionalText(value?.lastError),
-    lastSummary: normalizeOptionalText(value?.lastSummary)
+    lastRangeKey: normalizeReviewRangeKey(value?.lastRangeKey)
   };
 }
 
@@ -1816,20 +1108,12 @@ function normalizeReviewRangeKey(value: unknown): string {
 
 export function normalizeReviewOutputDir(value: unknown, fallback = DEFAULT_REVIEW_OUTPUT_DIR): string {
   const raw = normalizeText(value, fallback).replace(/\\/g, "/").replace(/^\/+/, "");
+  if (raw === ".") return ".";
   const clean = raw
     .split("/")
     .filter((part) => part && part !== "." && part !== "..")
     .join("/");
   return clean || fallback;
-}
-
-function normalizeReviewOutputPath(value: unknown, extension: ".md" | ".html", outputDir = DEFAULT_REVIEW_OUTPUT_DIR): string {
-  const raw = normalizeOptionalText(value).replace(/\\/g, "/").replace(/^\/+/, "");
-  if (!raw.endsWith(extension)) return "";
-  const parts = raw.split("/");
-  if (parts.some((part) => !part || part === "." || part === "..")) return "";
-  const allowedDirs = Array.from(new Set([outputDir, DEFAULT_REVIEW_OUTPUT_DIR].map((item) => normalizeReviewOutputDir(item)).filter(Boolean)));
-  return allowedDirs.some((dir) => raw.startsWith(`${dir}/`)) ? raw : "";
 }
 
 function normalizeKnowledgeBaseInitialization(input: unknown): KnowledgeBaseInitializationSettings {
@@ -1849,36 +1133,44 @@ function normalizeStoredSessions(value: unknown): StoredSession[] {
   return value
     .map((rawSession: unknown): StoredSession | null => {
       const session = settingsRecord(rawSession) ?? {};
+      if (session.kind === "knowledge-base") return null;
       const id = normalizeOptionalText(session.id);
       if (!id) return null;
       const messages = normalizeChatMessages(session.messages);
-      const kind = session.kind === "knowledge-base" ? "knowledge-base" as const : undefined;
-      const legacyThreadId = normalizeOptionalText(session.threadId) || undefined;
-      const generation = normalizeSessionGeneration(session.generation, session.revision);
+      const piSessionId = normalizeOptionalText(session.piSessionId) || undefined;
+      const parsedContextLedger = parsePiContextLedger(session.contextLedger);
+      const contextLedger = parsedContextLedger
+        && parsedContextLedger.conversationId === id
+        && (!piSessionId || parsedContextLedger.piSessionId === piSessionId)
+        ? parsedContextLedger
+        : undefined;
       return {
         id,
-        title: normalizeText(session.title, kind === "knowledge-base" ? KNOWLEDGE_BASE_SESSION_TITLE : "新会话"),
-        ...(kind ? { kind } : {}),
-        threadId: legacyThreadId,
-        backendBindings: normalizeBackendSessionBindings(session.backendBindings, legacyThreadId),
-        revision: generation,
-        generation,
-        contextId: normalizeOptionalText(session.contextId) || undefined,
-        contextStartsAfterMessageId: normalizeOptionalText(session.contextStartsAfterMessageId) || undefined,
-        commitId: normalizeOptionalText(session.commitId) || undefined,
-        workspaceFingerprint: normalizeOptionalFingerprint(session.workspaceFingerprint),
-        contextSnapshot: normalizeSessionContextSnapshot(session.contextSnapshot, id),
+        title: normalizeText(session.title, "新会话"),
+        piSessionId,
+        defaultMemoryMode: normalizeStoredSessionMemoryMode(session.defaultMemoryMode),
+        bodyAuthority: normalizeStoredSessionBodyAuthority(session.bodyAuthority),
         cwd: normalizeOptionalText(session.cwd),
         messages,
-        rollingSummary: normalizeSessionSummary(session.rollingSummary),
-        messagesHiddenBefore: normalizeOptionalPositiveNumber(session.messagesHiddenBefore),
-        historyActiveDate: normalizeOptionalText(session.historyActiveDate) || undefined,
         tokenUsage: session.tokenUsage as TokenUsage,
+        contextLedger,
         createdAt: normalizeNonNegativeNumber(session.createdAt),
         updatedAt: normalizeNonNegativeNumber(session.updatedAt)
       };
     })
     .filter((session): session is StoredSession => Boolean(session));
+}
+
+function normalizeStoredSessionMemoryMode(
+  value: unknown
+): StoredSession["defaultMemoryMode"] {
+  return value === "normal" || value === "no_memory" ? value : undefined;
+}
+
+function normalizeStoredSessionBodyAuthority(
+  value: unknown
+): StoredSession["bodyAuthority"] {
+  return value === "pi_session_only" ? value : undefined;
 }
 
 function normalizeChatMessages(value: unknown): ChatMessage[] {
@@ -1893,16 +1185,9 @@ function normalizeChatMessages(value: unknown): ChatMessage[] {
       const message = { ...item, id, role } as unknown as ChatMessage;
       message.text = typeof item.text === "string" ? item.text : "";
       assignOptionalText(message, "backendId", item.backendId);
+      assignOptionalText(message, "providerId", item.providerId ?? item.provider);
       assignOptionalText(message, "modelId", item.modelId ?? item.model);
       assignOptionalText(message, "profileId", item.profileId ?? item.profile);
-      assignOptionalText(message, "nativeExecutionIdHash", item.nativeExecutionIdHash);
-      assignOptionalText(message, "contextCompiledThroughMessageId", item.contextCompiledThroughMessageId);
-      assignOptionalText(message, "contextSnapshotVersion", item.contextSnapshotVersion);
-      assignOptionalText(message, "nativeLeaseId", item.nativeLeaseId);
-      message.contextMode = normalizeContextCompileMode(item.contextMode);
-      message.nativeLeaseStatus = normalizeNativeLeaseStatus(item.nativeLeaseStatus);
-      message.nativeLocalCommitStatus = normalizeNativeLocalCommitStatus(item.nativeLocalCommitStatus);
-      message.nativeCleanupStatus = normalizeNativeCleanupStatus(item.nativeCleanupStatus);
       message.runTerminalRecoveryPending = normalizeRunTerminalRecoveryPending(item.runTerminalRecoveryPending);
       message.echoInkRunTerminalRecovery = normalizeEchoInkChatRunTerminalRecovery(
         item.echoInkRunTerminalRecovery
@@ -1910,13 +1195,15 @@ function normalizeChatMessages(value: unknown): ChatMessage[] {
       if (!message.echoInkRunTerminalRecovery) {
         delete message.echoInkRunTerminalRecovery;
       }
-      message.nativeLeaseTurnCount = normalizeOptionalPositiveNumber(item.nativeLeaseTurnCount);
-      if (typeof item.nativeLeaseReused === "boolean") message.nativeLeaseReused = item.nativeLeaseReused;
-      else delete message.nativeLeaseReused;
       if (typeof item.runTerminalRecovered === "boolean") message.runTerminalRecovered = item.runTerminalRecovered;
       else delete message.runTerminalRecovered;
       message.runUsage = normalizeHarnessRunUsage(item.runUsage);
       if (!message.runUsage) delete message.runUsage;
+      try {
+        message.taskPlan = normalizeEchoInkTaskPlanSnapshot(item.taskPlan);
+      } catch {
+        delete message.taskPlan;
+      }
       message.createdAt = normalizeNonNegativeNumber(item.createdAt);
       message.completedAt = normalizeOptionalPositiveNumber(item.completedAt);
       return message;
@@ -2033,191 +1320,6 @@ function normalizeOptionalNonNegativeInteger(
     : undefined;
 }
 
-function normalizeContextCompileMode(value: unknown): ContextCompileMode | undefined {
-  return value === "bootstrap" || value === "incremental" || value === "catch-up" || value === "workflow" ? value : undefined;
-}
-
-function normalizeBackendSessionBindings(value: unknown, legacyThreadId?: string): Record<string, BackendSessionBinding> | undefined {
-  const bindings: Record<string, BackendSessionBinding> = {};
-  const records = settingsRecord(value);
-  if (records) {
-    for (const [key, raw] of Object.entries(records)) {
-      const item = settingsRecord(raw) ?? {};
-      const backendId = normalizeOptionalText(item.backendId || key);
-      if (!backendId) continue;
-      const nativeSessionId = normalizeOptionalText(item.nativeSessionId);
-      const nativeThreadId = normalizeOptionalText(item.nativeThreadId);
-      bindings[backendId] = {
-        backendId,
-        ...(nativeSessionId ? { nativeSessionId } : {}),
-        ...(nativeThreadId ? { nativeThreadId } : {}),
-        nativeExecutionKind: normalizeNativeExecutionKind(item.nativeExecutionKind),
-        nativeExecutionRef: normalizeNativeExecutionRef(item.nativeExecutionRef, backendId),
-        leaseId: normalizeOptionalText(item.leaseId) || undefined,
-        leaseStatus: normalizeNativeLeaseStatus(item.leaseStatus),
-        leaseCreatedAt: normalizeOptionalPositiveNumber(item.leaseCreatedAt),
-        leaseLastUsedAt: normalizeOptionalPositiveNumber(item.leaseLastUsedAt),
-        leaseExpiresAt: normalizeOptionalPositiveNumber(item.leaseExpiresAt),
-        leaseTurnCount: normalizeOptionalPositiveNumber(item.leaseTurnCount),
-        leaseMaxTurns: normalizeOptionalPositiveNumber(item.leaseMaxTurns),
-        leaseContextChars: normalizeOptionalPositiveNumber(item.leaseContextChars),
-        leaseMaxContextChars: normalizeOptionalPositiveNumber(item.leaseMaxContextChars),
-        contextCheckpointMessageId: normalizeOptionalText(item.contextCheckpointMessageId) || undefined,
-        syncedThroughMessageId: normalizeOptionalText(item.syncedThroughMessageId) || undefined,
-        syncedSessionRevision: normalizeSessionRevision(item.syncedSessionRevision),
-        snapshotVersion: normalizeOptionalText(item.snapshotVersion) || undefined,
-        contextCursor: normalizeContextSyncCursor(item.contextCursor, item),
-        workspaceFingerprint: normalizeOptionalFingerprint(item.workspaceFingerprint),
-        vaultProfileFingerprint: normalizeOptionalText(item.vaultProfileFingerprint) || undefined,
-        lastUsedAt: normalizeNonNegativeNumber(item.lastUsedAt),
-        ...(item.capabilitySnapshot ? { capabilitySnapshot: item.capabilitySnapshot as BackendSessionBinding["capabilitySnapshot"] } : {})
-      };
-    }
-  }
-  if (legacyThreadId && !bindings["codex-cli"]) {
-    bindings["codex-cli"] = {
-      backendId: "codex-cli",
-      nativeThreadId: legacyThreadId,
-      nativeExecutionKind: "thread",
-      syncedSessionRevision: 1,
-      lastUsedAt: 0
-    };
-  }
-  return Object.keys(bindings).length ? bindings : undefined;
-}
-
-function normalizeSessionRevision(value: unknown): number {
-  return normalizePositiveInteger(value, 1, 1, 1_000_000_000) || 1;
-}
-
-function normalizeSessionGeneration(generation: unknown, revision: unknown): number {
-  return Math.max(
-    normalizeSessionRevision(generation),
-    normalizeSessionRevision(revision)
-  );
-}
-
-function normalizeOptionalFingerprint(value: unknown): string | undefined {
-  const normalized = normalizeOptionalText(value);
-  return /^sha256:[a-f0-9]{16,128}$/i.test(normalized) ? normalized.toLowerCase() : undefined;
-}
-
-function normalizeNativeExecutionKind(value: unknown): BackendSessionBinding["nativeExecutionKind"] | undefined {
-  return value === "thread" || value === "session" || value === "run" || value === "process" ? value : undefined;
-}
-
-function normalizeNativeExecutionRef(value: unknown, backendId: string): NativeExecutionRef | undefined {
-  const item = settingsRecord(value);
-  if (!item) return undefined;
-  const id = normalizeOptionalText(item.id);
-  const kind = normalizeNativeExecutionKind(item.kind);
-  const persistence = item.persistence === "none" || item.persistence === "process-local" || item.persistence === "provider-persistent" || item.persistence === "unknown"
-    ? item.persistence
-    : undefined;
-  const deviceKey = normalizeOptionalText(item.deviceKey);
-  const vaultId = normalizeOptionalText(item.vaultId);
-  if (!id || !kind || !persistence || !deviceKey || !vaultId) return undefined;
-  if (
-    item.transport !== undefined
-    && !isSafeNativeExecutionTransport(item.transport)
-  ) return undefined;
-  const transport = item.transport;
-  const providerEndpoint = normalizeOptionalText(item.providerEndpoint);
-  return {
-    backendId,
-    id,
-    kind,
-    persistence,
-    ...(transport ? { transport } : {}),
-    ...(providerEndpoint ? { providerEndpoint } : {}),
-    deviceKey,
-    vaultId,
-    createdAt: normalizeNonNegativeNumber(item.createdAt)
-  };
-}
-
-function normalizeNativeLeaseStatus(value: unknown): BackendSessionBinding["leaseStatus"] | undefined {
-  return value === "active" || value === "expired" || value === "cleanup-pending" || value === "disposed" || value === "failed" ? value : undefined;
-}
-
-function normalizeNativeLocalCommitStatus(value: unknown): NativeLocalCommitStatus | undefined {
-  return value === "pending" || value === "committed" || value === "failed" ? value : undefined;
-}
-
-function normalizeNativeCleanupStatus(value: unknown): NativeCleanupStatus | undefined {
-  return value === "not-needed"
-    || value === "awaiting-local-commit"
-    || value === "pending"
-    || value === "disposing"
-    || value === "disposed"
-    || value === "unsupported"
-    || value === "failed"
-    || value === "retained-for-recovery"
-    || value === "retained"
-    || value === "aborted"
-    || value === "quarantined"
-    ? value
-    : undefined;
-}
-
-function normalizeContextSyncCursor(value: unknown, fallback?: unknown): ContextSyncCursor | undefined {
-  const source = settingsRecord(value) ?? settingsRecord(fallback);
-  if (!source) return undefined;
-  const syncedThroughMessageId = normalizeOptionalText(source.syncedThroughMessageId);
-  const snapshotVersion = normalizeOptionalText(source.snapshotVersion);
-  const contextId = normalizeOptionalText(source.contextId);
-  const workspaceFingerprint = normalizeOptionalFingerprint(source.workspaceFingerprint);
-  return {
-    ...(syncedThroughMessageId ? { syncedThroughMessageId } : {}),
-    syncedSessionRevision: normalizeSessionRevision(source.syncedSessionRevision),
-    sessionGeneration: normalizeSessionRevision(source.sessionGeneration ?? source.syncedSessionRevision),
-    ...(contextId ? { contextId } : {}),
-    ...(workspaceFingerprint ? { workspaceFingerprint } : {}),
-    ...(snapshotVersion ? { snapshotVersion } : {})
-  };
-}
-
-function normalizeSessionContextSnapshot(value: unknown, sessionId: string): SessionContextSnapshot | undefined {
-  const item = settingsRecord(value);
-  if (!item) return undefined;
-  const version = normalizeOptionalText(item.version);
-  const rollingSummary = normalizeOptionalText(item.rollingSummary).slice(0, 8000);
-  if (!version && !rollingSummary) return undefined;
-  const summarizedFromMessageId = normalizeOptionalText(item.summarizedFromMessageId);
-  const summarizedThroughMessageId = normalizeOptionalText(item.summarizedThroughMessageId);
-  const contextId = normalizeOptionalText(item.contextId);
-  return {
-    sessionId: normalizeOptionalText(item.sessionId) || sessionId,
-    ...(contextId ? { contextId } : {}),
-    generation: normalizeSessionRevision(item.generation),
-    version: version || "snapshot-v1",
-    goal: normalizeOptionalText(item.goal).slice(0, 2000),
-    currentState: normalizeOptionalText(item.currentState).slice(0, 4000),
-    decisions: normalizeTextArray(item.decisions, 80, 1000),
-    constraints: normalizeTextArray(item.constraints, 80, 1000),
-    openLoops: normalizeTextArray(item.openLoops, 80, 1000),
-    keyReferences: normalizeTextArray(item.keyReferences, 80, 1000),
-    rollingSummary,
-    ...(summarizedFromMessageId ? { summarizedFromMessageId } : {}),
-    ...(summarizedThroughMessageId ? { summarizedThroughMessageId } : {}),
-    sourceMessageCount: normalizePositiveInteger(item.sourceMessageCount, 0, 0, 1_000_000),
-    createdAt: normalizeNonNegativeNumber(item.createdAt),
-    updatedAt: normalizeNonNegativeNumber(item.updatedAt)
-  };
-}
-
-function normalizeTextArray(value: unknown, maxItems: number, maxChars: number): string[] {
-  if (!Array.isArray(value)) return [];
-  return value.map((item) => normalizeOptionalText(item).slice(0, maxChars)).filter(Boolean).slice(-maxItems);
-}
-
-function normalizeSessionSummary(value: unknown): StoredSession["rollingSummary"] {
-  const item = settingsRecord(value);
-  const text = normalizeOptionalText(item?.text).slice(0, 4000);
-  if (!text) return undefined;
-  return { text, updatedAt: normalizeNonNegativeNumber(item?.updatedAt) };
-}
-
 function normalizeOptionalPositiveNumber(value: unknown): number | undefined {
   const normalized = normalizeNonNegativeNumber(value);
   return normalized > 0 ? normalized : undefined;
@@ -2277,14 +1379,11 @@ function normalizeKnowledgeBaseHealthHistory(value: unknown): KnowledgeBaseHealt
     .slice(-90);
 }
 
-const KNOWLEDGE_BASE_RESULT_MAX_ATTEMPTS = 3;
 const KNOWLEDGE_BASE_RESULT_MAX_PENDING_SOURCES = 50;
 const KNOWLEDGE_BASE_RESULT_MAX_WARNINGS = 10;
 const KNOWLEDGE_BASE_RESULT_MAX_MESSAGE_CHARS = 500;
 const KNOWLEDGE_BASE_MAINTENANCE_HISTORY_MAX = 500;
 const KNOWLEDGE_BASE_WORKFLOW_ID_MAX_CHARS = 512;
-const KNOWLEDGE_BASE_ATTEMPT_ID_MAX_CHARS = 512;
-const KNOWLEDGE_BASE_NATIVE_ID_MAX_CHARS = 2048;
 
 export function canonicalizeKnowledgeBaseMaintenanceHistoryEntry(
   value: unknown,
@@ -2302,32 +1401,10 @@ export function canonicalizeKnowledgeBaseMaintenanceHistoryEntry(
   const mode = normalizeKnowledgeBaseMaintenanceMode(record.mode) ?? legacyMode;
   const reportPath = normalizeOptionalText(record.reportPath);
   const completion = normalizeKnowledgeBaseRunCompletion(record.completion);
-  const attempts = normalizeKnowledgeBaseRunAttempts(record.attempts);
   const pendingSources = normalizeKnowledgeBasePendingSources(record.pendingSources);
-  const selectedBackend = normalizeKnowledgeBaseAttemptBackend(record.selectedBackend);
-  const hasWinnerBackend = Object.prototype.hasOwnProperty.call(record, "winnerBackend");
-  const winnerBackend = record.winnerBackend === null
-    ? null
-    : normalizeKnowledgeBaseAttemptBackend(record.winnerBackend);
-  const hasFailureCode = Object.prototype.hasOwnProperty.call(record, "failureCode");
-  const failureCode = record.failureCode === null
-    ? null
-    : normalizeLimitedText(record.failureCode, 160);
-  const terminalPhase = normalizeKnowledgeBaseRunTerminalPhase(record.terminalPhase);
-  const commitState = normalizeKnowledgeBaseRunCommitState(record.commitState);
   const phase = normalizeLimitedText(record.phase, 160);
   const errorCode = normalizeLimitedText(record.errorCode, 160);
   const warnings = normalizeKnowledgeBaseRunWarnings(record.warnings);
-  const hasCanonicalDurableMetadata = Boolean(
-    runId
-    && (mode === "maintain" || mode === "reingest")
-    && selectedBackend
-    && hasWinnerBackend
-    && terminalPhase
-    && commitState
-    && Object.prototype.hasOwnProperty.call(record, "attempts")
-    && hasFailureCode
-  );
   return {
     date,
     status,
@@ -2336,22 +1413,10 @@ export function canonicalizeKnowledgeBaseMaintenanceHistoryEntry(
     mode,
     reportPath,
     ...(completion ? { completion } : {}),
-    ...(selectedBackend ? { selectedBackend } : {}),
-    ...(hasWinnerBackend && (winnerBackend || record.winnerBackend === null)
-      ? { winnerBackend }
-      : {}),
-    ...(attempts.length || hasCanonicalDurableMetadata ? { attempts } : {}),
-    ...(pendingSources.length || hasCanonicalDurableMetadata
-      ? { pendingSources }
-      : {}),
-    ...(hasFailureCode && (failureCode || failureCode === null)
-      ? { failureCode }
-      : {}),
-    ...(terminalPhase ? { terminalPhase } : {}),
-    ...(commitState ? { commitState } : {}),
+    ...(pendingSources.length ? { pendingSources } : {}),
     ...(phase ? { phase } : {}),
     ...(errorCode ? { errorCode } : {}),
-    ...(warnings.length || hasCanonicalDurableMetadata ? { warnings } : {})
+    ...(warnings.length ? { warnings } : {})
   };
 }
 
@@ -2397,175 +1462,6 @@ function normalizeKnowledgeBaseRunCompletion(value: unknown): KnowledgeBaseRunCo
   return value === "full" || value === "partial" || value === "recovered" || value === "noop" ? value : "";
 }
 
-function normalizeKnowledgeBaseRunAttempts(value: unknown): KnowledgeRunAttemptRecord[] {
-  if (!Array.isArray(value)) return [];
-  const normalized = value
-    .map(normalizeKnowledgeBaseRunAttempt)
-    .filter((item): item is KnowledgeRunAttemptRecord => Boolean(item))
-    .sort((left, right) => left.ordinal - right.ordinal);
-  const seenIds = new Set<string>();
-  const seenOrdinals = new Set<number>();
-  const result: KnowledgeRunAttemptRecord[] = [];
-  for (const attempt of normalized) {
-    if (seenIds.has(attempt.attemptId) || seenOrdinals.has(attempt.ordinal)) continue;
-    seenIds.add(attempt.attemptId);
-    seenOrdinals.add(attempt.ordinal);
-    result.push(attempt);
-    if (result.length >= KNOWLEDGE_BASE_RESULT_MAX_ATTEMPTS) break;
-  }
-  return result;
-}
-
-function normalizeKnowledgeBaseRunAttempt(value: unknown): KnowledgeRunAttemptRecord | null {
-  const record = settingsRecord(value);
-  if (!record) return null;
-  const attemptId = normalizeLimitedText(
-    record.attemptId,
-    KNOWLEDGE_BASE_ATTEMPT_ID_MAX_CHARS
-  );
-  const backend = normalizeKnowledgeBaseAttemptBackend(record.backend);
-  if (!attemptId || !backend) return null;
-
-  const nativeRecord = settingsRecord(record.native);
-  const nativeId = normalizeLimitedText(
-    nativeRecord?.id,
-    KNOWLEDGE_BASE_NATIVE_ID_MAX_CHARS
-  );
-  const nativeKind = normalizeKnowledgeBaseAttemptNativeKind(nativeRecord?.kind);
-  const persistence = normalizeKnowledgeBaseAttemptPersistence(nativeRecord?.persistence);
-
-  const submittedRecord = settingsRecord(record.submitted);
-  const harnessRunId = normalizeLimitedText(
-    submittedRecord?.harnessRunId,
-    KNOWLEDGE_BASE_NATIVE_ID_MAX_CHARS
-  );
-
-  const terminalRecord = settingsRecord(record.terminal);
-  const terminalStatus = normalizeKnowledgeBaseAttemptTerminalStatus(terminalRecord?.status);
-
-  const failureRecord = settingsRecord(record.failure);
-  const failureCode = normalizeLimitedText(failureRecord?.code, 160);
-  const failurePhase = normalizeKnowledgeBaseAttemptPhase(failureRecord?.phase);
-
-  const terminationRecord = settingsRecord(record.termination);
-  const stagingRecord = settingsRecord(record.staging);
-  const stagingPath = normalizeLimitedText(stagingRecord?.path, 1000);
-
-  return {
-    attemptId,
-    ordinal: normalizePositiveInteger(record.ordinal, 0, 0, 1000),
-    backend,
-    ...(nativeId ? {
-      native: {
-        id: nativeId,
-        ...(nativeKind ? { kind: nativeKind } : {}),
-        ...(persistence ? { persistence } : {})
-      }
-    } : {}),
-    ...(submittedRecord && harnessRunId ? {
-      submitted: {
-        at: normalizeNonNegativeNumber(submittedRecord.at),
-        harnessRunId
-      }
-    } : {}),
-    ...(terminalRecord && terminalStatus ? {
-      terminal: {
-        status: terminalStatus,
-        at: normalizeNonNegativeNumber(terminalRecord.at),
-        ...limitedOptionalMessage(terminalRecord.message)
-      }
-    } : {}),
-    ...(failureRecord && failureCode ? {
-      failure: {
-        code: failureCode,
-        at: normalizeNonNegativeNumber(failureRecord.at),
-        message: normalizeLimitedText(failureRecord.message, KNOWLEDGE_BASE_RESULT_MAX_MESSAGE_CHARS),
-        phase: failurePhase,
-        retryable: failureRecord.retryable === true,
-        failoverEligible: failureRecord.failoverEligible === true
-      }
-    } : {}),
-    ...(terminationRecord ? {
-      termination: {
-        ...optionalNonNegativeNumber("requestedAt", terminationRecord.requestedAt),
-        ...optionalNonNegativeNumber("confirmedAt", terminationRecord.confirmedAt),
-        ...optionalNonNegativeNumber("failedAt", terminationRecord.failedAt),
-        ...limitedOptionalMessage(terminationRecord.message)
-      }
-    } : {}),
-    ...(stagingRecord && stagingPath ? {
-      staging: {
-        path: stagingPath,
-        preparedAt: normalizeNonNegativeNumber(stagingRecord.preparedAt),
-        ...optionalNonNegativeNumber("promotedAt", stagingRecord.promotedAt),
-        ...optionalNonNegativeNumber("discardedAt", stagingRecord.discardedAt),
-        ...optionalNonNegativeNumber("failedAt", stagingRecord.failedAt),
-        ...limitedOptionalMessage(stagingRecord.message)
-      }
-    } : {})
-  };
-}
-
-function normalizeKnowledgeBaseAttemptBackend(value: unknown): AgentBackendKind | null {
-  return value === "codex-cli" || value === "opencode" || value === "hermes" ? value : null;
-}
-
-function normalizeKnowledgeBaseAttemptNativeKind(value: unknown): "thread" | "session" | "run" | "process" | null {
-  return value === "thread" || value === "session" || value === "run" || value === "process" ? value : null;
-}
-
-function normalizeKnowledgeBaseAttemptPersistence(value: unknown): "none" | "process-local" | "provider-persistent" | "unknown" | undefined {
-  return value === "none" || value === "process-local" || value === "provider-persistent" || value === "unknown" ? value : undefined;
-}
-
-function normalizeKnowledgeBaseAttemptTerminalStatus(value: unknown): NonNullable<KnowledgeRunAttemptRecord["terminal"]>["status"] | null {
-  return value === "completed" || value === "failed" || value === "canceled" ? value : null;
-}
-
-function normalizeKnowledgeBaseAttemptPhase(value: unknown): KnowledgeRunAttemptPhase {
-  return value === "preflight"
-    || value === "execution"
-    || value === "verification"
-    || value === "commit"
-    || value === "cleanup"
-    ? value
-    : "preflight";
-}
-
-function normalizeKnowledgeBaseRunTerminalPhase(
-  value: unknown
-): KnowledgeBaseRunTerminalPhase | null {
-  return value === "preflight"
-    || value === "execution"
-    || value === "verification"
-    || value === "commit"
-    || value === "cleanup"
-    || value === "finalized"
-    || value === "recovery-blocked"
-    ? value
-    : null;
-}
-
-function normalizeKnowledgeBaseRunCommitState(
-  value: unknown
-): KnowledgeBaseRunCommitState | null {
-  return value === "pre-wal"
-    || value === "wal-persisted"
-    || value === "committed"
-    ? value
-    : null;
-}
-
-function limitedOptionalMessage(value: unknown): { message?: string } {
-  const message = normalizeLimitedText(value, KNOWLEDGE_BASE_RESULT_MAX_MESSAGE_CHARS);
-  return message ? { message } : {};
-}
-
-function optionalNonNegativeNumber<Key extends string>(key: Key, value: unknown): Partial<Record<Key, number>> {
-  if (value === undefined || value === null || value === "") return {};
-  return { [key]: normalizeNonNegativeNumber(value) } as Partial<Record<Key, number>>;
-}
-
 function normalizeKnowledgeBasePendingSources(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   const result: string[] = [];
@@ -2594,69 +1490,6 @@ function normalizeKnowledgeBaseRunWarnings(value: unknown): KnowledgeBaseRunWarn
   return result;
 }
 
-function normalizeKnowledgeBaseNativeLifecycleRecoveryReceipt(
-  value: unknown
-): KnowledgeBaseNativeLifecycleRecoveryReceipt | null {
-  const record = settingsRecord(value);
-  if (!record || record.schemaVersion !== 1) return null;
-  const issue = record.issue === "local-persistence" || record.issue === "native-cleanup"
-    ? record.issue
-    : null;
-  if (!issue) return null;
-  const warningId = issue === "local-persistence"
-    ? "native-local-commit-recovery"
-    : "native-cleanup-recovery";
-  const localCommitStatus = record.localCommitStatus === "committed"
-    || record.localCommitStatus === "failed"
-    || record.localCommitStatus === "unknown"
-    ? record.localCommitStatus
-    : "unknown";
-  const cleanupStatuses = Array.isArray(record.cleanupStatuses)
-    ? Array.from(new Set(record.cleanupStatuses
-      .map((entry) => normalizeNativeCleanupStatus(entry))
-      .filter((entry): entry is NativeCleanupStatus => Boolean(entry))))
-      .slice(0, 20)
-    : [];
-  const recordIds = Array.isArray(record.recordIds)
-    ? Array.from(new Set(record.recordIds
-      .map((entry) => normalizeLimitedText(entry, 512))
-      .filter(Boolean)))
-      .slice(0, 100)
-    : [];
-  const message = normalizeLimitedText(
-    record.message,
-    KNOWLEDGE_BASE_RESULT_MAX_MESSAGE_CHARS
-  );
-  const projection = settingsRecord(record.projection);
-  const lastErrorWithRecovery = normalizeOptionalText(
-    projection?.lastErrorWithRecovery
-  );
-  const lastSummaryWithRecovery = normalizeOptionalText(
-    projection?.lastSummaryWithRecovery
-  );
-  if (!message || !projection || !lastErrorWithRecovery || !lastSummaryWithRecovery) {
-    return null;
-  }
-  return {
-    schemaVersion: 1,
-    issue,
-    warningId,
-    localCommitStatus,
-    cleanupStatuses,
-    cleanupAttempted: record.cleanupAttempted === true,
-    recordIds,
-    message,
-    firstObservedAt: normalizeNonNegativeNumber(record.firstObservedAt),
-    updatedAt: normalizeNonNegativeNumber(record.updatedAt),
-    projection: {
-      lastErrorBefore: normalizeOptionalText(projection.lastErrorBefore),
-      lastSummaryBefore: normalizeOptionalText(projection.lastSummaryBefore),
-      lastErrorWithRecovery,
-      lastSummaryWithRecovery
-    }
-  };
-}
-
 function normalizeLimitedText(value: unknown, maxChars: number): string {
   return normalizeOptionalText(value).slice(0, maxChars);
 }
@@ -2667,49 +1500,6 @@ function normalizeKnowledgeBaseHealthCheckStatus(value: unknown): KnowledgeBaseH
 
 function normalizeKnowledgeBaseMaintenanceMode(value: unknown): KnowledgeBaseMaintenanceMode | null {
   return value === "maintain" || value === "lint" || value === "reingest" || value === "outputs" || value === "inbox" || value === "unknown" ? value : null;
-}
-
-function normalizeKnowledgeBaseManagedThreadKind(value: unknown): KnowledgeBaseManagedThreadKind {
-  const maintenanceMode = normalizeKnowledgeBaseMaintenanceMode(value);
-  if (maintenanceMode) return maintenanceMode;
-  return value === "ask" || value === "journal" || value === "review" ? value : "unknown";
-}
-
-function normalizeKnowledgeBaseManagedThreadArchiveState(value: unknown): KnowledgeBaseManagedThreadArchiveState {
-  return value === "running" || value === "pending-archive" || value === "archived" || value === "archive-failed" ? value : "pending-archive";
-}
-
-export function normalizeKnowledgeBaseHistoryRetentionDays(value: unknown, fallback: number): number {
-  const normalized = normalizePositiveInteger(value, fallback, 0, 3650);
-  return normalized === 0 || normalized === 7 || normalized === 30 || normalized === 90 ? normalized : fallback;
-}
-
-function legacyManagedThreadsFrom(value: unknown): Pick<KnowledgeBaseSettings, "legacyManagedThreads"> {
-  const legacyManagedThreads = normalizeKnowledgeBaseManagedThreads(value);
-  return Object.keys(legacyManagedThreads).length ? { legacyManagedThreads } : {};
-}
-
-function normalizeKnowledgeBaseManagedThreads(value: unknown): Record<string, KnowledgeBaseManagedThread> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  const entries: Array<[string, KnowledgeBaseManagedThread]> = [];
-  for (const [key, raw] of Object.entries(value)) {
-    const item = settingsRecord(raw) ?? {};
-    const threadId = normalizeOptionalText(item?.threadId || key);
-    if (!threadId) continue;
-    entries.push([threadId, {
-      threadId,
-      runId: normalizeOptionalText(item?.runId),
-      kind: normalizeKnowledgeBaseManagedThreadKind(item?.kind),
-      vaultPath: normalizeOptionalText(item?.vaultPath),
-      archiveState: normalizeKnowledgeBaseManagedThreadArchiveState(item?.archiveState),
-      createdAt: normalizeNonNegativeNumber(item?.createdAt),
-      settledAt: normalizeNonNegativeNumber(item?.settledAt),
-      archivedAt: normalizeNonNegativeNumber(item?.archivedAt),
-      attempts: normalizePositiveInteger(item?.attempts, 0, 0, 1000),
-      lastError: normalizeOptionalText(item?.lastError)
-    }]);
-  }
-  return Object.fromEntries(entries.slice(-200));
 }
 
 export function recordKnowledgeBaseHealthCheck(settings: KnowledgeBaseSettings, status: KnowledgeBaseHealthCheckStatus, at = Date.now()): void {
@@ -2729,14 +1519,7 @@ export function recordKnowledgeBaseMaintenanceRun(
     runId?: string;
     reportPath?: string;
     completion?: KnowledgeBaseRunCompletion;
-    selectedBackend?: AgentBackendKind;
-    winnerBackend?: AgentBackendKind | null;
-    attempts?: KnowledgeRunAttemptRecord[];
     pendingSources?: string[];
-    failureCode?: string | null;
-    terminalPhase?: KnowledgeBaseRunTerminalPhase;
-    commitState?: KnowledgeBaseRunCommitState;
-    /** @deprecated Use terminalPhase for new maintenance records. */
     phase?: string;
     errorCode?: string;
     warnings?: KnowledgeBaseRunWarning[];
@@ -2754,9 +1537,7 @@ export function recordKnowledgeBaseMaintenanceRun(
     throw new Error("知识库维护历史终态无法规范化");
   }
   settings.lastCompletion = entry.completion ?? "";
-  settings.lastAttempts = entry.attempts ?? [];
   settings.lastPendingSources = entry.pendingSources ?? [];
-  settings.lastFailureCode = entry.failureCode ?? "";
   settings.lastWarnings = entry.warnings ?? [];
   settings.maintenanceHistory = normalizeKnowledgeBaseMaintenanceHistory([
     ...(settings.maintenanceHistory ?? []),
@@ -2780,118 +1561,9 @@ function normalizeScheduleTime(value: unknown, fallback: string): string {
   return /^([01]\d|2[0-3]):[0-5]\d$/.test(text) ? text : fallback;
 }
 
-function normalizeEditorActionConfigs(value: unknown, defaults: EditorAiActionConfig[], previousVersion: number): EditorAiActionConfig[] {
-  const defaultById = new Map(defaults.map((item) => [item.id, item]));
-  const used = new Set<string>();
-  const result: EditorAiActionConfig[] = [];
-  const source = Array.isArray(value) ? value : [];
-  for (const item of source) {
-    const record = settingsRecord(item) ?? {};
-    const id = normalizeEditorActionId(record.id);
-    if (id === "enhance") continue;
-    if (!id || used.has(id)) continue;
-    const fallback = defaultById.get(id);
-    used.add(id);
-    const rawPromptTemplate = normalizeText(record.promptTemplate, fallback?.promptTemplate ?? "{{selected_text}}");
-    result.push({
-      id,
-      label: normalizeText(record.label, fallback?.label ?? id),
-      enabled: typeof record.enabled === "boolean" ? record.enabled : fallback?.enabled ?? true,
-      promptTemplate: shouldMigrateEditorActionPrompt(id, rawPromptTemplate, previousVersion) ? fallback?.promptTemplate ?? rawPromptTemplate : rawPromptTemplate
-    });
-  }
-  for (const fallback of defaults) {
-    if (used.has(fallback.id)) continue;
-    result.push({ ...fallback });
-  }
-  return result;
-}
-
-function normalizeEditorActionStyles(value: unknown, defaults: EditorAiStyleConfig[], previousVersion: number): EditorAiStyleConfig[] {
-  const defaultById = new Map(defaults.map((item) => [item.id, item]));
-  const used = new Set<string>();
-  const result: EditorAiStyleConfig[] = [];
-  const source = Array.isArray(value) ? value : [];
-  for (const item of source) {
-    const record = settingsRecord(item) ?? {};
-    const id = normalizeEditorActionId(record.id);
-    if (!id || used.has(id)) continue;
-    const fallback = defaultById.get(id);
-    used.add(id);
-    const rawInstruction = normalizeText(record.instruction, fallback?.instruction ?? "");
-    result.push({
-      id,
-      label: normalizeText(record.label, fallback?.label ?? id),
-      instruction: shouldMigrateEditorStyleInstruction(id, rawInstruction, previousVersion) ? fallback?.instruction ?? rawInstruction : rawInstruction
-    });
-  }
-  for (const fallback of defaults) {
-    if (used.has(fallback.id)) continue;
-    result.push({ ...fallback });
-  }
-  return result;
-}
-
-function normalizeEditorActionModeConfigs(
-  value: unknown,
-  defaults: Record<EditorActionQualityMode, EditorActionModeConfig>,
-  legacyFast?: { model: string; contextCharsBefore: number; contextCharsAfter: number }
-): Record<EditorActionQualityMode, EditorActionModeConfig> {
-  const source = settingsRecord(value) ?? {};
-  return {
-    fast: normalizeEditorActionModeConfig(source.fast, defaults.fast, legacyFast ? {
-      model: legacyFast.model || defaults.fast.model,
-      contextCharsBefore: legacyFast.contextCharsBefore,
-      contextCharsAfter: legacyFast.contextCharsAfter
-    } : undefined),
-    quality: normalizeEditorActionModeConfig(source.quality, defaults.quality),
-    strict: normalizeEditorActionModeConfig(source.strict, defaults.strict)
-  };
-}
-
-function normalizeEditorActionModeConfig(
-  input: unknown,
-  fallback: EditorActionModeConfig,
-  overrideFallback?: Partial<Pick<EditorActionModeConfig, "model" | "contextCharsBefore" | "contextCharsAfter">>
-): EditorActionModeConfig {
-  const value = settingsRecord(input) ?? {};
-  return {
-    mode: fallback.mode,
-    label: fallback.label,
-    model: normalizeText(value?.model, overrideFallback?.model ?? fallback.model),
-    contextCharsBefore: normalizePositiveInteger(value?.contextCharsBefore, overrideFallback?.contextCharsBefore ?? fallback.contextCharsBefore, 0, 10000),
-    contextCharsAfter: normalizePositiveInteger(value?.contextCharsAfter, overrideFallback?.contextCharsAfter ?? fallback.contextCharsAfter, 0, 10000)
-  };
-}
-
-export function normalizeEditorActionQualityMode(value: unknown, fallback: EditorActionQualityMode): EditorActionQualityMode {
-  return value === "fast" || value === "quality" || value === "strict" ? value : fallback;
-}
-
-function normalizeEditorActionId(value: unknown): string {
-  const id = typeof value === "string" ? value.trim() : "";
-  return /^[A-Za-z0-9_-]+$/.test(id) ? id : "";
-}
-
-function shouldMigrateEditorActionPrompt(id: string, value: string, previousVersion: number): boolean {
-  if (previousVersion < 8) return LEGACY_EDITOR_ACTION_PROMPTS[id] === value;
-  if (previousVersion < 10) return VERSION_9_EDITOR_ACTION_PROMPTS[id] === value;
-  return false;
-}
-
-function shouldMigrateEditorStyleInstruction(id: string, value: string, previousVersion: number): boolean {
-  if (previousVersion >= 8) return false;
-  return LEGACY_EDITOR_STYLE_INSTRUCTIONS[id] === value;
-}
-
 function normalizeText(value: unknown, fallback: string): string {
   const text = typeof value === "string" ? value.trim() : "";
   return text || fallback;
-}
-
-function migrateLegacyEditorActionModel(value: string): string {
-  const model = value.trim();
-  return model === "gpt-5.4-mini" || model === "gpt-5.4" || model === "gpt-5.5" ? "" : model;
 }
 
 function normalizeOptionalText(value: unknown): string {
@@ -2911,17 +1583,6 @@ function normalizePositiveInteger(value: unknown, fallback: number, min: number,
   return Math.max(min, Math.min(max, Math.round(number)));
 }
 
-function normalizeEditorActionPerformanceNumber(value: unknown, fallback: number, legacyDefault: number, previousVersion: number, min: number, max: number): number {
-  if (previousVersion < 10 && Number(value) === legacyDefault) return fallback;
-  return normalizePositiveInteger(value, fallback, min, max);
-}
-
-function normalizeEditorActionTimeoutMs(value: unknown, fallback: number, previousVersion: number): number {
-  const number = Number(value);
-  if (previousVersion < 13 && (number === 90000 || number === 25000)) return fallback;
-  return normalizePositiveInteger(value, fallback, 10000, 300000);
-}
-
 function normalizeNonNegativeNumber(value: unknown): number {
   const number = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(number) || number < 0) return 0;
@@ -2930,31 +1591,155 @@ function normalizeNonNegativeNumber(value: unknown): number {
 
 function normalizeApiProviderSelection(settings: Pick<CodexForObsidianSettings, "providerMode" | "activeApiProviderId" | "apiProviders">): void {
   const active = getActiveApiProvider(settings);
-  if (active) return;
-  const first = settings.apiProviders[0];
+  settings.providerMode = "custom-api";
+  if (active && apiProviderHasUsableApiKey(active)) return;
+  const first = settings.apiProviders.find(apiProviderHasUsableApiKey);
   settings.activeApiProviderId = first?.id ?? "";
-  if (settings.providerMode === "custom-api" && !first) settings.providerMode = "codex-login";
 }
 
 function normalizeApiProviders(value: unknown): ApiProviderConfig[] {
-  if (!Array.isArray(value)) return [];
+  if (!Array.isArray(value)) {
+    return [createDefaultApiProvider()];
+  }
+  if (value.length === 0) return [];
   const usedIds = new Set<string>();
   return value.map((item, index) => {
     const record = settingsRecord(item) ?? {};
     const id = uniqueProviderId(sanitizeProviderId(record.id, index), usedIds, index);
     usedIds.add(id);
     const queryParams = normalizeQueryParams(record.queryParams);
-    const models = normalizeModelList(Array.isArray(record.models) ? [...record.models, record.model] : [record.model]);
+    const storedModels: unknown[] = Array.isArray(record.models)
+      ? record.models
+      : [];
+    const models = normalizeModelList([
+      ...storedModels,
+      record.model
+    ]);
+    const name = typeof record.name === "string" ? record.name.trim() : "";
+    const baseUrl = typeof record.baseUrl === "string" ? record.baseUrl.trim() : "";
+    const providerId = normalizeApiProviderId(
+      record.providerId,
+      baseUrl,
+      name
+    );
+    const preset = getApiProviderPreset(providerId);
+    const selectedModel = models[0] ?? preset.model;
+    const modelPreset = getApiProviderModelPreset(
+      providerId,
+      selectedModel
+    );
     return {
       id,
-      name: typeof record.name === "string" ? record.name.trim() : "",
-      baseUrl: typeof record.baseUrl === "string" ? record.baseUrl.trim() : "",
-      model: models[0] ?? "",
-      models,
-      apiKey: typeof record.apiKey === "string" ? record.apiKey.trim() : "",
+      providerId,
+      runtimeProviderId: normalizeRuntimeProviderId(
+        record.runtimeProviderId,
+        providerId === "custom"
+          ? preset.runtimeProviderId
+          : providerId === "openai"
+            || providerId === "anthropic"
+            || providerId === "qwen"
+            ? providerId
+            : preset.runtimeProviderId
+      ),
+      apiProtocol: normalizeApiProviderProtocol(
+        record.apiProtocol,
+        providerId
+      ),
+      name: name || preset.name,
+      baseUrl: baseUrl || preset.baseUrl,
+      model: selectedModel,
+      models: normalizeModelList([
+        ...models,
+        ...preset.models.map((model) => model.id)
+      ]),
+      modelSelection: record.modelSelection === "auto"
+        ? "auto"
+        : "model",
+      toolCalling: typeof record.toolCalling === "boolean"
+        ? record.toolCalling
+        : modelPreset?.toolCalling ?? true,
+      imageInput: typeof record.imageInput === "boolean"
+        ? record.imageInput
+        : modelPreset?.imageInput ?? false,
+      reasoning: typeof record.reasoning === "boolean"
+        ? record.reasoning
+        : modelPreset?.reasoning ?? false,
+      contextWindow: normalizePositiveInteger(
+        record.contextWindow,
+        modelPreset?.contextWindow ?? 64_000,
+        1_024,
+        2_000_000
+      ),
+      maxOutputTokens: normalizeApiProviderMaxOutputTokens({
+        storedValue: record.maxOutputTokens,
+        providerId,
+        modelPreset
+      }),
+      apiKey: typeof record.apiKey === "string"
+        ? record.apiKey.trim()
+        : "",
       ...(Object.keys(queryParams).length ? { queryParams } : {})
     };
   });
+}
+
+function normalizeApiProviderMaxOutputTokens(input: Readonly<{
+  storedValue: unknown;
+  providerId: ApiProviderId;
+  modelPreset: ReturnType<typeof getApiProviderModelPreset>;
+}>): number {
+  const normalized = normalizePositiveInteger(
+    input.storedValue,
+    input.modelPreset?.maxOutputTokens ?? 8_192,
+    1,
+    1_000_000
+  );
+  // v44's exact 256K Kimi preset value is migrated to 64K. Lower user limits
+  // remain valid, while no Kimi request may exceed the product ceiling.
+  return apiProviderMaxOutputReserve(
+    input.providerId,
+    input.modelPreset?.id ?? "",
+    normalized
+  );
+}
+
+function createDefaultApiProvider(): ApiProviderConfig {
+  const preset = getApiProviderPreset("deepseek");
+  const modelPreset = preset.models[0]!;
+  return {
+    id: "provider-default",
+    providerId: preset.id,
+    runtimeProviderId: preset.runtimeProviderId,
+    apiProtocol: preset.apiProtocol,
+    name: preset.name,
+    baseUrl: preset.baseUrl,
+    model: preset.model,
+    models: preset.models.map((model) => model.id),
+    modelSelection: "auto",
+    toolCalling: modelPreset.toolCalling,
+    imageInput: modelPreset.imageInput,
+    reasoning: modelPreset.reasoning,
+    contextWindow: modelPreset.contextWindow,
+    maxOutputTokens: modelPreset.maxOutputTokens,
+    apiKey: ""
+  };
+}
+
+function normalizeRuntimeProviderId(
+  value: unknown,
+  fallback: string
+): string {
+  const providerId = normalizeOptionalText(value);
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u.test(providerId)
+    ? providerId
+    : fallback;
+}
+
+function normalizeCredentialRef(value: unknown): string {
+  const credentialRef = normalizeOptionalText(value);
+  return /^cred-[a-f0-9]{32}$/u.test(credentialRef)
+    ? credentialRef
+    : "";
 }
 
 function normalizeModelList(value: unknown[]): string[] {

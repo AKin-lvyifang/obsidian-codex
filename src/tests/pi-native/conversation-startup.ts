@@ -1,0 +1,610 @@
+import * as assert from "node:assert/strict";
+import type { PiConversationCatalogEntry, PiConversationProjection } from "../../harness/pi-native/contracts";
+import type { StoredSession } from "../../settings/settings";
+import {
+  activateSession,
+  archiveSession,
+  createSession,
+  deleteSessions,
+  ensureInitialConversation
+} from "../../ui/codex-view/session-controller";
+
+export async function runPiConversationStartupTests(): Promise<void> {
+  await createsOneCurrentConversationForAnEmptyProductGeneration();
+  await reusesTheCurrentConversationWhenOneExists();
+  await rendersLocalHistoryBeforeSettingsPersistenceCompletes();
+  await rapidSelectionIsNotBlockedByEarlierSettingsPersistence();
+  await lateEarlierProjectionCannotReplaceTheLatestSelection();
+  await laterExistingSelectionBeatsAnEarlierConversationCreation();
+  await laterConversationCreationBeatsAnEarlierExistingSelection();
+  await archivingAPendingSelectionInvalidatesItsLateProjection();
+  await deletingAPendingSelectionInvalidatesItsLateProjection();
+  await laterFallbackSelectionBeatsAnEarlierExistingSelection();
+  await laterExistingSelectionPreventsAnEarlierFallbackActivation();
+}
+
+async function createsOneCurrentConversationForAnEmptyProductGeneration(): Promise<void> {
+  const settings = { sessions: [] as StoredSession[], activeSessionId: "" };
+  const createdRequests: Array<Record<string, unknown>> = [];
+  const switched: Array<[string | null, string]> = [];
+  let saves = 0;
+  const catalogEntry: PiConversationCatalogEntry = {
+    conversationId: "conversation-current-generation",
+    title: "新会话",
+    piSessionId: "pi-session-current-generation",
+    status: "active",
+    defaultMemoryMode: "normal",
+    createdAt: 10,
+    updatedAt: 10
+  };
+  const projection: PiConversationProjection = {
+    catalog: catalogEntry,
+    activeLeafId: null,
+    messages: [],
+    diagnostics: [],
+    drafts: []
+  };
+  const host = {
+    plugin: {
+      settings,
+      createPiConversation: async (request: Record<string, unknown>) => {
+        createdRequests.push(request);
+        return catalogEntry;
+      },
+      switchPiConversation: async (previous: string | null, next: string) => {
+        switched.push([previous, next]);
+        return projection;
+      },
+      getVaultPath: () => "/disposable-vault",
+      saveSettings: async () => { saves += 1; }
+    },
+    updateInputPlaceholder: () => undefined,
+    resetVirtualWindow: () => undefined,
+    renderTabs: () => undefined,
+    renderMessages: () => undefined,
+    renderToolbar: () => undefined
+  } as any;
+
+  const result = await ensureInitialConversation(host);
+
+  assert.equal(result.created, true);
+  assert.equal(result.session.id, catalogEntry.conversationId);
+  assert.equal(settings.activeSessionId, catalogEntry.conversationId);
+  assert.equal(settings.sessions.length, 1);
+  assert.equal(createdRequests.length, 1);
+  assert.deepEqual(switched, [[null, catalogEntry.conversationId]]);
+  assert.equal(saves, 1);
+}
+
+async function reusesTheCurrentConversationWhenOneExists(): Promise<void> {
+  const existing: StoredSession = {
+    id: "conversation-existing",
+    title: "Existing",
+    piSessionId: "pi-session-existing",
+    bodyAuthority: "pi_session_only",
+    cwd: "/disposable-vault",
+    messages: [],
+    createdAt: 1,
+    updatedAt: 1
+  };
+  let creates = 0;
+  const host = {
+    plugin: {
+      settings: { sessions: [existing], activeSessionId: existing.id },
+      createPiConversation: async () => { creates += 1; }
+    }
+  } as any;
+
+  const result = await ensureInitialConversation(host);
+
+  assert.equal(result.created, false);
+  assert.equal(result.session, existing);
+  assert.equal(creates, 0);
+}
+
+async function rendersLocalHistoryBeforeSettingsPersistenceCompletes():
+Promise<void> {
+  const current = storedSession("conversation-current");
+  const target = storedSession("conversation-target");
+  const projection = conversationProjection(target, "history-target");
+  const persistence = deferred<void>();
+  const rendered: string[] = [];
+  let saveStarted = false;
+  let settled = false;
+  const host = conversationHost({
+    sessions: [current, target],
+    activeSessionId: current.id,
+    switchPiConversation: async () => projection,
+    saveSettings: async () => {
+      saveStarted = true;
+      await persistence.promise;
+    },
+    rendered
+  });
+
+  const opening = activateSession(host, target).finally(() => {
+    settled = true;
+  });
+  await flushMicrotasks();
+
+  assert.equal(saveStarted, true);
+  assert.equal(settled, false);
+  assert.equal(host.plugin.settings.activeSessionId, target.id);
+  assert.equal(target.messages[0]?.id, "history-target");
+  assert.ok(rendered.includes(`messages:${target.id}:history-target`));
+
+  persistence.resolve();
+  await opening;
+}
+
+async function rapidSelectionIsNotBlockedByEarlierSettingsPersistence():
+Promise<void> {
+  const current = storedSession("conversation-current");
+  const first = storedSession("conversation-first");
+  const second = storedSession("conversation-second");
+  const firstPersistence = deferred<void>();
+  const switches: Array<[string | null, string]> = [];
+  const rendered: string[] = [];
+  let saves = 0;
+  const host = conversationHost({
+    sessions: [current, first, second],
+    activeSessionId: current.id,
+    switchPiConversation: async (previous, next) => {
+      switches.push([previous, next]);
+      const session = next === first.id ? first : second;
+      return conversationProjection(session, `history-${next}`);
+    },
+    saveSettings: async () => {
+      saves += 1;
+      if (saves === 1) await firstPersistence.promise;
+    },
+    rendered
+  });
+
+  const openingFirst = activateSession(host, first);
+  await flushMicrotasks();
+  assert.equal(host.plugin.settings.activeSessionId, first.id);
+
+  const openingSecond = activateSession(host, second);
+  await flushMicrotasks();
+  const activeBeforeEarlierSaveSettled =
+    host.plugin.settings.activeSessionId;
+  const switchesBeforeEarlierSaveSettled = [...switches];
+  const renderedLatestBeforeEarlierSaveSettled = rendered.includes(
+    `messages:${second.id}:history-${second.id}`
+  );
+
+  firstPersistence.resolve();
+  await Promise.all([openingFirst, openingSecond]);
+
+  assert.equal(
+    activeBeforeEarlierSaveSettled,
+    second.id,
+    "an earlier settings save must not block the latest local history"
+  );
+  assert.deepEqual(switchesBeforeEarlierSaveSettled, [
+    [current.id, first.id],
+    [first.id, second.id]
+  ]);
+  assert.equal(renderedLatestBeforeEarlierSaveSettled, true);
+  assert.equal(host.plugin.settings.activeSessionId, second.id);
+}
+
+async function lateEarlierProjectionCannotReplaceTheLatestSelection():
+Promise<void> {
+  const current = storedSession("conversation-current");
+  const first = storedSession("conversation-first-late");
+  const second = storedSession("conversation-second-latest");
+  const firstProjection = deferred<PiConversationProjection>();
+  const rendered: string[] = [];
+  const switches: Array<[string | null, string]> = [];
+  const host = conversationHost({
+    sessions: [current, first, second],
+    activeSessionId: current.id,
+    switchPiConversation: async (previous, next) => {
+      switches.push([previous, next]);
+      if (next === first.id) return await firstProjection.promise;
+      return conversationProjection(second, "history-latest");
+    },
+    saveSettings: async () => undefined,
+    rendered
+  });
+
+  const openingFirst = activateSession(host, first);
+  const openingSecond = activateSession(host, second);
+  await flushMicrotasks();
+  firstProjection.resolve(conversationProjection(first, "history-stale"));
+  await Promise.all([openingFirst, openingSecond]);
+
+  assert.equal(host.plugin.settings.activeSessionId, second.id);
+  assert.equal(first.messages.length, 0);
+  assert.equal(second.messages[0]?.id, "history-latest");
+  assert.equal(
+    rendered.some((entry) => entry.includes("history-stale")),
+    false
+  );
+  assert.deepEqual(switches, [
+    [current.id, first.id],
+    [current.id, second.id]
+  ]);
+}
+
+async function laterExistingSelectionBeatsAnEarlierConversationCreation():
+Promise<void> {
+  const current = storedSession("conversation-current-create-race");
+  const target = storedSession("conversation-existing-latest");
+  const createdCatalog: PiConversationCatalogEntry = {
+    conversationId: "conversation-created-stale",
+    piSessionId: "pi-conversation-created-stale",
+    title: "新会话",
+    status: "active",
+    defaultMemoryMode: "normal",
+    createdAt: 2,
+    updatedAt: 2
+  };
+  const creation = deferred<PiConversationCatalogEntry>();
+  const switches: Array<[string | null, string]> = [];
+  const rendered: string[] = [];
+  const host = conversationHost({
+    sessions: [current, target],
+    activeSessionId: current.id,
+    switchPiConversation: async (previous, next) => {
+      switches.push([previous, next]);
+      const session = next === target.id
+        ? target
+        : storedSession(next);
+      return conversationProjection(session, `history-${next}`);
+    },
+    saveSettings: async () => undefined,
+    rendered
+  });
+  host.plugin.createPiConversation = async () => await creation.promise;
+  host.plugin.getVaultPath = () => "/disposable-vault";
+
+  const creating = createSession(host);
+  await flushMicrotasks();
+  const openingTarget = activateSession(host, target);
+  await openingTarget;
+  creation.resolve(createdCatalog);
+  const created = await creating;
+
+  assert.equal(created.id, createdCatalog.conversationId);
+  assert.equal(host.plugin.settings.activeSessionId, target.id);
+  assert.equal(target.messages[0]?.id, `history-${target.id}`);
+  assert.equal(created.messages.length, 0);
+  assert.deepEqual(switches, [[current.id, target.id]]);
+}
+
+async function laterConversationCreationBeatsAnEarlierExistingSelection():
+Promise<void> {
+  const current = storedSession("conversation-current-new-latest");
+  const earlier = storedSession("conversation-existing-stale");
+  const created = storedSession("conversation-created-latest");
+  const earlierProjection = deferred<PiConversationProjection>();
+  const rendered: string[] = [];
+  const host = conversationHost({
+    sessions: [current, earlier],
+    activeSessionId: current.id,
+    switchPiConversation: async (_previous, next) => {
+      if (next === earlier.id) return await earlierProjection.promise;
+      return conversationProjection(created, "history-created-latest");
+    },
+    saveSettings: async () => undefined,
+    rendered
+  });
+  host.plugin.createPiConversation = async () =>
+    conversationProjection(created).catalog;
+  host.plugin.getVaultPath = () => "/disposable-vault";
+
+  const openingEarlier = activateSession(host, earlier);
+  await flushMicrotasks();
+  const creating = createSession(host);
+  await flushMicrotasks();
+  earlierProjection.resolve(conversationProjection(
+    earlier,
+    "history-existing-stale"
+  ));
+  const createdResult = await creating;
+  await openingEarlier;
+
+  assert.equal(createdResult.id, created.id);
+  assert.equal(host.plugin.settings.activeSessionId, created.id);
+  assert.equal(earlier.messages.length, 0);
+  assert.equal(createdResult.messages[0]?.id, "history-created-latest");
+  assert.equal(
+    rendered.some((entry) => entry.includes("history-existing-stale")),
+    false
+  );
+}
+
+async function archivingAPendingSelectionInvalidatesItsLateProjection():
+Promise<void> {
+  const current = storedSession("conversation-current-archive-pending");
+  const target = storedSession("conversation-target-archive-pending");
+  const targetProjection = deferred<PiConversationProjection>();
+  const queuedActivations: string[] = [];
+  const rendered: string[] = [];
+  let saves = 0;
+  const host = conversationHost({
+    sessions: [current, target],
+    activeSessionId: current.id,
+    switchPiConversation: async (_previous, next, options) => {
+      const projection = await targetProjection.promise;
+      if (options?.isStillCurrent?.() !== false) {
+        queuedActivations.push(next);
+      }
+      return projection;
+    },
+    saveSettings: async () => { saves += 1; },
+    rendered
+  });
+  host.plugin.setPiConversationStatus = async () => ({
+    ...conversationProjection(target).catalog,
+    status: "archived" as const
+  });
+  host.turnQueue = { clearSessionQueue: () => undefined };
+
+  const openingTarget = activateSession(host, target);
+  await flushMicrotasks();
+  await archiveSession(host, target.id, {
+    confirm: async () => true
+  });
+  targetProjection.resolve(conversationProjection(
+    target,
+    "history-archived-selection-stale"
+  ));
+  await openingTarget;
+
+  assert.equal(host.plugin.settings.activeSessionId, current.id);
+  assert.deepEqual(
+    host.plugin.settings.sessions.map((session: StoredSession) => session.id),
+    [current.id]
+  );
+  assert.equal(target.messages.length, 0);
+  assert.equal(saves, 1);
+  assert.deepEqual(queuedActivations, []);
+  assert.equal(
+    rendered.some((entry) => entry.includes(target.id)),
+    false
+  );
+}
+
+async function deletingAPendingSelectionInvalidatesItsLateProjection():
+Promise<void> {
+  const current = storedSession("conversation-current-delete-pending");
+  const target = storedSession("conversation-target-delete-pending");
+  const targetProjection = deferred<PiConversationProjection>();
+  const queuedActivations: string[] = [];
+  const rendered: string[] = [];
+  let saves = 0;
+  const host = conversationHost({
+    sessions: [current, target],
+    activeSessionId: current.id,
+    switchPiConversation: async (_previous, next, options) => {
+      const projection = await targetProjection.promise;
+      if (options?.isStillCurrent?.() !== false) {
+        queuedActivations.push(next);
+      }
+      return projection;
+    },
+    saveSettings: async () => { saves += 1; },
+    rendered
+  });
+  host.plugin.setPiConversationStatus = async () => ({
+    ...conversationProjection(target).catalog,
+    status: "deleted" as const
+  });
+  host.turnQueue = { clearSessionQueue: () => undefined };
+
+  const openingTarget = activateSession(host, target);
+  await flushMicrotasks();
+  await deleteSessions(host, [target.id], {
+    confirm: async () => true
+  });
+  targetProjection.resolve(conversationProjection(
+    target,
+    "history-deleted-selection-stale"
+  ));
+  await openingTarget;
+
+  assert.equal(host.plugin.settings.activeSessionId, current.id);
+  assert.deepEqual(
+    host.plugin.settings.sessions.map((session: StoredSession) => session.id),
+    [current.id]
+  );
+  assert.equal(target.messages.length, 0);
+  assert.equal(saves, 1);
+  assert.deepEqual(queuedActivations, []);
+  assert.equal(
+    rendered.some((entry) => entry.includes(target.id)),
+    false
+  );
+}
+
+async function laterFallbackSelectionBeatsAnEarlierExistingSelection():
+Promise<void> {
+  const current = storedSession("conversation-current-delete-latest");
+  const fallback = storedSession("conversation-fallback-latest");
+  const earlier = storedSession("conversation-click-stale");
+  const earlierProjection = deferred<PiConversationProjection>();
+  const rendered: string[] = [];
+  const host = conversationHost({
+    sessions: [current, fallback, earlier],
+    activeSessionId: current.id,
+    switchPiConversation: async (_previous, next) => {
+      if (next === earlier.id) return await earlierProjection.promise;
+      return conversationProjection(fallback, "history-fallback-latest");
+    },
+    saveSettings: async () => undefined,
+    rendered
+  });
+  host.plugin.activatePiConversation = async () =>
+    conversationProjection(fallback, "history-fallback-latest");
+  host.plugin.setPiConversationStatus = async () => ({
+    ...conversationProjection(current).catalog,
+    status: "deleted" as const
+  });
+  host.turnQueue = { clearSessionQueue: () => undefined };
+
+  const openingEarlier = activateSession(host, earlier);
+  await flushMicrotasks();
+  const deleting = deleteSessions(host, [current.id], {
+    confirm: async () => true
+  });
+  await flushMicrotasks();
+  earlierProjection.resolve(conversationProjection(
+    earlier,
+    "history-click-stale"
+  ));
+  await Promise.all([openingEarlier, deleting]);
+
+  assert.equal(host.plugin.settings.activeSessionId, fallback.id);
+  assert.equal(earlier.messages.length, 0);
+  assert.equal(fallback.messages[0]?.id, "history-fallback-latest");
+  assert.equal(
+    rendered.some((entry) => entry.includes("history-click-stale")),
+    false
+  );
+}
+
+async function laterExistingSelectionPreventsAnEarlierFallbackActivation():
+Promise<void> {
+  const current = storedSession("conversation-current-delete-stale");
+  const fallback = storedSession("conversation-fallback-stale");
+  const latest = storedSession("conversation-click-latest");
+  const deletion = deferred<Readonly<PiConversationCatalogEntry>>();
+  const latestProjection = deferred<PiConversationProjection>();
+  const fallbackActivations: string[] = [];
+  const rendered: string[] = [];
+  const host = conversationHost({
+    sessions: [current, fallback, latest],
+    activeSessionId: current.id,
+    switchPiConversation: async (_previous, next) => {
+      if (next === latest.id) return await latestProjection.promise;
+      fallbackActivations.push(next);
+      return conversationProjection(fallback, "history-fallback-stale");
+    },
+    saveSettings: async () => undefined,
+    rendered
+  });
+  host.plugin.activatePiConversation = async (conversationId: string) => {
+    fallbackActivations.push(conversationId);
+    return conversationProjection(fallback, "history-fallback-stale");
+  };
+  host.plugin.setPiConversationStatus = async () => await deletion.promise;
+  host.turnQueue = { clearSessionQueue: () => undefined };
+
+  const deleting = deleteSessions(host, [current.id], {
+    confirm: async () => true
+  });
+  await flushMicrotasks();
+  const openingLatest = activateSession(host, latest);
+  await flushMicrotasks();
+  deletion.resolve({
+    ...conversationProjection(current).catalog,
+    status: "deleted"
+  });
+  await flushMicrotasks();
+  latestProjection.resolve(conversationProjection(
+    latest,
+    "history-click-latest"
+  ));
+  await Promise.all([deleting, openingLatest]);
+
+  assert.equal(host.plugin.settings.activeSessionId, latest.id);
+  assert.equal(latest.messages[0]?.id, "history-click-latest");
+  assert.deepEqual(
+    fallbackActivations,
+    [],
+    "a stale fallback must not read or activate its AgentSession"
+  );
+}
+
+function storedSession(id: string): StoredSession {
+  return {
+    id,
+    title: id,
+    piSessionId: `pi-${id}`,
+    bodyAuthority: "pi_session_only",
+    cwd: "/disposable-vault",
+    messages: [],
+    createdAt: 1,
+    updatedAt: 1
+  };
+}
+
+function conversationProjection(
+  session: StoredSession,
+  messageId: string
+): PiConversationProjection {
+  return {
+    catalog: {
+      conversationId: session.id,
+      piSessionId: session.piSessionId ?? `pi-${session.id}`,
+      title: session.title,
+      status: "active",
+      defaultMemoryMode: "normal",
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt
+    },
+    activeLeafId: null,
+    messages: [{ id: messageId } as PiConversationProjection["messages"][number]],
+    diagnostics: [],
+    drafts: []
+  };
+}
+
+function conversationHost(input: Readonly<{
+  sessions: StoredSession[];
+  activeSessionId: string;
+  switchPiConversation(
+    previous: string | null,
+    next: string,
+    options?: Readonly<{ isStillCurrent?: () => boolean }>
+  ): Promise<PiConversationProjection>;
+  saveSettings(): Promise<void>;
+  rendered: string[];
+}>): any {
+  const settings = {
+    sessions: input.sessions,
+    activeSessionId: input.activeSessionId
+  };
+  const host: any = {
+    plugin: {
+      settings,
+      switchPiConversation: input.switchPiConversation,
+      saveSettings: input.saveSettings
+    },
+    updateInputPlaceholder: () => undefined,
+    resetVirtualWindow: () => undefined,
+    renderTabs: () => undefined,
+    renderMessages: () => {
+      const active = settings.sessions.find(
+        (session) => session.id === settings.activeSessionId
+      );
+      input.rendered.push(
+        `messages:${settings.activeSessionId}:${active?.messages[0]?.id ?? ""}`
+      );
+    },
+    renderToolbar: () => undefined
+  };
+  return host;
+}
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve(value: T): void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+async function flushMicrotasks(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+}

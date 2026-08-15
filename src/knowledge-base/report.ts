@@ -1,11 +1,10 @@
 import * as fsp from "fs/promises";
 import * as path from "path";
 import { swallowError } from "../core/error-handling";
-import type { AgentBackendKind } from "../agent/types";
 import type {
   MaintenanceWorkflowFileCas,
   MaintenanceWorkflowManagedUpsertDraft
-} from "../harness/maintenance/workflow-wal";
+} from "./maintenance-content-plan";
 import type { DigestEvidencePendingSource } from "./digest-evidence";
 import { normalizeMaintenanceContentMode } from "./maintenance-content-plan";
 import { isRawIntegrityErrorMessage } from "./raw-integrity";
@@ -41,8 +40,6 @@ export interface KnowledgeBaseFailureReportInput {
 export interface KnowledgeBaseMaintenanceFinalBlockInput {
   completion: KnowledgeBaseRunCompletion;
   workflowRunId: string;
-  attemptId?: string;
-  backend?: AgentBackendKind;
   verifiedSources: Pick<KnowledgeBaseSource, "relativePath">[];
   pendingSources: DigestEvidencePendingSource[];
   warnings?: KnowledgeBaseRunWarning[];
@@ -419,8 +416,6 @@ export function buildKnowledgeBaseMaintenanceFinalBlock(
     "",
     `- 结果：${input.completion}`,
     `- workflow：${inlineCode(input.workflowRunId)}`,
-    ...(input.attemptId ? [`- attempt：${inlineCode(input.attemptId)}`] : []),
-    ...(input.backend ? [`- Agent：${input.backend}`] : []),
     "",
     `### 已验证来源（${input.verifiedSources.length}）`,
     ...(input.verifiedSources.length

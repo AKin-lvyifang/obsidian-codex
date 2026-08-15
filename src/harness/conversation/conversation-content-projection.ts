@@ -28,9 +28,6 @@ export function projectDurableKnowledgeBaseUi(
     kind: payload.kind,
     mode: payload.mode,
     status: payload.status,
-    ...(Object.prototype.hasOwnProperty.call(payload, "failureCode")
-      ? { failureCode: payload.failureCode ?? null }
-      : {}),
     ...(payload.completion ? { completion: payload.completion } : {}),
     ...(payload.pendingSourceCount !== undefined
       ? { pendingSourceCount: payload.pendingSourceCount }

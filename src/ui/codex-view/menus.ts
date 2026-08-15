@@ -32,6 +32,10 @@ export interface SkillMatchesCallbacks {
   onSelectSkill: (skill: EchoInkResource) => void;
 }
 
+export interface SlashMenuCallbacks extends SkillMatchesCallbacks {
+  onFillCommand: (command: string) => void;
+}
+
 export interface AddMenuCallbacks {
   onAttachActiveFile: () => void;
   onPickFiles: (imagesOnly: boolean) => void;
@@ -55,20 +59,17 @@ export interface ModelMenuState {
   selectedMode: UiMode;
 }
 
-export interface KnowledgeModelMenuCallbacks {
+export interface ModelMenuCallbacks {
   onSelectModel: (model: string) => void;
   onSelectReasoning: (reasoning: ReasoningEffort) => void;
-}
-
-export interface ModelMenuCallbacks extends KnowledgeModelMenuCallbacks {
   onSelectServiceTier: (tier: ServiceTierChoice) => void;
   onSelectMode: (mode: UiMode) => void;
 }
 
 export interface SessionMenuCallbacks {
   onRename: () => void;
+  onArchive: () => void;
   onResetCache: () => void;
-  onClearRecords: () => void;
   onDelete: () => void;
 }
 
@@ -195,10 +196,6 @@ export function openKnowledgeCommandMenu(event: MouseEvent, onFillCommand: (comm
   menu.showAtMouseEvent(event);
 }
 
-export function openKnowledgeModelMenu(event: MouseEvent, state: ModelMenuState, callbacks: KnowledgeModelMenuCallbacks): void {
-  openComposerParameterMenu(event, parameterSections(state, callbacks, false), "知识库模型和思考强度");
-}
-
 export function openModelMenu(event: MouseEvent, state: ModelMenuState, callbacks: ModelMenuCallbacks): void {
   openComposerParameterMenu(event, parameterSections(state, callbacks, true), "模型和运行参数");
 }
@@ -214,39 +211,37 @@ export function closeComposerParameterMenu(): void {
   active.cleanup();
 }
 
-export function openSessionMenu(event: MouseEvent, knowledgeSession: boolean, callbacks: SessionMenuCallbacks): void {
+export function openSessionMenu(
+  event: MouseEvent,
+  callbacks: SessionMenuCallbacks
+): void {
   event.preventDefault();
   const menu = new Menu();
-  if (!knowledgeSession) {
-    menu.addItem((item) =>
-      item
-        .setTitle("重命名会话")
-        .setIcon("pencil")
-        .onClick(callbacks.onRename)
-    );
-  }
+  menu.addItem((item) =>
+    item
+      .setTitle("重命名会话")
+      .setIcon("pencil")
+      .onClick(callbacks.onRename)
+  );
+  menu.addItem((item) =>
+    item
+      .setTitle("归档会话")
+      .setIcon("archive")
+      .onClick(callbacks.onArchive)
+  );
   menu.addItem((item) =>
     item
       .setTitle("重置 Agent 缓存")
       .setIcon("rotate-ccw")
       .onClick(callbacks.onResetCache)
   );
-  if (!knowledgeSession) {
-    menu.addItem((item) =>
-      item
-        .setTitle("清空会话记录")
-        .setIcon("eraser")
-        .setWarning(true)
-        .onClick(callbacks.onClearRecords)
-    );
-    menu.addItem((item) =>
-      item
-        .setTitle("删除会话")
-        .setIcon("trash")
-        .setWarning(true)
-        .onClick(callbacks.onDelete)
-    );
-  }
+  menu.addItem((item) =>
+    item
+      .setTitle("删除会话")
+      .setIcon("trash")
+      .setWarning(true)
+      .onClick(callbacks.onDelete)
+  );
   menu.showAtMouseEvent(event);
 }
 
@@ -271,15 +266,23 @@ export function renderKnowledgeCommandMatches(
   container: HTMLElement,
   input: HTMLTextAreaElement,
   query: string,
-  onFillCommand: (command: string) => void
+  state: SkillMatchesState,
+  callbacks: SlashMenuCallbacks
 ): void {
   container.empty();
-  const matches = knowledgeCommandOptions(query);
-  matches.forEach((command, index) => container.appendChild(createKnowledgeCommandItem(container, input, command, index, onFillCommand)));
-  if (matches.length === 0) container.createDiv({ cls: "codex-skill-empty", text: "没有匹配的知识库命令" });
+  const commands = knowledgeCommandOptions(query);
+  const skills = filterSkillResources(state.skills, query);
+  let index = 0;
+  for (const command of commands) {
+    container.appendChild(createKnowledgeCommandItem(container, input, command, index++, callbacks.onFillCommand));
+  }
+  for (const skill of skills) {
+    container.appendChild(createSlashSkillItem(container, input, skill, index++, state.selectedSkill?.id === skill.id, callbacks.onSelectSkill));
+  }
+  if (index === 0) container.createDiv({ cls: "codex-skill-empty", text: "没有匹配的命令或已启用 Skill" });
   container.scrollTop = 0;
   setKnowledgeCommandMenuOpen(input, container, true);
-  selectKnowledgeCommandItem(input, container, matches.length > 0 ? 0 : -1);
+  selectKnowledgeCommandItem(input, container, index > 0 ? 0 : -1);
 }
 
 function modelChoicesForState(state: ModelMenuState): CodexModel[] {
@@ -290,7 +293,7 @@ function modelChoicesForState(state: ModelMenuState): CodexModel[] {
 
 function parameterSections(
   state: ModelMenuState,
-  callbacks: KnowledgeModelMenuCallbacks | ModelMenuCallbacks,
+  callbacks: ModelMenuCallbacks,
   includeRuntimeOptions: boolean
 ): ComposerParameterSection[] {
   const models = modelChoicesForState(state);
@@ -326,7 +329,7 @@ function parameterSections(
   ];
   if (!includeRuntimeOptions) return sections;
 
-  const runtimeCallbacks = callbacks as ModelMenuCallbacks;
+  const runtimeCallbacks = callbacks;
   sections.push(
     {
       id: "speed",
@@ -583,5 +586,35 @@ function createKnowledgeCommandItem(
   item.onmouseenter = () => selectKnowledgeCommandItem(input, container, index);
   item.onmousedown = (event) => event.preventDefault();
   item.onclick = () => onFillCommand(command.text);
+  return item;
+}
+
+function createSlashSkillItem(
+  container: HTMLElement,
+  input: HTMLTextAreaElement,
+  skill: EchoInkResource,
+  index: number,
+  selected: boolean,
+  onSelectSkill: (skill: EchoInkResource) => void
+): HTMLElement {
+  const item = document.createElement("button");
+  item.setAttribute("type", "button");
+  item.setAttribute("role", "option");
+  item.setAttribute("aria-selected", String(selected));
+  item.id = `${container.id}-option-${index}`;
+  item.addClass("codex-command-item", "codex-command-skill");
+  item.toggleClass("is-current", selected);
+  const icon = item.createSpan({ cls: "codex-command-icon" });
+  setIcon(icon, "box");
+  const body = item.createDiv({ cls: "codex-command-body" });
+  body.createSpan({ cls: "codex-command-text", text: skill.name });
+  body.createSpan({
+    cls: "codex-command-desc",
+    text: skill.description || skill.contentPath || "已启用 Skill"
+  });
+  item.createSpan({ cls: "codex-command-shortcut", text: selected ? "已选择" : "↵" });
+  item.onmouseenter = () => selectKnowledgeCommandItem(input, container, index);
+  item.onmousedown = (event) => event.preventDefault();
+  item.onclick = () => onSelectSkill(skill);
   return item;
 }

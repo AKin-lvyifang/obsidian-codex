@@ -1,0 +1,59 @@
+import { spawnSync } from "node:child_process";
+import { mkdir } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import esbuild from "esbuild";
+
+const rootDir = fileURLToPath(new URL("../", import.meta.url));
+const outputDir = path.join(rootDir, ".tmp");
+const outputFile = path.join(outputDir, "mcp-vault-tests.mjs");
+const obsidianShimPath = path.join(rootDir, "src", "tests", "obsidian-shim.ts");
+
+await mkdir(outputDir, { recursive: true });
+await esbuild.build({
+  stdin: {
+    contents: [
+      'import { runMcpToolSecurityTests } from "./src/tests/mcp-tool-security";',
+      'import { runToolAuthorizationAndReceiptTests } from "./src/tests/pi-native/tool-authorization-and-receipt";',
+      'import { runVaultDomainServiceTests } from "./src/tests/pi-native/vault-domain-service";',
+      "await runMcpToolSecurityTests();",
+      "await runToolAuthorizationAndReceiptTests();",
+      "await runVaultDomainServiceTests();",
+      'console.log("Current MCP and Vault Tool acceptance: PASS");'
+    ].join("\n"),
+    resolveDir: rootDir,
+    sourcefile: "mcp-vault-test-entry.ts",
+    loader: "ts"
+  },
+  bundle: true,
+  platform: "node",
+  target: "node22",
+  format: "esm",
+  external: [
+    "@earendil-works/pi-agent-core",
+    "@earendil-works/pi-ai",
+    "@earendil-works/pi-coding-agent",
+    "yaml"
+  ],
+  plugins: [{
+    name: "mcp-vault-test-shims",
+    setup(build) {
+      build.onResolve({ filter: /^obsidian$/ }, () => ({
+        path: obsidianShimPath
+      }));
+    }
+  }],
+  outfile: outputFile,
+  logLevel: "silent"
+});
+
+const result = spawnSync(process.execPath, [outputFile], {
+  cwd: rootDir,
+  env: {
+    ...process.env,
+    PI_OFFLINE: "1"
+  },
+  stdio: "inherit"
+});
+
+process.exit(result.status ?? 1);

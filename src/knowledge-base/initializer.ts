@@ -195,7 +195,7 @@ export function formatKnowledgeBaseInitializationPreview(input: Omit<KnowledgeBa
     "- 不修改 raw/ 原始资料整文件。",
     "",
     "## 确认执行",
-    "发送 `/init confirm` 后才会创建目录和规则文件。"
+    "在 Knowledge 设置页确认后才会创建目录和规则文件。"
   ].join("\n");
 }
 
@@ -210,7 +210,7 @@ function formatKnowledgeBaseInitializationResult(input: Omit<KnowledgeBaseInitia
     `- 新建文件：${input.createdFiles.length} 个`,
     `- 已存在未覆盖：${input.skippedFiles.length} 个`,
     "",
-    "下一步建议：发送 `/check 初始化后体检当前 vault，只报告问题，不移动文件，不删除文件。`"
+    "下一步建议：在当前 Pi Conversation 显式使用 `/maintain 初始化后检查当前 Vault。`，一次完成提炼、安全写入和回读验证。"
   ].join("\n");
 }
 
