@@ -1,12 +1,12 @@
 <p align="center">
   <a href="https://github.com/AKin-lvyifang/codex-echoink/releases/latest">
-    <img width="1024" alt="EchoInk 2.0 发布图" src="assets/releases/echoink-2.0.0-release.png">
+    <img width="1024" alt="EchoInk Agent 2.0.1 发布图" src="assets/releases/echoink-agent-2.0.1-release.png">
   </a>
 </p>
 
-<h1 align="center">EchoInk</h1>
+<h1 align="center">EchoInk Agent</h1>
 
-<p align="center">在 Obsidian 里持续对话、维护知识，并让长期记忆保持可见、可修正。</p>
+<p align="center">管理你的 Obsidian 知识，也在每次使用中更懂你。</p>
 
 <p align="center">
   <a href="#主要功能">主要功能</a> ·
@@ -21,16 +21,16 @@
 <p align="center">
   <a href="https://github.com/AKin-lvyifang/codex-echoink/releases/latest">
     <img src="https://img.shields.io/badge/platform-Obsidian_Desktop-7C3AED?style=flat-square&logo=obsidian&logoColor=white" alt="平台：Obsidian 桌面端">
-    <img src="https://img.shields.io/badge/version-2.0.0-0EA5E9?style=flat-square" alt="版本 2.0.0">
+    <img src="https://img.shields.io/badge/version-2.0.1-0EA5E9?style=flat-square" alt="版本 2.0.1">
     <img src="https://img.shields.io/badge/license-MIT-10B981?style=flat-square" alt="MIT 开源许可证">
   </a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/AKin-lvyifang/codex-echoink/releases/tag/2.0.0"><strong>下载 2.0.0</strong></a>
+  <a href="https://github.com/AKin-lvyifang/codex-echoink/releases/tag/2.0.1"><strong>下载 2.0.1</strong></a>
 </p>
 
-EchoInk 是一款 Obsidian 桌面端插件。它把模型对话、当前 Vault 的知识维护、长期记忆与复盘放进同一个侧栏中。会话历史保存在本地；打开或切换会话时，EchoInk 会同时恢复本地历史并激活对应的 AgentSession，因此可以直接继续聊天。
+EchoInk Agent 是一个运行在 Obsidian 中的个人知识 Agent。它能帮你持续对话，整理、提炼和维护当前 Vault，并把长期有用的信息沉淀为可查看、可修正的记忆。随着使用，这些记忆会帮助它逐渐理解你的关注点、判断方式和正在推进的事情，让它在管理知识的同时，成长为越来越懂你的个人 Agent。无需安装 Codex CLI；添加 OpenAI 或兼容 Provider 的 API URL、API Key 和模型后即可开始使用。
 
 ## 2.0 有什么变化
 
@@ -48,7 +48,7 @@ EchoInk 是一款 Obsidian 桌面端插件。它把模型对话、当前 Vault �
 - 每个 Conversation 对应独立的 Pi AgentSession。
 - 本地历史读取不依赖 Provider；会话打开后会在后台准备继续聊天所需的 AgentSession。
 - 支持新建、重命名、归档、恢复和软删除会话。
-- 已归档会话统一在 **设置 → EchoInk → 复盘 → 已归档会话** 管理。
+- 已归档会话统一在 **设置 → EchoInk Agent → 复盘 → 已归档会话** 管理。
 - 模型的思考、工具调用、文件变更与最终回答投影在同一条对话时间线中。
 
 ### Provider 与模型
@@ -90,15 +90,15 @@ EchoInk 是一款 Obsidian 桌面端插件。它把模型对话、当前 Vault �
 
 ### Obsidian 社区插件
 
-如果 EchoInk 已出现在 Obsidian 社区插件中：
+如果 EchoInk Agent 已出现在 Obsidian 社区插件中：
 
 1. 打开 **设置 → 第三方插件 → 浏览**。
-2. 搜索 `EchoInk`。
+2. 搜索 `EchoInk Agent`。
 3. 安装并启用插件。
 
 ### 手动安装
 
-1. 从 [2.0.0 Release](https://github.com/AKin-lvyifang/codex-echoink/releases/tag/2.0.0) 下载 `main.js`、`manifest.json` 和 `styles.css`。
+1. 从 [2.0.1 Release](https://github.com/AKin-lvyifang/codex-echoink/releases/tag/2.0.1) 下载 `main.js`、`manifest.json` 和 `styles.css`。
 2. 在 Vault 中创建目录：
 
 ```text
@@ -106,15 +106,15 @@ EchoInk 是一款 Obsidian 桌面端插件。它把模型对话、当前 Vault �
 ```
 
 3. 将三个文件放入该目录。
-4. 重启 Obsidian，在第三方插件中启用 `EchoInk`。
+4. 重启 Obsidian，在第三方插件中启用 `EchoInk Agent`。
 
 ## 快速开始
 
-1. 打开 **设置 → EchoInk → API Provider**。
+1. 打开 **设置 → EchoInk Agent → API Provider**。
 2. 添加一个 Provider，输入 API URL、API Key 和模型后保存。Ollama 本地可不填 API Key。
 3. 从 Ribbon 或命令面板打开 EchoInk 侧栏。
 4. 新建会话并开始对话；需要知识库问答时输入 `/ask`，需要提炼时输入 `/maintain`。
-5. 在 **设置 → EchoInk → 复盘** 中生成周报、管理已归档会话或修正长期记忆。
+5. 在 **设置 → EchoInk Agent → 复盘** 中生成周报、管理已归档会话或修正长期记忆。
 
 ## 知识维护
 
@@ -130,7 +130,7 @@ EchoInk 是一款 Obsidian 桌面端插件。它把模型对话、当前 Vault �
 
 ## 复盘与记忆修正
 
-进入 **设置 → EchoInk → 复盘**：
+进入 **设置 → EchoInk Agent → 复盘**：
 
 - 在“生成周报”中选择统计周期、输出文件夹和生成后是否打开 HTML。
 - 在“已归档会话”中搜索、恢复或从列表软删除会话；原始 Pi Session JSONL 保留。

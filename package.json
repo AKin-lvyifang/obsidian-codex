@@ -1,7 +1,7 @@
 {
-  "name": "codex-echoink",
-  "version": "2.0.0",
-  "description": "Codex EchoInk",
+  "name": "echoink-agent",
+  "version": "2.0.1",
+  "description": "A personal knowledge agent for Obsidian that builds editable memory and grows to understand you better.",
   "main": "dist/main.js",
   "scripts": {
     "build": "node esbuild.config.mjs production",
@@ -26,7 +26,10 @@
   },
   "keywords": [
     "obsidian",
-    "codex"
+    "openai",
+    "knowledge-management",
+    "personal-agent",
+    "memory"
   ],
   "author": "AKin-lvyifang",
   "license": "MIT",

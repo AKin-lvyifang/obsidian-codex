@@ -1,5 +1,35 @@
 # Changelog
 
+## 2.0.1 - 2026-08-15
+
+![EchoInk Agent 2.0.1](https://raw.githubusercontent.com/AKin-lvyifang/codex-echoink/2.0.1/assets/releases/echoink-agent-2.0.1-release.png)
+
+### 中文
+
+#### EchoInk Agent
+
+1. 插件对外名称正式变更为 `EchoInk Agent`，不再使用 `Codex EchoInk` 作为产品名称。
+2. 公开介绍改为个人知识 Agent：帮助整理和维护 Obsidian 知识，沉淀可查看、可修正的长期记忆，并随着使用逐渐理解用户的关注点和正在推进的事情。
+3. 插件 ID 和 GitHub 仓库地址保持不变，现有用户可以直接升级，不需要迁移会话、知识或记忆。
+
+#### 更直接的 Provider 接入
+
+1. 普通安装不需要 Codex CLI。在 Provider 设置中填入 OpenAI 或兼容服务的 API URL、API Key 和模型即可开始使用。
+2. 会话、知识维护、长期记忆、记忆修正和复盘功能保持不变。
+
+### English
+
+#### EchoInk Agent
+
+1. The public plugin name is now `EchoInk Agent`; `Codex EchoInk` is no longer used as the product name.
+2. The public description now presents EchoInk Agent as a personal knowledge agent that organizes and maintains Obsidian knowledge, builds visible and correctable long-term memory, and gradually learns what matters to the user.
+3. The plugin ID and GitHub repository remain unchanged, so existing users can upgrade in place without migrating conversations, knowledge, or memory.
+
+#### Direct Provider setup
+
+1. Normal installation does not require Codex CLI. Add the API URL, API key, and model for OpenAI or a compatible service in Provider settings to get started.
+2. Conversations, knowledge maintenance, long-term memory, memory correction, and review continue to work as before.
+
 ## 2.0.0 - 2026-08-15
 
 ![EchoInk 2.0](https://raw.githubusercontent.com/AKin-lvyifang/codex-echoink/2.0.0/assets/releases/echoink-2.0.0-release.png)

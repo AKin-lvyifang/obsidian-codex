@@ -13,7 +13,7 @@ import type { KnowledgeBaseRunCompletion } from "../knowledge-base/types";
 
 const ZH_CN = {
   languageName: "中文",
-  title: "EchoInk 设置",
+  title: "EchoInk Agent 设置",
   common: {
     enabled: "启用",
     disabled: "关闭",
@@ -289,7 +289,7 @@ export type SettingsCopy = typeof ZH_CN;
 
 const EN: SettingsCopy = {
   languageName: "English",
-  title: "EchoInk Settings",
+  title: "EchoInk Agent Settings",
   common: {
     enabled: "Enabled",
     disabled: "Off",

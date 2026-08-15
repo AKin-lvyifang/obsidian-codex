@@ -1,12 +1,12 @@
 <p align="center">
   <a href="https://github.com/AKin-lvyifang/codex-echoink/releases/latest">
-    <img width="1024" alt="EchoInk 2.0 release artwork" src="assets/releases/echoink-2.0.0-release.png">
+    <img width="1024" alt="EchoInk Agent 2.0.1 release artwork" src="assets/releases/echoink-agent-2.0.1-release.png">
   </a>
 </p>
 
-<h1 align="center">EchoInk</h1>
+<h1 align="center">EchoInk Agent</h1>
 
-<p align="center">Keep conversations, vault knowledge, and editable long-term memory together in Obsidian.</p>
+<p align="center">Manage your Obsidian knowledge while your personal agent grows to understand you better.</p>
 
 <p align="center">
   <a href="#features">Features</a> ·
@@ -21,16 +21,16 @@
 <p align="center">
   <a href="https://github.com/AKin-lvyifang/codex-echoink/releases/latest">
     <img src="https://img.shields.io/badge/platform-Obsidian_Desktop-7C3AED?style=flat-square&logo=obsidian&logoColor=white" alt="Platform: Obsidian Desktop">
-    <img src="https://img.shields.io/badge/version-2.0.0-0EA5E9?style=flat-square" alt="Version 2.0.0">
+    <img src="https://img.shields.io/badge/version-2.0.1-0EA5E9?style=flat-square" alt="Version 2.0.1">
     <img src="https://img.shields.io/badge/license-MIT-10B981?style=flat-square" alt="MIT License">
   </a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/AKin-lvyifang/codex-echoink/releases/tag/2.0.0"><strong>Download 2.0.0</strong></a>
+  <a href="https://github.com/AKin-lvyifang/codex-echoink/releases/tag/2.0.1"><strong>Download 2.0.1</strong></a>
 </p>
 
-EchoInk is an Obsidian desktop plugin that brings model conversations, vault knowledge maintenance, long-term memory, and review into one sidebar. Conversation history stays local. When you open or switch conversations, EchoInk restores local history while activating the matching AgentSession so the conversation is ready to continue.
+EchoInk Agent is a personal knowledge agent for Obsidian. It keeps conversations going, organizes and maintains your vault, and turns useful context into visible, correctable long-term memory. As you use it, that memory helps the agent learn what you care about, how you make decisions, and what you are working on, so it becomes a more useful personal agent over time. No Codex CLI installation is required: add the API URL, API key, and model for OpenAI or a compatible provider to get started.
 
 ## What changed in 2.0
 
@@ -48,7 +48,7 @@ EchoInk is an Obsidian desktop plugin that brings model conversations, vault kno
 - Each Conversation maps to an independent Pi AgentSession.
 - Reading local history does not depend on a Provider. Opening a conversation prepares its AgentSession in the background.
 - Create, rename, archive, restore, and soft-delete conversations.
-- Manage archived conversations under **Settings → EchoInk → Review → Archived conversations**.
+- Manage archived conversations under **Settings → EchoInk Agent → Review → Archived conversations**.
 - Model reasoning, tool calls, file changes, and final answers share one conversation timeline.
 
 ### Providers and models
@@ -90,15 +90,15 @@ EchoInk is an Obsidian desktop plugin that brings model conversations, vault kno
 
 ### Obsidian Community Plugins
 
-If EchoInk is available in the Obsidian Community Plugins directory:
+If EchoInk Agent is available in the Obsidian Community Plugins directory:
 
 1. Open **Settings → Community plugins → Browse**.
-2. Search for `EchoInk`.
+2. Search for `EchoInk Agent`.
 3. Install and enable the plugin.
 
 ### Manual installation
 
-1. Download `main.js`, `manifest.json`, and `styles.css` from the [2.0.0 Release](https://github.com/AKin-lvyifang/codex-echoink/releases/tag/2.0.0).
+1. Download `main.js`, `manifest.json`, and `styles.css` from the [2.0.1 Release](https://github.com/AKin-lvyifang/codex-echoink/releases/tag/2.0.1).
 2. Create this directory inside your vault:
 
 ```text
@@ -106,15 +106,15 @@ If EchoInk is available in the Obsidian Community Plugins directory:
 ```
 
 3. Place the three files in that directory.
-4. Restart Obsidian and enable `EchoInk` under Community plugins.
+4. Restart Obsidian and enable `EchoInk Agent` under Community plugins.
 
 ## Quick start
 
-1. Open **Settings → EchoInk → API Provider**.
+1. Open **Settings → EchoInk Agent → API Provider**.
 2. Add a Provider, enter its API URL, API key, and model, then save. A local Ollama setup can omit the API key.
 3. Open the EchoInk sidebar from the ribbon or command palette.
 4. Create a conversation and start chatting. Use `/ask` for knowledge questions and `/maintain` for refinement.
-5. Open **Settings → EchoInk → Review** to generate reports, manage archived conversations, or correct long-term memory.
+5. Open **Settings → EchoInk Agent → Review** to generate reports, manage archived conversations, or correct long-term memory.
 
 ## Knowledge maintenance
 
@@ -130,7 +130,7 @@ Single-note mode accepts one Raw Markdown note from the current vault. If a name
 
 ## Review and memory correction
 
-Open **Settings → EchoInk → Review**:
+Open **Settings → EchoInk Agent → Review**:
 
 - Under Generate reports, choose the date range, destination folder, and whether to open the HTML result.
 - Under Archived conversations, search, restore, or soft-delete conversations. The original Pi Session JSONL remains intact.

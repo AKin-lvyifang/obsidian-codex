@@ -95,7 +95,7 @@ const piRendererNodeImportShimPlugin = {
 
 const context = await esbuild.context({
   banner: {
-    js: "/* Codex for Obsidian */"
+    js: "/* EchoInk Agent */"
   },
   // Pi publishes one ESM entry for its SDK and dormant CLI/TUI utilities.
   // Obsidian loads a CJS bundle, so preserve a deterministic module URL for

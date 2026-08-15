@@ -337,7 +337,7 @@ function buildTrackerTemplate(now: Date): string {
     "",
     "<!-- codex-echoink-kb:start -->",
     "",
-    `## Codex EchoInk 处理记录（${formatDateTime(now)}）`,
+    `## EchoInk Agent 处理记录（${formatDateTime(now)}）`,
     "",
     "- 暂无",
     "",
