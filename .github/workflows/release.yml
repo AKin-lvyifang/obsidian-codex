@@ -171,6 +171,9 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Check built bundle size and review markers
+        run: npm run check:bundle
+
       - name: Prepare Obsidian release assets
         run: |
           rm -rf release-assets

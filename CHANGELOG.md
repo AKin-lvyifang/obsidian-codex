@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.0.2 - 2026-08-16
+
+### 中文
+
+1. 大幅减小插件包体（`main.js`），恢复 Obsidian Sync Standard 计划的同步兼容。
+2. 移除了 EchoInk 未使用的 Pi CLI、工具下载安装器和自更新相关代码。
+3. 修正社区目录 Manifest 描述，去除冗余单词。
+
+### English
+
+1. Significantly reduced the plugin bundle (`main.js`) to restore compatibility with the Obsidian Sync Standard plan.
+2. Removed the unused Pi CLI, tool download installer, and self-update code that EchoInk does not use.
+3. Fixed the community directory Manifest description by removing a redundant word.
+
 ## 2.0.1 - 2026-08-15
 
 ![EchoInk Agent 2.0.1](https://raw.githubusercontent.com/AKin-lvyifang/codex-echoink/2.0.1/assets/releases/echoink-agent-2.0.1-release.png)

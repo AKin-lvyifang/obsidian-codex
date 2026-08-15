@@ -1,10 +1,11 @@
 {
   "name": "echoink-agent",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "A personal knowledge agent for Obsidian that builds editable memory and grows to understand you better.",
   "main": "dist/main.js",
   "scripts": {
     "build": "node esbuild.config.mjs production",
+    "check:bundle": "node scripts/check-built-bundle.mjs",
     "check:phase1-obsidian-runtime": "node scripts/check-phase1-obsidian-runtime.mjs",
     "check:public": "node scripts/check-public-files.mjs",
     "check:release": "node scripts/check-release-contract.mjs",
@@ -20,7 +21,7 @@
     "test:personal-memory": "node scripts/personal-memory-tests.mjs",
     "test:knowledge": "node scripts/phase3-tests.mjs",
     "test:mcp-vault": "node scripts/mcp-vault-tests.mjs",
-    "verify:obsidian": "npm run check:public && npm run check:release && npm run lint && npm run test && npm run typecheck && npm run build",
+    "verify:obsidian": "npm run check:public && npm run check:release && npm run lint && npm run test && npm run typecheck && npm run build && npm run check:bundle",
     "package": "npm run build && node scripts/package.mjs",
     "deploy": "npm run build && node scripts/deploy.mjs"
   },
