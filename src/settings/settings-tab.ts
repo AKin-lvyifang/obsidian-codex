@@ -231,11 +231,12 @@ export class CodexSettingTab extends PluginSettingTab {
       titleEl.empty();
       tabsEl.empty();
       bodyEl.empty();
-      titleEl.createEl("h1", {
-        cls: "codex-settings-page-title",
-        text: copy.title,
-        attr: { id: SETTINGS_TITLE_ID }
-      });
+      const pageTitle = new Setting(titleEl)
+        .setName(copy.title)
+        .setHeading();
+      pageTitle.settingEl.addClass("echoink-settings-page-title-row");
+      pageTitle.nameEl.addClass("codex-settings-page-title");
+      pageTitle.nameEl.id = SETTINGS_TITLE_ID;
 
       const activeTab = visibleSettingsTab(this.plugin.settings.settingsTab);
       this.plugin.settings.settingsTab = activeTab;
@@ -1649,9 +1650,11 @@ export class CodexSettingTab extends PluginSettingTab {
     const savedSection = wrapper.createDiv({
       cls: "codex-provider-saved-section"
     });
-    savedSection.createEl("h3", {
-      text: label("已保存模型", "Saved models")
-    });
+    const savedHeading = new Setting(savedSection)
+      .setName(label("已保存模型", "Saved models"))
+      .setHeading();
+    savedHeading.settingEl.addClass("echoink-provider-saved-heading-row");
+    savedHeading.nameEl.addClass("codex-provider-saved-heading");
     const savedList = savedSection.createDiv({
       cls: "codex-provider-saved-list"
     });

@@ -130,11 +130,10 @@ class ConfirmModal extends Modal {
     contentEl.empty();
     contentEl.createEl("h2", { text: this.titleText });
     if (this.preformatted) {
-      const body = contentEl.createDiv({ text: this.bodyText });
-      body.style.whiteSpace = "pre-wrap";
-      body.style.overflowWrap = "anywhere";
-      body.style.maxHeight = "50vh";
-      body.style.overflowY = "auto";
+      contentEl.createDiv({
+        cls: "echoink-confirm-modal-preformatted",
+        text: this.bodyText
+      });
     } else {
       contentEl.createEl("p", { text: this.bodyText });
     }

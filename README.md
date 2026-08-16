@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://github.com/AKin-lvyifang/codex-echoink/releases/latest">
-    <img width="1024" alt="EchoInk Agent 2.0.2 release artwork" src="assets/releases/echoink-agent-2.0.1-release.png">
+    <img width="1024" alt="EchoInk Agent 2.0.3 release artwork" src="assets/releases/echoink-agent-2.0.1-release.png">
   </a>
 </p>
 
@@ -21,13 +21,13 @@
 <p align="center">
   <a href="https://github.com/AKin-lvyifang/codex-echoink/releases/latest">
     <img src="https://img.shields.io/badge/platform-Obsidian_Desktop-7C3AED?style=flat-square&logo=obsidian&logoColor=white" alt="Platform: Obsidian Desktop">
-    <img src="https://img.shields.io/badge/version-2.0.2-0EA5E9?style=flat-square" alt="Version 2.0.2">
+    <img src="https://img.shields.io/badge/version-2.0.3-0EA5E9?style=flat-square" alt="Version 2.0.3">
     <img src="https://img.shields.io/badge/license-MIT-10B981?style=flat-square" alt="MIT License">
   </a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/AKin-lvyifang/codex-echoink/releases/tag/2.0.2"><strong>Download 2.0.2</strong></a>
+  <a href="https://github.com/AKin-lvyifang/codex-echoink/releases/tag/2.0.3"><strong>Download 2.0.3</strong></a>
 </p>
 
 EchoInk Agent is a personal knowledge agent for Obsidian. It keeps conversations going, organizes and maintains your vault, and turns useful context into visible, correctable long-term memory. As you use it, that memory helps the agent learn what you care about, how you make decisions, and what you are working on, so it becomes a more useful personal agent over time. No Codex CLI installation is required: add the API URL, API key, and model for OpenAI or a compatible provider to get started.
@@ -98,7 +98,7 @@ If EchoInk Agent is available in the Obsidian Community Plugins directory:
 
 ### Manual installation
 
-1. Download `main.js`, `manifest.json`, and `styles.css` from the [2.0.2 Release](https://github.com/AKin-lvyifang/codex-echoink/releases/tag/2.0.2).
+1. Download `main.js`, `manifest.json`, and `styles.css` from the [2.0.3 Release](https://github.com/AKin-lvyifang/codex-echoink/releases/tag/2.0.3).
 2. Create this directory inside your vault:
 
 ```text

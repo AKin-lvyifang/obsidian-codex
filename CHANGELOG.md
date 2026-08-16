@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.0.3 - 2026-08-16
+
+![EchoInk Agent 2.0.3](https://raw.githubusercontent.com/AKin-lvyifang/codex-echoink/2.0.3/assets/releases/echoink-agent-2.0.1-release.png)
+
+### 中文
+
+1. 修复 Obsidian Community 审核标记的标题与静态样式 Error：设置页标题与分组标题改用 Obsidian Setting API 的 `setHeading()`，弹窗预格式化正文的静态样式移入 `styles.css`。
+2. 补强本地审核门禁：所有 `obsidianmd/*` 的 error 级问题现在一律硬性失败，不再被 baseline 放行。
+
+### English
+
+1. Fixed the heading and static-style errors flagged by the Obsidian Community review: the settings page and section headings now use the Obsidian Setting API `setHeading()`, and the modal preformatted body styles moved into `styles.css`.
+2. Strengthened the local review gate: every `obsidianmd/*` error now fails hard instead of being allowed by the baseline.
+
 ## 2.0.2 - 2026-08-16
 
 ![EchoInk Agent 2.0.2](https://raw.githubusercontent.com/AKin-lvyifang/codex-echoink/2.0.2/assets/releases/echoink-agent-2.0.1-release.png)

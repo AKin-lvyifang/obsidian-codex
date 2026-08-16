@@ -10,7 +10,7 @@ const writeBaseline = process.argv.includes("--write-baseline");
 const eslint = new ESLint({ cwd: rootDir });
 const results = await eslint.lintFiles(["src", "manifest.json", "package.json", "versions.json"]);
 const errors = collectErrors(results);
-const hardErrors = errors.filter(isObsidianBoundaryError);
+const hardErrors = errors.filter(isHardError);
 const counts = countByPathAndRule(errors);
 
 if (writeBaseline) {
@@ -51,19 +51,13 @@ function collectErrors(lintResults) {
   return findings;
 }
 
-function isObsidianBoundaryError(finding) {
+function isHardError(finding) {
   return finding.rule === "no-eval"
     || finding.rule === "no-implied-eval"
     || finding.rule === "@typescript-eslint/no-implied-eval"
     || finding.rule === "no-unsanitized/method"
     || finding.rule === "no-unsanitized/property"
-    || [
-      "obsidianmd/validate-manifest",
-      "obsidianmd/no-unsupported-api",
-      "obsidianmd/platform",
-      "obsidianmd/no-forbidden-elements",
-      "obsidianmd/regex-lookbehind"
-    ].includes(finding.rule);
+    || (typeof finding.rule === "string" && finding.rule.startsWith("obsidianmd/"));
 }
 
 function countByPathAndRule(findings) {
@@ -115,7 +109,7 @@ function findRegressions(current, allowed) {
 }
 
 function failHardErrors(findings) {
-  console.error("Obsidian manifest, API, platform, dangerous-DOM and eval rules must have zero errors:");
+  console.error("Obsidian review hard errors: every ObsidianMD error and dangerous-DOM/eval rule must be zero:");
   for (const finding of findings) {
     console.error(`- ${finding.path}:${finding.line}:${finding.column} ${finding.rule} ${finding.message}`);
   }

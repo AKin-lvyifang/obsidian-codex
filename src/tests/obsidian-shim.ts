@@ -121,6 +121,7 @@ export class Setting {
   }
   setName(value: string): this { this.nameEl.setText(value); return this; }
   setDesc(value: string): this { this.descEl.setText(value); return this; }
+  setHeading(): this { this.settingEl.addClass("setting-item-heading"); return this; }
   setClass(value: string): this { this.settingEl.addClass(value); return this; }
   addText(callback: (component: { inputEl: HTMLInputElement; setPlaceholder: (value: string) => any; setValue: (value: string) => any; onChange: (handler: (value: string) => any) => any }) => any): this {
     const inputEl = this.controlEl.createEl("input", {
