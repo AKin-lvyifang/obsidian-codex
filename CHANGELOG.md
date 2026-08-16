@@ -2,6 +2,8 @@
 
 ## 2.0.2 - 2026-08-16
 
+![EchoInk Agent 2.0.2](https://raw.githubusercontent.com/AKin-lvyifang/codex-echoink/2.0.2/assets/releases/echoink-agent-2.0.1-release.png)
+
 ### 中文
 
 1. 大幅减小插件包体（`main.js`），恢复 Obsidian Sync Standard 计划的同步兼容。
