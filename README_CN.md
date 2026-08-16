@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://github.com/AKin-lvyifang/codex-echoink/releases/latest">
-    <img width="1024" alt="EchoInk Agent 2.0.1 发布图" src="assets/releases/echoink-agent-2.0.1-release.png">
+    <img width="1024" alt="EchoInk Agent 2.0.2 发布图" src="assets/releases/echoink-agent-2.0.1-release.png">
   </a>
 </p>
 
@@ -21,13 +21,13 @@
 <p align="center">
   <a href="https://github.com/AKin-lvyifang/codex-echoink/releases/latest">
     <img src="https://img.shields.io/badge/platform-Obsidian_Desktop-7C3AED?style=flat-square&logo=obsidian&logoColor=white" alt="平台：Obsidian 桌面端">
-    <img src="https://img.shields.io/badge/version-2.0.1-0EA5E9?style=flat-square" alt="版本 2.0.1">
+    <img src="https://img.shields.io/badge/version-2.0.2-0EA5E9?style=flat-square" alt="版本 2.0.2">
     <img src="https://img.shields.io/badge/license-MIT-10B981?style=flat-square" alt="MIT 开源许可证">
   </a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/AKin-lvyifang/codex-echoink/releases/tag/2.0.1"><strong>下载 2.0.1</strong></a>
+  <a href="https://github.com/AKin-lvyifang/codex-echoink/releases/tag/2.0.2"><strong>下载 2.0.2</strong></a>
 </p>
 
 EchoInk Agent 是一个运行在 Obsidian 中的个人知识 Agent。它能帮你持续对话，整理、提炼和维护当前 Vault，并把长期有用的信息沉淀为可查看、可修正的记忆。随着使用，这些记忆会帮助它逐渐理解你的关注点、判断方式和正在推进的事情，让它在管理知识的同时，成长为越来越懂你的个人 Agent。无需安装 Codex CLI；添加 OpenAI 或兼容 Provider 的 API URL、API Key 和模型后即可开始使用。
@@ -98,7 +98,7 @@ EchoInk Agent 是一个运行在 Obsidian 中的个人知识 Agent。它能帮�
 
 ### 手动安装
 
-1. 从 [2.0.1 Release](https://github.com/AKin-lvyifang/codex-echoink/releases/tag/2.0.1) 下载 `main.js`、`manifest.json` 和 `styles.css`。
+1. 从 [2.0.2 Release](https://github.com/AKin-lvyifang/codex-echoink/releases/tag/2.0.2) 下载 `main.js`、`manifest.json` 和 `styles.css`。
 2. 在 Vault 中创建目录：
 
 ```text
