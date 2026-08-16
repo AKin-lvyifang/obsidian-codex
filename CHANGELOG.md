@@ -8,11 +8,15 @@
 
 1. 修复 Obsidian Community 审核标记的标题与静态样式 Error：设置页标题与分组标题改用 Obsidian Setting API 的 `setHeading()`，弹窗预格式化正文的静态样式移入 `styles.css`。
 2. 补强本地审核门禁：所有 `obsidianmd/*` 的 error 级问题现在一律硬性失败，不再被 baseline 放行。
+3. 修复 OpenAI 和 Anthropic 兼容 Provider 无法发出请求的问题，云端对话恢复可用。
+4. 已知限制：`main.js` 约为 5.71 MiB，超过 Obsidian Sync Standard 的 5 MiB 单文件上限；本地安装与社区下载不受影响，但 Standard Sync 无法同步该文件。
 
 ### English
 
 1. Fixed the heading and static-style errors flagged by the Obsidian Community review: the settings page and section headings now use the Obsidian Setting API `setHeading()`, and the modal preformatted body styles moved into `styles.css`.
 2. Strengthened the local review gate: every `obsidianmd/*` error now fails hard instead of being allowed by the baseline.
+3. Fixed OpenAI- and Anthropic-compatible Providers failing before requests were sent, restoring cloud conversations.
+4. Known limitation: `main.js` is about 5.71 MiB, above the 5 MiB per-file limit of Obsidian Sync Standard. Local installation and Community downloads still work, but Standard Sync cannot synchronize this file.
 
 ## 2.0.2 - 2026-08-16
 

@@ -108,6 +108,8 @@ If EchoInk Agent is available in the Obsidian Community Plugins directory:
 3. Place the three files in that directory.
 4. Restart Obsidian and enable `EchoInk Agent` under Community plugins.
 
+> **Sync note:** `main.js` in 2.0.3 is about 5.71 MiB, above the 5 MiB per-file limit of Obsidian Sync Standard. Install or update EchoInk Agent independently on each device, or use a sync method that supports larger files.
+
 ## Quick start
 
 1. Open **Settings → EchoInk Agent → API Provider**.

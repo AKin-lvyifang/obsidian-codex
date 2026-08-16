@@ -108,6 +108,8 @@ EchoInk Agent 是一个运行在 Obsidian 中的个人知识 Agent。它能帮�
 3. 将三个文件放入该目录。
 4. 重启 Obsidian，在第三方插件中启用 `EchoInk Agent`。
 
+> **同步说明：** 2.0.3 的 `main.js` 约为 5.71 MiB，超过 Obsidian Sync Standard 的 5 MiB 单文件上限。请在每台设备上分别安装或更新 EchoInk Agent，或使用支持更大文件的同步方式。
+
 ## 快速开始
 
 1. 打开 **设置 → EchoInk Agent → API Provider**。

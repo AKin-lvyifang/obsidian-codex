@@ -10,8 +10,13 @@ const bundle = await readFile(bundlePath, "utf8");
 
 assert.match(
   bundle,
-  /EchoInk disables Pi default undici transport/,
-  "production bundle must keep the fail-closed Pi HTTP transport boundary"
+  /@earendil-works\/pi-coding-agent\/node_modules\/openai\//,
+  "production bundle must include the real OpenAI provider SDK"
+);
+assert.match(
+  bundle,
+  /@earendil-works\/pi-coding-agent\/node_modules\/@anthropic-ai\/sdk\//,
+  "production bundle must include the real Anthropic provider SDK"
 );
 assert.doesNotMatch(
   bundle,
