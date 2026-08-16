@@ -398,14 +398,13 @@ export function createJiti(...args) { return fail("createJiti")(...args); }
 };
 
 /**
- * Pi's built-in provider SDKs (Google GenAI, OpenAI, Anthropic, Mistral) are
- * only reached through `lazyApi(() => import(...))` — a dynamic import that
- * runs on the first stream through that provider. EchoInk never streams
- * through the built-in providers: it registers its own native provider
- * (createPiNativeControlledProvider) and uses the controlled EchoInk transport.
- * Replace each SDK package with a fail-closed stub so their multi-megabyte
- * transitive graphs (web-streams, OpenTelemetry, google-auth, node-fetch, ws,
- * yaml, bignumber) are never bundled or executed.
+ * Configured cloud Providers stream through Pi's built-in OpenAI and
+ * Anthropic clients, so those SDKs stay bundled for real. The remaining SDKs
+ * (Google GenAI, Mistral) and the terminal TUI are unreachable from any
+ * EchoInk product path — only dormant `lazyApi(() => import(...))` entries —
+ * so they are replaced with fail-closed stubs to keep their multi-megabyte
+ * transitive graphs (OpenTelemetry, google-auth, ws, yaml, bignumber) out of
+ * the bundle.
  */
 const PI_PROVIDER_SDK_SHIMS = {
   "@google/genai": `
@@ -416,17 +415,6 @@ export const FunctionCallingConfigMode = new Proxy({}, { get: (_t, p) => p });
 export const ResourceScope = new Proxy({}, { get: (_t, p) => p });
 export const ThinkingLevel = new Proxy({}, { get: (_t, p) => p });
 export default GoogleGenAI;
-`,
-  openai: `
-const fail = ${failFactory("OpenAI provider SDK")};
-export class OpenAI { constructor(...args) { fail("OpenAI")(...args); } }
-export class AzureOpenAI { constructor(...args) { fail("AzureOpenAI")(...args); } }
-export default OpenAI;
-`,
-  "@anthropic-ai/sdk": `
-const fail = ${failFactory("Anthropic provider SDK")};
-export class Anthropic { constructor(...args) { fail("Anthropic")(...args); } }
-export default Anthropic;
 `,
   "@mistralai/mistralai": `
 const fail = ${failFactory("Mistral provider SDK")};
@@ -477,7 +465,7 @@ const piProviderSdkShimsPlugin = {
     build.onResolve(
       {
         filter:
-          /^(?:@google\/genai|openai|@anthropic-ai\/sdk|@mistralai\/mistralai|@earendil-works\/pi-tui)$/
+          /^(?:@google\/genai|@mistralai\/mistralai|@earendil-works\/pi-tui)$/
       },
       (args) => ({
         path: args.path,

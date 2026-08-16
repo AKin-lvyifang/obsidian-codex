@@ -4,8 +4,11 @@
  * Guards three Obsidian community-review requirements that a plain `npm run
  * build` cannot express:
  *
- *   1. `dist/main.js` must stay below the 5 MiB limit that the Obsidian Sync
- *      Standard plan can synchronize (5 * 1024 * 1024 bytes).
+ *   1. `dist/main.js` size versus the 5 MiB Obsidian Sync Standard cap
+ *      (5 * 1024 * 1024 bytes). Exceeding the cap is reported as a warning,
+ *      not a failure: the community review surfaces it as a Warning (Standard
+ *      Sync cannot sync the asset), and the 2026-08-16 product decision
+ *      accepts that to keep the real OpenAI/Anthropic provider SDKs bundled.
  *   2. The bundle must not contain Pi CLI / self-update / tool-download code
  *      (ZIP extraction, `Expand-Archive`, `windows-self-update`, the fd/rg
  *      downloader). EchoInk ships a narrowed Pi runtime; see esbuild.config.mjs.
@@ -75,9 +78,11 @@ function checkSize() {
   console.log(`dist/main.js: ${bytes} bytes (${sizeMiB} MiB)`);
 
   if (bytes >= OFFICIAL_LIMIT_BYTES) {
-    failures.push(
-      `dist/main.js is ${bytes} bytes (${sizeMiB} MiB), which exceeds the `
-        + `5 MiB Obsidian Sync Standard limit (${OFFICIAL_LIMIT_BYTES} bytes).`
+    console.log(
+      `warning: dist/main.js is ${bytes} bytes (${sizeMiB} MiB), above the `
+        + `5 MiB Obsidian Sync Standard limit (${OFFICIAL_LIMIT_BYTES} bytes). `
+        + "Community review reports this as a Warning only; accepted by the "
+        + "2026-08-16 product decision to keep real provider SDKs bundled."
     );
   } else if (bytes > TARGET_LIMIT_BYTES) {
     console.log(
