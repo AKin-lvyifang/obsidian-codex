@@ -12486,3 +12486,243 @@ body.theme-dark .codex-session-picker {
   background: var(--background-primary);
   border-top: 1px solid var(--background-modifier-border);
 }
+
+/* ==========================================================================
+   Cognitive System v2: Personality Onboarding (cold-start setup flow)
+   Multi-step: template grid → scenario questions → hexagon preview
+   ========================================================================== */
+
+.echoink-onboarding {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.echoink-onboarding-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.echoink-onboarding-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-normal);
+  margin: 0;
+}
+
+.echoink-onboarding-subtitle {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+/* --- Template grid (Step 1) --- */
+
+.echoink-onboarding-template-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.echoink-onboarding-template-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 10px;
+  border-radius: 12px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  cursor: pointer;
+  transition: border-color 0.2s ease, background 0.2s ease;
+  text-align: center;
+}
+
+.echoink-onboarding-template-card:hover {
+  border-color: var(--interactive-accent);
+  background: var(--background-modifier-hover);
+}
+
+.echoink-onboarding-template-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.echoink-onboarding-template-desc {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.echoink-onboarding-template-preview {
+  margin-top: 4px;
+}
+
+/* --- Progress bar (Step 2) --- */
+
+.echoink-onboarding-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.echoink-onboarding-progress-bar {
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--interactive-accent);
+  transition: width 0.3s ease;
+}
+
+.echoink-onboarding-progress::before {
+  content: "";
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--background-modifier-border);
+  order: -1;
+}
+
+.echoink-onboarding-progress-text {
+  font-size: 11px;
+  font-family: var(--font-monospace);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* --- Question step (Step 2) --- */
+
+.echoink-onboarding-question {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.echoink-onboarding-question-prompt {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-normal);
+  line-height: 1.5;
+}
+
+.echoink-onboarding-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.echoink-onboarding-option-btn {
+  display: flex;
+  align-items: center;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+.echoink-onboarding-option-btn:hover {
+  border-color: var(--interactive-accent);
+  background: var(--background-modifier-hover);
+}
+
+.echoink-onboarding-option-label {
+  font-size: 13px;
+  color: var(--text-normal);
+  line-height: 1.4;
+}
+
+/* --- Preview step (Step 3) --- */
+
+.echoink-onboarding-preview-stage {
+  display: flex;
+  justify-content: center;
+  padding: 8px 0;
+}
+
+.echoink-onboarding-score-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 8px;
+}
+
+.echoink-onboarding-score-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.echoink-onboarding-score-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  width: 40px;
+  flex-shrink: 0;
+}
+
+.echoink-onboarding-score-bar-container {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--background-modifier-border);
+  overflow: hidden;
+}
+
+.echoink-onboarding-score-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--interactive-accent);
+  transition: width 0.4s ease;
+}
+
+.echoink-onboarding-score-value {
+  font-size: 11px;
+  font-family: var(--font-monospace);
+  color: var(--text-muted);
+  width: 36px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+/* --- Footer / buttons --- */
+
+.echoink-onboarding-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.echoink-onboarding-btn {
+  padding: 7px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  border: none;
+  transition: background 0.2s ease, opacity 0.2s ease;
+}
+
+.echoink-onboarding-btn-ghost {
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.echoink-onboarding-btn-ghost:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.echoink-onboarding-btn-primary {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.echoink-onboarding-btn-primary:hover {
+  opacity: 0.9;
+}
