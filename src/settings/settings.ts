@@ -155,6 +155,12 @@ export interface SetupSettings {
 export interface EchoInkMemorySettings {
   enabled: boolean;
   useLongTermMemory: boolean;
+  /** Dream scheduler: offline memory consolidation (anchor expansion + personality signal extraction). */
+  dreamEnabled: boolean;
+  /** Number of dream runs per day (1-6). */
+  dreamRunsPerDay: number;
+  /** Max token budget per dream run. */
+  dreamTokenBudget: number;
 }
 
 export interface KnowledgeBaseProcessedSource {
@@ -334,7 +340,10 @@ export const DEFAULT_SETTINGS: CodexForObsidianSettings = {
   },
   memory: {
     enabled: true,
-    useLongTermMemory: true
+    useLongTermMemory: true,
+    dreamEnabled: false,
+    dreamRunsPerDay: 3,
+    dreamTokenBudget: 50000
   },
   resourceManagementTab: "plugins",
   knowledgeBase: {
@@ -1041,9 +1050,18 @@ function normalizeSetupSettings(input: unknown): SetupSettings {
 
 function normalizeMemorySettings(input: unknown): EchoInkMemorySettings {
   const value = settingsRecord(input) ?? {};
+  const runsPerDay = typeof value?.dreamRunsPerDay === "number" && Number.isSafeInteger(value.dreamRunsPerDay)
+    ? Math.max(1, Math.min(6, value.dreamRunsPerDay))
+    : 3;
+  const tokenBudget = typeof value?.dreamTokenBudget === "number" && Number.isSafeInteger(value.dreamTokenBudget)
+    ? Math.max(1000, Math.min(200000, value.dreamTokenBudget))
+    : 50000;
   return {
     enabled: value?.enabled !== false,
-    useLongTermMemory: value?.useLongTermMemory !== false
+    useLongTermMemory: value?.useLongTermMemory !== false,
+    dreamEnabled: value?.dreamEnabled === true,
+    dreamRunsPerDay: runsPerDay,
+    dreamTokenBudget: tokenBudget
   };
 }
 

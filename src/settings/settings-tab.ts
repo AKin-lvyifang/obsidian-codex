@@ -452,6 +452,36 @@ export class CodexSettingTab extends PluginSettingTab {
         });
       }));
 
+    // --- Dream scheduler settings ---
+    applySettingsRow(new Setting(memoryGroup)
+      .setName(zh ? "离线记忆整理（做梦）" : "Offline memory consolidation (dreaming)")
+      .setDesc(zh
+        ? "定期在后台对近期记忆做语义展开和人格信号提取。仅在 Obsidian 打开时运行。"
+        : "Periodically expand recent memories and extract personality signals in the background. Only runs while Obsidian is open.")
+      .addToggle((toggle) => {
+        labelSettingsToggle(toggle, zh ? "离线记忆整理" : "Memory consolidation");
+        toggle.setValue(this.plugin.settings.memory.dreamEnabled).onChange(async (enabled) => {
+          this.plugin.settings.memory.dreamEnabled = enabled;
+          await this.plugin.saveSettings();
+        });
+      }));
+
+    applySettingsRow(new Setting(memoryGroup)
+      .setName(zh ? "每日整理次数" : "Runs per day")
+      .setDesc(zh
+        ? `每天执行几次离线整理（1-6 次）。当前：${this.plugin.settings.memory.dreamRunsPerDay} 次/天，约每 ${Math.round(24 / this.plugin.settings.memory.dreamRunsPerDay)} 小时一次。`
+        : `How many consolidation runs per day (1-6). Current: ${this.plugin.settings.memory.dreamRunsPerDay}/day, ~every ${Math.round(24 / this.plugin.settings.memory.dreamRunsPerDay)} hours.`)
+      .addSlider((slider) => {
+        slider.setLimits(1, 6, 1)
+          .setValue(this.plugin.settings.memory.dreamRunsPerDay)
+          .setDynamicTooltip()
+          .onChange(async (value) => {
+            this.plugin.settings.memory.dreamRunsPerDay = value;
+            await this.plugin.saveSettings();
+            this.scheduleDisplay();
+          });
+      }));
+
     this.renderFilePersonalizationSettings(page);
 
     const conversationSection = createSettingsSection(page, {
