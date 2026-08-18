@@ -12373,3 +12373,116 @@ body.theme-dark .codex-session-picker {
   font-family: var(--font-monospace);
   color: var(--text-muted);
 }
+
+/* ==========================================================================
+   Cognitive System v2: Agent Profile Card (read-only hexagon + collapsible text)
+   Replaces the old AGENT.md textarea editor.
+   ========================================================================== */
+
+.echoink-agent-profile-card {
+  border-radius: 16px;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.echoink-agent-profile-card-header {
+  padding: 14px 16px 10px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.echoink-agent-profile-card-title-area {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.echoink-agent-profile-card-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.echoink-agent-profile-card-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-family: var(--font-monospace);
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  opacity: 0.85;
+}
+
+.echoink-agent-profile-card-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  flex-basis: 100%;
+}
+
+/* Hexagon stage — centered container for the SVG chart */
+.echoink-agent-profile-card-stage {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 8px 16px 16px;
+  min-height: 220px;
+}
+
+/* Collapsible text content */
+.echoink-agent-profile-card-details {
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.echoink-agent-profile-card-summary {
+  padding: 10px 16px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.echoink-agent-profile-card-summary::-webkit-details-marker {
+  display: none;
+}
+
+.echoink-agent-profile-card-summary::before {
+  content: "▸";
+  font-size: 10px;
+  transition: transform 0.2s ease;
+  display: inline-block;
+}
+
+.echoink-agent-profile-card-details[open] > .echoink-agent-profile-card-summary::before {
+  transform: rotate(90deg);
+}
+
+.echoink-agent-profile-card-summary:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+
+.echoink-agent-profile-card-content {
+  margin: 0;
+  padding: 12px 16px 16px;
+  font-size: 12px;
+  line-height: 1.6;
+  font-family: var(--font-monospace);
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 300px;
+  overflow-y: auto;
+  background: var(--background-primary);
+  border-top: 1px solid var(--background-modifier-border);
+}

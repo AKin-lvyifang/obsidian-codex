@@ -476,8 +476,8 @@ export class CodexSettingTab extends PluginSettingTab {
     const section = createSettingsSection(page, {
       title: zh ? "身份与用户画像" : "Identity and user profile",
       description: zh
-        ? "直接编辑当前 Vault 的 AGENT.md 与 USER.md；下一次请求重新读取，不再复制到设置 JSON。"
-        : "Edit this Vault's AGENT.md and USER.md directly. The next request reloads both files; settings JSON is not a second source.",
+        ? "Agent 人格由系统从 trait 记录自动生成，不可手动编辑。USER.md 保存你明确确认的稳定画像。"
+        : "Agent personality is auto-generated from trait records and cannot be edited manually. USER.md stores your explicitly confirmed stable profile.",
       surface: "group"
     });
     const group = createSettingsGroup(section);
@@ -500,7 +500,9 @@ export class CodexSettingTab extends PluginSettingTab {
       );
       return;
     }
-    this.addPersonalMemoryProfileEditor(group, "agent", this.personalMemoryState.agent);
+    // Agent profile: read-only hexagon card + collapsible text (no editing)
+    this.addAgentProfileCard(group, this.personalMemoryState.agent);
+    // User profile: still editable
     this.addPersonalMemoryProfileEditor(group, "user", this.personalMemoryState.user);
     applySettingsRow(new Setting(group)
       .setName(this.copy.general.showWelcome)
@@ -513,6 +515,65 @@ export class CodexSettingTab extends PluginSettingTab {
           this.plugin.getCodexView()?.refreshPersonalizationUi();
         });
       }));
+  }
+
+  /**
+   * Agent profile card: hexagon chart (primary) + collapsible text content.
+   * Read-only — AGENT.md is a projection from trait records, not user-editable.
+   */
+  private addAgentProfileCard(container: HTMLElement, agentContent: string): void {
+    const zh = this.plugin.settings.settingsLanguage !== "en";
+
+    // Card wrapper
+    const card = container.createDiv({ cls: "echoink-agent-profile-card" });
+
+    // --- Header ---
+    const header = card.createDiv({ cls: "echoink-agent-profile-card-header" });
+    const titleArea = header.createDiv({ cls: "echoink-agent-profile-card-title-area" });
+    titleArea.createDiv({
+      cls: "echoink-agent-profile-card-label",
+      text: "AGENT.md"
+    });
+    titleArea.createSpan({
+      cls: "echoink-agent-profile-card-badge",
+      text: zh ? "自动生成" : "Auto-generated"
+    });
+    header.createDiv({
+      cls: "echoink-agent-profile-card-desc",
+      text: zh
+        ? "人格由 trait 记录投影生成，不可手动编辑。"
+        : "Personality projected from trait records. Not editable."
+    });
+
+    // --- Hexagon stage ---
+    const stage = card.createDiv({ cls: "echoink-agent-profile-card-stage" });
+    // TODO: When TraitStore is wired up, render real scores here.
+    // For now, show default midpoint scores as placeholder.
+    import("../ui/trait-hexagon").then(({ renderTraitHexagon }) => {
+      const defaultScores = {
+        tempo: 0.5, energy: 0.5, mind: 0.5,
+        warmth: 0.5, order: 0.5, stance: 0.5
+      } as const;
+      renderTraitHexagon(stage, defaultScores, { size: 220, rings: 4 });
+    }).catch(() => {
+      stage.createDiv({
+        cls: "echoink-settings-state is-neutral",
+        text: zh ? "人格图表加载中…" : "Loading personality chart…"
+      });
+    });
+
+    // --- Collapsible text content ---
+    const details = card.createEl("details", { cls: "echoink-agent-profile-card-details" });
+    const summary = details.createEl("summary", {
+      cls: "echoink-agent-profile-card-summary",
+      text: zh ? "查看完整人格文本" : "View full personality text"
+    });
+    summary.setAttr("aria-label", zh ? "展开或折叠 AGENT.md 内容" : "Expand or collapse AGENT.md content");
+    const contentPre = details.createEl("pre", {
+      cls: "echoink-agent-profile-card-content",
+      text: agentContent
+    });
+    contentPre.setAttr("tabindex", "0");
   }
 
   private addPersonalMemoryProfileEditor(
