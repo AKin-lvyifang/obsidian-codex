@@ -49,12 +49,17 @@ const DEFAULT_CONFIG: TraitEvolutionConfig = {
 // Candidate observation
 // ---------------------------------------------------------------------------
 
+/** Source of a personality observation. */
+export type ObservationSource = "conversation" | "correction" | "dream" | "episode_stats";
+
 interface CandidateObservation {
   readonly dimension: TraitDimension;
   readonly direction: "increase" | "decrease"; // which pole the signal pushes toward
   readonly strength: number; // 0-1, how strong the signal is
   readonly evidence: string; // brief description of what was observed
   readonly turnIndex: number;
+  readonly source: ObservationSource;
+  readonly memoryId?: string; // set when source is correction/dream/episode_stats
 }
 
 // ---------------------------------------------------------------------------
@@ -65,6 +70,8 @@ export class TraitEvolution {
   private candidates: CandidateObservation[] = [];
   private turnCount = 0;
   private readonly config: TraitEvolutionConfig;
+  /** Memory IDs already processed for personality signals (prevents duplicate injection). */
+  private readonly processedMemoryIds = new Set<string>();
 
   constructor(
     private readonly store: TraitStore,
@@ -98,11 +105,55 @@ export class TraitEvolution {
       direction,
       strength: Math.max(0, Math.min(1, strength)),
       evidence,
-      turnIndex: this.turnCount
+      turnIndex: this.turnCount,
+      source: "conversation"
     });
 
     // Check if threshold is met for this dimension
     await this.checkAndEvolve(dimension);
+  }
+
+  /**
+   * Process a personality signal extracted from a memory record.
+   * Unlike conversation signals, memory signals are NOT subject to cold-start
+   * protection (they come from established records, not early-turn noise).
+   *
+   * @param signal The detected personality signal
+   * @param source Where the signal came from
+   * @param weight Signal strength (0-1), typically 0.5-0.9 depending on source
+   * @param memoryId Source memory ID (for deduplication)
+   */
+  async observeFromMemory(
+    signal: Readonly<{ dimension: TraitDimension; direction: "increase" | "decrease"; evidence: string }>,
+    source: Exclude<ObservationSource, "conversation">,
+    weight: number,
+    memoryId: string
+  ): Promise<void> {
+    // Deduplicate: skip if this memory was already processed
+    if (this.processedMemoryIds.has(memoryId)) return;
+    this.processedMemoryIds.add(memoryId);
+
+    this.candidates.push({
+      dimension: signal.dimension,
+      direction: signal.direction,
+      strength: Math.max(0, Math.min(1, weight)),
+      evidence: `[${source}] ${signal.evidence}`,
+      turnIndex: this.turnCount,
+      source,
+      memoryId
+    });
+
+    await this.checkAndEvolve(signal.dimension);
+  }
+
+  /** Check if a memory ID has already been processed. */
+  isMemoryProcessed(memoryId: string): boolean {
+    return this.processedMemoryIds.has(memoryId);
+  }
+
+  /** Clear processed memory IDs (e.g., for re-processing after reset). */
+  clearProcessedMemoryIds(): void {
+    this.processedMemoryIds.clear();
   }
 
   /**
