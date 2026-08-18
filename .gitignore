@@ -21,3 +21,4 @@ src/tests/agent-evals/
 src/tests/fixtures/agent-evals-v1/
 
 *.log
+node_modules
