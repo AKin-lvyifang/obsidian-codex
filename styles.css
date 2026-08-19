@@ -12391,7 +12391,7 @@ body.theme-dark .codex-session-picker {
   padding: 14px 16px 10px;
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
 }
 
@@ -12419,72 +12419,224 @@ body.theme-dark .codex-session-picker {
   opacity: 0.85;
 }
 
+/* Expand button — top-right corner of header */
+.echoink-agent-profile-expand-btn {
+  margin-left: auto;
+  padding: 4px 12px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid var(--background-modifier-border);
+  background: transparent;
+  color: var(--text-muted);
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.echoink-agent-profile-expand-btn:hover {
+  border-color: var(--interactive-accent);
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+
+.echoink-agent-profile-expand-btn.is-open {
+  border-color: var(--interactive-accent);
+  color: var(--interactive-accent);
+}
+
 .echoink-agent-profile-card-desc {
   font-size: 12px;
   color: var(--text-muted);
   flex-basis: 100%;
 }
 
-/* Hexagon stage — centered container for the SVG chart */
-.echoink-agent-profile-card-stage {
+/* --- Body: left hexagon + right trait bars --- */
+.echoink-agent-profile-card-body {
   display: flex;
+  min-height: 260px;
+}
+
+.echoink-agent-profile-hex-side {
+  flex: 0 0 200px;
+  display: flex;
+  flex-direction: column;
   justify-content: center;
   align-items: center;
-  padding: 8px 16px 16px;
-  min-height: 220px;
+  padding: 12px;
+  border-right: 1px solid var(--background-modifier-border);
 }
 
-/* Collapsible text content */
-.echoink-agent-profile-card-details {
-  border-top: 1px solid var(--background-modifier-border);
+.echoink-agent-profile-text-side {
+  flex: 1;
+  min-width: 0;
+  padding: 14px 16px;
+  overflow-y: auto;
+  max-height: 320px;
 }
 
-.echoink-agent-profile-card-summary {
-  padding: 10px 16px;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-muted);
-  cursor: pointer;
-  user-select: none;
-  list-style: none;
+/* Trait dimension rows */
+.echoink-trait-row {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 6px;
+  padding: 2px 0;
 }
 
-.echoink-agent-profile-card-summary::-webkit-details-marker {
-  display: none;
-}
-
-.echoink-agent-profile-card-summary::before {
-  content: "▸";
-  font-size: 10px;
-  transition: transform 0.2s ease;
-  display: inline-block;
-}
-
-.echoink-agent-profile-card-details[open] > .echoink-agent-profile-card-summary::before {
-  transform: rotate(90deg);
-}
-
-.echoink-agent-profile-card-summary:hover {
+.echoink-trait-dim {
+  font-weight: 600;
   color: var(--text-normal);
-  background: var(--background-modifier-hover);
+  min-width: 36px;
+  font-size: 12px;
 }
 
-.echoink-agent-profile-card-content {
-  margin: 0;
-  padding: 12px 16px 16px;
+.echoink-trait-bar-bg {
+  flex: 1;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--background-modifier-border);
+  overflow: hidden;
+}
+
+.echoink-trait-bar-fg {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--interactive-accent);
+  width: 50%; /* default; set dynamically when TraitStore is wired */
+  transition: width 0.4s ease;
+}
+
+.echoink-trait-pct {
+  font-size: 11px;
+  font-family: var(--font-monospace);
+  color: var(--text-muted);
+  min-width: 32px;
+  text-align: right;
+}
+
+.echoink-trait-poles {
+  font-size: 10px;
+  color: var(--text-muted);
+  opacity: 0.7;
+  padding-left: 42px;
+  margin-bottom: 4px;
+}
+
+/* --- Footer --- */
+.echoink-agent-profile-card-footer {
+  padding: 8px 16px;
+  border-top: 1px solid var(--background-modifier-border);
+  font-size: 11px;
+  color: var(--text-muted);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.echoink-agent-profile-reselect {
+  color: var(--interactive-accent);
+  text-decoration: none;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.echoink-agent-profile-reselect:hover {
+  text-decoration: underline;
+}
+
+/* --- Drawer (slides down) --- */
+.echoink-agent-profile-drawer {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.4s ease;
+  border-top: 0 solid var(--background-modifier-border);
+}
+
+.echoink-agent-profile-drawer.is-open {
+  max-height: 800px;
+  border-top-width: 1px;
+}
+
+.echoink-agent-profile-drawer-inner {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* Summary card inside drawer */
+.echoink-agent-profile-summary-card {
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 12px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.echoink-agent-profile-summary-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--interactive-accent);
+}
+
+.echoink-agent-profile-summary-text {
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--text-normal);
+}
+
+/* Raw AGENT.md text inside drawer */
+.echoink-agent-profile-raw-title {
   font-size: 12px;
-  line-height: 1.6;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.echoink-agent-profile-raw-text {
+  margin: 0;
+  padding: 12px;
+  font-size: 12px;
+  line-height: 1.7;
   font-family: var(--font-monospace);
   color: var(--text-muted);
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 300px;
+  max-height: 200px;
   overflow-y: auto;
   background: var(--background-primary);
-  border-top: 1px solid var(--background-modifier-border);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+}
+
+.echoink-agent-profile-collapse-btn {
+  align-self: center;
+  padding: 4px 14px;
+  border-radius: 6px;
+  font-size: 11px;
+  cursor: pointer;
+  border: 1px solid var(--background-modifier-border);
+  background: transparent;
+  color: var(--text-muted);
+  transition: all 0.2s ease;
+}
+
+.echoink-agent-profile-collapse-btn:hover {
+  border-color: var(--interactive-accent);
+  color: var(--text-normal);
+}
+
+/* Responsive: stack vertically on narrow screens */
+@media (max-width: 560px) {
+  .echoink-agent-profile-card-body {
+    flex-direction: column;
+  }
+  .echoink-agent-profile-hex-side {
+    flex: none;
+    border-right: none;
+    border-bottom: 1px solid var(--background-modifier-border);
+  }
 }
 
 /* ==========================================================================

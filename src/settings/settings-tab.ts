@@ -548,7 +548,10 @@ export class CodexSettingTab extends PluginSettingTab {
   }
 
   /**
-   * Agent profile card: hexagon chart (primary) + collapsible text content.
+   * Agent profile card: left-right layout (hexagon + trait bars) with a
+   * top-right expand button that slides open a drawer containing a
+   * personality summary and the raw AGENT.md text.
+   *
    * Read-only — AGENT.md is a projection from trait records, not user-editable.
    */
   private addAgentProfileCard(container: HTMLElement, agentContent: string): void {
@@ -557,53 +560,119 @@ export class CodexSettingTab extends PluginSettingTab {
     // Card wrapper
     const card = container.createDiv({ cls: "echoink-agent-profile-card" });
 
-    // --- Header ---
+    // --- Header (with expand button in top-right) ---
     const header = card.createDiv({ cls: "echoink-agent-profile-card-header" });
     const titleArea = header.createDiv({ cls: "echoink-agent-profile-card-title-area" });
-    titleArea.createDiv({
-      cls: "echoink-agent-profile-card-label",
-      text: "AGENT.md"
-    });
+    titleArea.createDiv({ cls: "echoink-agent-profile-card-label", text: "AGENT.md" });
     titleArea.createSpan({
       cls: "echoink-agent-profile-card-badge",
       text: zh ? "自动生成" : "Auto-generated"
     });
+    // Expand/collapse button — top-right corner
+    const expandBtn = header.createEl("button", {
+      cls: "echoink-agent-profile-expand-btn",
+      attr: { type: "button" }
+    });
+    expandBtn.setText(zh ? "查看完整描述" : "Full description");
     header.createDiv({
       cls: "echoink-agent-profile-card-desc",
       text: zh
-        ? "人格由 trait 记录投影生成，不可手动编辑。"
-        : "Personality projected from trait records. Not editable."
+        ? "人格由 trait 记录投影生成，不可手动编辑。随对话和记忆校准缓慢演化。"
+        : "Personality projected from trait records. Evolves slowly via conversation and memory calibration."
     });
 
-    // --- Hexagon stage ---
-    const stage = card.createDiv({ cls: "echoink-agent-profile-card-stage" });
-    // TODO: When TraitStore is wired up, render real scores here.
-    // For now, show default midpoint scores as placeholder.
+    // --- Body: left hexagon + right trait bars ---
+    const body = card.createDiv({ cls: "echoink-agent-profile-card-body" });
+
+    // Left: hexagon
+    const hexSide = body.createDiv({ cls: "echoink-agent-profile-hex-side" });
+    const defaultScores = {
+      tempo: 0.5, energy: 0.5, mind: 0.5,
+      warmth: 0.5, order: 0.5, stance: 0.5
+    } as const;
     import("../ui/trait-hexagon").then(({ renderTraitHexagon }) => {
-      const defaultScores = {
-        tempo: 0.5, energy: 0.5, mind: 0.5,
-        warmth: 0.5, order: 0.5, stance: 0.5
-      } as const;
-      renderTraitHexagon(stage, defaultScores, { size: 220, rings: 4 });
+      renderTraitHexagon(hexSide, defaultScores, { size: 170, rings: 4 });
     }).catch(() => {
-      stage.createDiv({
+      hexSide.createDiv({
         cls: "echoink-settings-state is-neutral",
-        text: zh ? "人格图表加载中…" : "Loading personality chart…"
+        text: zh ? "加载中…" : "Loading…"
       });
     });
 
-    // --- Collapsible text content ---
-    const details = card.createEl("details", { cls: "echoink-agent-profile-card-details" });
-    const summary = details.createEl("summary", {
-      cls: "echoink-agent-profile-card-summary",
-      text: zh ? "查看完整人格文本" : "View full personality text"
+    // Right: trait dimension bars
+    const textSide = body.createDiv({ cls: "echoink-agent-profile-text-side" });
+    const dimLabels: [string, string, string][] = [
+      ["tempo", zh ? "节奏" : "Tempo", zh ? "快·短平快 ←→ 慢·深思熟虑" : "Fast ↔ Slow"],
+      ["energy", zh ? "能量" : "Energy", zh ? "外向·主动 ←→ 内向·安静" : "Outgoing ↔ Quiet"],
+      ["mind", zh ? "思维" : "Mind", zh ? "发散·联想 ←→ 聚焦·务实" : "Divergent ↔ Focused"],
+      ["warmth", zh ? "温度" : "Warmth", zh ? "冷静·对事 ←→ 共情·顾及感受" : "Cool ↔ Empathetic"],
+      ["order", zh ? "秩序" : "Order", zh ? "严谨·结构化 ←→ 随性·自然" : "Structured ↔ Casual"],
+      ["stance", zh ? "立场" : "Stance", zh ? "配合·以你为准 ←→ 主见·据理力争" : "Cooperative ↔ Opinionated"]
+    ];
+    for (const [, label, poles] of dimLabels) {
+      const row = textSide.createDiv({ cls: "echoink-trait-row" });
+      row.createSpan({ cls: "echoink-trait-dim", text: label });
+      const barBg = row.createDiv({ cls: "echoink-trait-bar-bg" });
+      barBg.createDiv({ cls: "echoink-trait-bar-fg" }); // width set dynamically when TraitStore is wired
+      row.createSpan({ cls: "echoink-trait-pct", text: "—" });
+      textSide.createDiv({ cls: "echoink-trait-poles", text: poles });
+    }
+
+    // --- Footer ---
+    const footer = card.createDiv({ cls: "echoink-agent-profile-card-footer" });
+    footer.createSpan({
+      text: zh ? "基于默认模板 · 尚未自进化" : "Default template · No evolution yet"
     });
-    summary.setAttr("aria-label", zh ? "展开或折叠 AGENT.md 内容" : "Expand or collapse AGENT.md content");
-    const contentPre = details.createEl("pre", {
-      cls: "echoink-agent-profile-card-content",
+    const reselectLink = footer.createEl("a", {
+      cls: "echoink-agent-profile-reselect",
+      text: zh ? "重新选择模板" : "Reselect template"
+    });
+    reselectLink.onclick = () => {
+      // TODO: trigger onboarding flow
+    };
+
+    // --- Drawer (slides down when expanded) ---
+    const drawer = card.createDiv({ cls: "echoink-agent-profile-drawer" });
+    const drawerInner = drawer.createDiv({ cls: "echoink-agent-profile-drawer-inner" });
+
+    // Summary card
+    const summaryCard = drawerInner.createDiv({ cls: "echoink-agent-profile-summary-card" });
+    const summaryTitle = summaryCard.createDiv({ cls: "echoink-agent-profile-summary-title" });
+    summaryTitle.setText(zh ? "人格总结" : "Personality Summary");
+    const summaryText = summaryCard.createDiv({ cls: "echoink-agent-profile-summary-text" });
+    summaryText.setText(zh
+      ? "这是一个基于默认配置的 Agent。完成冷启动引导后，这里会根据你的六维人格分数自动生成个性化的性格描述和行为特征总结。"
+      : "This is a default-configured Agent. After completing the onboarding, a personalized character description will be generated here based on your six trait scores."
+    );
+
+    // Raw AGENT.md text
+    const rawTitle = drawerInner.createDiv({ cls: "echoink-agent-profile-raw-title" });
+    rawTitle.setText("AGENT.md");
+    const rawPre = drawerInner.createEl("pre", {
+      cls: "echoink-agent-profile-raw-text",
       text: agentContent
     });
-    contentPre.setAttr("tabindex", "0");
+    rawPre.setAttr("tabindex", "0");
+
+    // Collapse button inside drawer
+    const collapseBtn = drawerInner.createEl("button", {
+      cls: "echoink-agent-profile-collapse-btn",
+      text: zh ? "▴ 收起" : "▴ Collapse",
+      attr: { type: "button" }
+    });
+
+    // Toggle logic
+    let isOpen = false;
+    function toggle(): void {
+      isOpen = !isOpen;
+      drawer.classList.toggle("is-open", isOpen);
+      expandBtn.setText(isOpen
+        ? (zh ? "收起描述" : "Collapse")
+        : (zh ? "查看完整描述" : "Full description"));
+      expandBtn.classList.toggle("is-open", isOpen);
+    }
+    expandBtn.onclick = toggle;
+    collapseBtn.onclick = toggle;
   }
 
   private addPersonalMemoryProfileEditor(
