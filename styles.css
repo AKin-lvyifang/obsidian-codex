@@ -12702,6 +12702,90 @@ body.theme-dark .codex-session-picker {
   color: var(--text-normal);
 }
 
+/* --- Template picker panel (inline, slides open below footer) --- */
+.echoink-template-picker {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.4s ease;
+  border-top: 0 solid var(--background-modifier-border);
+}
+
+.echoink-template-picker.is-visible {
+  max-height: 1200px;
+  border-top-width: 1px;
+  padding: 16px;
+}
+
+.echoink-picker-step-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-normal);
+  margin-bottom: 12px;
+}
+
+.echoink-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 10px;
+}
+
+.echoink-picker-template {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 12px 8px;
+  border-radius: 12px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  cursor: pointer;
+  transition: border-color 0.2s ease, background 0.2s ease;
+  text-align: center;
+}
+
+.echoink-picker-template:hover {
+  border-color: var(--interactive-accent);
+  background: var(--background-modifier-hover);
+}
+
+.echoink-picker-template-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.echoink-picker-template-desc {
+  font-size: 10px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.echoink-picker-mini-hex {
+  margin-top: 4px;
+}
+
+.echoink-picker-cancel-row {
+  display: flex;
+  justify-content: center;
+  margin-top: 12px;
+}
+
+.echoink-picker-cancel-btn {
+  padding: 5px 16px;
+  border-radius: 8px;
+  font-size: 12px;
+  cursor: pointer;
+  border: 1px solid var(--background-modifier-border);
+  background: transparent;
+  color: var(--text-muted);
+  transition: all 0.2s ease;
+}
+
+.echoink-picker-cancel-btn:hover {
+  border-color: var(--interactive-accent);
+  color: var(--text-normal);
+}
+
 /* Responsive: stack vertically on narrow screens */
 @media (max-width: 560px) {
   .echoink-agent-profile-card-body {

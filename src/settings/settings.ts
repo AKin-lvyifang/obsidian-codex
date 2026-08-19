@@ -300,6 +300,11 @@ export interface CodexForObsidianSettings {
   showWelcome: boolean;
   setup: SetupSettings;
   memory: EchoInkMemorySettings;
+  /** Personality system settings (cognitive v2). */
+  personality?: {
+    templateId?: string;
+    scores?: Record<string, number>;
+  };
   resourceManagementTab: ResourceManagementTab;
   knowledgeBase: KnowledgeBaseSettings;
   review: WeeklyReviewSettings;

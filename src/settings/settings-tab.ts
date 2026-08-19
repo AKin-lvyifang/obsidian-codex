@@ -654,13 +654,18 @@ export class CodexSettingTab extends PluginSettingTab {
 
   /**
    * Agent profile card: left-right layout (hexagon + trait bars) with a
-   * top-right expand button that slides open a drawer containing a
-   * personality summary and the raw AGENT.md text.
+   * top-right expand button that toggles a drawer containing a personality
+   * summary and the raw AGENT.md text.
+   *
+   * Footer has a template button: "初始风格选择" (first time) or "重置" (after).
+   * Clicking opens an inline template picker with 8 presets + scenario questions.
    *
    * Read-only — AGENT.md is a projection from trait records, not user-editable.
    */
   private addAgentProfileCard(container: HTMLElement, agentContent: string): void {
     const zh = this.plugin.settings.settingsLanguage !== "en";
+    // Check if a template has been selected before
+    const hasTemplate = Boolean(this.plugin.settings.personality?.templateId);
 
     // Card wrapper
     const card = container.createDiv({ cls: "echoink-agent-profile-card" });
@@ -673,20 +678,16 @@ export class CodexSettingTab extends PluginSettingTab {
       cls: "echoink-agent-profile-card-badge",
       text: zh ? "自动生成" : "Auto-generated"
     });
-    // Expand/collapse button — top-right corner, slide-arrow animation
+    // Expand/collapse button — top-right corner, morph animation
     const expandBtn = header.createEl("button", {
       cls: "echoink-agent-profile-expand-btn",
       attr: { type: "button" }
     });
-    // Morph icon container — User icon morphs to UserCheck on hover (amicro btn-23)
     const iconWrap = expandBtn.createSpan({ cls: "echoink-morph-icon-wrap" });
-    // Default icon: User (person silhouette)
     const iconDefault = iconWrap.createSpan({ cls: "echoink-morph-icon-default" });
     iconDefault.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`;
-    // Hover icon: UserCheck (person with checkmark)
     const iconHover = iconWrap.createSpan({ cls: "echoink-morph-icon-hover" });
     iconHover.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><polyline points="16 11 18 13 22 9"/></svg>`;
-    // Text label
     const btnLabel = expandBtn.createSpan({
       cls: "echoink-morph-btn-label",
       text: zh ? "查看完整描述" : "Full description"
@@ -700,15 +701,11 @@ export class CodexSettingTab extends PluginSettingTab {
 
     // --- Body: left hexagon + right trait bars ---
     const body = card.createDiv({ cls: "echoink-agent-profile-card-body" });
-
-    // Left: hexagon
     const hexSide = body.createDiv({ cls: "echoink-agent-profile-hex-side" });
-    const defaultScores = {
-      tempo: 0.5, energy: 0.5, mind: 0.5,
-      warmth: 0.5, order: 0.5, stance: 0.5
-    } as const;
+    const currentScores = { ...this.getCurrentTraitScores() } as Record<string, number>;
     import("../ui/trait-hexagon").then(({ renderTraitHexagon }) => {
-      renderTraitHexagon(hexSide, defaultScores, { size: 170, rings: 4 });
+      hexSide.empty();
+      renderTraitHexagon(hexSide, currentScores as any, { size: 170, rings: 4 });
     }).catch(() => {
       hexSide.createDiv({
         cls: "echoink-settings-state is-neutral",
@@ -716,7 +713,6 @@ export class CodexSettingTab extends PluginSettingTab {
       });
     });
 
-    // Right: trait dimension bars
     const textSide = body.createDiv({ cls: "echoink-agent-profile-text-side" });
     const dimLabels: [string, string, string][] = [
       ["tempo", zh ? "节奏" : "Tempo", zh ? "快·短平快 ←→ 慢·深思熟虑" : "Fast ↔ Slow"],
@@ -726,70 +722,186 @@ export class CodexSettingTab extends PluginSettingTab {
       ["order", zh ? "秩序" : "Order", zh ? "严谨·结构化 ←→ 随性·自然" : "Structured ↔ Casual"],
       ["stance", zh ? "立场" : "Stance", zh ? "配合·以你为准 ←→ 主见·据理力争" : "Cooperative ↔ Opinionated"]
     ];
-    for (const [, label, poles] of dimLabels) {
+    const barFgs: HTMLElement[] = [];
+    const pctSpans: HTMLElement[] = [];
+    for (let i = 0; i < dimLabels.length; i++) {
+      const [dim, label, poles] = dimLabels[i];
       const row = textSide.createDiv({ cls: "echoink-trait-row" });
       row.createSpan({ cls: "echoink-trait-dim", text: label });
       const barBg = row.createDiv({ cls: "echoink-trait-bar-bg" });
-      barBg.createDiv({ cls: "echoink-trait-bar-fg" }); // width set dynamically when TraitStore is wired
-      row.createSpan({ cls: "echoink-trait-pct", text: "—" });
+      const barFg = barBg.createDiv({ cls: "echoink-trait-bar-fg" });
+      const score = currentScores[dim as keyof typeof currentScores] ?? 0.5;
+      barFg.style.width = `${Math.round(score * 100)}%`;
+      barFgs.push(barFg);
+      const pct = row.createSpan({ cls: "echoink-trait-pct", text: `${Math.round(score * 100)}%` });
+      pctSpans.push(pct);
       textSide.createDiv({ cls: "echoink-trait-poles", text: poles });
     }
 
     // --- Footer ---
     const footer = card.createDiv({ cls: "echoink-agent-profile-card-footer" });
-    footer.createSpan({
-      text: zh ? "基于默认模板 · 尚未自进化" : "Default template · No evolution yet"
-    });
-    const reselectLink = footer.createEl("a", {
+    const footerStatus = footer.createSpan({});
+    footerStatus.setText(hasTemplate
+      ? (zh ? `基于「${this.getTemplateName()}」模板` : `Template: ${this.getTemplateName()}`)
+      : (zh ? "尚未选择初始风格" : "No style selected yet"));
+    const templateBtn = footer.createEl("a", {
       cls: "echoink-agent-profile-reselect",
-      text: zh ? "重新选择模板" : "Reselect template"
+      text: hasTemplate
+        ? (zh ? "重置" : "Reset")
+        : (zh ? "初始风格选择" : "Choose initial style")
     });
-    reselectLink.onclick = () => {
-      // TODO: trigger onboarding flow
+
+    // --- Template picker panel (hidden by default) ---
+    const pickerPanel = card.createDiv({ cls: "echoink-template-picker" });
+    let pickerVisible = false;
+
+    templateBtn.onclick = () => {
+      if (hasTemplate && !pickerVisible) {
+        // Show reset confirmation first
+        void confirmModal(
+          this.app,
+          zh ? "重置人格" : "Reset personality",
+          zh
+            ? "重置后 AGENT.md 的内容会马上覆盖更新。未来靠做梦也会不断成长，可能最后也会变得和现在一样——除非你把相关记忆也删了。确定要重置吗？"
+            : "After reset, AGENT.md will be immediately overwritten. Future dreaming may evolve it back to something similar — unless you also delete the related memories. Proceed?",
+          zh ? "确定重置" : "Confirm reset",
+          zh ? "取消" : "Cancel"
+        ).then((confirmed) => {
+          if (confirmed) this.showTemplatePicker(pickerPanel, body, footer, footerStatus, templateBtn, hexSide, barFgs, pctSpans, dimLabels, zh);
+        });
+      } else {
+        this.showTemplatePicker(pickerPanel, body, footer, footerStatus, templateBtn, hexSide, barFgs, pctSpans, dimLabels, zh);
+      }
     };
 
-    // --- Drawer (slides down when expanded) ---
+    // --- Drawer (toggled by expand button only, no separate collapse btn) ---
     const drawer = card.createDiv({ cls: "echoink-agent-profile-drawer" });
     const drawerInner = drawer.createDiv({ cls: "echoink-agent-profile-drawer-inner" });
 
-    // Summary card
     const summaryCard = drawerInner.createDiv({ cls: "echoink-agent-profile-summary-card" });
-    const summaryTitle = summaryCard.createDiv({ cls: "echoink-agent-profile-summary-title" });
-    summaryTitle.setText(zh ? "人格总结" : "Personality Summary");
+    summaryCard.createDiv({ cls: "echoink-agent-profile-summary-title", text: zh ? "人格总结" : "Personality Summary" });
     const summaryText = summaryCard.createDiv({ cls: "echoink-agent-profile-summary-text" });
     summaryText.setText(zh
-      ? "这是一个基于默认配置的 Agent。完成冷启动引导后，这里会根据你的六维人格分数自动生成个性化的性格描述和行为特征总结。"
-      : "This is a default-configured Agent. After completing the onboarding, a personalized character description will be generated here based on your six trait scores."
+      ? "完成初始风格选择后，这里会根据你的六维人格分数自动生成个性化的性格描述和行为特征总结。随着对话和做梦的积累，总结会持续更新。"
+      : "After choosing an initial style, a personalized character description will be auto-generated here. It updates as conversations and dreaming accumulate."
     );
 
-    // Raw AGENT.md text
-    const rawTitle = drawerInner.createDiv({ cls: "echoink-agent-profile-raw-title" });
-    rawTitle.setText("AGENT.md");
+    drawerInner.createDiv({ cls: "echoink-agent-profile-raw-title", text: "AGENT.md" });
     const rawPre = drawerInner.createEl("pre", {
       cls: "echoink-agent-profile-raw-text",
       text: agentContent
     });
     rawPre.setAttr("tabindex", "0");
 
-    // Collapse button inside drawer
-    const collapseBtn = drawerInner.createEl("button", {
-      cls: "echoink-agent-profile-collapse-btn",
-      text: zh ? "▴ 收起" : "▴ Collapse",
-      attr: { type: "button" }
-    });
-
-    // Toggle logic
+    // Toggle logic — expand button only, no separate collapse button
     let isOpen = false;
-    function toggle(): void {
+    expandBtn.onclick = () => {
       isOpen = !isOpen;
       drawer.classList.toggle("is-open", isOpen);
       btnLabel.setText(isOpen
         ? (zh ? "收起描述" : "Collapse")
         : (zh ? "查看完整描述" : "Full description"));
       expandBtn.classList.toggle("is-open", isOpen);
-    }
-    expandBtn.onclick = toggle;
-    collapseBtn.onclick = toggle;
+    };
+  }
+
+  /** Get current trait scores from settings (or defaults). */
+  private getCurrentTraitScores(): Readonly<Record<string, number>> {
+    const p = this.plugin.settings.personality;
+    if (p?.scores) return p.scores;
+    return { tempo: 0.5, energy: 0.5, mind: 0.5, warmth: 0.5, order: 0.5, stance: 0.5 };
+  }
+
+  /** Get the display name of the selected template. */
+  private getTemplateName(): string {
+    const id = this.plugin.settings.personality?.templateId;
+    if (!id) return "default";
+    const { PERSONALITY_TEMPLATES } = require("../harness/memory/personal-memory-contracts");
+    const t = (PERSONALITY_TEMPLATES as readonly { id: string; label: string }[]).find((x) => x.id === id);
+    return t?.label ?? id;
+  }
+
+  /** Show the inline template picker with 8 presets and scenario questions. */
+  private showTemplatePicker(
+    panel: HTMLElement,
+    body: HTMLElement,
+    footer: HTMLElement,
+    footerStatus: HTMLElement,
+    templateBtn: HTMLElement,
+    hexSide: HTMLElement,
+    barFgs: HTMLElement[],
+    pctSpans: HTMLElement[],
+    dimLabels: [string, string, string][],
+    zh: boolean
+  ): void {
+    panel.empty();
+    panel.addClass("is-visible");
+
+    import("../harness/memory/personal-memory-contracts").then(({ PERSONALITY_TEMPLATES, TRAIT_DIMENSIONS }) => {
+      import("../ui/trait-hexagon").then(({ renderTraitHexagon }) => {
+        // Step 1: Template grid
+        const stepLabel = panel.createDiv({ cls: "echoink-picker-step-label" });
+        stepLabel.setText(zh ? "选择一个最接近你期望的风格" : "Choose the closest style");
+
+        const grid = panel.createDiv({ cls: "echoink-picker-grid" });
+        for (const tpl of PERSONALITY_TEMPLATES) {
+          const tcard = grid.createEl("button", {
+            cls: "echoink-picker-template",
+            attr: { type: "button" }
+          });
+          tcard.createDiv({ cls: "echoink-picker-template-name", text: tpl.label });
+          tcard.createDiv({ cls: "echoink-picker-template-desc", text: tpl.description });
+          const miniHex = tcard.createDiv({ cls: "echoink-picker-mini-hex" });
+          renderTraitHexagon(miniHex, tpl.scores, { size: 80, rings: 3 });
+
+          tcard.onclick = () => {
+            // Apply template scores
+            const scores: Record<string, number> = {};
+            for (const dim of TRAIT_DIMENSIONS) scores[dim] = tpl.scores[dim];
+
+            // Update settings
+            this.plugin.settings.personality = {
+              ...(this.plugin.settings.personality ?? {}),
+              templateId: tpl.id,
+              scores
+            };
+            void this.plugin.saveSettings();
+
+            // Update UI immediately
+            footerStatus.setText(zh ? `基于「${tpl.label}」模板` : `Template: ${tpl.label}`);
+            templateBtn.setText(zh ? "重置" : "Reset");
+
+            // Update hexagon
+            hexSide.empty();
+            renderTraitHexagon(hexSide, scores as any, { size: 170, rings: 4 });
+
+            // Update bars
+            for (let i = 0; i < dimLabels.length; i++) {
+              const dim = dimLabels[i][0];
+              const score = scores[dim] ?? 0.5;
+              barFgs[i].style.width = `${Math.round(score * 100)}%`;
+              pctSpans[i].setText(`${Math.round(score * 100)}%`);
+            }
+
+            // Close picker
+            panel.removeClass("is-visible");
+            panel.empty();
+          };
+        }
+
+        // Cancel button
+        const cancelRow = panel.createDiv({ cls: "echoink-picker-cancel-row" });
+        const cancelBtn = cancelRow.createEl("button", {
+          cls: "echoink-picker-cancel-btn",
+          text: zh ? "取消" : "Cancel",
+          attr: { type: "button" }
+        });
+        cancelBtn.onclick = () => {
+          panel.removeClass("is-visible");
+          panel.empty();
+        };
+      });
+    });
   }
 
   private addPersonalMemoryProfileEditor(
