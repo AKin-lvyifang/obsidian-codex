@@ -545,6 +545,111 @@ export class CodexSettingTab extends PluginSettingTab {
           this.plugin.getCodexView()?.refreshPersonalizationUi();
         });
       }));
+
+    this.renderAboutSection(page);
+  }
+
+  private renderAboutSection(page: HTMLElement): void {
+    const zh = this.plugin.settings.settingsLanguage !== "en";
+    const version = this.plugin.manifest.version ?? "unknown";
+
+    const section = createSettingsSection(page, {
+      title: zh ? "关于 EchoInk" : "About EchoInk",
+      surface: "group"
+    });
+    const group = createSettingsGroup(section);
+
+    // --- Plugin info card ---
+    const card = group.createDiv({ cls: "echoink-about-card" });
+
+    // Logo + name + version
+    const header = card.createDiv({ cls: "echoink-about-header" });
+    const logoWrap = header.createDiv({ cls: "echoink-about-logo" });
+    logoWrap.innerHTML = `<svg width="36" height="36" viewBox="0 0 36 36" fill="none"><rect width="36" height="36" rx="10" fill="var(--interactive-accent)" fill-opacity="0.15"/><path d="M10 18c0-4.4 3.6-8 8-8s8 3.6 8 8-3.6 8-8 8" stroke="var(--interactive-accent)" stroke-width="2" stroke-linecap="round"/><circle cx="18" cy="18" r="2.5" fill="var(--interactive-accent)"/><path d="M18 10v3M18 23v3M10 18h3M23 18h3" stroke="var(--interactive-accent)" stroke-width="1.5" stroke-linecap="round" opacity="0.5"/></svg>`;
+    const nameArea = header.createDiv({ cls: "echoink-about-name-area" });
+    nameArea.createDiv({ cls: "echoink-about-name", text: "Codex EchoInk" });
+    nameArea.createDiv({ cls: "echoink-about-version", text: `v${version}` });
+
+    // Description
+    card.createDiv({
+      cls: "echoink-about-desc",
+      text: zh
+        ? "EchoInk 是一个 Obsidian 本地 AI 插件，让 Agent 拥有长期记忆、可演化的人格和知识库能力。所有数据留在你的 Vault 里，不上传任何云端。"
+        : "EchoInk is a local Obsidian AI plugin that gives your Agent long-term memory, evolving personality, and knowledge base capabilities. All data stays in your Vault — nothing is uploaded to the cloud."
+    });
+
+    // Philosophy
+    const philosophy = card.createDiv({ cls: "echoink-about-philosophy" });
+    philosophy.createDiv({
+      cls: "echoink-about-philosophy-title",
+      text: zh ? "设计理念" : "Philosophy"
+    });
+    const principles = zh
+      ? [
+          "真实高于迎合 — Agent 不会为了讨好你而隐藏风险或伪造确定性",
+          "记忆属于用户 — 所有记忆存在本地 Vault，你可随时查看、纠正、删除",
+          "人格缓慢演化 — 不是你说一次就改，而是从对话和记忆中逐渐校准",
+          "克制而非全能 — 只做该做的事，轻微变化保持安静"
+        ]
+      : [
+          "Truth over flattery — Agent won't hide risks or fake certainty to please you",
+          "Memory belongs to you — all memories live in your local Vault, always inspectable",
+          "Personality evolves slowly — calibrated from conversations and memories, not instant overrides",
+          "Restraint over omnipotence — does what's needed, stays quiet on minor changes"
+        ];
+    for (const p of principles) {
+      const item = philosophy.createDiv({ cls: "echoink-about-principle" });
+      item.createSpan({ cls: "echoink-about-principle-dot" });
+      item.createSpan({ cls: "echoink-about-principle-text", text: p });
+    }
+
+    // --- Action buttons row ---
+    const actions = card.createDiv({ cls: "echoink-about-actions" });
+
+    // Star on GitHub button (sparkle animation)
+    const starBtn = actions.createEl("a", {
+      cls: "echoink-about-btn echoink-about-btn-star",
+      attr: {
+        href: "https://github.com/AKin-lvyifang/codex-echoink",
+        target: "_blank",
+        rel: "noopener noreferrer"
+      }
+    });
+    const starIconWrap = starBtn.createSpan({ cls: "echoink-sparkle-icon-wrap" });
+    // Default icon: GitHub
+    const githubIcon = starIconWrap.createSpan({ cls: "echoink-sparkle-icon-default" });
+    githubIcon.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.865 8.166 6.839 9.489.5.092.682-.217.682-.482 0-.237-.009-.866-.013-1.7-2.782.604-3.369-1.34-3.369-1.34-.454-1.156-1.11-1.463-1.11-1.463-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.831.092-.646.35-1.086.636-1.336-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0112 6.836c.85.004 1.705.115 2.504.337 1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.203 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.743 0 .267.18.578.688.48C19.138 20.163 22 16.418 22 12c0-5.523-4.477-10-10-10z"/></svg>`;
+    // Hover icon: Star (hidden by default)
+    const starIcon = starIconWrap.createSpan({ cls: "echoink-sparkle-icon-hover" });
+    starIcon.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" class="echoink-star-yellow"><path d="M12 2l2.4 7.6H22l-6.2 4.5 2.4 7.6-6.2-4.5-6.2 4.5 2.4-7.6L2 9.6h7.6z"/></svg>`;
+    // Sparkle particles (appear on hover)
+    const sparkle1 = starIconWrap.createSpan({ cls: "echoink-sparkle-particle echoink-sparkle-p1" });
+    sparkle1.innerHTML = `<svg width="8" height="8" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 7.6H22l-6.2 4.5 2.4 7.6-6.2-4.5-6.2 4.5 2.4-7.6L2 9.6h7.6z"/></svg>`;
+    const sparkle2 = starIconWrap.createSpan({ cls: "echoink-sparkle-particle echoink-sparkle-p2" });
+    sparkle2.innerHTML = `<svg width="6" height="6" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 7.6H22l-6.2 4.5 2.4 7.6-6.2-4.5-6.2 4.5 2.4-7.6L2 9.6h7.6z"/></svg>`;
+    starBtn.createSpan({ cls: "echoink-about-btn-label", text: "Star on GitHub" });
+
+    // Repo link button
+    const repoBtn = actions.createEl("a", {
+      cls: "echoink-about-btn echoink-about-btn-ghost",
+      attr: {
+        href: "https://github.com/AKin-lvyifang/codex-echoink",
+        target: "_blank",
+        rel: "noopener noreferrer"
+      },
+      text: zh ? "查看源码" : "Source Code"
+    });
+
+    // Issues link
+    const issuesBtn = actions.createEl("a", {
+      cls: "echoink-about-btn echoink-about-btn-ghost",
+      attr: {
+        href: "https://github.com/AKin-lvyifang/codex-echoink/issues",
+        target: "_blank",
+        rel: "noopener noreferrer"
+      },
+      text: zh ? "反馈问题" : "Report Issue"
+    });
   }
 
   /**

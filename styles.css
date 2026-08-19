@@ -12953,3 +12953,229 @@ body.theme-dark .codex-session-picker {
 .echoink-onboarding-btn-primary:hover {
   opacity: 0.9;
 }
+
+/* ==========================================================================
+   Cognitive System v2: About Section (plugin info + philosophy + actions)
+   ========================================================================== */
+
+.echoink-about-card {
+  margin: 4px 14px;
+  padding: 16px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.echoink-about-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.echoink-about-logo {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.echoink-about-name-area {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.echoink-about-name {
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--text-normal);
+}
+
+.echoink-about-version {
+  font-size: 11px;
+  font-family: var(--font-monospace);
+  color: var(--text-muted);
+}
+
+.echoink-about-desc {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+
+/* Philosophy */
+.echoink-about-philosophy {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.echoink-about-philosophy-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-normal);
+  margin-bottom: 2px;
+}
+
+.echoink-about-principle {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.echoink-about-principle-dot {
+  flex-shrink: 0;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--interactive-accent);
+  opacity: 0.6;
+  margin-top: 6px;
+}
+
+.echoink-about-principle-text {
+  flex: 1;
+}
+
+/* Action buttons row */
+.echoink-about-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.echoink-about-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 16px;
+  border-radius: 40px;
+  font-size: 12px;
+  font-weight: 500;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+  white-space: nowrap;
+}
+
+.echoink-about-btn:active {
+  transform: scale(0.96);
+}
+
+.echoink-about-btn-ghost {
+  border: 1px solid var(--background-modifier-border);
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.echoink-about-btn-ghost:hover {
+  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-normal);
+}
+
+/* Star button — sparkle animation (amicro btn-2 style) */
+.echoink-about-btn-star {
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-muted);
+  position: relative;
+}
+
+.echoink-about-btn-star:hover {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.1);
+  color: var(--text-normal);
+  transform: scale(1.02);
+}
+
+/* Sparkle icon container */
+.echoink-sparkle-icon-wrap {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+/* Default icon (GitHub) — visible by default, slides up on hover */
+.echoink-sparkle-icon-default {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity 0.25s cubic-bezier(0.34, 1.56, 0.64, 1),
+              transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.echoink-about-btn-star:hover .echoink-sparkle-icon-default {
+  opacity: 0;
+  transform: translateY(-15px);
+}
+
+/* Hover icon (Star) — hidden by default, slides up from below on hover */
+.echoink-sparkle-icon-hover {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transform: translateY(15px);
+  transition: opacity 0.25s cubic-bezier(0.34, 1.56, 0.64, 1),
+              transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.echoink-about-btn-star:hover .echoink-sparkle-icon-hover {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.echoink-star-yellow {
+  color: #facc15;
+}
+
+/* Sparkle particles — appear on hover with staggered delay */
+.echoink-sparkle-particle {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transform: scale(0) rotate(-45deg);
+  transition: opacity 0.3s cubic-bezier(0.34, 1.56, 0.64, 1),
+              transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+  color: #fef08a;
+  pointer-events: none;
+}
+
+.echoink-sparkle-p1 {
+  top: -8px;
+  right: -6px;
+  transition-delay: 0.05s;
+}
+
+.echoink-sparkle-p2 {
+  top: -4px;
+  right: -10px;
+  transition-delay: 0.1s;
+}
+
+.echoink-about-btn-star:hover .echoink-sparkle-particle {
+  opacity: 1;
+  transform: scale(1) rotate(0deg);
+}
