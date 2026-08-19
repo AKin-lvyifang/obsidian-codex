@@ -839,27 +839,49 @@ export class CodexSettingTab extends PluginSettingTab {
 
     import("../harness/memory/personal-memory-contracts").then(({ PERSONALITY_TEMPLATES, TRAIT_DIMENSIONS }) => {
       import("../ui/trait-hexagon").then(({ renderTraitHexagon }) => {
-        // Step 1: Template grid
         const stepLabel = panel.createDiv({ cls: "echoink-picker-step-label" });
         stepLabel.setText(zh ? "选择一个最接近你期望的风格" : "Choose the closest style");
 
-        const grid = panel.createDiv({ cls: "echoink-picker-grid" });
+        // List layout — one row per template
+        const list = panel.createDiv({ cls: "echoink-picker-list" });
+
+        // Richer descriptions that explain what the Agent will DO
+        const richDescsZh: Record<string, string> = {
+          executor: "回答先给结论再展开，不废话不寒暄，发现问题直接指出",
+          advisor: "每个建议都附依据和利弊分析，宁可慢一步也不给模糊答案",
+          butler: "安静执行你的指令，不主动起话题，有不同意见也只轻声提醒",
+          companion: "先回应你的情绪再处理事情，措辞温和，批评也会留面子",
+          steward: "输出永远结构化——列表、表格、分步骤，帮你把混乱理清楚",
+          enthusiast: "聊天氛围轻松活跃，会主动追问和延伸话题，什么都能接",
+          creative: "讨论时爱发散联想，经常提出你没想到的角度和可能性",
+          pragmatist: "边聊边干，说话直来直去，有分歧会据理力争但尊重你的最终决定"
+        };
+        const richDescsEn: Record<string, string> = {
+          executor: "Leads with conclusions, no filler, flags problems directly",
+          advisor: "Every suggestion backed by evidence and trade-off analysis",
+          butler: "Quietly executes your instructions, only gently flags disagreements",
+          companion: "Acknowledges your feelings first, criticism always delivered kindly",
+          steward: "Always structured output — lists, tables, step-by-step breakdowns",
+          enthusiast: "Lively and proactive, asks follow-ups, picks up any topic",
+          creative: "Loves divergent thinking, surfaces angles you hadn't considered",
+          pragmatist: "Talks and does simultaneously, argues with evidence, respects your call"
+        };
+        const descs = zh ? richDescsZh : richDescsEn;
+
         for (const tpl of PERSONALITY_TEMPLATES) {
-          const tcard = grid.createEl("button", {
-            cls: "echoink-picker-template",
+          const row = list.createEl("button", {
+            cls: "echoink-picker-row",
             attr: { type: "button" }
           });
-          tcard.createDiv({ cls: "echoink-picker-template-name", text: tpl.label });
-          tcard.createDiv({ cls: "echoink-picker-template-desc", text: tpl.description });
-          const miniHex = tcard.createDiv({ cls: "echoink-picker-mini-hex" });
-          renderTraitHexagon(miniHex, tpl.scores, { size: 80, rings: 3 });
+          const nameCol = row.createDiv({ cls: "echoink-picker-row-name" });
+          nameCol.setText(tpl.label);
+          const descCol = row.createDiv({ cls: "echoink-picker-row-desc" });
+          descCol.setText(descs[tpl.id] ?? tpl.description);
 
-          tcard.onclick = () => {
-            // Apply template scores
+          row.onclick = () => {
             const scores: Record<string, number> = {};
             for (const dim of TRAIT_DIMENSIONS) scores[dim] = tpl.scores[dim];
 
-            // Update settings
             this.plugin.settings.personality = {
               ...(this.plugin.settings.personality ?? {}),
               templateId: tpl.id,
@@ -867,15 +889,12 @@ export class CodexSettingTab extends PluginSettingTab {
             };
             void this.plugin.saveSettings();
 
-            // Update UI immediately
             footerStatus.setText(zh ? `基于「${tpl.label}」模板` : `Template: ${tpl.label}`);
             templateBtn.setText(zh ? "重置" : "Reset");
 
-            // Update hexagon
             hexSide.empty();
             renderTraitHexagon(hexSide, scores as any, { size: 170, rings: 4 });
 
-            // Update bars
             for (let i = 0; i < dimLabels.length; i++) {
               const dim = dimLabels[i][0];
               const score = scores[dim] ?? 0.5;
@@ -883,13 +902,11 @@ export class CodexSettingTab extends PluginSettingTab {
               pctSpans[i].setText(`${Math.round(score * 100)}%`);
             }
 
-            // Close picker
             panel.removeClass("is-visible");
             panel.empty();
           };
         }
 
-        // Cancel button
         const cancelRow = panel.createDiv({ cls: "echoink-picker-cancel-row" });
         const cancelBtn = cancelRow.createEl("button", {
           cls: "echoink-picker-cancel-btn",
