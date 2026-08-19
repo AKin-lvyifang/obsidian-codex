@@ -568,12 +568,22 @@ export class CodexSettingTab extends PluginSettingTab {
       cls: "echoink-agent-profile-card-badge",
       text: zh ? "自动生成" : "Auto-generated"
     });
-    // Expand/collapse button — top-right corner
+    // Expand/collapse button — top-right corner, slide-arrow animation
     const expandBtn = header.createEl("button", {
       cls: "echoink-agent-profile-expand-btn",
       attr: { type: "button" }
     });
-    expandBtn.setText(zh ? "查看完整描述" : "Full description");
+    // Left icon slot (profile circle, visible by default)
+    const iconLeft = expandBtn.createSpan({ cls: "echoink-slide-btn-icon-left" });
+    iconLeft.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="11" stroke="currentColor" stroke-width="1.5"/><circle cx="12" cy="9.5" r="3.5" stroke="currentColor" stroke-width="1.5"/><path d="M5.5 19.5c0-3.5 2.9-5.5 6.5-5.5s6.5 2 6.5 5.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>`;
+    // Text label
+    const btnLabel = expandBtn.createSpan({
+      cls: "echoink-slide-btn-label",
+      text: zh ? "查看完整描述" : "Full description"
+    });
+    // Right arrow slot (hidden by default, appears on hover)
+    const iconRight = expandBtn.createSpan({ cls: "echoink-slide-btn-icon-right" });
+    iconRight.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
     header.createDiv({
       cls: "echoink-agent-profile-card-desc",
       text: zh
@@ -666,7 +676,7 @@ export class CodexSettingTab extends PluginSettingTab {
     function toggle(): void {
       isOpen = !isOpen;
       drawer.classList.toggle("is-open", isOpen);
-      expandBtn.setText(isOpen
+      btnLabel.setText(isOpen
         ? (zh ? "收起描述" : "Collapse")
         : (zh ? "查看完整描述" : "Full description"));
       expandBtn.classList.toggle("is-open", isOpen);

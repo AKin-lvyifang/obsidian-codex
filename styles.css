@@ -12419,30 +12419,105 @@ body.theme-dark .codex-session-picker {
   opacity: 0.85;
 }
 
-/* Expand button — top-right corner of header */
+/* Expand button — top-right, slide-arrow animation (amicro btn-1 style)
+   Default: [profile-icon] [text]
+   Hover:   [text] [arrow→]  (icon slides out left, arrow slides in right)
+   Open:    [text] [chevron↓] (arrow rotated 90° to indicate collapse)
+   Spring-like feel via cubic-bezier(0.34, 1.56, 0.64, 1) ≈ stiffness 600 damping 25 */
 .echoink-agent-profile-expand-btn {
   margin-left: auto;
-  padding: 4px 12px;
-  border-radius: 6px;
-  font-size: 11px;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 40px;
+  font-size: 12px;
   font-weight: 500;
+  letter-spacing: -0.01em;
   cursor: pointer;
-  border: 1px solid var(--background-modifier-border);
-  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.04);
   color: var(--text-muted);
-  transition: all 0.2s ease;
   white-space: nowrap;
+  transition: background 0.15s ease, border-color 0.15s ease,
+              transform 0.15s ease, color 0.15s ease;
 }
 
 .echoink-agent-profile-expand-btn:hover {
-  border-color: var(--interactive-accent);
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.1);
   color: var(--text-normal);
-  background: var(--background-modifier-hover);
+  transform: scale(1.02);
+}
+
+.echoink-agent-profile-expand-btn:active {
+  transform: scale(0.96);
 }
 
 .echoink-agent-profile-expand-btn.is-open {
   border-color: var(--interactive-accent);
   color: var(--interactive-accent);
+  background: rgba(124, 92, 191, 0.08);
+}
+
+/* Left icon (profile circle) — visible by default, slides out on hover */
+.echoink-slide-btn-icon-left {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  margin-right: 6px;
+  opacity: 1;
+  transform: translateX(0);
+  transition: opacity 0.25s cubic-bezier(0.34, 1.56, 0.64, 1),
+              transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1),
+              margin 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.echoink-agent-profile-expand-btn:hover .echoink-slide-btn-icon-left,
+.echoink-agent-profile-expand-btn.is-open .echoink-slide-btn-icon-left {
+  opacity: 0;
+  transform: translateX(-10px);
+  margin-right: 0;
+  width: 0;
+  overflow: hidden;
+}
+
+/* Right arrow — hidden by default, slides in on hover */
+.echoink-slide-btn-icon-right {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  margin-left: 0;
+  opacity: 0;
+  transform: translateX(10px);
+  width: 0;
+  overflow: hidden;
+  transition: opacity 0.25s cubic-bezier(0.34, 1.56, 0.64, 1),
+              transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1),
+              margin 0.25s cubic-bezier(0.34, 1.56, 0.64, 1),
+              width 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.echoink-agent-profile-expand-btn:hover .echoink-slide-btn-icon-right {
+  opacity: 1;
+  transform: translateX(0);
+  margin-left: 6px;
+  width: 14px;
+}
+
+/* When drawer is open, show arrow rotated as collapse indicator */
+.echoink-agent-profile-expand-btn.is-open .echoink-slide-btn-icon-right {
+  opacity: 1;
+  transform: translateX(0) rotate(90deg);
+  margin-left: 6px;
+  width: 14px;
+}
+
+/* Label text */
+.echoink-slide-btn-label {
+  transition: opacity 0.15s ease;
 }
 
 .echoink-agent-profile-card-desc {
