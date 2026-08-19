@@ -678,17 +678,19 @@ export class CodexSettingTab extends PluginSettingTab {
       cls: "echoink-agent-profile-expand-btn",
       attr: { type: "button" }
     });
-    // Left icon slot (profile circle, visible by default)
-    const iconLeft = expandBtn.createSpan({ cls: "echoink-slide-btn-icon-left" });
-    iconLeft.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="11" stroke="currentColor" stroke-width="1.5"/><circle cx="12" cy="9.5" r="3.5" stroke="currentColor" stroke-width="1.5"/><path d="M5.5 19.5c0-3.5 2.9-5.5 6.5-5.5s6.5 2 6.5 5.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>`;
+    // Morph icon container — User icon morphs to UserCheck on hover (amicro btn-23)
+    const iconWrap = expandBtn.createSpan({ cls: "echoink-morph-icon-wrap" });
+    // Default icon: User (person silhouette)
+    const iconDefault = iconWrap.createSpan({ cls: "echoink-morph-icon-default" });
+    iconDefault.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`;
+    // Hover icon: UserCheck (person with checkmark)
+    const iconHover = iconWrap.createSpan({ cls: "echoink-morph-icon-hover" });
+    iconHover.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><polyline points="16 11 18 13 22 9"/></svg>`;
     // Text label
     const btnLabel = expandBtn.createSpan({
-      cls: "echoink-slide-btn-label",
+      cls: "echoink-morph-btn-label",
       text: zh ? "查看完整描述" : "Full description"
     });
-    // Right arrow slot (hidden by default, appears on hover)
-    const iconRight = expandBtn.createSpan({ cls: "echoink-slide-btn-icon-right" });
-    iconRight.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M5 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
     header.createDiv({
       cls: "echoink-agent-profile-card-desc",
       text: zh
