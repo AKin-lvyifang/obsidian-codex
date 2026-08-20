@@ -16,6 +16,7 @@ import {
 } from "../harness/memory/dream-engine";
 import {
   applySecondaryDecay,
+  applySecondaryHit,
   computeSecondaryConfidence,
   createSecondaryRecord,
   reconcileSecondaryForParent,
@@ -25,11 +26,13 @@ import {
 } from "../harness/memory/secondary-memory-store";
 import {
   measureFinalInjectionTokens,
-  PersonalMemoryRecallHarness
+  PersonalMemoryRecallHarness,
+  serializeRecallInjection
 } from "../harness/memory/personal-memory-recall-harness";
+import { estimatePiContextTokens } from "../harness/pi-native/pi-context-budget";
 import type { PersonalMemoryTurnCatalogCandidate } from "../harness/memory/personal-memory-repository";
 import { currentPersonalityScores, type PersonalityState } from "../harness/memory/personality-state";
-import { USER_OBSERVED_MIN_SOURCES, type UserProfileState } from "../harness/memory/user-profile-state";
+import { parseUserProfileState, USER_OBSERVED_MIN_SOURCES, type UserProfileState } from "../harness/memory/user-profile-state";
 import { renderUserMarkdown } from "../harness/memory/cognitive-projection";
 import { getPersonalityTemplate, TRAIT_DIMENSION_META } from "../harness/memory/personality-templates";
 import { defaultUserProfile } from "../harness/memory/personal-memory-repository";
@@ -257,6 +260,7 @@ async function scenarioDreamCreatesSecondaryFacts(): Promise<void> {
     });
     const memoryId = memory.id;
 
+    await system.settleDreamEnqueue();
     assert.ok(system.dreamStateStore.peek().pendingMemoryIds.includes(memoryId));
 
     const beforeManifest = await readJson(fixture.repository.layout.manifest);
@@ -331,6 +335,7 @@ async function scenarioDreamGating(): Promise<void> {
       title: "门控测试记忆",
       content: "关闭做梦或长期记忆后不得被处理。"
     });
+    await system.settleDreamEnqueue();
     assert.ok(system.dreamStateStore.peek().pendingMemoryIds.includes(memory.id));
 
     // Dream switch off → no run at all, queue untouched.
@@ -367,6 +372,7 @@ async function scenarioDreamFailureSemantics(): Promise<void> {
       title: "待整理的记忆",
       content: "这条记忆在 Provider 不可用时不能被做梦处理。"
     });
+    await system.settleDreamEnqueue();
 
     // Provider unavailable: migration (local) may commit, but lastSuccessAt
     // must NOT advance and pending must survive.
@@ -1024,7 +1030,7 @@ async function scenarioSecondaryLifecycle(): Promise<void> {
       reason: "工具范围更新",
       basis: "explicit"
     } as never, fixture.runtime());
-    let facts = await system.secondaryStore.refresh();
+    let facts = await system.listAllSecondary();
     const forOldParent = facts.filter((fact) => fact.parentId === memoryId);
     assert.equal(forOldParent.length, 1);
     assert.equal(forOldParent[0].status, "disabled");
@@ -1042,13 +1048,13 @@ async function scenarioSecondaryLifecycle(): Promise<void> {
     assert.equal((await system.listSecondaryForParent(secondId)).length, 1);
 
     await fixture.repository.forgetFromUserControl(secondId, "测试删除");
-    facts = await system.secondaryStore.refresh();
+    facts = await system.listAllSecondary();
     assert.ok(facts
       .filter((fact) => fact.parentId === secondId)
       .every((fact) => fact.status === "disabled"));
 
     await fixture.repository.restoreForgotten(secondId);
-    facts = await system.secondaryStore.refresh();
+    facts = await system.listAllSecondary();
     assert.ok(facts
       .filter((fact) => fact.parentId === secondId)
       .every((fact) => fact.status === "current"));
@@ -1085,7 +1091,7 @@ async function scenarioSecondaryUserEditDelete(): Promise<void> {
     assert.match(onDisk, /user_edited_inference/);
 
     await system.deleteSecondaryFact(fact.id);
-    assert.equal((await system.secondaryStore.refresh())
+    assert.equal((await system.listAllSecondary())
       .filter((record) => record.id === fact.id).length, 0);
     const index = await readJson(fixture.repository.layout.searchIndex) as {
       secondaryCatalog: readonly unknown[];
@@ -1347,8 +1353,8 @@ async function scenarioFinalPayloadBudgetSingleInjection(): Promise<void> {
       })
     ])
   });
-  const withTokens = measureFinalInjectionTokens(withMatches);
-  const withoutTokens = measureFinalInjectionTokens(base);
+  const withTokens = measureFinalInjectionTokens([withMatches]);
+  const withoutTokens = measureFinalInjectionTokens([base]);
   assert.ok(withTokens > withoutTokens,
     "budget must include secondary fact text, parentTitle and wrappers");
 
@@ -1523,13 +1529,13 @@ async function scenarioHitStatsAndDisabledReasonRestore(): Promise<void> {
 
     // --- Forget disables by parent lifecycle; restore only re-enables those. ---
     await fixture.repository.forgetFromUserControl(memory.id, "测试忘记");
-    facts = await system.secondaryStore.refresh();
+    facts = await system.listAllSecondary();
     const editedDisabled = facts.find((fact) => fact.id === editedFact.id)!;
     assert.equal(editedDisabled.status, "disabled");
     assert.equal(editedDisabled.disabledReason, "parent_lifecycle");
 
     await fixture.repository.restoreForgotten(memory.id);
-    facts = await system.secondaryStore.refresh();
+    facts = await system.listAllSecondary();
     const editedRestored = facts.find((fact) => fact.id === editedFact.id)!;
     assert.equal(editedRestored.status, "current", "parent_lifecycle facts restore");
     const stillDisabled = facts.find((fact) => fact.id === hitFact.id)!;
@@ -1537,6 +1543,655 @@ async function scenarioHitStatsAndDisabledReasonRestore(): Promise<void> {
     assert.equal(stillDisabled.disabledReason, "low_confidence");
   });
   console.log("PASS cognitive: hit transaction + decay revisions + restore gate");
+}
+
+
+// ---------------------------------------------------------------------------
+// R3-1. DreamState restart: enqueue merges into real persisted state (§1)
+// ---------------------------------------------------------------------------
+
+async function scenarioDreamStateRestartMergesEnqueues(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    const seeded = {
+      schema: "echoink.dream.v1",
+      revision: 7,
+      lastRunAt: 1_700_000_000_000,
+      lastSuccessAt: 1_700_000_000_000,
+      lastProcessedMemoryRevision: 3,
+      pendingMemoryIds: ["mem_legacy_pending"],
+      backfillCursor: "mem_cursor_x",
+      updatedAt: 1_700_000_000_000
+    };
+    await writeFile(fixture.repository.layout.dreamState, JSON.stringify(seeded, null, 2));
+
+    // Rebuild the system (simulated restart) — no scheduler tick involved.
+    const system = await createSystem(fixture, () => fakeDreamLlm(validDreamJson));
+
+    // Immediately write three new memories concurrently: enqueue must merge
+    // into the real persisted state, not an uninitialized in-memory default.
+    const writes = await Promise.all([
+      createMemory(fixture, { title: "重启后记忆一", content: "重启后第一条记忆。" }),
+      createMemory(fixture, { title: "重启后记忆二", content: "重启后第二条记忆。" }),
+      createMemory(fixture, { title: "重启后记忆三", content: "重启后第三条记忆。" })
+    ]);
+    await system.settleDreamEnqueue();
+
+    const state = await readJson(fixture.repository.layout.dreamState) as {
+      revision: number;
+      lastRunAt: number;
+      lastSuccessAt: number;
+      lastProcessedMemoryRevision: number;
+      pendingMemoryIds: readonly string[];
+      backfillCursor: string | null;
+    };
+    assert.deepEqual(
+      [...state.pendingMemoryIds].sort(),
+      ["mem_legacy_pending", ...writes.map((record) => record.id)].sort(),
+      "pre-existing pending and all new writes must survive rebuild + concurrent enqueues"
+    );
+    assert.equal(state.lastRunAt, 1_700_000_000_000, "enqueue must never reset lastRunAt");
+    assert.equal(state.lastSuccessAt, 1_700_000_000_000, "enqueue must never reset lastSuccessAt");
+    assert.equal(state.lastProcessedMemoryRevision, 3, "enqueue must never reset the processed watermark");
+    assert.equal(state.backfillCursor, "mem_cursor_x", "enqueue must never reset the backfill cursor");
+    assert.equal(state.revision, 10, "each real enqueue bumps the dream-state revision exactly once");
+  });
+  console.log("PASS cognitive: restart merges dream enqueues into persisted state");
+}
+
+// ---------------------------------------------------------------------------
+// R3-2. Dual-cache consistency: immediate visibility, rebuild, failed txn (§2)
+// ---------------------------------------------------------------------------
+
+async function scenarioSecondaryCacheImmediateAndConsistent(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    const system = await createSystem(fixture, () => fakeDreamLlm(validDreamJson));
+    const memory = await createMemory(fixture, {
+      title: "缓存一致性记忆",
+      content: "用于验证二级事实双缓存一致性。"
+    });
+    await system.settleDreamEnqueue();
+    await system.forceDreamRun();
+    const fact = (await system.listSecondaryForParent(memory.id))[0];
+    assert.ok(fact);
+
+    // close → immediately visible through the committed cache (no refresh).
+    await fixture.repository.write({
+      operation: "close",
+      targetId: memory.id,
+      reason: "测试关闭"
+    } as never, fixture.runtime());
+    const afterClose = await system.listSecondaryForParent(memory.id);
+    assert.equal(afterClose[0].status, "disabled", "close must be visible without any refresh");
+    assert.equal(afterClose[0].disabledReason, "parent_lifecycle");
+
+    // Rebuild from disk (fresh system) → identical view.
+    const rebuilt = await createSystem(fixture, () => null);
+    const fromDisk = await rebuilt.listAllSecondary();
+    const fromCache = await system.listAllSecondary();
+    assert.deepEqual(
+      fromDisk.map((record) => `${record.id}:${record.status}:${record.disabledReason}`),
+      fromCache.map((record) => `${record.id}:${record.status}:${record.disabledReason}`),
+      "rebuild from disk must match the committed cache"
+    );
+
+    // Failed cognitive transaction: disk and BOTH caches keep the old values.
+    // An unsafe extraChanges path makes runTransaction reject mid-flight.
+    const factPath = `${fixture.vaultPath}/.echoink/${fact.file}`;
+    const diskBefore = await readFile(factPath, "utf8");
+    const cacheBefore = (await system.listAllSecondary())
+      .map((record) => `${record.id}:${record.confidence}:${record.revision}`);
+    await assert.rejects(
+      fixture.repository.applyCognitiveUpdate({
+        secondaryRecords: (await system.listAllSecondary()).map((record) => ({ ...record, confidence: 0.01 })),
+        extraChanges: [{ relativePath: "../escape.md", content: "must fail" }],
+        detail: "must-fail"
+      }),
+      /escapes/u
+    );
+    assert.equal(await readFile(factPath, "utf8"), diskBefore,
+      "failed transaction must not touch secondary files on disk");
+    const cacheAfter = (await system.listAllSecondary())
+      .map((record) => `${record.id}:${record.confidence}:${record.revision}`);
+    assert.deepEqual(cacheAfter, cacheBefore,
+      "failed transaction must leave both caches at the pre-commit state");
+    const rebuiltAfterFail = await createSystem(fixture, () => null);
+    assert.deepEqual(
+      (await rebuiltAfterFail.listAllSecondary())
+        .map((record) => `${record.id}:${record.confidence}:${record.revision}`),
+      cacheBefore,
+      "disk rebuild after a failed transaction also sees the old state"
+    );
+  });
+  console.log("PASS cognitive: secondary caches stay consistent through lifecycle and failures");
+}
+
+// ---------------------------------------------------------------------------
+// R3-3. Partial failure retries only the failed records (§3)
+// ---------------------------------------------------------------------------
+
+async function scenarioPartialFailureRedreamsOnlyFailed(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    const calls: string[] = [];
+    let bValid = false;
+    const system = await createSystem(fixture, () => scriptedDreamLlm((memory) => {
+      calls.push(memory.title);
+      if (memory.title === "部分失败记忆乙") {
+        if (!bValid) return "{invalid-json";
+        return {
+          ...EMPTY_DREAM_OUTPUT,
+          secondaryFacts: [{
+            title: "乙记忆事实",
+            content: "由乙记忆推导的事实。",
+            recallWhen: "相关话题出现时",
+            matchTerms: ["部分失败乙"],
+            relation: "instance",
+            supportLevel: "direct",
+            reason: "测试",
+            evidence: "记忆直接陈述"
+          }]
+        };
+      }
+      return {
+        ...EMPTY_DREAM_OUTPUT,
+        secondaryFacts: [{
+          title: "甲记忆事实",
+          content: "由甲记忆推导的事实。",
+          recallWhen: "相关话题出现时",
+          matchTerms: ["部分失败甲"],
+          relation: "instance",
+          supportLevel: "direct",
+          reason: "测试",
+          evidence: "记忆直接陈述"
+        }]
+      };
+    }));
+    const memoryA = await createMemory(fixture, { title: "部分失败记忆甲", content: "甲记忆内容。" });
+    const memoryB = await createMemory(fixture, { title: "部分失败记忆乙", content: "乙记忆内容。" });
+    await system.settleDreamEnqueue();
+
+    // Round 1: A valid, B invalid → only A commits; B stays pending.
+    const run1 = await system.forceDreamRun();
+    assert.ok(run1);
+    assert.equal(run1!.committed, true);
+    assert.deepEqual(run1!.processedMemoryIds, [memoryA.id]);
+    assert.deepEqual(run1!.failedMemoryIds, [memoryB.id]);
+    const factsA1 = await system.listSecondaryForParent(memoryA.id);
+    assert.equal(factsA1.length, 1);
+    assert.equal((await system.listSecondaryForParent(memoryB.id)).length, 0);
+    let dreamState = await readJson(fixture.repository.layout.dreamState) as {
+      pendingMemoryIds: readonly string[];
+      lastSuccessAt: number;
+    };
+    assert.deepEqual(dreamState.pendingMemoryIds, [memoryB.id], "failed record stays pending");
+    assert.equal(dreamState.lastSuccessAt, 0, "partial failure must not advance lastSuccessAt");
+
+    // Round 2: Provider receives ONLY B; A's facts/revision/calls unchanged.
+    bValid = true;
+    const aCallsBefore = calls.filter((title) => title === "部分失败记忆甲").length;
+    const run2 = await system.forceDreamRun();
+    assert.ok(run2);
+    assert.deepEqual(run2!.processedMemoryIds, [memoryB.id]);
+    assert.deepEqual(run2!.failedMemoryIds, []);
+    assert.equal(
+      calls.filter((title) => title === "部分失败记忆甲").length,
+      aCallsBefore,
+      "already-succeeded record must never be re-sent to the Provider"
+    );
+    const factsA2 = await system.listSecondaryForParent(memoryA.id);
+    assert.equal(factsA2.length, 1);
+    assert.equal(factsA2[0].id, factsA1[0].id, "A's fact id untouched");
+    assert.equal(factsA2[0].revision, factsA1[0].revision, "A's fact revision untouched");
+    assert.equal(factsA2[0].confidence, factsA1[0].confidence, "A's fact confidence untouched");
+    assert.equal((await system.listSecondaryForParent(memoryB.id)).length, 1);
+    dreamState = await readJson(fixture.repository.layout.dreamState) as {
+      pendingMemoryIds: readonly string[];
+      lastSuccessAt: number;
+    };
+    assert.deepEqual(dreamState.pendingMemoryIds, [], "queue empties once B succeeds");
+    assert.ok(dreamState.lastSuccessAt > 0, "zero-failure round advances lastSuccessAt");
+  });
+  console.log("PASS cognitive: partial failure retries only failed records");
+}
+
+// ---------------------------------------------------------------------------
+// R3-4. Recall budget measures the real final payload once (§4)
+// ---------------------------------------------------------------------------
+
+async function scenarioRecallBudgetFinalPayloadOnce(): Promise<void> {
+  const factContent = "用于预算验证的二级事实正文，必须足够长以主导包络开销。".repeat(3);
+  const make = (suffix: string): PersonalMemoryTurnCatalogCandidate => Object.freeze({
+    id: `mem_budget_${suffix}`,
+    kind: "fact",
+    status: "current",
+    title: `预算记忆${suffix}`,
+    recallWhen: "相关话题出现时",
+    summary: `预算摘要${suffix}`,
+    date: "2026-08-20",
+    basis: "explicit",
+    sourceSummary: "",
+    score: 1,
+    secondaryMatches: Object.freeze([Object.freeze({
+      id: `sec_budget_${suffix}`,
+      parentId: `mem_budget_${suffix}`,
+      title: `预算事实${suffix}`,
+      content: factContent,
+      recallWhen: "相关话题出现时",
+      matchTerms: [`预算${suffix}`],
+      relation: "instance" as const,
+      basis: "llm_inferred" as const
+    })])
+  });
+  const a = make("甲");
+  const b = make("乙");
+
+  // Envelope/wrapper overhead is counted ONCE across candidates.
+  const together = measureFinalInjectionTokens([a, b]);
+  const separate = measureFinalInjectionTokens([a]) + measureFinalInjectionTokens([b]);
+  assert.ok(together < separate, "wrapper overhead must be counted once, not per candidate");
+
+  await withPersonalMemoryFixture(async (fixture) => {
+    const system = await createSystem(fixture, () => scriptedDreamLlm((memory) => ({
+      ...EMPTY_DREAM_OUTPUT,
+      secondaryFacts: [{
+        title: memory.title.includes("甲") ? "预算事实甲" : "预算事实乙",
+        content: factContent,
+        recallWhen: "相关话题出现时",
+        matchTerms: [memory.title.includes("甲") ? "预算甲" : "预算乙"],
+        relation: "instance",
+        supportLevel: "direct",
+        reason: "测试",
+        evidence: "记忆直接陈述"
+      }]
+    })));
+    await createMemory(fixture, { title: "预算记忆甲", content: "预算记忆甲的内容。预算甲" });
+    await createMemory(fixture, { title: "预算记忆乙", content: "预算记忆乙的内容。预算乙" });
+    await system.settleDreamEnqueue();
+    await system.forceDreamRun();
+
+    // Index-only fields must never leak into recall match views.
+    const snapshot = await fixture.repository.prepareTurnSnapshot({
+      memoryMode: "normal",
+      query: "预算甲 预算乙"
+    }, fixture.runtime());
+    assert.ok(snapshot.search);
+    assert.ok(snapshot.search!.items.length >= 2);
+    for (const item of snapshot.search!.items) {
+      for (const match of item.secondaryMatches ?? []) {
+        assert.ok(!("routeTokens" in match), "match views must not carry routeTokens");
+        assert.ok(!("contentTokens" in match), "match views must not carry contentTokens");
+      }
+    }
+
+    const harness = new PersonalMemoryRecallHarness(fixture.repository);
+    const common = {
+      memoryMode: "normal" as const,
+      query: "预算甲 预算乙",
+      vaultId: fixture.vaultId,
+      conversationId: "conversation-budget-r3",
+      piSessionId: "pi-budget-r3",
+      productRunId: "run-budget-r3"
+    };
+    const plenty = await harness.prepareTurnContext({ ...common, tokenBudget: 20_000 });
+    assert.equal(plenty.recall?.injected, 2);
+
+    // Budget = the exact cumulative final payload → both candidates admitted
+    // (per-candidate wrapper double-counting would reject the second one).
+    const exactBudget = measureFinalInjectionTokens(plenty.recall!.candidates);
+    assert.ok(exactBudget < separate, "cumulative measurement must beat the old over-estimate");
+    const exact = await harness.prepareTurnContext({ ...common, tokenBudget: exactBudget });
+    assert.equal(exact.recall?.injected, 2,
+      "cumulative payload at the exact budget must admit both candidates");
+
+    // The shared serializer's final payload really fits the budget.
+    const secondaryFacts = [];
+    for (const candidate of exact.recall!.candidates) {
+      for (const view of candidate.secondaryMatches ?? []) {
+        secondaryFacts.push({ parentId: candidate.id, parentTitle: candidate.title, fact: view });
+      }
+    }
+    const payload = serializeRecallInjection({
+      candidates: exact.recall!.candidates,
+      secondaryFacts
+    });
+    assert.ok(estimatePiContextTokens(payload).tokens <= exactBudget,
+      "serialized final payload must stay within the measured budget");
+  });
+  console.log("PASS cognitive: recall budget measures the real final payload once");
+}
+
+// ---------------------------------------------------------------------------
+// R3-5. Observed profile aggregation by stable profileKey (§5)
+// ---------------------------------------------------------------------------
+
+async function scenarioObservedProfileKeyAggregation(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    const texts: Record<string, string> = {
+      散步记忆一: "用户每天早晨都会去公园散步",
+      散步记忆二: "用户有清晨散步的习惯",
+      散步记忆三: "用户喜欢在清晨散步"
+    };
+    const prompts: string[] = [];
+    const llm: DreamLlmPort = {
+      call: async (input) => {
+        prompts.push(input.systemPrompt);
+        const parsed = JSON.parse(input.userPrompt) as { memory: { title: string } };
+        return JSON.stringify({
+          ...EMPTY_DREAM_OUTPUT,
+          userProfileItems: [{
+            section: "preference",
+            profileKey: "清晨散步",
+            text: texts[parsed.memory.title] ?? "用户喜欢清晨散步"
+          }]
+        });
+      }
+    };
+    const system = await createSystem(fixture, () => llm);
+    for (const title of Object.keys(texts)) {
+      await createMemory(fixture, {
+        title,
+        content: `${title}的内容：用户谈到自己的散步习惯。`,
+        kind: "view",
+        basis: "observed"
+      });
+    }
+    await system.settleDreamEnqueue();
+    await system.forceDreamRun();
+
+    const raw = await readJson(fixture.repository.layout.userProfileState) as Record<string, unknown>;
+    const profileState = parseUserProfileState(raw);
+    assert.ok(profileState);
+    const currentItems = profileState!.items.filter((item) => item.status === "current");
+    assert.equal(currentItems.length, 1, "three near-synonym observed texts must merge into ONE item");
+    assert.equal(currentItems[0].sourceMemoryIds.length, 3, "all three sources must accumulate");
+    assert.equal(currentItems[0].profileKey, "清晨散步");
+    assert.ok(!prompts[0].includes("已有 profileKey"), "first memory sees no existing keys");
+    assert.ok(prompts[1].includes("清晨散步"),
+      "later memories in the same round must be offered keys created earlier");
+
+    // USER.md renders the merged observed item (threshold 3 reached).
+    const userMd = await readFile(fixture.repository.layout.user, "utf8");
+    assert.ok(userMd.includes(currentItems[0].text), "merged item must reach USER.md");
+
+    // Legacy state without profileKey still parses with a fallback key.
+    const legacy = parseUserProfileState({
+      schema: "echoink.user-profile.v1",
+      revision: 2,
+      items: [{ id: "p_legacy", section: "preference", text: "用户喜欢手冲咖啡" }],
+      processedSources: [],
+      updatedAt: 5
+    });
+    assert.ok(legacy);
+    assert.ok(legacy!.items[0].profileKey.length > 0, "legacy items get a fallback key");
+    assert.equal(legacy!.items[0].text, "用户喜欢手冲咖啡", "legacy text preserved");
+  });
+  console.log("PASS cognitive: observed profile aggregates near-synonyms by profileKey");
+}
+
+// ---------------------------------------------------------------------------
+// R3-6. User-edited low-confidence facts stay recallable (§6)
+// ---------------------------------------------------------------------------
+
+async function scenarioUserEditedLowConfidenceRecallable(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    const system = await createSystem(fixture, () => scriptedDreamLlm(() => ({
+      ...EMPTY_DREAM_OUTPUT,
+      secondaryFacts: [{
+        title: "丙类关联事实",
+        content: "用于验证用户编辑后的低置信事实召回。",
+        recallWhen: "相关话题出现时",
+        matchTerms: ["丙类关联"],
+        relation: "associated",
+        supportLevel: "direct",
+        reason: "测试",
+        evidence: "记忆直接陈述"
+      }]
+    })));
+    const memory = await createMemory(fixture, {
+      title: "丙类记忆",
+      content: "用户提到丙类相关内容。"
+    });
+    await system.settleDreamEnqueue();
+    await system.forceDreamRun();
+    const fact = (await system.listSecondaryForParent(memory.id))[0];
+    // direct(0.85) × explicit(1.00) + associated(−0.15) = 0.70.
+    assert.ok(Math.abs(fact.confidence - 0.70) < 1e-9);
+
+    // One decay period → below the 0.60 index threshold.
+    fixture.advance(30 * DAY_MS + 1_000);
+    await system.forceDreamRun();
+    const decayedFact = (await system.listSecondaryForParent(memory.id))[0];
+    assert.ok(Math.abs(decayedFact.confidence - 0.56) < 1e-9);
+    assert.equal(decayedFact.status, "current");
+    let index = await readJson(fixture.repository.layout.searchIndex) as {
+      secondaryCatalog: readonly { id: string }[];
+    };
+    assert.ok(!index.secondaryCatalog.some((entry) => entry.id === fact.id),
+      "decayed fact must leave the search index");
+
+    // User edit → immediately recallable again (index rebuilt in the same txn).
+    await system.updateSecondaryFact(fact.id, { content: "用户确认丙类关联。" });
+    const edited = (await system.listSecondaryForParent(memory.id))[0];
+    assert.equal(edited.basis, "user_edited_inference");
+    index = await readJson(fixture.repository.layout.searchIndex) as {
+      secondaryCatalog: readonly { id: string }[];
+    };
+    assert.ok(index.secondaryCatalog.some((entry) => entry.id === fact.id),
+      "user-edited fact must re-enter the index immediately, regardless of confidence");
+    const snapshot = await fixture.repository.prepareTurnSnapshot({
+      memoryMode: "normal",
+      query: "丙类关联"
+    }, fixture.runtime());
+    assert.ok(snapshot.search);
+    const match = (snapshot.search!.items[0]?.secondaryMatches ?? [])[0];
+    assert.ok(match, "edited low-confidence fact must be recallable immediately");
+    assert.equal(match!.basis, "user_edited_inference");
+
+    // Still recallable after a rebuild from disk.
+    await createSystem(fixture, () => null);
+    const snapshot2 = await fixture.repository.prepareTurnSnapshot({
+      memoryMode: "normal",
+      query: "丙类关联"
+    }, fixture.runtime());
+    assert.equal((snapshot2.search!.items[0]?.secondaryMatches ?? []).length, 1,
+      "recall survives restart");
+
+    // Survives multiple dream rounds with zero further decay.
+    for (let round = 0; round < 3; round += 1) {
+      fixture.advance(30 * DAY_MS + 1_000);
+      await system.forceDreamRun();
+    }
+    const stable = (await system.listSecondaryForParent(memory.id))[0];
+    assert.ok(Math.abs(stable.confidence - 0.56) < 1e-9,
+      "user_edited_inference never decays further");
+    assert.equal(stable.status, "current", "user_edited_inference never auto-disables");
+    assert.equal(stable.basis, "user_edited_inference");
+  });
+  console.log("PASS cognitive: user-edited low-confidence facts stay recallable");
+}
+
+// ---------------------------------------------------------------------------
+// R3-7. Decay revision discipline + no-op writes (§7)
+// ---------------------------------------------------------------------------
+
+async function scenarioDecayRevisionAndNoOpWrites(): Promise<void> {
+  const now = 1_800_000_000_000;
+  const make = (confidence: number): ReturnType<typeof createSecondaryRecord> =>
+    createSecondaryRecord({
+      parentId: "mem_decay_parent",
+      title: "衰减事实",
+      content: "用于验证衰减 revision 纪律。",
+      recallWhen: "相关话题出现时",
+      matchTerms: ["衰减验证"],
+      relation: "instance",
+      reason: "测试",
+      supportLevel: "strong_inference",
+      evidence: "由记忆推导",
+      basis: "llm_inferred",
+      confidence,
+      sourceMemoryRevision: 1,
+      now
+    });
+
+  const base = make(0.8);
+  const d1 = applySecondaryDecay(base, now + 30 * DAY_MS + 1_000);
+  assert.equal(d1.decayed, true);
+  assert.equal(d1.record.revision, base.revision + 1, "real decay bumps revision exactly once");
+  assert.ok(d1.record.lastDecayAt !== null);
+
+  // Same-period repeat is a pure no-op (no confidence/lastDecayAt/updatedAt/revision change).
+  const d2 = applySecondaryDecay(d1.record, now + 30 * DAY_MS + 2_000);
+  assert.equal(d2.decayed, false);
+  assert.equal(d2.record, d1.record, "same-period re-run must return the identical record");
+
+  // Multi-period catch-up = ONE persisted change, ONE revision bump.
+  const d3 = applySecondaryDecay(base, now + 90 * DAY_MS + 3_000);
+  assert.equal(d3.decayed, true);
+  assert.equal(d3.record.revision, base.revision + 1, "multi-period catch-up is a single revision bump");
+  assert.ok(Math.abs(d3.record.confidence - 0.8 * Math.pow(0.8, 3)) < 1e-9);
+
+  // Auto-disable shares the same single revision change.
+  const weak = make(0.12);
+  const w1 = applySecondaryDecay(weak, now + 30 * DAY_MS + 1_000);
+  assert.equal(w1.autoDisabled, true);
+  assert.equal(w1.record.status, "disabled");
+  assert.equal(w1.record.disabledReason, "low_confidence");
+  assert.equal(w1.record.revision, weak.revision + 1,
+    "decay + auto-disable land in one revision change");
+
+  // System level: the second run in the same period writes nothing.
+  await withPersonalMemoryFixture(async (fixture) => {
+    const system = await createSystem(fixture, () => scriptedDreamLlm(() => ({
+      ...EMPTY_DREAM_OUTPUT,
+      secondaryFacts: [{
+        title: "衰减系统事实",
+        content: "用于验证系统级衰减写盘纪律。",
+        recallWhen: "相关话题出现时",
+        matchTerms: ["衰减系统"],
+        relation: "instance",
+        supportLevel: "strong_inference",
+        reason: "测试",
+        evidence: "由记忆推导"
+      }]
+    })));
+    const memory = await createMemory(fixture, { title: "衰减系统记忆", content: "衰减系统记忆内容。" });
+    await system.settleDreamEnqueue();
+    await system.forceDreamRun();
+
+    fixture.advance(30 * DAY_MS + 1_000);
+    const run1 = await system.forceDreamRun();
+    assert.ok(run1);
+    assert.equal(run1!.decayed, 1);
+    const factAfterRun1 = (await system.listSecondaryForParent(memory.id))[0];
+    const filePath = `${fixture.vaultPath}/.echoink/${factAfterRun1.file}`;
+    const contentAfterRun1 = await readFile(filePath, "utf8");
+
+    const run2 = await system.forceDreamRun();
+    assert.ok(run2);
+    assert.equal(run2!.decayed, 0, "same-period repeat must decay nothing");
+    assert.equal(await readFile(filePath, "utf8"), contentAfterRun1,
+      "no file rewrite for a no-op decay round");
+    const factAfterRun2 = (await system.listSecondaryForParent(memory.id))[0];
+    assert.equal(factAfterRun2.revision, factAfterRun1.revision);
+    assert.equal(factAfterRun2.confidence, factAfterRun1.confidence);
+    assert.equal(factAfterRun2.lastDecayAt, factAfterRun1.lastDecayAt);
+    assert.equal(factAfterRun2.updatedAt, factAfterRun1.updatedAt);
+  });
+  console.log("PASS cognitive: decay revision discipline + no-op writes");
+}
+
+// ---------------------------------------------------------------------------
+// R3-8. Secondary dedupe: title OR term set, user-edited precedence (§8)
+// ---------------------------------------------------------------------------
+
+async function scenarioSecondaryDedupeTitleOrTerms(): Promise<void> {
+  const now = 1_800_000_000_000;
+  const makeExisting = (confidence: number, basis: "llm_inferred" | "user_edited_inference") =>
+    createSecondaryRecord({
+      parentId: "mem_dedupe_parent",
+      title: "手冲咖啡",
+      content: "既有二级事实。",
+      recallWhen: "相关话题出现时",
+      matchTerms: ["咖啡豆", "滤纸"],
+      relation: "instance",
+      reason: "测试",
+      supportLevel: "strong_inference",
+      evidence: "由记忆推导",
+      basis,
+      confidence,
+      sourceMemoryRevision: 1,
+      now
+    });
+  const candidate = (
+    title: string,
+    matchTerms: readonly string[],
+    supportLevel: SecondaryFactCandidate["supportLevel"] = "direct"
+  ): SecondaryFactCandidate => Object.freeze({
+    title,
+    content: "新候选内容。",
+    recallWhen: "相关话题出现时",
+    matchTerms,
+    relation: "instance" as const,
+    supportLevel,
+    reason: "测试",
+    evidence: "记忆直接陈述"
+  });
+  const reconcile = (
+    existing: readonly ReturnType<typeof makeExisting>[],
+    candidates: readonly SecondaryFactCandidate[]
+  ) => reconcileSecondaryForParent({
+    parentId: "mem_dedupe_parent",
+    parentBasis: "explicit",
+    parentRevision: 2,
+    existing,
+    candidates,
+    now: now + 1_000
+  });
+
+  // 1) Same title, different terms, higher candidate confidence → replace.
+  let result = reconcile([makeExisting(0.75, "llm_inferred")], [candidate("手冲咖啡", ["手冲", "器具"])]);
+  assert.equal(result.records.filter((record) => record.status === "current").length, 1);
+  assert.equal(result.factsCreated, 1);
+  assert.equal(
+    result.records.filter((record) => record.disabledReason === "redream_replaced").length,
+    1
+  );
+
+  // 2) Same title, existing confidence higher → keep old record untouched.
+  const boosted = applySecondaryHit(makeExisting(0.75, "llm_inferred"), now + 500);
+  assert.ok(boosted.confidence >= 0.80);
+  result = reconcile([boosted], [candidate("手冲咖啡", ["手冲", "器具"], "strong_inference")]);
+  let current = result.records.filter((record) => record.status === "current");
+  assert.equal(current.length, 1);
+  assert.equal(current[0].id, boosted.id, "kept record reuses the old id");
+  assert.equal(current[0].hitCount, boosted.hitCount, "hitCount unchanged");
+  assert.equal(current[0].lastHitAt, boosted.lastHitAt, "lastHitAt unchanged");
+  assert.equal(current[0].revision, boosted.revision, "kept record is not rewritten");
+  assert.ok(!result.fileChanges.some((change) => change.relativePath === boosted.file),
+    "kept record causes no file write");
+  assert.equal(result.factsCreated, 0);
+  assert.equal(result.factsRetired, 0);
+
+  // 3) Different title, same non-empty term set → duplicate as well.
+  result = reconcile([boosted], [candidate("清晨手冲", ["咖啡豆", "滤纸"], "strong_inference")]);
+  current = result.records.filter((record) => record.status === "current");
+  assert.equal(current.length, 1);
+  assert.equal(current[0].id, boosted.id, "same term set dedupes despite different title");
+  assert.equal(result.factsCreated, 0);
+
+  // 4) user_edited_inference always beats LLM candidates (title or terms).
+  const userFact = makeExisting(0.62, "user_edited_inference");
+  result = reconcile([userFact], [candidate("手冲咖啡", ["完全不同的词"])]);
+  current = result.records.filter((record) => record.status === "current");
+  assert.equal(current.length, 1);
+  assert.equal(current[0].id, userFact.id, "same-title candidate loses to user edit");
+  assert.equal(current[0].basis, "user_edited_inference");
+  assert.equal(result.factsCreated, 0);
+  result = reconcile([userFact], [candidate("另一个标题", ["咖啡豆", "滤纸"])]);
+  current = result.records.filter((record) => record.status === "current");
+  assert.equal(current.length, 1);
+  assert.equal(current[0].id, userFact.id, "same-term candidate loses to user edit");
+  assert.equal(result.factsCreated, 0);
+  console.log("PASS cognitive: secondary dedupe by title OR term set with user-edit precedence");
 }
 
 export async function runCognitiveSystemScenarios(): Promise<void> {
@@ -1563,4 +2218,12 @@ export async function runCognitiveSystemScenarios(): Promise<void> {
   await scenarioFinalPayloadBudgetSingleInjection();
   await scenarioMangoRecallBridge();
   await scenarioHitStatsAndDisabledReasonRestore();
+  await scenarioDreamStateRestartMergesEnqueues();
+  await scenarioSecondaryCacheImmediateAndConsistent();
+  await scenarioPartialFailureRedreamsOnlyFailed();
+  await scenarioRecallBudgetFinalPayloadOnce();
+  await scenarioObservedProfileKeyAggregation();
+  await scenarioUserEditedLowConfidenceRecallable();
+  await scenarioDecayRevisionAndNoOpWrites();
+  await scenarioSecondaryDedupeTitleOrTerms();
 }

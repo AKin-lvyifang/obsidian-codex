@@ -45,7 +45,9 @@ import {
 import {
   applyDreamProfileUpdate,
   reconcileProfileSources,
+  fallbackProfileKey,
   isProfileItemRenderable,
+  PROFILE_KEY_MAX_CHARS,
   type DreamProfileInput,
   type UserProfileSection,
   type UserProfileState
@@ -286,9 +288,13 @@ export class DreamEngine {
     const candidatesByParent = new Map<string, SecondaryFactCandidate[]>();
     let tokensUsed = 0;
 
+    // 同一轮内前面 Memory 新产生的 profileKey 也要供后续 Memory 复用。
+    const knownProfileKeys: string[] = workingProfile.items
+      .filter((item) => item.status === "current")
+      .map((item) => item.profileKey);
     for (const record of processable) {
       if (!llm) break;
-      const promptInput = buildDreamPrompts(record, this.config.maxInputChars);
+      const promptInput = buildDreamPrompts(record, this.config.maxInputChars, knownProfileKeys);
       const estimated = estimateTokens(promptInput.systemPrompt) + estimateTokens(promptInput.userPrompt);
       if (tokensUsed + estimated > this.config.tokenBudget && processedMemoryIds.length > 0) {
         failedMemoryIds.push(record.id);
@@ -327,7 +333,8 @@ export class DreamEngine {
           for (const signal of parsed.signals.slice(0, 2)) {
             if (seenDimensions.has(signal.dimension)) continue;
             seenDimensions.add(signal.dimension);
-            signals.push({ ...signal, sourceMemoryId: record.id, sourceMemoryRevision: inspected.revision });
+            // 单条来源 revision 用对应 record.revision，不用整份 manifest revision。
+            signals.push({ ...signal, sourceMemoryId: record.id, sourceMemoryRevision: record.revision });
           }
           if (record.basis === "explicit") {
             for (const text of parsed.requirements.slice(0, 2)) {
@@ -346,10 +353,13 @@ export class DreamEngine {
               basis: record.basis === "explicit" ? "explicit_memory" : "observed_memory",
               sourceMemoryId: record.id
             });
+            if (!knownProfileKeys.includes(item.profileKey)) {
+              knownProfileKeys.push(item.profileKey);
+            }
           }
         }
 
-        processedSources.push({ memoryId: record.id, memoryRevision: inspected.revision });
+        processedSources.push({ memoryId: record.id, memoryRevision: record.revision });
         processedMemoryIds.push(record.id);
       } catch {
         failedMemoryIds.push(record.id);
@@ -366,7 +376,7 @@ export class DreamEngine {
       const result = reconcileSecondaryForParent({
         parentId,
         parentBasis: parentRecord?.basis ?? "inferred",
-        parentRevision: inspected.revision,
+        parentRevision: parentRecord?.revision ?? 1,
         existing: secondaryRecords.filter((record) => record.parentId === parentId),
         candidates,
         now: this.now()
@@ -401,18 +411,21 @@ export class DreamEngine {
     let decayed = 0;
     let autoDisabled = 0;
     const decayedSecondary: SecondaryMemoryRecord[] = [];
+    const decayedThisRound = new Set<string>();
     for (const record of finalSecondary) {
       const result = applySecondaryDecay(record, this.now());
       if (result.decayed) {
         decayed += 1;
+        decayedThisRound.add(result.record.id);
         decayedSecondary.push(result.record);
       } else {
         decayedSecondary.push(record);
       }
       if (result.autoDisabled) autoDisabled += 1;
     }
+    // 只写本轮实际衰减的记录，不能把所有 lastDecayAt 非空记录每轮重复写盘。
     const decayedFileChanges = decayedSecondary
-      .filter((record) => record.lastDecayAt !== null)
+      .filter((record) => decayedThisRound.has(record.id))
       .map((record) => ({ relativePath: record.file, content: serializeSecondaryRecord(record) }));
 
     // --- 9. Projections -------------------------------------------------------
@@ -541,7 +554,9 @@ export class DreamEngine {
 
     // --- 13. Transaction succeeded -------------------------------------------
     dreamStateStore.updateCache(nextDream);
-    await secondaryStore.refresh();
+    // 事务已提交：同步缓存为最终落盘内容（含衰减后的 records），
+    // 不做异步磁盘刷新，避免窗口期。
+    secondaryStore.setCache(decayedSecondary);
 
     return this.finish({
       startedAt,
@@ -631,16 +646,14 @@ export class DreamEngine {
       if (backfill) fromBackfill.add(record.id);
     };
 
-    // 1. Explicit pending queue (new writes enqueue here).
+    // 1. Explicit pending queue (failed items stay here and retry first).
     for (const id of dreamState.pendingMemoryIds) {
       const record = byId.get(id);
       if (record) consider(record, false);
     }
-    // 2. Changed since the last processed manifest revision.
-    for (const record of currentRecords) {
-      if (record.revision > dreamState.lastProcessedMemoryRevision) consider(record, false);
-    }
-    // 3. Unprocessed (e.g. after a reset cleared processedSources).
+    // 2. 以每条记录的 processedSources.memoryRevision 为准：只处理尚未
+    //    成功处理当前 record.revision 的记忆。部分失败时已成功项不会再被
+    //    选中（它们的 memoryRevision 已登记），避免重复 Provider 调用。
     for (const record of currentRecords) {
       const processedAt = processedRevisions.get(record.id);
       if (processedAt === undefined || processedAt < record.revision) consider(record, false);
@@ -701,7 +714,8 @@ function isProfileEligible(record: PersonalMemoryRecord): boolean {
 
 export function buildDreamPrompts(
   record: PersonalMemoryRecord,
-  maxInputChars: number
+  maxInputChars: number,
+  knownProfileKeys: readonly string[] = []
 ): { systemPrompt: string; userPrompt: string } {
   const directionLines = TRAIT_DIMENSIONS.map((dimension) => {
     const meta = TRAIT_DIMENSION_META[dimension];
@@ -717,7 +731,7 @@ export function buildDreamPrompts(
     "5. personalitySignals：仅当这条记忆体现用户对 Agent 表达方式或处事方式的长期偏好时给出 0-2 条，形如 {\"dimension\":\"tempo|energy|mind|warmth|order|stance\", \"direction\":\"increase|decrease\", \"strength\":0-1, \"evidence\":≤80字}；方向语义如下（分数 0=左极，1=右极）：",
     ...directionLines,
     "6. agentRequirements：仅当记忆是用户对 Agent 的明确长期要求（如\"以后回复简短\"）时给出 0-2 条短语；否则空数组。",
-    "7. userProfileItems：仅当记忆包含稳定、当前有效的用户画像（身份、长期偏好、合作方式）时给出 0-2 条 {\"section\":\"identity|preference|collaboration\", \"text\":≤120字}；一次性任务、临时指令、引用、假设不得进入。",
+    `7. userProfileItems：仅当记忆包含稳定、当前有效的用户画像（身份、长期偏好、合作方式）时给出 0-2 条 {"section":"identity|preference|collaboration", "profileKey":≤${PROFILE_KEY_MAX_CHARS}字的稳定主题词（如"清晨散步"，同义表述必须复用同一 key）, "text":≤120字}；一次性任务、临时指令、引用、假设不得进入。${knownProfileKeys.length > 0 ? `已有 profileKey（主题相同必须复用，不要新造近义 key）：${knownProfileKeys.join("、")}` : ""}`,
     "8. 不得声称用户亲口说过记忆之外的话；语言与记忆保持一致。"
   ].join("\n");
   const content = record.content.slice(0, maxInputChars);
@@ -757,7 +771,7 @@ export interface ParsedDreamOutput {
     evidence: string;
   }>;
   readonly requirements: string[];
-  readonly profileItems: Array<{ section: UserProfileSection; text: string }>;
+  readonly profileItems: Array<{ section: UserProfileSection; profileKey: string; text: string }>;
 }
 
 export function parseDreamOutput(raw: string): ParsedDreamOutput | null {
@@ -842,8 +856,12 @@ export function parseDreamOutput(raw: string): ParsedDreamOutput | null {
       if (!sections.has(item.section as string)) continue;
       const text = boundedString(item.text, 800);
       if (!text) continue;
+      const rawKey = typeof item.profileKey === "string" ? item.profileKey.trim() : "";
       profileItems.push(Object.freeze({
         section: item.section as UserProfileSection,
+        profileKey: rawKey
+          ? rawKey.slice(0, PROFILE_KEY_MAX_CHARS)
+          : fallbackProfileKey(text),
         text
       }));
     }

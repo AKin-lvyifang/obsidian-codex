@@ -20,9 +20,19 @@ import {
 export type UserProfileSection = "identity" | "preference" | "collaboration";
 export type UserProfileItemBasis = "explicit_memory" | "observed_memory" | "legacy_import";
 
+export const PROFILE_KEY_MAX_CHARS = 40;
+
+/** 兼容旧 state / 模型未给 key：从 text 生成有界 fallback key。 */
+export function fallbackProfileKey(text: string): string {
+  const normalized = normalizeTextForDedupe(text);
+  return normalized.slice(0, PROFILE_KEY_MAX_CHARS) || "unknown";
+}
+
 export interface UserProfileItem {
   readonly id: string;
   readonly section: UserProfileSection;
+  /** 稳定主题 key（如「清晨散步」）：按 section + key 聚合近义来源。 */
+  readonly profileKey: string;
   readonly text: string;
   readonly basis: UserProfileItemBasis;
   readonly status: "current" | "superseded";
@@ -97,6 +107,8 @@ export interface DreamProfileInput {
   readonly items: readonly Readonly<{
     section: UserProfileSection;
     text: string;
+    /** 模型输出的稳定主题 key；缺省时从 text 生成 fallback。 */
+    profileKey?: string;
     basis: UserProfileItemBasis;
     sourceMemoryId: string;
   }>[];
@@ -120,9 +132,14 @@ export function applyDreamProfileUpdate(
   for (const incoming of input.items) {
     const text = incoming.text.trim();
     if (!text) continue;
-    const normalized = normalizeTextForDedupe(text);
+    // 按 section + 稳定主题 key 聚合近义来源（不再按整句 text 相等），
+    // 真实 Provider 的近义表述才能累计到三来源阈值。
+    const key = (incoming.profileKey && incoming.profileKey.trim())
+      ? normalizeTextForDedupe(incoming.profileKey).slice(0, PROFILE_KEY_MAX_CHARS)
+      : fallbackProfileKey(text);
     const existing = items.find(
-      (item) => item.status === "current" && normalizeTextForDedupe(item.text) === normalized
+      (item) => item.status === "current" && item.section === incoming.section
+        && normalizeTextForDedupe(item.profileKey) === key
     );
     if (existing) {
       if (!existing.sourceMemoryIds.includes(incoming.sourceMemoryId)) {
@@ -138,6 +155,7 @@ export function applyDreamProfileUpdate(
     items.push(Object.freeze({
       id: newCognitiveId("profile"),
       section: incoming.section,
+      profileKey: key,
       text: text.slice(0, 800),
       basis: incoming.basis,
       status: "current",
@@ -245,6 +263,9 @@ export function parseUserProfileState(raw: Record<string, unknown>): UserProfile
           section: (["identity", "preference", "collaboration"].includes(item.section as string)
             ? item.section
             : "preference") as UserProfileSection,
+          profileKey: typeof item.profileKey === "string" && item.profileKey.trim()
+            ? item.profileKey.trim().slice(0, PROFILE_KEY_MAX_CHARS)
+            : fallbackProfileKey(typeof item.text === "string" ? item.text : ""),
           text: typeof item.text === "string" ? item.text : "",
           basis: (item.basis === "observed_memory" || item.basis === "legacy_import"
             ? item.basis

@@ -182,6 +182,7 @@ import {
 } from "../harness/memory/personal-memory-contracts";
 import {
   PersonalMemoryRecallHarness,
+  serializeRecallInjection,
   type PersonalMemoryPreparedTurnContext,
   type PersonalMemoryRecallSafeStats,
   type PersonalMemoryRecallStage
@@ -1014,16 +1015,19 @@ function buildPersonalMemoryContextMessage(fixed: Readonly<{
             `<echoink_memory_recall trust="user-owned-memory" exhaustive="${fixed.recall.exhaustive}" has_more="${fixed.recall.hasMore}">`,
             // 二级事实只注入一次（Recall PRD §12）：candidates JSON 只保留
             // matchedSecondaryId，完整事实只在 <echoink_memory_secondary> 区块。
-            JSON.stringify({
-              candidates: fixed.recall.candidates.map((candidate) => {
-                const injected: Record<string, unknown> = { ...candidate };
-                delete injected.secondaryMatches;
-                return injected;
-              }),
-              total: fixed.recall.total,
-              injected: fixed.recall.injected,
-              remaining: fixed.recall.remaining
-            }),
+            // 序列化与预算计算共用 serializeRecallInjection，避免口径漂移。
+            (() => {
+              const parsed = JSON.parse(serializeRecallInjection({
+                candidates: fixed.recall.candidates,
+                secondaryFacts
+              })) as Record<string, unknown>;
+              return JSON.stringify({
+                ...parsed,
+                total: fixed.recall.total,
+                injected: fixed.recall.injected,
+                remaining: fixed.recall.remaining
+              });
+            })(),
             "</echoink_memory_recall>",
             ...(secondaryFacts.length === 0
               ? []

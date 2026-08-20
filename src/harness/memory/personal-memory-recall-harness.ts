@@ -146,52 +146,82 @@ export class PersonalMemoryRecallHarness {
   }
 }
 
-/**
- * One-time wrapper overhead of the final injection: the candidates JSON
- * envelope and the `<echoink_memory_secondary>` block around it.
- */
-const RECALL_WRAPPER_OVERHEAD = JSON.stringify({
-  candidates: [],
-  secondaryFacts: []
-}) + "<echoink_memory_secondary trust=\"llm-inferred-reference\"></echoink_memory_secondary>";
+/** XML envelope overhead of the recall + secondary blocks (counted once). */
+const RECALL_ENVELOPE_OVERHEAD =
+  '<echoink_memory_recall trust="user-owned-memory" exhaustive="" has_more="">' +
+  "</echoink_memory_recall>" +
+  '<echoink_memory_secondary trust="llm-inferred-reference">' +
+  "</echoink_memory_secondary>";
+
+export interface PersonalMemorySecondaryInjectionFact {
+  readonly parentId: string;
+  readonly parentTitle: string;
+  readonly fact: SecondaryMatchView;
+}
 
 /**
- * Token 预算必须按照最终真实注入内容计算（做梦/Recall PRD §12）：
- * 一级候选（只带 matchedSecondaryId，不携带完整 secondaryMatches）+
- * 该候选带来的完整二级事实（含 parentTitle）+ JSON 包装。先完成最终
- * payload，再根据预算选择候选，不能先按一级内容选完再追加二级事实。
+ * 预算计算与实际注入（pi-production-runtime-composition）共用的纯序列化：
+ * candidates 只保留 matchedSecondaryId（剥离 secondaryMatches），完整二级
+ * 事实单独列出；routeTokens/contentTokens 等索引内部字段绝不进入 payload。
+ */
+export function serializeRecallInjection(input: Readonly<{
+  candidates: readonly Readonly<PersonalMemoryRecallCandidate>[];
+  secondaryFacts: readonly PersonalMemorySecondaryInjectionFact[];
+}>): string {
+  const stripped = input.candidates.map((candidate) => {
+    const injected: Record<string, unknown> = { ...candidate };
+    delete injected.secondaryMatches;
+    return injected;
+  });
+  return JSON.stringify({
+    candidates: stripped,
+    secondaryFacts: input.secondaryFacts
+  });
+}
+
+function secondaryFactsFor(
+  items: readonly Readonly<PersonalMemoryTurnCatalogCandidate>[]
+): PersonalMemorySecondaryInjectionFact[] {
+  const seen = new Set<string>();
+  const facts: PersonalMemorySecondaryInjectionFact[] = [];
+  for (const item of items) {
+    for (const view of item.secondaryMatches ?? []) {
+      if (seen.has(view.id)) continue;
+      seen.add(view.id);
+      facts.push({ parentId: item.id, parentTitle: item.title, fact: view });
+    }
+  }
+  return facts;
+}
+
+/**
+ * Token 预算必须按照最终真实注入内容计算（做梦/Recall PRD §12）：按
+ * 「当前已选候选 + 新候选」累计构造完整最终 payload 后测量，包装开销
+ * 只计算一次。先完成最终 payload，再根据预算选择候选。
  */
 export function measureFinalInjectionTokens(
-  item: Readonly<PersonalMemoryTurnCatalogCandidate>
+  items: readonly Readonly<PersonalMemoryTurnCatalogCandidate>[]
 ): number {
-  const candidate = toRecallCandidate(item);
-  const injectedCandidate: Record<string, unknown> = { ...candidate };
-  delete injectedCandidate.secondaryMatches;
-  const secondaryFacts = (candidate.secondaryMatches ?? []).map((fact) => ({
-    parentId: item.id,
-    parentTitle: item.title,
-    fact
-  }));
-  const payload = JSON.stringify({
-    candidates: [injectedCandidate],
-    secondaryFacts
+  const payload = serializeRecallInjection({
+    candidates: items.map((item) => toRecallCandidate(item)),
+    secondaryFacts: secondaryFactsFor(items)
   });
-  return estimatePiContextTokens(payload).tokens;
+  return estimatePiContextTokens(payload + RECALL_ENVELOPE_OVERHEAD).tokens;
 }
 
 function selectRecallCandidateIds(
   candidates: readonly Readonly<PersonalMemoryTurnCatalogCandidate>[],
   tokenBudget: number
 ): readonly string[] {
-  const selected: string[] = [];
-  let usedTokens = estimatePiContextTokens(RECALL_WRAPPER_OVERHEAD).tokens;
+  const selected: PersonalMemoryTurnCatalogCandidate[] = [];
   for (const item of candidates) {
-    const measured = measureFinalInjectionTokens(item);
-    if (measured > tokenBudget || usedTokens + measured > tokenBudget) continue;
-    selected.push(item.id);
-    usedTokens += measured;
+    const withCandidate = [...selected, item];
+    // 与预算口径共用同一个测量函数：按「已选 + 新候选」的累计最终
+    // payload 一次性测量（包装开销只算一次），避免口径漂移。
+    if (measureFinalInjectionTokens(withCandidate) > tokenBudget) continue;
+    selected.push(item);
   }
-  return Object.freeze(selected);
+  return Object.freeze(selected.map((item) => item.id));
 }
 
 function toRecallCandidate(

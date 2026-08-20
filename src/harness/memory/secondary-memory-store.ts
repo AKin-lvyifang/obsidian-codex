@@ -452,15 +452,61 @@ export function reconcileSecondaryForParent(
     }))
     .filter((entry) => entry.confidence >= SECONDARY_CONFIDENCE_THRESHOLD);
 
-  // --- 2. Dedupe: same title or same term set → keep highest confidence ----
-  const keptUserFingerprints = new Set(
-    userEdited.map((record) => secondaryFingerprint(record.title, record.matchTerms))
+  // --- 2. Dedupe（有界本地去重，不做 embedding）：同一父节点内，标题相同
+  //    或非空匹配词集合相同即视为重复，保留 confidence 更高的一条；与
+  //    user_edited_inference 冲突时始终保留用户编辑版本，丢弃 LLM 候选。
+  const normalizeTitleKey = (value: string): string =>
+    value.normalize("NFKC").toLocaleLowerCase().trim();
+  const normalizeTermSetKey = (terms: readonly string[]): string => {
+    const normalized = terms
+      .map((term) => normalizeMatchTerm(term))
+      .filter((term): term is string => term !== null)
+      .map((term) => term.normalize("NFKC").toLocaleLowerCase())
+      .sort();
+    return [...new Set(normalized)].join("|");
+  };
+  const userTitleKeys = new Set(userEdited.map((record) => normalizeTitleKey(record.title)));
+  const userTermKeys = new Set(
+    userEdited.map((record) => normalizeTermSetKey(record.matchTerms)).filter((key) => key.length > 0)
   );
+  // 既有 llm 事实也按宽 key 参与去重：每个 key 只对应一条旧记录。
+  const oldLlmByTitleKey = new Map<string, SecondaryMemoryRecord>();
+  const oldLlmByTermKey = new Map<string, SecondaryMemoryRecord>();
+  for (const record of oldLlm) {
+    const titleKey = normalizeTitleKey(record.title);
+    if (titleKey && !oldLlmByTitleKey.has(titleKey)) oldLlmByTitleKey.set(titleKey, record);
+    const termKey = normalizeTermSetKey(record.matchTerms);
+    if (termKey && !oldLlmByTermKey.has(termKey)) oldLlmByTermKey.set(termKey, record);
+  }
+  const keptOldIds = new Set<string>();
   const deduped: typeof scored = [];
+  const keptTitleKeys = new Set<string>();
+  const keptTermKeys = new Set<string>();
   for (const entry of scored.sort((left, right) => right.confidence - left.confidence)) {
-    if (keptUserFingerprints.has(entry.fingerprint)) continue;
-    const duplicate = deduped.some((kept) => kept.fingerprint === entry.fingerprint);
-    if (duplicate) continue;
+    const titleKey = normalizeTitleKey(entry.candidate.title);
+    const termKey = normalizeTermSetKey(entry.candidate.matchTerms);
+    // 与 user_edited_inference 冲突：始终保留用户编辑版本。
+    if (userTitleKeys.has(titleKey)) continue;
+    if (termKey && userTermKeys.has(termKey)) continue;
+    if (keptTitleKeys.has(titleKey)) continue;
+    if (termKey && keptTermKeys.has(termKey)) continue;
+    const oldMatch = (titleKey ? oldLlmByTitleKey.get(titleKey) : undefined)
+      ?? (termKey ? oldLlmByTermKey.get(termKey) : undefined);
+    if (oldMatch) {
+      if (oldMatch.confidence >= entry.confidence) {
+        // 既有事实 confidence 不低于候选：原样保留旧记录
+        // （ID / hitCount / lastHitAt 不变，不重复写盘），丢弃候选。
+        keptOldIds.add(oldMatch.id);
+        oldLlmByTitleKey.delete(titleKey);
+        if (termKey) oldLlmByTermKey.delete(termKey);
+        continue;
+      }
+      // 候选 confidence 更高：替换既有记录（旧记录走 retire，候选继续参与）。
+      oldLlmByTitleKey.delete(titleKey);
+      if (termKey) oldLlmByTermKey.delete(termKey);
+    }
+    keptTitleKeys.add(titleKey);
+    if (termKey) keptTermKeys.add(termKey);
     deduped.push(entry);
   }
 
@@ -552,8 +598,14 @@ export function reconcileSecondaryForParent(
     fileChanges.push({ relativePath: created.file, content: serializeSecondaryRecord(created) });
     factsCreated += 1;
   }
+  // 去重保留下来的既有事实：原样留在最终集合中（无文件变更）。
   for (const record of oldLlm) {
-    if (reusedIds.has(record.id)) continue;
+    if (!keptOldIds.has(record.id)) continue;
+    finalRecords.push(record);
+    factsReused += 1;
+  }
+  for (const record of oldLlm) {
+    if (reusedIds.has(record.id) || keptOldIds.has(record.id)) continue;
     const retired: SecondaryMemoryRecord = Object.freeze({
       ...record,
       status: "disabled",
@@ -615,7 +667,10 @@ export function indexableSecondaryRecords(
   records: readonly SecondaryMemoryRecord[]
 ): readonly SecondaryMemoryRecord[] {
   return records.filter(
-    (record) => record.status === "current" && record.confidence >= SECONDARY_CONFIDENCE_THRESHOLD
+    (record) => record.status === "current"
+      // 用户主动修改过的事实持续参与索引，不再被低置信阈值移出；
+      // 只有删除或父 Memory 生命周期失效才停止召回。
+      && (record.basis === "user_edited_inference" || record.confidence >= SECONDARY_CONFIDENCE_THRESHOLD)
   );
 }
 
@@ -624,6 +679,10 @@ export function applySecondaryDecay(
   now: number
 ): SecondaryDecayResult {
   if (record.status !== "current") {
+    return { record, decayed: false, autoDisabled: false };
+  }
+  // 用户编辑过的事实不再自动衰减（做梦 PRD §11 / 低置信召回修复）。
+  if (record.basis === "user_edited_inference") {
     return { record, decayed: false, autoDisabled: false };
   }
   const graceMs = SECONDARY_DECAY_GRACE_DAYS * MS_PER_DAY;
@@ -636,11 +695,14 @@ export function applySecondaryDecay(
   if (elapsed < graceMs) return { record, decayed: false, autoDisabled: false };
   const periods = Math.floor(elapsed / graceMs);
   const confidence = Math.max(0, record.confidence * Math.pow(SECONDARY_DECAY_FACTOR, periods));
+  // 真正发生衰减才 revision +1；跨多个周期一次计算也只算一次持久化变更，
+  // 自动 disabled 与衰减在同一次 revision 变化中完成。
   let next: SecondaryMemoryRecord = Object.freeze({
     ...record,
     confidence,
     lastDecayAt: anchor + periods * graceMs,
-    updatedAt: now
+    updatedAt: now,
+    revision: record.revision + 1
   });
   let autoDisabled = false;
   if (next.basis === "llm_inferred" && next.confidence < SECONDARY_MIN_CONFIDENCE) {

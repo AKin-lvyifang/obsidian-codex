@@ -278,7 +278,7 @@ export class PersonalMemoryRepository {
     recordId: string;
     revision: number;
   }>) => void;
-  private secondaryChangedHook?: () => void;
+  private secondaryChangedHook?: (records: readonly SecondaryMemoryRecord[]) => void;
 
   constructor(options: Readonly<PersonalMemoryRepositoryOptions>) {
     this.vaultPath = path.resolve(options.vaultPath);
@@ -721,7 +721,7 @@ export class PersonalMemoryRepository {
         ...(record.scope ? { scope: record.scope } : {}),
         score,
         ...(matches && matches.length > 0
-          ? { secondaryMatches: Object.freeze(matches.map((entry) => Object.freeze({ ...entry }))) }
+          ? { secondaryMatches: Object.freeze(matches.map(toSecondaryMatchView)) }
           : {})
       });
     }));
@@ -952,15 +952,15 @@ export class PersonalMemoryRepository {
         };
         extra.push({ relativePath: path.relative(this.layout.root, this.layout.user), content: normalized });
       }
-      this.secondaryCache = [...input.secondaryRecords];
+      // 事务成功前不改缓存：用局部快照构造索引与事务内容。
       const changes = await this.stateChanges(next, records, extra, {
         type: "cognitive_update",
         revision: targetRevision,
         at: this.now(),
         detail: cleanOptional(input.detail, "detail", 500) ?? ""
-      });
+      }, input.secondaryRecords);
       await this.runTransaction("cognitive-update", manifest.revision, targetRevision, changes);
-      try { this.secondaryChangedHook?.(); } catch { /* never break the writer */ }
+      this.commitSecondaryCache(input.secondaryRecords);
       return Object.freeze({ revision: targetRevision });
     });
   }
@@ -999,7 +999,6 @@ export class PersonalMemoryRepository {
       const next = cloneManifest(manifest);
       next.revision = targetRevision;
       next.updatedAt = now;
-      this.secondaryCache = cache;
       const changes = await this.stateChanges(next, records, updatedRecords.map((record) => ({
         relativePath: record.file,
         content: serializeSecondaryRecord(record)
@@ -1008,9 +1007,9 @@ export class PersonalMemoryRepository {
         revision: targetRevision,
         at: now,
         detail: `secondary-recall-hits:${updatedRecords.length}`
-      });
+      }, cache);
       await this.runTransaction("cognitive-update", manifest.revision, targetRevision, changes);
-      try { this.secondaryChangedHook?.(); } catch { /* never break recall */ }
+      this.commitSecondaryCache(cache);
     });
   }
 
@@ -1058,8 +1057,12 @@ export class PersonalMemoryRepository {
     this.secondaryLifecycleHook = handler;
   }
 
-  /** Fired after secondary records changed on disk (hits / cognitive updates). */
-  setSecondaryChangedHook(hook: () => void): void {
+  /**
+   * Fired synchronously AFTER a committed transaction changed secondary
+   * records, carrying the committed records（双缓存一致性：调用方用它同步
+   * setCache，不做 fire-and-forget 异步刷新）。
+   */
+  setSecondaryChangedHook(hook: (records: readonly SecondaryMemoryRecord[]) => void): void {
     this.secondaryChangedHook = hook;
   }
 
@@ -1072,14 +1075,30 @@ export class PersonalMemoryRepository {
     this.onMemoryCommittedHook = hook;
   }
 
+  /**
+   * 事务成功后同步两份缓存（Repository.secondaryCache 与 SecondaryMemoryStore
+   * 经由 hook）；事务失败时任何缓存都不得改变。
+   */
+  private commitSecondaryCache(records: readonly SecondaryMemoryRecord[]): void {
+    this.secondaryCache = [...records];
+    try {
+      this.secondaryChangedHook?.(Object.freeze([...records]));
+    } catch { /* never break the writer */ }
+  }
+
   private async applySecondaryLifecycle(
     operation: "supersede" | "forget" | "restore" | "close",
     parentId: string
-  ): Promise<readonly Readonly<{ relativePath: string; content: string }>[]> {
-    if (!this.secondaryLifecycleHook) return Object.freeze([]);
+  ): Promise<Readonly<{
+    files: readonly Readonly<{ relativePath: string; content: string }>[];
+    records: readonly SecondaryMemoryRecord[];
+  }>> {
+    if (!this.secondaryLifecycleHook) {
+      return Object.freeze({ files: Object.freeze([]), records: this.secondaryCache });
+    }
     const result = await this.secondaryLifecycleHook({ operation, parentId });
-    this.secondaryCache = [...result.records];
-    return result.changedFiles;
+    // 事务提交前不得改缓存；records 由调用方在 runTransaction 成功后提交。
+    return Object.freeze({ files: result.changedFiles, records: result.records });
   }
 
   private notifyMemoryCommitted(
@@ -1325,18 +1344,19 @@ export class PersonalMemoryRepository {
         item.recordId !== tombstone.recordId || item.backupFile !== tombstone.backupFile
       );
       const allRecords = [...records, restored];
-      const secondaryChanges = await this.applySecondaryLifecycle("restore", safeId);
+      const lifecycle = await this.applySecondaryLifecycle("restore", safeId);
       const changes = await this.stateChanges(next, allRecords, [{
         relativePath: restored.file,
         content: serializeRecord(restored)
-      }, ...secondaryChanges], {
+      }, ...lifecycle.files], {
         type: "forget_restored",
         revision: targetRevision,
         at: this.now(),
         recordId: safeId,
         backupFile: tombstone.backupFile
-      });
+      }, lifecycle.records);
       await this.runTransaction("restore-forgotten", manifest.revision, targetRevision, changes);
+      this.commitSecondaryCache(lifecycle.records);
       this.notifyMemoryCommitted("restore", restored.id, targetRevision);
       return Object.freeze({ revision: targetRevision, record: restored });
     });
@@ -1431,11 +1451,11 @@ export class PersonalMemoryRepository {
     next.revision = targetRevision;
     next.updatedAt = this.now();
     next.records = allRecords.map(recordMetadata);
-    const secondaryChanges = await this.applySecondaryLifecycle("supersede", previous.id);
+    const lifecycle = await this.applySecondaryLifecycle("supersede", previous.id);
     const changes = await this.stateChanges(next, allRecords, [
       { relativePath: superseded.file, content: serializeRecord(superseded) },
       { relativePath: replacement.file, content: serializeRecord(replacement) },
-      ...secondaryChanges
+      ...lifecycle.files
     ], {
       type: "superseded",
       revision: targetRevision,
@@ -1444,8 +1464,9 @@ export class PersonalMemoryRepository {
       targetId: previous.id,
       source: replacement.source,
       ...auditLink
-    });
+    }, lifecycle.records);
     await this.runTransaction("supersede", manifest.revision, targetRevision, changes);
+    this.commitSecondaryCache(lifecycle.records);
     this.notifyMemoryCommitted("supersede", replacement.id, targetRevision);
     return Object.freeze({ revision: targetRevision, record: replacement });
   }
@@ -1471,16 +1492,17 @@ export class PersonalMemoryRepository {
     next.revision = targetRevision;
     next.updatedAt = this.now();
     next.records = allRecords.map(recordMetadata);
-    const secondaryChanges = await this.applySecondaryLifecycle("close", targetId);
-    const changes = await this.stateChanges(next, allRecords, [{ relativePath: closed.file, content: serializeRecord(closed) }, ...secondaryChanges], {
+    const lifecycle = await this.applySecondaryLifecycle("close", targetId);
+    const changes = await this.stateChanges(next, allRecords, [{ relativePath: closed.file, content: serializeRecord(closed) }, ...lifecycle.files], {
       type: "closed",
       revision: targetRevision,
       at: this.now(),
       recordId: targetId,
       source: runtimeSource(runtime),
       ...runtimeAuditLink(runtime)
-    });
+    }, lifecycle.records);
     await this.runTransaction("close", manifest.revision, targetRevision, changes);
+    this.commitSecondaryCache(lifecycle.records);
     return Object.freeze({ revision: targetRevision, record: closed });
   }
 
@@ -1566,11 +1588,11 @@ export class PersonalMemoryRepository {
       source
     });
     const remaining = records.filter((record) => record.id !== targetId);
-    const secondaryChanges = await this.applySecondaryLifecycle("forget", targetId);
+    const lifecycle = await this.applySecondaryLifecycle("forget", targetId);
     const changes = await this.stateChanges(next, remaining, [
       { relativePath: backupFile, content: serializeRecord(target) },
       { relativePath: target.file },
-      ...secondaryChanges
+      ...lifecycle.files
     ], {
       type: "forgotten",
       revision: targetRevision,
@@ -1582,6 +1604,7 @@ export class PersonalMemoryRepository {
         : {})
     });
     await this.runTransaction("forget", manifest.revision, targetRevision, changes);
+    this.commitSecondaryCache(lifecycle.records);
     return Object.freeze({ revision: targetRevision, forgottenId: targetId });
   }
 
@@ -2017,13 +2040,15 @@ export class PersonalMemoryRepository {
     manifest: PersonalMemoryManifest,
     records: readonly PersonalMemoryRecord[],
     extra: readonly TransactionChange[],
-    audit: Readonly<Record<string, unknown>>
+    audit: Readonly<Record<string, unknown>>,
+    secondaryForIndex?: readonly SecondaryMemoryRecord[]
   ): Promise<TransactionChange[]> {
+    const secondarySnapshot = secondaryForIndex ?? this.secondaryCache;
     const previousAudit = await readTextOrEmpty(this.layout.audit);
     return dedupeChanges([
       ...extra,
       { relativePath: path.relative(this.layout.root, this.layout.manifest), content: jsonText(manifest) },
-      { relativePath: path.relative(this.layout.root, this.layout.searchIndex), content: jsonText(buildSearchIndexV3(manifest.revision, records.map((record) => this.catalogInput(record)), indexableSecondaryRecords(this.secondaryCache))) },
+      { relativePath: path.relative(this.layout.root, this.layout.searchIndex), content: jsonText(buildSearchIndexV3(manifest.revision, records.map((record) => this.catalogInput(record)), indexableSecondaryRecords(secondarySnapshot))) },
       { relativePath: path.relative(this.layout.root, this.layout.sourceMap), content: jsonText(buildSourceMap(manifest)) },
       { relativePath: path.relative(this.layout.root, this.layout.memory), content: renderOverview(manifest, records) },
       {

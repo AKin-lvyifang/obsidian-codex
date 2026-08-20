@@ -202,8 +202,10 @@ export class CognitiveSystem {
     options.repository.setMemoryCommittedHook((event) => {
       void system.enqueueForDream([event.recordId]).catch(() => {});
     });
-    options.repository.setSecondaryChangedHook(() => {
-      void secondaryStore.refresh().catch(() => {});
+    // 事务提交后同步 SecondaryMemoryStore 缓存（携带已提交 records），
+    // 不做 fire-and-forget 异步刷新，避免界面读到旧状态的窗口期。
+    options.repository.setSecondaryChangedHook((records) => {
+      secondaryStore.setCache(records);
     });
 
     return system;
@@ -362,7 +364,6 @@ export class CognitiveSystem {
       extraChanges: [{ relativePath: updated.file, content: serializeSecondaryRecord(updated) }],
       detail: `secondary-user-edit:${secondaryId}`
     });
-    await this.secondaryStore.refresh();
     return Object.freeze({ revision: result.revision, record: updated });
   }
 
@@ -377,7 +378,6 @@ export class CognitiveSystem {
       extraChanges: [{ relativePath: removed.file }],
       detail: `secondary-user-delete:${secondaryId}`
     });
-    await this.secondaryStore.refresh();
     return Object.freeze({ revision: result.revision });
   }
 
@@ -397,10 +397,26 @@ export class CognitiveSystem {
     this.scheduler.dispose();
   }
 
+  /** 串行合并连续/并发入队，防止互相覆盖。 */
+  private enqueueLane: Promise<void> = Promise.resolve();
+
+  /** 等待异步入队落定（测试与 UI 的同步点）。 */
+  async settleDreamEnqueue(): Promise<void> {
+    await this.enqueueLane;
+  }
+
   private async enqueueForDream(memoryIds: readonly string[]): Promise<void> {
-    const state = this.dreamStateStore.peek();
-    const next = enqueuePendingMemoryIds(state, memoryIds, this.now());
-    if (next !== state) await this.dreamStateStore.write(next);
+    const run = async (): Promise<void> => {
+      // 入队前必须读取真实持久状态：插件重启后 peek() 可能仍是默认值，
+      // 直接写会用空队列覆盖已有 pendingMemoryIds/lastRunAt/lastSuccessAt。
+      // enqueuePendingMemoryIds 只追加 pending，不动时间戳和 backfillCursor。
+      const state = await this.dreamStateStore.read();
+      const next = enqueuePendingMemoryIds(state, memoryIds, this.now());
+      if (next !== state) await this.dreamStateStore.write(next);
+    };
+    const lane = this.enqueueLane.then(run, run);
+    this.enqueueLane = lane.catch(() => undefined);
+    return lane;
   }
 
   /**
