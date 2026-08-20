@@ -84,6 +84,12 @@ import {
 } from "./plugin/personal-memory-correction-service";
 import { normalizeApiProviderId } from "./settings/provider-presets";
 import { CognitiveSystem } from "./harness/memory/cognitive-system";
+import {
+  DEFAULT_AGENT_DISPLAY_NAME,
+  defaultAgentIdentityState
+} from "./harness/memory/agent-identity-state";
+import { resolveAgentAvatarUrl } from "./ui/agent-avatar-presets";
+import type { AgentIdentityView } from "./ui/codex-view/message-list";
 import type { DreamLlmPort } from "./harness/memory/dream-engine";
 
 interface PiConversationActivationTask {
@@ -611,9 +617,36 @@ export default class CodexForObsidianPlugin extends Plugin {
   }
   async getEchoInkPersonalMemoryState() {
     const localData = await this.ensurePiLocalData();
+    // 身份与人格真源只有一份：CognitiveSystem 的落盘状态。设置页不再
+    // 维护第二套身份数据；身份绝不复制进 plugin settings。
+    const system = this.cognitiveSystem
+      ?? (typeof this.getCognitiveSystem === "function"
+        ? await this.getCognitiveSystem().catch(() => null)
+        : null);
     return Object.freeze({
       ...await localData.personalMemory.readUserControlState(),
-      learningEnabled: this.settings.memory.enabled
+      learningEnabled: this.settings.memory.enabled,
+      agentIdentity: system
+        ? await system.readAgentIdentity()
+        : defaultAgentIdentityState(),
+      personalityState: system ? await system.readPersonalityState() : null
+    });
+  }
+
+  /**
+   * 同步读取当前 Agent 身份展示快照（消息头名称 + 头像）。数据来自
+   * CognitiveSystem 已预热的身份缓存；系统未初始化完成时返回默认
+   * EchoInk / bot 图标，绝不在消息渲染时读磁盘。
+   */
+  getEchoInkAgentIdentityView(): AgentIdentityView {
+    const system = this.cognitiveSystem;
+    if (!system) {
+      return Object.freeze({ displayName: DEFAULT_AGENT_DISPLAY_NAME, avatarUrl: null });
+    }
+    const identity = system.currentAgentIdentity();
+    return Object.freeze({
+      displayName: identity.displayName,
+      avatarUrl: resolveAgentAvatarUrl(identity.avatar)
     });
   }
   async updateEchoInkPersonalMemoryProfile(

@@ -38,6 +38,7 @@ import { getPersonalityTemplate, TRAIT_DIMENSION_META } from "../harness/memory/
 import { defaultUserProfile } from "../harness/memory/personal-memory-repository";
 import { lexicalTokens } from "../harness/memory/search-index-v3";
 import type { PersonalMemoryRecord } from "../harness/memory/personal-memory-contracts";
+import type { AgentAvatarState } from "../harness/memory/agent-identity-state";
 
 const DAY_MS = 86_400_000;
 
@@ -146,7 +147,9 @@ async function scenarioTemplateSelectionPersistsWithoutProvider(): Promise<void>
     });
 
     const before = await readJson(fixture.repository.layout.manifest);
-    const result = await system.selectPersonalityTemplate("executor");
+    const result = await system.selectPersonalityTemplate("executor", {
+      initialIdentity: { displayName: "小执", avatar: { kind: "default" } }
+    });
     const template = getPersonalityTemplate("executor")!;
 
     assert.equal(llmCalls, 0);
@@ -176,7 +179,9 @@ async function scenarioTemplateSelectionPersistsWithoutProvider(): Promise<void>
 async function scenarioResetFlowSingleTransaction(): Promise<void> {
   await withPersonalMemoryFixture(async (fixture) => {
     const system = await createSystem(fixture, () => fakeDreamLlm(() => validDreamJson()));
-    await system.selectPersonalityTemplate("companion");
+    await system.selectPersonalityTemplate("companion", {
+      initialIdentity: { displayName: "小伴", avatar: { kind: "default" } }
+    });
     const memory = await createMemory(fixture, {
       title: "用户偏好简短直接的回复",
       content: "用户明确要求以后回复尽量简短直接。",
@@ -253,7 +258,9 @@ async function scenarioResetFlowSingleTransaction(): Promise<void> {
 async function scenarioDreamCreatesSecondaryFacts(): Promise<void> {
   await withPersonalMemoryFixture(async (fixture) => {
     const system = await createSystem(fixture, () => fakeDreamLlm(validDreamJson));
-    await system.selectPersonalityTemplate("advisor");
+    await system.selectPersonalityTemplate("advisor", {
+      initialIdentity: { displayName: "小问", avatar: { kind: "default" } }
+    });
     const memory = await createMemory(fixture, {
       title: "早晨的手冲流程",
       content: "用户每天早晨都有一套固定的手冲流程，偏好酸一点的风味。"
@@ -447,7 +454,9 @@ async function scenarioLegacyFileCompatibility(): Promise<void> {
 
     // First template selection must persist a restorable history copy of the
     // custom AGENT.md BEFORE overwriting it.
-    await system.selectPersonalityTemplate("butler");
+    await system.selectPersonalityTemplate("butler", {
+      initialIdentity: { displayName: "小管", avatar: { kind: "default" } }
+    });
     const agentOnDisk = await readFile(fixture.repository.layout.agent, "utf8");
     assert.notEqual(agentOnDisk, customAgent);
     const historyDir = `${fixture.vaultPath}/.echoink/agents/echoink/history`;
@@ -498,7 +507,9 @@ async function scenarioSourceReconciliation(): Promise<void> {
       }
       return EMPTY_DREAM_OUTPUT;
     }));
-    await system.selectPersonalityTemplate("advisor");
+    await system.selectPersonalityTemplate("advisor", {
+      initialIdentity: { displayName: "小问", avatar: { kind: "default" } }
+    });
 
     const requirementMemory = await createMemory(fixture, {
       title: "回复要简短",
@@ -556,7 +567,9 @@ async function scenarioObservedTraitFallback(): Promise<void> {
       }
       return EMPTY_DREAM_OUTPUT;
     }));
-    await system.selectPersonalityTemplate("advisor"); // explicit tempo = 0.75
+    await system.selectPersonalityTemplate("advisor", { // explicit tempo = 0.75
+      initialIdentity: { displayName: "小问", avatar: { kind: "default" } }
+    });
 
     const sources: PersonalMemoryRecord[] = [];
     for (let index = 0; index < 3; index += 1) {
@@ -686,7 +699,9 @@ async function scenarioUserProfileThresholdAndTrust(): Promise<void> {
       ...EMPTY_DREAM_OUTPUT,
       userProfileItems: [{ section: "preference", text: "用户习惯清晨散步" }]
     })));
-    await system.selectPersonalityTemplate("companion");
+    await system.selectPersonalityTemplate("companion", {
+      initialIdentity: { displayName: "小伴", avatar: { kind: "default" } }
+    });
     const first = await createMemory(fixture, {
       title: "清晨散步 1", content: "用户提到喜欢清晨散步。", kind: "view", basis: "observed"
     });
@@ -2194,6 +2209,276 @@ async function scenarioSecondaryDedupeTitleOrTerms(): Promise<void> {
   console.log("PASS cognitive: secondary dedupe by title OR term set with user-edit precedence");
 }
 
+
+// ---------------------------------------------------------------------------
+// R4. Agent identity (名称 + 头像)：首次命名单事务、改名、重置保留、做梦不改
+// ---------------------------------------------------------------------------
+
+const TEST_AVATAR_DATA_URL = `data:image/png;base64,${"QUJD".repeat(24)}`;
+const TEST_CUSTOM_AVATAR = Object.freeze({
+  kind: "custom",
+  mimeType: "image/png",
+  dataUrl: TEST_AVATAR_DATA_URL,
+  width: 256,
+  height: 256
+}) as AgentAvatarState;
+
+async function scenarioFirstTemplateRequiresIdentity(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    const system = await createSystem(fixture, () => null);
+    const manifestBefore = await readJson(fixture.repository.layout.manifest) as { revision: number };
+    const agentBefore = await readFile(fixture.repository.layout.agent, "utf8");
+
+    await assert.rejects(
+      system.selectPersonalityTemplate("executor"),
+      /agent_identity_required/u,
+      "first template selection without identity must be rejected"
+    );
+
+    // 零写入：人格、身份、AGENT.md、manifest 全部保持原样。
+    const manifestAfter = await readJson(fixture.repository.layout.manifest) as { revision: number };
+    assert.equal(manifestAfter.revision, manifestBefore.revision);
+    assert.equal(await readFile(fixture.repository.layout.agent, "utf8"), agentBefore);
+    await assert.rejects(readFile(fixture.repository.layout.personalityState, "utf8"));
+    await assert.rejects(readFile(fixture.repository.layout.agentIdentity, "utf8"),
+      "cancelled naming must not create agent-identity.json");
+    const identity = await system.readAgentIdentity();
+    assert.equal(identity.revision, 0);
+    assert.equal(identity.displayName, "EchoInk");
+    assert.equal(identity.avatar.kind, "default");
+  });
+  console.log("PASS cognitive: first template selection requires identity (zero writes otherwise)");
+}
+
+async function scenarioFirstTemplateIdentitySingleTransaction(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    // No Provider at all: naming + template must be a purely local transaction.
+    const system = await createSystem(fixture, () => null);
+    const manifestBefore = await readJson(fixture.repository.layout.manifest) as { revision: number };
+
+    const result = await system.selectPersonalityTemplate("executor", {
+      initialIdentity: { displayName: "  小墨  ", avatar: { kind: "default" } }
+    });
+
+    // 只提交一次 Repository 事务：manifest revision 恰好 +1。
+    const manifestAfter = await readJson(fixture.repository.layout.manifest) as { revision: number };
+    assert.equal(manifestAfter.revision, manifestBefore.revision + 1,
+      "template + identity + AGENT.md must commit in ONE transaction");
+
+    // 人格、identity JSON 与 AGENT.md 同时成功。
+    assert.equal(result.state.templateId, "executor");
+    assert.equal(result.identity.displayName, "小墨", "display name is trimmed");
+    assert.equal(result.identity.revision, 1);
+    assert.equal(result.identity.avatar.kind, "default");
+    const identityOnDisk = await readJson(fixture.repository.layout.agentIdentity) as {
+      revision: number; displayName: string; avatar: { kind: string };
+    };
+    assert.equal(identityOnDisk.displayName, "小墨");
+    assert.equal(identityOnDisk.revision, 1);
+    assert.equal(identityOnDisk.avatar.kind, "default");
+
+    // AGENT.md 包含名称，但绝不包含头像 Data URL / presetId / 图片路径。
+    assert.ok(result.agent.includes("当前名称：小墨"));
+    assert.ok(!result.agent.includes("data:image"));
+    assert.ok(!result.agent.includes("presetId"));
+    const agentOnDisk = await readFile(fixture.repository.layout.agent, "utf8");
+    assert.equal(agentOnDisk, result.agent);
+
+    // 缓存立即可读（设置页与对话区无需重启）。
+    assert.equal(system.currentAgentIdentity().displayName, "小墨");
+  });
+  console.log("PASS cognitive: first template + naming commits once without Provider");
+}
+
+async function scenarioIdentityTransactionFailureKeepsOld(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    const system = await createSystem(fixture, () => null);
+    // 先正常完成首次命名，得到一份旧版本基线。
+    await system.selectPersonalityTemplate("executor", {
+      initialIdentity: { displayName: "旧名字", avatar: { kind: "default" } }
+    });
+    const identityBefore = await readFile(fixture.repository.layout.agentIdentity, "utf8");
+    const agentBefore = await readFile(fixture.repository.layout.agent, "utf8");
+    const personalityBefore = await readFile(fixture.repository.layout.personalityState, "utf8");
+
+    // 模拟事务失败：把 identity 目标路径占成目录，事务写入阶段必然抛错回滚。
+    const { mkdirSync, rmSync } = await import("node:fs");
+    rmSync(fixture.repository.layout.agentIdentity);
+    mkdirSync(fixture.repository.layout.agentIdentity, { recursive: true });
+    await assert.rejects(
+      system.updateAgentIdentity({ displayName: "新名字", avatar: { kind: "default" } })
+    );
+    rmSync(fixture.repository.layout.agentIdentity, { recursive: true, force: true });
+
+    // 失败后：身份、AGENT.md、人格全部保持旧版本。
+    assert.equal(system.currentAgentIdentity().displayName, "旧名字",
+      "failed transaction must keep the cached identity");
+    assert.equal(await readFile(fixture.repository.layout.agent, "utf8"), agentBefore);
+    assert.equal(await readFile(fixture.repository.layout.personalityState, "utf8"), personalityBefore);
+    assert.equal((await system.readAgentIdentity()).displayName, "旧名字");
+    void identityBefore;
+  });
+  console.log("PASS cognitive: failed identity transaction keeps old identity and AGENT.md");
+}
+
+async function scenarioRenameUpdatesAgentSameRound(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    const system = await createSystem(fixture, () => null);
+    await system.selectPersonalityTemplate("executor", {
+      initialIdentity: { displayName: "小墨", avatar: { kind: "default" } }
+    });
+    const personalityBefore = await readFile(fixture.repository.layout.personalityState, "utf8");
+
+    const result = await system.updateAgentIdentity({
+      displayName: "阿澈",
+      avatar: { kind: "default" }
+    });
+
+    assert.equal(result.identity.revision, 2, "rename bumps identity revision");
+    assert.equal(result.identity.displayName, "阿澈");
+    assert.ok(result.agent.includes("当前名称：阿澈"));
+    assert.ok(!result.agent.includes("当前名称：小墨"));
+    assert.equal(await readFile(fixture.repository.layout.agent, "utf8"), result.agent,
+      "AGENT.md updates in the same round as the rename");
+    // 改名不影响人格状态与 dreaming 进度。
+    assert.equal(await readFile(fixture.repository.layout.personalityState, "utf8"), personalityBefore);
+    assert.equal(system.currentAgentIdentity().displayName, "阿澈");
+
+    // 无变化保存：不增加 revision、不创建事务。
+    const manifestBefore = await readJson(fixture.repository.layout.manifest) as { revision: number };
+    const noop = await system.updateAgentIdentity({ displayName: "阿澈", avatar: { kind: "default" } });
+    assert.equal(noop.identity.revision, 2, "no-op save must not bump identity revision");
+    const manifestAfter = await readJson(fixture.repository.layout.manifest) as { revision: number };
+    assert.equal(manifestAfter.revision, manifestBefore.revision,
+      "no-op save must not create a transaction");
+  });
+  console.log("PASS cognitive: rename bumps identity revision and rewrites AGENT.md same round");
+}
+
+async function scenarioAvatarOnlyChangeKeepsAgentAndPersonality(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    const system = await createSystem(fixture, () => null);
+    await system.selectPersonalityTemplate("executor", {
+      initialIdentity: { displayName: "小墨", avatar: { kind: "default" } }
+    });
+    const agentBefore = await readFile(fixture.repository.layout.agent, "utf8");
+    const personalityBefore = await readFile(fixture.repository.layout.personalityState, "utf8");
+    const readDream = () => readFile(fixture.repository.layout.dreamState, "utf8").catch(() => null);
+    const dreamBefore = await readDream();
+
+    const result = await system.updateAgentIdentity({
+      displayName: "小墨",
+      avatar: TEST_CUSTOM_AVATAR
+    });
+
+    assert.equal(result.identity.revision, 2);
+    assert.equal(result.identity.avatar.kind, "custom");
+    // 头像变化不改 AGENT.md、trait、learnedRequirements、processedSources、DreamState。
+    assert.equal(await readFile(fixture.repository.layout.agent, "utf8"), agentBefore);
+    assert.equal(await readFile(fixture.repository.layout.personalityState, "utf8"), personalityBefore);
+    assert.equal(await readDream(), dreamBefore);
+    assert.ok(!agentBefore.includes("data:image"));
+    const identityOnDisk = await readJson(fixture.repository.layout.agentIdentity) as {
+      avatar: { kind: string; dataUrl?: string };
+    };
+    assert.equal(identityOnDisk.avatar.kind, "custom");
+    assert.equal(identityOnDisk.avatar.dataUrl, TEST_AVATAR_DATA_URL);
+  });
+  console.log("PASS cognitive: avatar-only change leaves AGENT.md, personality and dream state untouched");
+}
+
+async function scenarioResetKeepsIdentity(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    const system = await createSystem(fixture, () => null);
+    await system.selectPersonalityTemplate("executor", {
+      initialIdentity: { displayName: "小墨", avatar: TEST_CUSTOM_AVATAR }
+    });
+
+    const result = await system.selectPersonalityTemplate("companion", { reset: true });
+
+    assert.equal(result.state.templateId, "companion");
+    assert.equal(result.identity.displayName, "小墨", "reset keeps the display name");
+    assert.equal(result.identity.revision, 1, "reset must not bump identity revision");
+    assert.equal(result.identity.avatar.kind, "custom", "reset keeps the avatar");
+    assert.ok(result.agent.includes("当前名称：小墨"));
+    const identityOnDisk = await readJson(fixture.repository.layout.agentIdentity) as {
+      revision: number; displayName: string;
+    };
+    assert.equal(identityOnDisk.revision, 1);
+    assert.equal(identityOnDisk.displayName, "小墨");
+  });
+  console.log("PASS cognitive: personality reset keeps name, avatar and identity revision");
+}
+
+async function scenarioDreamPreservesIdentity(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    const system = await createSystem(fixture, () => scriptedDreamLlm(() => ({
+      ...EMPTY_DREAM_OUTPUT,
+      personalitySignals: [{
+        dimension: "tempo",
+        direction: "decrease",
+        strength: 0.7,
+        evidence: "记忆显示用户偏好简短回复"
+      }]
+    })));
+    await system.selectPersonalityTemplate("executor", {
+      initialIdentity: { displayName: "小墨", avatar: TEST_CUSTOM_AVATAR }
+    });
+    const identityBefore = await readFile(fixture.repository.layout.agentIdentity, "utf8");
+    await createMemory(fixture, {
+      title: "偏好简短回复",
+      content: "用户明确要求以后回复都保持简短。"
+    });
+    await system.settleDreamEnqueue();
+    const run = await system.forceDreamRun();
+    assert.ok(run);
+    assert.equal(run!.committed, true);
+
+    // 做梦重渲染 AGENT.md 时读取当前身份：名称不丢、不被改回 EchoInk。
+    const agentAfter = await readFile(fixture.repository.layout.agent, "utf8");
+    assert.ok(agentAfter.includes("当前名称：小墨"), "dream must keep the custom name in AGENT.md");
+    assert.ok(!agentAfter.includes("当前名称：EchoInk"));
+    assert.ok(!agentAfter.includes("data:image"), "avatar data must never reach AGENT.md");
+    // 做梦无权修改身份：文件与 revision 均不变。
+    assert.equal(await readFile(fixture.repository.layout.agentIdentity, "utf8"), identityBefore);
+    assert.equal(system.currentAgentIdentity().revision, 1);
+  });
+  console.log("PASS cognitive: dreaming preserves agent name and never writes identity");
+}
+
+async function scenarioIdentitySurvivesRestart(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    const system = await createSystem(fixture, () => null);
+    await system.selectPersonalityTemplate("executor", {
+      initialIdentity: { displayName: "小墨", avatar: TEST_CUSTOM_AVATAR }
+    });
+
+    // 插件重启 = 重建 CognitiveSystem。
+    const restarted = await createSystem(fixture, () => null);
+    const identity = await restarted.readAgentIdentity();
+    assert.equal(identity.displayName, "小墨");
+    assert.equal(identity.avatar.kind, "custom");
+    assert.equal((identity.avatar as { dataUrl: string }).dataUrl, TEST_AVATAR_DATA_URL);
+    // create 已预热缓存：同步快照同样可用。
+    assert.equal(restarted.currentAgentIdentity().displayName, "小墨");
+  });
+  console.log("PASS cognitive: agent identity survives plugin restart");
+}
+
+async function scenarioLegacyVaultIdentityFallback(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    const system = await createSystem(fixture, () => null);
+    // 旧 Vault 没有 identity 文件：回退 EchoInk/default，且不创建文件。
+    const identity = await system.readAgentIdentity();
+    assert.equal(identity.displayName, "EchoInk");
+    assert.equal(identity.avatar.kind, "default");
+    assert.equal(identity.revision, 0);
+    await assert.rejects(readFile(fixture.repository.layout.agentIdentity, "utf8"),
+      "reading identity must not auto-create the file");
+  });
+  console.log("PASS cognitive: legacy vault without identity falls back without writing");
+}
+
 export async function runCognitiveSystemScenarios(): Promise<void> {
   await scenarioTemplateSelectionPersistsWithoutProvider();
   await scenarioResetFlowSingleTransaction();
@@ -2226,4 +2511,13 @@ export async function runCognitiveSystemScenarios(): Promise<void> {
   await scenarioUserEditedLowConfidenceRecallable();
   await scenarioDecayRevisionAndNoOpWrites();
   await scenarioSecondaryDedupeTitleOrTerms();
+  await scenarioFirstTemplateRequiresIdentity();
+  await scenarioFirstTemplateIdentitySingleTransaction();
+  await scenarioIdentityTransactionFailureKeepsOld();
+  await scenarioRenameUpdatesAgentSameRound();
+  await scenarioAvatarOnlyChangeKeepsAgentAndPersonality();
+  await scenarioResetKeepsIdentity();
+  await scenarioDreamPreservesIdentity();
+  await scenarioIdentitySurvivesRestart();
+  await scenarioLegacyVaultIdentityFallback();
 }

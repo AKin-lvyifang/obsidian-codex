@@ -50,6 +50,16 @@ import type {
   SecondaryMemoryRecord
 } from "./personal-memory-contracts";
 import { defaultAgentProfile, type PersonalMemoryRepository } from "./personal-memory-repository";
+import {
+  AGENT_IDENTITY_RELATIVE_PATH,
+  AgentIdentityStateStore,
+  agentIdentityStateJson,
+  defaultAgentIdentityState,
+  normalizeAgentAvatar,
+  normalizeAgentDisplayName,
+  type AgentAvatarState,
+  type AgentIdentityState
+} from "./agent-identity-state";
 
 export interface CognitiveSystemLlmOptions {
   /** null → Provider 未配置：做梦当轮不产生模型结果，队列保持 pending。 */
@@ -128,6 +138,7 @@ export class CognitiveSystem {
   readonly profileStore: UserProfileStateStore;
   readonly dreamStateStore: DreamStateStore;
   readonly secondaryStore: SecondaryMemoryStore;
+  readonly agentIdentityStore: AgentIdentityStateStore;
   readonly engine: DreamEngine;
   readonly scheduler: DreamScheduler;
   private readonly now: () => number;
@@ -137,6 +148,7 @@ export class CognitiveSystem {
     profileStore: UserProfileStateStore;
     dreamStateStore: DreamStateStore;
     secondaryStore: SecondaryMemoryStore;
+    agentIdentityStore: AgentIdentityStateStore;
     engine: DreamEngine;
     scheduler: DreamScheduler;
   }>) {
@@ -146,6 +158,7 @@ export class CognitiveSystem {
     this.profileStore = parts.profileStore;
     this.dreamStateStore = parts.dreamStateStore;
     this.secondaryStore = parts.secondaryStore;
+    this.agentIdentityStore = parts.agentIdentityStore;
     this.engine = parts.engine;
     this.scheduler = parts.scheduler;
   }
@@ -164,8 +177,12 @@ export class CognitiveSystem {
     const profileStore = new UserProfileStateStore(root);
     const dreamStateStore = new DreamStateStore(root);
     const secondaryStore = new SecondaryMemoryStore(path.join(root, "shared-user", "memory"));
+    const agentIdentityStore = new AgentIdentityStateStore(root);
 
     options.repository.setSecondaryRecords(await secondaryStore.loadAll());
+    // 启动时读取一次身份（文件不存在则返回默认运行状态，不写文件），
+    // 让 peek/current 快照可以同步供给 UI；不调用 Provider。
+    await agentIdentityStore.read();
 
     const engine = new DreamEngine({
       repository: new RepositoryDreamPort(options.repository),
@@ -173,6 +190,7 @@ export class CognitiveSystem {
       profileStore,
       secondaryStore,
       dreamStateStore,
+      agentIdentityStore,
       llm: options.llm,
       ...(options.now ? { now: options.now } : {})
     });
@@ -182,6 +200,7 @@ export class CognitiveSystem {
       profileStore,
       dreamStateStore,
       secondaryStore,
+      agentIdentityStore,
       engine,
       scheduler: null as unknown as DreamScheduler
     });
@@ -242,27 +261,71 @@ export class CognitiveSystem {
    */
   async selectPersonalityTemplate(
     templateId: string,
-    options?: Readonly<{ reset?: boolean }>
+    options?: Readonly<{
+      reset?: boolean;
+      /** 首次选择模板时必须随同提交身份（命名步骤的结果）。 */
+      initialIdentity?: Readonly<{
+        displayName: string;
+        avatar: AgentAvatarState;
+      }>;
+    }>
   ): Promise<Readonly<{
     revision: number;
     state: PersonalityState;
     agent: string;
+    identity: AgentIdentityState;
   }>> {
     const template = getPersonalityTemplate(templateId);
     if (!template) throw new Error(`Unknown personality template: ${templateId}`);
     const now = this.now();
     const previous = (await this.personalityStore.read()) ?? emptyPersonalityShape(now);
+    const currentIdentity = await this.agentIdentityStore.read();
+
+    // 首次选择 = 尚无模板且身份仍为默认 revision 0。此时必须携带
+    // initialIdentity，否则拒绝写入（UI 取消命名时根本不会调用到这里，
+    // 因此取消 = 零写入）。
+    const firstTime = previous.templateId === null
+      && previous.revision === 0
+      && currentIdentity.revision === 0;
+    if (firstTime && !options?.reset && !options?.initialIdentity) {
+      throw new Error("agent_identity_required");
+    }
+
+    let nextIdentity = currentIdentity;
+    if (firstTime && !options?.reset && options?.initialIdentity) {
+      const displayName = normalizeAgentDisplayName(options.initialIdentity.displayName);
+      if (!displayName) throw new Error("agent_identity_invalid_name");
+      const avatar = normalizeAgentAvatar(options.initialIdentity.avatar)
+        ?? Object.freeze({ kind: "default" as const });
+      nextIdentity = Object.freeze({
+        schema: currentIdentity.schema,
+        revision: currentIdentity.revision + 1,
+        displayName,
+        avatar,
+        updatedAt: now
+      });
+    }
+    // reset 或非首次选择：身份原样保留，revision 不变。
+
     const next = applyTemplateToState(previous, {
       templateId: template.id,
       now,
       reset: Boolean(options?.reset)
     });
-    const agentContent = renderAgentMarkdown(next);
+    const agentContent = renderAgentMarkdown(next, nextIdentity);
 
     const extraChanges: Array<{ relativePath: string; content: string }> = [{
       relativePath: PERSONALITY_STATE_RELATIVE_PATH,
       content: personalityStateJson(next)
     }];
+    if (nextIdentity !== currentIdentity) {
+      // 首次命名与模板在同一个 Repository 事务中落盘，避免「人格已选但
+      // 名字没保存」的半状态。
+      extraChanges.push({
+        relativePath: AGENT_IDENTITY_RELATIVE_PATH,
+        content: agentIdentityStateJson(nextIdentity)
+      });
+    }
 
     // 首次选择模板覆盖自定义 AGENT.md 前，保存一份持久、可恢复的本地
     // 历史版本（事务临时备份提交后会删除，不能冒充历史备份；草案 §12.2）。
@@ -315,7 +378,95 @@ export class CognitiveSystem {
       });
       resultRevision = result.revision;
     }
-    return Object.freeze({ revision: resultRevision, state: next, agent: agentContent });
+    // 事务成功后才更新身份缓存；失败时保持旧身份与旧 AGENT.md。
+    if (nextIdentity !== currentIdentity) {
+      this.agentIdentityStore.updateCache(nextIdentity);
+    }
+    return Object.freeze({
+      revision: resultRevision,
+      state: next,
+      agent: agentContent,
+      identity: nextIdentity
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Agent identity (名称 + 头像；只能由用户在设置中修改，全程无 Provider)
+  // -------------------------------------------------------------------------
+
+  /** 读取正式身份状态（文件不存在时回退默认 EchoInk/default）。 */
+  async readAgentIdentity(): Promise<AgentIdentityState> {
+    return await this.agentIdentityStore.read();
+  }
+
+  /** 同步快照（create 时已预热缓存），供 UI 即时读取。 */
+  currentAgentIdentity(): AgentIdentityState {
+    return this.agentIdentityStore.peek();
+  }
+
+  /**
+   * 用户修改名称 / 头像：一个 applyCognitiveUpdate 事务保存身份 JSON 与
+   * 必要的 AGENT.md。内容没有变化时不增加 revision、不创建事务；
+   * 头像变化不影响 trait、learnedRequirements、processedSources、Memory
+   * 或 DreamState；全程不调用 Provider。
+   */
+  async updateAgentIdentity(
+    draft: Readonly<{
+      displayName: string;
+      avatar: AgentAvatarState;
+    }>
+  ): Promise<Readonly<{
+    revision: number;
+    identity: AgentIdentityState;
+    agent: string;
+  }>> {
+    const displayName = normalizeAgentDisplayName(draft.displayName);
+    if (!displayName) throw new Error("agent_identity_invalid_name");
+    const avatar = normalizeAgentAvatar(draft.avatar)
+      ?? Object.freeze({ kind: "default" as const });
+
+    const current = await this.agentIdentityStore.read();
+    const personality = await this.readPersonalityState();
+    const fixedBefore = await this.repository.readUserControlState();
+    const nameChanged = displayName !== current.displayName;
+    const avatarChanged = avatar.kind !== current.avatar.kind
+      || JSON.stringify(avatar) !== JSON.stringify(current.avatar);
+    if (!nameChanged && !avatarChanged) {
+      // 内容没有变化：不增加 identity revision，也不创建事务。
+      return Object.freeze({
+        revision: fixedBefore.revision,
+        identity: current,
+        agent: fixedBefore.agent
+      });
+    }
+
+    const now = this.now();
+    const nextIdentity: AgentIdentityState = Object.freeze({
+      schema: current.schema,
+      revision: current.revision + 1,
+      displayName,
+      avatar,
+      updatedAt: now
+    });
+    // 名称变化才需要重写 AGENT.md；头像绝不进入模型上下文。
+    const agentContent = nameChanged
+      ? renderAgentMarkdown(personality, nextIdentity)
+      : undefined;
+    const result = await this.repository.applyCognitiveUpdate({
+      ...(agentContent ? { agentContent } : {}),
+      secondaryRecords: await this.secondaryStore.loadAll(),
+      extraChanges: [{
+        relativePath: AGENT_IDENTITY_RELATIVE_PATH,
+        content: agentIdentityStateJson(nextIdentity)
+      }],
+      detail: `agent-identity:${nameChanged ? "rename" : "avatar"}`
+    });
+    this.agentIdentityStore.updateCache(nextIdentity);
+    return Object.freeze({
+      revision: result.revision,
+      identity: nextIdentity,
+      agent: agentContent ?? fixedBefore.agent
+    });
   }
 
   // -------------------------------------------------------------------------

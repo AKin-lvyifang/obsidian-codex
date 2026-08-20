@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { defaultAgentIdentityState } from "../../harness/memory/agent-identity-state";
 import CodexForObsidianPlugin from "../../main";
 import type {
   PiConversationCatalogEntry,
@@ -656,7 +657,9 @@ async function localManagementAndMemoryStayProviderIndependent(): Promise<void> 
     {
       identity: { agent: "Agent", user: "User" },
       records: [{ id: "memory-local" }],
-      learningEnabled: true
+      learningEnabled: true,
+      agentIdentity: defaultAgentIdentityState(),
+      personalityState: null
     }
   );
 }

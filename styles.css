@@ -322,6 +322,21 @@ body.theme-light .codex-container {
   height: 15px;
 }
 
+/* Custom / preset avatar image in the reply header. */
+.codex-agent-avatar.has-image {
+  background: transparent;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--background-modifier-border) 55%, transparent);
+  overflow: hidden;
+}
+
+.codex-agent-avatar img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+  border-radius: inherit;
+}
+
 .codex-agent-header-main {
   display: grid;
   flex: 1 1 auto;
@@ -12378,6 +12393,171 @@ body.theme-dark .codex-session-picker {
    Cognitive System v2: Agent Profile Card (read-only hexagon + collapsible text)
    Replaces the old AGENT.md textarea editor.
    ========================================================================== */
+
+/* --- Agent identity card (settings: 身份与用户画像) ---------------------- */
+.echoink-agent-identity-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  background: var(--background-secondary);
+  margin-bottom: 12px;
+}
+
+.echoink-agent-identity-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  border-radius: 50%;
+  overflow: hidden;
+  color: #f8f7ff;
+  background: #8b5cf6;
+}
+
+.echoink-agent-identity-avatar.is-default svg {
+  width: 22px;
+  height: 22px;
+}
+
+.echoink-agent-identity-avatar img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
+.echoink-agent-identity-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.echoink-agent-identity-name {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.echoink-agent-identity-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.echoink-agent-identity-edit {
+  flex: 0 0 auto;
+}
+
+.echoink-agent-identity-default-badge {
+  font-size: 11px;
+  color: var(--text-muted);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+
+/* --- Agent identity modal ------------------------------------------------- */
+.echoink-agent-identity-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.echoink-agent-identity-modal-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.echoink-agent-identity-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.echoink-agent-identity-label {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.echoink-agent-identity-error {
+  font-size: 12px;
+  color: var(--text-error);
+  min-height: 14px;
+}
+
+.echoink-agent-identity-avatar-area {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.echoink-agent-identity-modal-preview {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 64px;
+  height: 64px;
+  flex: 0 0 64px;
+  border-radius: 50%;
+  overflow: hidden;
+  background: var(--background-modifier-border);
+}
+
+.echoink-agent-identity-modal-preview img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
+.echoink-agent-identity-modal-preview.is-default {
+  font-size: 28px;
+  background: #8b5cf6;
+}
+
+.echoink-agent-identity-avatar-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.echoink-agent-identity-file {
+  display: none;
+}
+
+.echoink-agent-avatar-preset-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.echoink-agent-avatar-preset {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.echoink-agent-avatar-preset.is-selected {
+  border-color: var(--interactive-accent);
+  background: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
+}
+
+.echoink-agent-identity-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
 
 .echoink-agent-profile-card {
   border-radius: 16px;

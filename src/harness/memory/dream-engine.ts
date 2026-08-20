@@ -64,6 +64,10 @@ import {
   cognitiveJsonText
 } from "./cognitive-file-utils";
 import {
+  AgentIdentityStateStore,
+  defaultAgentIdentityState
+} from "./agent-identity-state";
+import {
   DREAM_STATE_RELATIVE_PATH,
   enqueuePendingMemoryIds,
   type DreamState,
@@ -136,6 +140,8 @@ export interface DreamEngineDeps {
   readonly profileStore: UserProfileStateStore;
   readonly secondaryStore: SecondaryMemoryStore;
   readonly dreamStateStore: DreamStateStore;
+  /** 做梦只读取 Agent 身份用于重渲染 AGENT.md，绝不修改身份。 */
+  readonly agentIdentityStore?: AgentIdentityStateStore;
   /** null → Provider 不可用，本轮不产生模型结果。 */
   readonly llm: () => DreamLlmPort | null;
   readonly now?: () => number;
@@ -200,6 +206,10 @@ export class DreamEngine {
     const profileState = (await profileStore.read())
       ?? this.emptyProfile(startedAt);
     const secondaryRecords = [...(await secondaryStore.loadAll())];
+    // 身份只读：做梦重渲染 AGENT.md 时使用当前名称，不得改回默认值。
+    const agentIdentity = this.deps.agentIdentityStore
+      ? await this.deps.agentIdentityStore.read()
+      : defaultAgentIdentityState();
     const inspected = await repository.inspect();
     const currentRecords = inspected.records.filter((record) => record.status === "current");
     const validMemoryIds = new Set(currentRecords.map((record) => record.id));
@@ -432,7 +442,7 @@ export class DreamEngine {
     let agentContent: string | undefined;
     let userContent: string | undefined;
     if (nextPersonality.templateId && nextPersonality !== personalityState) {
-      const rendered = renderAgentMarkdown(nextPersonality);
+      const rendered = renderAgentMarkdown(nextPersonality, agentIdentity);
       if (rendered !== fixedFiles.agent) {
         agentContent = rendered;
         agentUpdated = true;

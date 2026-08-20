@@ -83,6 +83,9 @@ export class Menu {
   showAtMouseEvent(): void {}
 }
 
+/** Modals currently open, in open order (test inspection hook). */
+export const openTestModals: Modal[] = [];
+
 export class Modal {
   modalEl = document.createElement("div");
   titleEl = document.createElement("div");
@@ -94,11 +97,14 @@ export class Modal {
   open(): void {
     if (this.opened) return;
     this.opened = true;
+    openTestModals.push(this);
     this.onOpen();
   }
   close(): void {
     if (!this.opened) return;
     this.opened = false;
+    const index = openTestModals.lastIndexOf(this);
+    if (index >= 0) openTestModals.splice(index, 1);
     this.onClose();
   }
   onOpen(): void {}

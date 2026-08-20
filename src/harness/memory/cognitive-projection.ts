@@ -17,15 +17,35 @@ import {
   type UserProfileItem,
   type UserProfileState
 } from "./user-profile-state";
+import {
+  DEFAULT_AGENT_DISPLAY_NAME,
+  normalizeAgentDisplayName,
+  type AgentIdentityState
+} from "./agent-identity-state";
 
-export function renderAgentMarkdown(state: PersonalityState): string {
+export function renderAgentMarkdown(
+  state: PersonalityState,
+  identity?: AgentIdentityState | null
+): string {
   const template = getPersonalityTemplate(state.templateId);
+  const displayName = normalizeAgentDisplayName(identity?.displayName ?? "")
+    ?? DEFAULT_AGENT_DISPLAY_NAME;
   const lines: string[] = ["# EchoInk Agent", ""];
   if (template) {
     lines.push(`> 初始模板：${template.labelZh}。人格由 EchoInk 依据模板与有效长期 Memory 自动生成，不由用户直接编辑。`, "");
   } else {
     lines.push("> 人格由 EchoInk 依据有效长期 Memory 自动生成，不由用户直接编辑。", "");
   }
+
+  // 身份段：名称由用户在设置中指定。头像绝不写入 AGENT.md（避免把 Data URL
+  // 注入模型上下文），也不出现 presetId / 图片路径。
+  lines.push(
+    "## 身份",
+    "",
+    `- 当前名称：${displayName}`,
+    "- 名称由用户在 EchoInk 设置中指定；人格与长期要求仍由模板和有效 Memory 自动生成。",
+    ""
+  );
 
   lines.push("## 当前人格", "");
   for (const dimension of TRAIT_DIMENSIONS) {

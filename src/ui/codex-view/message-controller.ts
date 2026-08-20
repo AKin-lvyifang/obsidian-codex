@@ -84,6 +84,7 @@ export function renderMessages(host: CodexMessageHost, options: { forceBottom?: 
     sessionId: session.id,
     showWelcome: host.plugin.settings.showWelcome,
     settingsLanguage: host.plugin.settings.settingsLanguage,
+    agentIdentity: host.plugin.getEchoInkAgentIdentityView(),
     messages,
     tokenUsage: session.tokenUsage,
     vaultPath: host.plugin.getVaultPath(),

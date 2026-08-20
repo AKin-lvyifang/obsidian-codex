@@ -16,6 +16,8 @@ import {
   TRAIT_DIMENSION_META,
   getPersonalityTemplate
 } from "../harness/memory/personality-templates";
+import { AGENT_AVATAR_PRESETS, resolveAgentAvatarUrl } from "../ui/agent-avatar-presets";
+import { AgentIdentityModal } from "../ui/agent-identity-modal";
 import { buildActiveEchoInkResourceCatalog } from "../resources/registry";
 import {
   mcpConnectionStatus,
@@ -479,8 +481,8 @@ export class CodexSettingTab extends PluginSettingTab {
     applySettingsRow(new Setting(memoryGroup)
       .setName(zh ? "离线记忆整理（做梦）" : "Offline memory consolidation (dreaming)")
       .setDesc(zh
-        ? "开启后，Obsidian 打开期间按定时在后台复盘一级记忆：生成二级事实，并更新 USER.md、人格状态与 AGENT.md。"
-        : "While Obsidian is open, periodically reviews primary memories on a timer: generates secondary facts and updates USER.md, personality state and AGENT.md.")
+        ? "开启后，Obsidian 打开期间按定时在后台复盘一级记忆：生成二级事实，并更新用户画像、人格状态与 Agent 画像。"
+        : "While Obsidian is open, periodically reviews primary memories on a timer: generates secondary facts and updates the user profile, personality state and Agent profile.")
       .addToggle((toggle) => {
         labelSettingsToggle(toggle, zh ? "离线记忆整理" : "Memory consolidation");
         toggle.setValue(this.plugin.settings.memory.dreamEnabled).onChange(async (enabled) => {
@@ -529,8 +531,8 @@ export class CodexSettingTab extends PluginSettingTab {
     const section = createSettingsSection(page, {
       title: zh ? "身份与用户画像" : "Identity and user profile",
       description: zh
-        ? "Agent 人格由系统从 trait 记录自动生成，不可手动编辑。USER.md 保存你明确确认的稳定画像。"
-        : "Agent personality is auto-generated from trait records and cannot be edited manually. USER.md stores your explicitly confirmed stable profile.",
+        ? "Agent 画像由系统自动生成，不能手动编辑；用户画像由做梦与记忆修正自动维护。Agent 身份（名称和头像）可以随时修改，不影响人格或 Memory。"
+        : "The Agent profile is auto-generated and cannot be edited manually; the user profile is maintained by dreaming and memory corrections. Agent identity (name and avatar) can be changed anytime without affecting personality or Memory.",
       surface: "group"
     });
     const group = createSettingsGroup(section);
@@ -538,21 +540,23 @@ export class CodexSettingTab extends PluginSettingTab {
       void this.loadPersonalMemoryState();
     }
     if (this.personalMemoryLoading) {
-      createSettingsState(group, zh ? "正在读取文件…" : "Loading files…", "neutral");
+      createSettingsState(group, zh ? "正在读取画像数据…" : "Loading profile data…", "neutral");
       return;
     }
     if (!this.personalMemoryState) {
       createSettingsState(
         group,
-        zh ? "暂时无法读取当前 Vault 的身份文件。" : "Identity files are temporarily unavailable.",
+        zh ? "画像数据暂时无法读取" : "Profile data is temporarily unavailable",
         "error",
         {
-          label: zh ? "重新加载身份文件" : "Reload identity files",
+          label: zh ? "重新加载画像数据" : "Reload profile data",
           onActivate: () => void this.loadPersonalMemoryState(true)
         }
       );
       return;
     }
+    // Agent identity (name + avatar): user-editable; never touches personality or Memory.
+    this.addAgentIdentitySetting(group);
     // Agent profile: read-only hexagon card + collapsible text (no editing)
     this.addAgentProfileCard(group, this.personalMemoryState.agent);
     // User profile: read-only (maintained by dreaming / memory corrections)
@@ -687,7 +691,7 @@ export class CodexSettingTab extends PluginSettingTab {
     // --- Header ---
     const header = card.createDiv({ cls: "echoink-agent-profile-card-header" });
     const titleArea = header.createDiv({ cls: "echoink-agent-profile-card-title-area" });
-    titleArea.createDiv({ cls: "echoink-agent-profile-card-label", text: "AGENT.md" });
+    titleArea.createDiv({ cls: "echoink-agent-profile-card-label", text: zh ? "Agent 画像" : "Agent profile" });
     titleArea.createSpan({
       cls: "echoink-agent-profile-card-badge",
       text: zh ? "自动生成" : "Auto-generated"
@@ -703,13 +707,13 @@ export class CodexSettingTab extends PluginSettingTab {
     iconHover.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><polyline points="16 11 18 13 22 9"/></svg>`;
     const btnLabel = expandBtn.createSpan({
       cls: "echoink-morph-btn-label",
-      text: zh ? "查看完整描述" : "Full description"
+      text: zh ? "查看完整画像" : "Full profile"
     });
     header.createDiv({
       cls: "echoink-agent-profile-card-desc",
       text: zh
-        ? "人格由人格状态文件投影生成，不可手动编辑；选择模板或做梦后自动更新。"
-        : "Personality is projected from the personality state file; it updates automatically after template selection or dreaming."
+        ? "人格来自初始模板，并根据长期协作缓慢演化；不能直接修改六维数值。"
+        : "Personality starts from the chosen template and evolves slowly through long-term collaboration; the six dimensions cannot be edited directly."
     });
 
     // --- Body: left hexagon + right trait bars ---
@@ -765,7 +769,7 @@ export class CodexSettingTab extends PluginSettingTab {
     summaryCard.createDiv({ cls: "echoink-agent-profile-summary-title", text: zh ? "人格总结" : "Personality Summary" });
     const summaryText = summaryCard.createDiv({ cls: "echoink-agent-profile-summary-text" });
     summaryText.setText(zh ? "正在读取…" : "Loading…");
-    drawerInner.createDiv({ cls: "echoink-agent-profile-raw-title", text: "AGENT.md" });
+    drawerInner.createDiv({ cls: "echoink-agent-profile-raw-title", text: zh ? "画像文本" : "Profile text" });
     const rawPre = drawerInner.createEl("pre", {
       cls: "echoink-agent-profile-raw-text",
       text: agentContent
@@ -777,8 +781,8 @@ export class CodexSettingTab extends PluginSettingTab {
       isOpen = !isOpen;
       drawer.classList.toggle("is-open", isOpen);
       btnLabel.setText(isOpen
-        ? (zh ? "收起描述" : "Collapse")
-        : (zh ? "查看完整描述" : "Full description"));
+        ? (zh ? "收起画像" : "Collapse profile")
+        : (zh ? "查看完整画像" : "Full profile"));
       expandBtn.classList.toggle("is-open", isOpen);
       if (isOpen) {
         // 做梦可能在后台更新了人格状态和 AGENT.md；展开时重新读取。
@@ -923,12 +927,33 @@ export class CodexSettingTab extends PluginSettingTab {
         void (async () => {
           try {
             const system = await this.plugin.getCognitiveSystem();
+            const personality = await system.readPersonalityState();
+            const identity = await system.readAgentIdentity();
+            // 首次选择模板 = 尚无模板且身份仍是默认 revision 0：
+            // 此时必须先经过命名弹窗；取消时根本不会调用
+            // selectPersonalityTemplate，因此取消 = 零写入。
+            const firstTime = !reset
+              && personality.templateId === null
+              && personality.revision === 0
+              && identity.revision === 0;
+            if (firstTime) {
+              row.removeAttribute("disabled");
+              this.openAgentIdentityModal({
+                templateId: tpl.id,
+                templateLabel: zh ? tpl.labelZh : tpl.labelEn,
+                panel,
+                refs,
+                zh
+              });
+              return;
+            }
             const result = await system.selectPersonalityTemplate(
               tpl.id,
               reset ? { reset: true } : undefined
             );
             this.applyPersonalityToCard(refs, result.state, result.agent, zh);
             refs.summaryText.setText(await system.renderPersonalitySummary(zh ? "zh" : "en"));
+            await this.refreshIdentityAfterChange();
             new Notice(zh ? `已应用「${tpl.labelZh}」人格模板` : `Applied template: ${tpl.labelEn}`);
             panel.removeClass("is-visible");
             panel.empty();
@@ -954,13 +979,123 @@ export class CodexSettingTab extends PluginSettingTab {
     };
   }
 
+  /**
+   * 首次选择模板后的命名弹窗。确认前不写任何东西；取消只是关闭弹窗、
+   * 模板选择面板保持打开，用户可继续换模板或退出。
+   */
+  private openAgentIdentityModal(context: Readonly<{
+    templateId: string;
+    templateLabel: string;
+    panel: HTMLElement;
+    refs: AgentProfileCardRefs;
+    zh: boolean;
+  }>): void {
+    const { templateId, templateLabel, panel, refs, zh } = context;
+    const modal = new AgentIdentityModal(this.plugin.app, {
+      initialName: "",
+      initialAvatar: Object.freeze({ kind: "default" }),
+      language: zh ? "zh" : "en",
+      mode: "first-run",
+      presets: AGENT_AVATAR_PRESETS,
+      onConfirm: async (draft) => {
+        const system = await this.plugin.getCognitiveSystem();
+        // 模板 + 名称 + 头像在同一个事务中落盘；失败时旧状态全部保留。
+        const result = await system.selectPersonalityTemplate(templateId, {
+          initialIdentity: { displayName: draft.displayName, avatar: draft.avatar }
+        });
+        this.applyPersonalityToCard(refs, result.state, result.agent, zh);
+        refs.summaryText.setText(await system.renderPersonalitySummary(zh ? "zh" : "en"));
+        await this.refreshIdentityAfterChange();
+        new Notice(zh
+          ? `已应用「${templateLabel}」人格模板，Agent 名称：${draft.displayName}`
+          : `Applied template: ${templateLabel}. Agent name: ${draft.displayName}`);
+        panel.removeClass("is-visible");
+        panel.empty();
+      }
+    });
+    modal.open();
+  }
+
+  /** 身份保存成功后：刷新设置页状态与对话区的消息头。 */
+  private async refreshIdentityAfterChange(): Promise<void> {
+    await this.loadPersonalMemoryState(true);
+    this.plugin.getCodexView()?.refreshPersonalizationUi();
+  }
+
+  /**
+   * 身份与用户画像页面顶部的「Agent 身份」卡片（草案 §8）：
+   * 名称 + 头像只由用户在这里修改，绝不影响人格或 Memory。
+   */
+  private addAgentIdentitySetting(container: HTMLElement): void {
+    const zh = this.plugin.settings.settingsLanguage !== "en";
+    const identity = this.personalMemoryState?.agentIdentity ?? null;
+    const personalityState = this.personalMemoryState?.personalityState ?? null;
+    const hasTemplate = Boolean(personalityState && personalityState.templateId);
+    const card = container.createDiv({ cls: "echoink-agent-identity-card" });
+
+    const avatarEl = card.createDiv({ cls: "echoink-agent-identity-avatar" });
+    const avatarUrl = identity ? resolveAgentAvatarUrl(identity.avatar) : null;
+    if (avatarUrl) {
+      avatarEl.createEl("img", { attr: { src: avatarUrl, alt: "" } });
+    } else {
+      avatarEl.addClass("is-default");
+      setIcon(avatarEl, "bot");
+    }
+
+    const copy = card.createDiv({ cls: "echoink-agent-identity-copy" });
+    copy.createDiv({
+      cls: "echoink-agent-identity-name",
+      text: identity ? identity.displayName : "EchoInk"
+    });
+    copy.createDiv({
+      cls: "echoink-agent-identity-desc",
+      text: !hasTemplate
+        ? (zh ? "选择初始风格后设置名称与头像" : "Set a name and avatar after choosing a starting style")
+        : (zh
+            ? "名称和头像会显示在 Agent 回复旁；修改身份不会重置人格或 Memory。"
+            : "Name and avatar appear next to the Agent's replies; editing identity never resets personality or Memory.")
+    });
+
+    const editButton = card.createEl("button", {
+      cls: "echoink-agent-identity-edit",
+      attr: { type: "button" },
+      text: zh ? "编辑身份" : "Edit identity"
+    });
+    editButton.disabled = !hasTemplate;
+    if (!identity && hasTemplate) {
+      // 旧 Vault：人格模板已存在但没有身份文件 —— 显示默认值，可编辑，
+      // 不强制弹窗。
+      card.createSpan({ cls: "echoink-agent-identity-default-badge", text: zh ? "默认" : "Default" });
+    }
+    editButton.addEventListener("click", () => {
+      const current = this.personalMemoryState?.agentIdentity ?? null;
+      const modal = new AgentIdentityModal(this.plugin.app, {
+        initialName: current?.displayName ?? "EchoInk",
+        initialAvatar: current?.avatar ?? Object.freeze({ kind: "default" }),
+        language: zh ? "zh" : "en",
+        mode: "edit",
+        presets: AGENT_AVATAR_PRESETS,
+        onConfirm: async (draft) => {
+          const system = await this.plugin.getCognitiveSystem();
+          await system.updateAgentIdentity({
+            displayName: draft.displayName,
+            avatar: draft.avatar
+          });
+          await this.refreshIdentityAfterChange();
+          new Notice(zh ? "Agent 身份已更新" : "Agent identity updated");
+        }
+      });
+      modal.open();
+    });
+  }
+
   /** USER.md is maintained by dreaming / memory corrections — read-only here. */
   private addReadOnlyUserProfileCard(container: HTMLElement, userContent: string): void {
     const zh = this.plugin.settings.settingsLanguage !== "en";
     const card = container.createDiv({ cls: "echoink-agent-profile-card" });
     const header = card.createDiv({ cls: "echoink-agent-profile-card-header" });
     const titleArea = header.createDiv({ cls: "echoink-agent-profile-card-title-area" });
-    titleArea.createDiv({ cls: "echoink-agent-profile-card-label", text: "USER.md" });
+    titleArea.createDiv({ cls: "echoink-agent-profile-card-label", text: zh ? "用户画像" : "User profile" });
     titleArea.createSpan({
       cls: "echoink-agent-profile-card-badge",
       text: zh ? "只读" : "Read-only"

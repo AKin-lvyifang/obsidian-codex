@@ -40,6 +40,12 @@ export interface MessageListRenderOptions {
   preserveScroll?: boolean;
 }
 
+/** 只读展示快照：当前 Agent 名称 + 头像 URL（null = 默认 bot 图标）。 */
+export interface AgentIdentityView {
+  readonly displayName: string;
+  readonly avatarUrl: string | null;
+}
+
 export interface MessageListRenderInput {
   app: App;
   component: Component;
@@ -49,6 +55,8 @@ export interface MessageListRenderInput {
   showWelcome: boolean;
   settingsLanguage: SettingsLanguage;
   messages: ChatMessage[];
+  /** 当前 Agent 身份展示快照；缺省时回退 EchoInk + bot 图标。 */
+  agentIdentity?: AgentIdentityView;
   tokenUsage?: TokenUsage;
   vaultPath: string;
   readRawMessageText: (rawRef: string) => Promise<string>;
@@ -921,14 +929,25 @@ export class CodexMessageListRenderer {
     return copyButton;
   }
 
-  private renderAgentHeader(container: HTMLElement, input: { message?: ChatMessage; statusLabel: string; compact: boolean }): void {
+  private renderAgentHeader(container: HTMLElement, input: { message?: ChatMessage; statusLabel: string; compact: boolean; agentIdentity?: AgentIdentityView }): void {
     const header = container.createDiv({ cls: "codex-agent-header" });
     header.toggleClass("is-compact", input.compact);
+    // 未显式传入时读取当前渲染环境的身份快照（消息头全部使用同一份
+    // 当前身份，不做逐消息持久化）。
+    const identity = input.agentIdentity ?? this.env?.agentIdentity;
+    const displayName = identity?.displayName?.trim() || "EchoInk";
+    const avatarUrl = identity?.avatarUrl ?? null;
     const avatar = header.createSpan({ cls: "codex-agent-avatar", attr: { "aria-hidden": "true" } });
-    setIcon(avatar, "bot");
+    if (avatarUrl) {
+      // 自定义 / preset 头像：装饰性图片，容器保持 aria-hidden。
+      avatar.addClass("has-image");
+      avatar.createEl("img", { attr: { src: avatarUrl, alt: "" } });
+    } else {
+      setIcon(avatar, "bot");
+    }
     const main = header.createDiv({ cls: "codex-agent-header-main" });
     const nameRow = main.createDiv({ cls: "codex-agent-name-row" });
-    nameRow.createSpan({ cls: "codex-agent-name", text: "EchoInk" });
+    nameRow.createSpan({ cls: "codex-agent-name", text: displayName });
     const agent = input.message ? agentModelLine(input.message) : "";
     if (agent) nameRow.createSpan({ cls: "codex-agent-model-pill", text: `· ${agent}` });
     if (input.statusLabel) main.createDiv({ cls: "codex-agent-status-line", text: input.statusLabel });

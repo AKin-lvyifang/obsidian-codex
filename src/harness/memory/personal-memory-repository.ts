@@ -131,6 +131,7 @@ export interface PersonalMemoryLayout {
   readonly secondary: string;
   readonly personalityState: string;
   readonly userProfileState: string;
+  readonly agentIdentity: string;
   readonly dreamState: string;
 }
 
@@ -315,6 +316,7 @@ export class PersonalMemoryRepository {
       secondary: path.join(history, "secondary"),
       personalityState: path.join(root, "agents", "echoink", "personality-state.json"),
       userProfileState: path.join(sharedUser, "user-profile-state.json"),
+      agentIdentity: path.join(root, "agents", "echoink", "agent-identity.json"),
       dreamState: path.join(runtime, "dream-state.json")
     });
     for (const key of Object.keys(this.layout) as Array<keyof PersonalMemoryLayout>) {

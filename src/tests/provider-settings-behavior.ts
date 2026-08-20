@@ -1,6 +1,6 @@
 import * as assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { App } from "obsidian";
+import { App, openTestModals } from "obsidian";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import {
   activateApiProvider,
@@ -66,6 +66,22 @@ import {
   restoreApiProviderSettings,
   snapshotApiProviderSettings
 } from "../plugin/settings-store";
+import { AgentIdentityModal } from "../ui/agent-identity-modal";
+import {
+  AGENT_AVATAR_OUTPUT_MAX_DATA_URL_CHARS,
+  AGENT_AVATAR_SOURCE_MAX_BYTES,
+  processAgentAvatar,
+  validateAvatarSourceSize,
+  validateAvatarSourceType
+} from "../ui/agent-avatar-processor";
+import {
+  resolveAgentAvatarPresetAsset,
+  resolveAgentAvatarUrl
+} from "../ui/agent-avatar-presets";
+import {
+  AGENT_IDENTITY_STATE_SCHEMA,
+  agentIdentityStateJson
+} from "../harness/memory/agent-identity-state";
 
 export async function runProviderSettingsBehaviorTests(): Promise<void> {
   assertSettingsV49MigrationContract();
@@ -99,6 +115,12 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   await runHarnessV2PiObsidianSecretStorageTests();
   await runHarnessV2PiProviderSecurityTests();
   await runPiNativeControlledProviderTests();
+  await assertAgentIdentityCardPlacementAndCopy();
+  await assertIdentityEditSaveRefreshesSettingsAndPersonalization();
+  await assertFirstNamingModalZeroWriteOnCancel();
+  await assertIdentityModalNameValidation();
+  await assertAvatarPresetCatalogBehavior();
+  await assertAvatarProcessorContract();
 }
 
 async function assertMemoryCorrectionModalContract(): Promise<void> {
@@ -2254,6 +2276,455 @@ async function flushProviderModalTasks(): Promise<void> {
 
 let providerModalTestDocument: ProviderModalTestDocument;
 
+
+// ---------------------------------------------------------------------------
+// R4: Agent identity — settings card, naming modal, avatar processing
+// ---------------------------------------------------------------------------
+
+function createIdentityFixtureState(overrides: Record<string, unknown> = {}): Record<string, any> {
+  return {
+    agent: "# Agent",
+    user: "# User",
+    memory: "# Memory",
+    revision: 3,
+    learningEnabled: true,
+    records: Object.freeze([]),
+    forgottenIds: Object.freeze([]),
+    agentIdentity: {
+      schema: "echoink.agent-identity.v1",
+      revision: 1,
+      displayName: "小墨",
+      avatar: { kind: "default" },
+      updatedAt: 123
+    },
+    personalityState: {
+      schema: "echoink.personality.v1",
+      revision: 1,
+      templateId: "executor",
+      explicit: { tempo: null, energy: null, mind: null, warmth: null, order: null, stance: null },
+      observed: { tempo: null, energy: null, mind: null, warmth: null, order: null, stance: null },
+      history: [],
+      candidates: [],
+      learnedRequirements: [],
+      processedSources: [],
+      updatedAt: 0
+    },
+    ...overrides
+  };
+}
+
+function createIdentityTestPlugin(fixtureState: Record<string, any>): {
+  plugin: Record<string, any>;
+  refreshCalls: () => number;
+  personalMemoryCalls: () => number;
+} {
+  const settings = structuredClone(DEFAULT_SETTINGS);
+  settings.settingsTab = "general";
+  let refreshes = 0;
+  let personalMemoryCalls = 0;
+  const plugin: Record<string, any> = {
+    app: new App(),
+    manifest: { id: "codex-echoink" },
+    settings,
+    getCognitiveSystem: async () => createCognitiveSystemStub(),
+    getCodexView: () => ({ refreshPersonalizationUi: () => { refreshes += 1; } }),
+    getEchoInkPersonalMemoryState: async () => {
+      personalMemoryCalls += 1;
+      return structuredClone(fixtureState);
+    }
+  };
+  return {
+    plugin,
+    refreshCalls: () => refreshes,
+    personalMemoryCalls: () => personalMemoryCalls
+  };
+}
+
+async function assertAgentIdentityCardPlacementAndCopy(): Promise<void> {
+  installProviderModalDomFixture();
+  const { plugin } = createIdentityTestPlugin(createIdentityFixtureState());
+  const tab = new CodexSettingTab(plugin as never);
+  const mutable = tab as unknown as { personalMemoryState: Record<string, any> | null };
+  mutable.personalMemoryState = createIdentityFixtureState();
+  tab.display();
+
+  const identityCard = tab.containerEl.querySelector<ProviderModalTestElement>(
+    ".echoink-agent-identity-card"
+  );
+  assert.ok(identityCard, "identity card must render in the personalization section");
+  assert.match(identityCard.textContent, /小墨/u);
+  assert.match(identityCard.textContent, /名称和头像会显示在 Agent 回复旁/u);
+  assert.ok(identityCard.querySelector(".echoink-agent-identity-edit"), "edit button exists");
+
+  // Identity card must come BEFORE the Agent profile card.
+  const cards = Array.from(
+    tab.containerEl.querySelectorAll<ProviderModalTestElement>(
+      ".echoink-agent-identity-card, .echoink-agent-profile-card"
+    )
+  );
+  const identityIndex = cards.findIndex((card) => card.hasClass("echoink-agent-identity-card"));
+  const profileIndex = cards.findIndex((card) => card.hasClass("echoink-agent-profile-card"));
+  assert.ok(identityIndex >= 0 && profileIndex >= 0 && identityIndex < profileIndex,
+    "identity card must precede the Agent profile card");
+
+  // Copy: Agent 身份 / Agent 画像 / 用户画像；no AGENT.md / USER.md filenames.
+  const text = tab.containerEl.textContent;
+  assert.match(text, /Agent 身份/u);
+  assert.match(text, /Agent 画像/u);
+  assert.match(text, /用户画像/u);
+  assert.doesNotMatch(text, /AGENT\.md|USER\.md/u);
+  assert.match(text, /查看完整画像/u);
+  assert.doesNotMatch(text, /查看完整描述/u);
+  console.log("PASS settings: identity card placement and profile copy");
+}
+
+async function assertIdentityEditSaveRefreshesSettingsAndPersonalization(): Promise<void> {
+  installProviderModalDomFixture();
+  const fixtureState = createIdentityFixtureState();
+  const { plugin, refreshCalls } = createIdentityTestPlugin(fixtureState);
+  let updated: { displayName: string; avatar: { kind: string } } | null = null;
+  plugin.getCognitiveSystem = async () => ({
+    ...createCognitiveSystemStub(),
+    updateAgentIdentity: async (draft: { displayName: string; avatar: { kind: string } }) => {
+      updated = draft;
+      fixtureState.agentIdentity = {
+        schema: "echoink.agent-identity.v1",
+        revision: 2,
+        displayName: draft.displayName,
+        avatar: draft.avatar,
+        updatedAt: 456
+      };
+      return { revision: 4, identity: fixtureState.agentIdentity, agent: "# Agent" };
+    }
+  });
+
+  const tab = new CodexSettingTab(plugin as never);
+  const mutable = tab as unknown as {
+    personalMemoryState: Record<string, any> | null;
+    loadPersonalMemoryState(force?: boolean): Promise<void>;
+  };
+  mutable.personalMemoryState = createIdentityFixtureState();
+  tab.display();
+
+  const editButton = tab.containerEl.querySelector<ProviderModalTestElement>(
+    ".echoink-agent-identity-edit"
+  );
+  assert.ok(editButton);
+  editButton.click();
+
+  // The shared modal opens prefilled with the current identity.
+  const nameInput = findLatestModalElement<ProviderModalTestElement>("name-input");
+  assert.ok(nameInput, "identity modal must open with a name input");
+  assert.equal((nameInput as unknown as { value: string }).value, "小墨");
+
+  (nameInput as unknown as { value: string }).value = "阿澈";
+  nameInput.fireEvent("input");
+  const confirm = findLatestModalElement<ProviderModalTestElement>(".echoink-agent-identity-confirm");
+  assert.ok(confirm);
+  assert.equal((confirm as unknown as { disabled: boolean }).disabled, false);
+  confirm.click();
+  await settleMicrotasks();
+
+  assert.ok(updated, "updateAgentIdentity must be called on save");
+  assert.equal(updated!.displayName, "阿澈");
+  assert.equal(refreshCalls() >= 1, true, "personalization UI refresh must fire after save");
+  console.log("PASS settings: identity edit save refreshes settings and personalization UI");
+}
+
+async function assertFirstNamingModalZeroWriteOnCancel(): Promise<void> {
+  installProviderModalDomFixture();
+  // First-time template selection without identity must open the naming modal
+  // and NEVER call selectPersonalityTemplate until 完成设置.
+  const fixtureState = createIdentityFixtureState({
+    agentIdentity: {
+      schema: "echoink.agent-identity.v1",
+      revision: 0,
+      displayName: "EchoInk",
+      avatar: { kind: "default" },
+      updatedAt: 0
+    },
+    personalityState: {
+      schema: "echoink.personality.v1",
+      revision: 0,
+      templateId: null,
+      explicit: { tempo: null, energy: null, mind: null, warmth: null, order: null, stance: null },
+      observed: { tempo: null, energy: null, mind: null, warmth: null, order: null, stance: null },
+      history: [], candidates: [], learnedRequirements: [], processedSources: [],
+      updatedAt: 0
+    }
+  });
+  const { plugin } = createIdentityTestPlugin(fixtureState);
+  let templateCalls = 0;
+  let lastInitialIdentity: unknown = null;
+  plugin.getCognitiveSystem = async () => ({
+    ...createCognitiveSystemStub(),
+    readPersonalityState: async () => fixtureState.personalityState,
+    readAgentIdentity: async () => fixtureState.agentIdentity,
+    renderPersonalitySummary: async () => "summary",
+    selectPersonalityTemplate: async (
+      templateId: string,
+      options?: { initialIdentity?: unknown }
+    ) => {
+      templateCalls += 1;
+      lastInitialIdentity = options?.initialIdentity ?? null;
+      return {
+        revision: 1,
+        state: { ...fixtureState.personalityState, templateId },
+        agent: "# Agent",
+        identity: fixtureState.agentIdentity
+      };
+    }
+  });
+
+  const tab = new CodexSettingTab(plugin as never);
+  const mutable = tab as unknown as { personalMemoryState: Record<string, any> | null };
+  mutable.personalMemoryState = structuredClone(fixtureState);
+  tab.display();
+
+  const templateBtn = tab.containerEl.querySelector<ProviderModalTestElement>(
+    ".echoink-agent-profile-reselect"
+  );
+  assert.ok(templateBtn, "template button must exist when no template is chosen");
+  templateBtn.click();
+
+  const row = tab.containerEl.querySelector<ProviderModalTestElement>(".echoink-picker-row");
+  assert.ok(row, "picker rows render");
+  row.click();
+  await settleMicrotasks();
+
+  // First-time: the naming modal opened instead of writing anything.
+  assert.equal(templateCalls, 0, "clicking a template must not write before naming");
+  const nameInput = findLatestModalElement<ProviderModalTestElement>("name-input");
+  assert.ok(nameInput, "naming modal must open after template click");
+
+  // Cancel = zero writes.
+  const cancel = findLatestModalElement<ProviderModalTestElement>(".echoink-agent-identity-cancel");
+  assert.ok(cancel);
+  cancel.click();
+  await settleMicrotasks();
+  assert.equal(templateCalls, 0, "cancel must keep zero writes");
+
+  // Re-open and complete the flow: exactly one call with initialIdentity.
+  templateBtn.click();
+  const rowAgain = tab.containerEl.querySelector<ProviderModalTestElement>(".echoink-picker-row");
+  rowAgain!.click();
+  await settleMicrotasks();
+  const nameInput2 = findLatestModalElement<ProviderModalTestElement>("name-input");
+  (nameInput2 as unknown as { value: string }).value = "小墨";
+  nameInput2!.fireEvent("input");
+  const confirm2 = findLatestModalElement<ProviderModalTestElement>(".echoink-agent-identity-confirm");
+  assert.equal((confirm2 as unknown as { disabled: boolean }).disabled, false);
+  confirm2!.click();
+  await settleMicrotasks();
+
+  assert.equal(templateCalls, 1, "完成设置 commits template + identity once");
+  assert.deepEqual(lastInitialIdentity, {
+    displayName: "小墨",
+    avatar: { kind: "default" }
+  });
+  console.log("PASS settings: first naming modal keeps zero writes on cancel");
+}
+
+async function assertIdentityModalNameValidation(): Promise<void> {
+  installProviderModalDomFixture();
+  let confirmed: { displayName: string } | null = null;
+  const modal = new AgentIdentityModal(new App(), {
+    initialName: "",
+    initialAvatar: { kind: "default" },
+    language: "zh",
+    mode: "first-run",
+    onConfirm: async (draft) => { confirmed = { displayName: draft.displayName }; }
+  });
+  modal.open();
+
+  const nameInput = findLatestModalElement<ProviderModalTestElement>("name-input");
+  const errorEl = modal.contentEl.querySelector<ProviderModalTestElement>(
+    ".echoink-agent-identity-error"
+  );
+  const confirm = modal.contentEl.querySelector<ProviderModalTestElement>(
+    ".echoink-agent-identity-confirm"
+  );
+  assert.ok(nameInput && errorEl && confirm);
+
+  // Empty name: disabled with visible reason.
+  assert.equal((confirm as unknown as { disabled: boolean }).disabled, true);
+  assert.match(errorEl!.textContent, /请输入名称/u);
+
+  // Too long (25 Unicode chars): disabled with visible reason.
+  (nameInput as unknown as { value: string }).value = "一二三四五六七八九十一二三四五六七八九十一二三四五";
+  nameInput!.fireEvent("input");
+  assert.equal((confirm as unknown as { disabled: boolean }).disabled, true);
+  assert.match(errorEl!.textContent, /不能超过 24/u);
+
+  // Valid CJK + Emoji name: enabled; confirm passes trimmed draft.
+  (nameInput as unknown as { value: string }).value = "  小墨🖋️  ";
+  nameInput!.fireEvent("input");
+  assert.equal((confirm as unknown as { disabled: boolean }).disabled, false);
+  assert.equal(errorEl!.textContent, "");
+  confirm!.click();
+  await settleMicrotasks();
+  assert.deepEqual(confirmed, { displayName: "小墨🖋️" });
+  console.log("PASS settings: identity modal validates empty/too-long names");
+}
+
+async function assertAvatarPresetCatalogBehavior(): Promise<void> {
+  installProviderModalDomFixture();
+
+  // Empty catalog (the shipped default): no preset list in the modal.
+  const emptyModal = new AgentIdentityModal(new App(), {
+    initialName: "小墨",
+    initialAvatar: { kind: "default" },
+    language: "zh",
+    mode: "edit",
+    onConfirm: async () => undefined
+  });
+  emptyModal.open();
+  assert.equal(emptyModal.contentEl.querySelector(".echoink-agent-avatar-preset-list"), null,
+    "empty preset catalog must hide the list entirely");
+
+  // Fake catalog: presets become selectable and produce a presetId draft.
+  let saved: { avatar: { kind: string; presetId?: string } } | null = null;
+  const fakeCatalog = Object.freeze([{
+    id: "preset-ink",
+    labelZh: "墨点",
+    labelEn: "Ink Dot",
+    assetPath: "assets/avatars/ink-dot.webp"
+  }]);
+  const modal = new AgentIdentityModal(new App(), {
+    initialName: "小墨",
+    initialAvatar: { kind: "default" },
+    language: "zh",
+    mode: "edit",
+    presets: fakeCatalog,
+    resolvePresetAsset: (id) => resolveAgentAvatarPresetAsset(id, fakeCatalog),
+    onConfirm: async (draft) => { saved = { avatar: draft.avatar as never }; }
+  });
+  modal.open();
+  const list = modal.contentEl.querySelector<ProviderModalTestElement>(".echoink-agent-avatar-preset-list");
+  assert.ok(list, "non-empty catalog renders the preset list");
+  const chip = list!.querySelector<ProviderModalTestElement>(".echoink-agent-avatar-preset");
+  assert.ok(chip);
+  assert.match(chip!.textContent, /墨点/u);
+  chip!.click();
+  const preview = modal.contentEl.querySelector<ProviderModalTestElement>("img");
+  assert.ok(preview, "selected preset renders its asset in the preview");
+  assert.equal(preview!.getAttribute("src"), "assets/avatars/ink-dot.webp");
+
+  const confirm = modal.contentEl.querySelector<ProviderModalTestElement>(".echoink-agent-identity-confirm");
+  confirm!.click();
+  await settleMicrotasks();
+  assert.deepEqual(saved, { avatar: { kind: "preset", presetId: "preset-ink" } });
+
+  // Resolver: unknown preset and default avatar both fall back to null (bot icon).
+  assert.equal(resolveAgentAvatarPresetAsset("missing"), null);
+  assert.equal(resolveAgentAvatarUrl({ kind: "default" }), null);
+  assert.equal(resolveAgentAvatarUrl({ kind: "preset", presetId: "missing" }), null);
+  assert.equal(
+    resolveAgentAvatarUrl({ kind: "preset", presetId: "preset-ink" }, fakeCatalog),
+    "assets/avatars/ink-dot.webp"
+  );
+  console.log("PASS settings: preset catalog hidden when empty and selectable when provided");
+}
+
+async function assertAvatarProcessorContract(): Promise<void> {
+  const smallWebp = "data:image/webp;base64,UkVE";
+  const fakeRenderer = (result: { sourceWidth: number; sourceHeight: number; dataUrl: string }) =>
+    async () => result;
+
+  // Type validation: png/jpeg/webp accepted; svg/gif/heic/bmp/pdf rejected.
+  assert.equal(validateAvatarSourceType("image/png"), true);
+  assert.equal(validateAvatarSourceType("image/jpeg"), true);
+  assert.equal(validateAvatarSourceType("image/webp"), true);
+  for (const type of ["image/svg+xml", "image/gif", "image/heic", "image/bmp", "application/pdf", ""]) {
+    assert.equal(validateAvatarSourceType(type), false, `must reject ${type}`);
+  }
+  await assert.rejects(
+    processAgentAvatar(new BlobStub() as never, "image/gif", 10, fakeRenderer({ sourceWidth: 10, sourceHeight: 10, dataUrl: smallWebp })),
+    /unsupported_type/u
+  );
+
+  // Size validation: 4MB cap on the source file.
+  assert.equal(validateAvatarSourceSize(AGENT_AVATAR_SOURCE_MAX_BYTES), true);
+  assert.equal(validateAvatarSourceSize(AGENT_AVATAR_SOURCE_MAX_BYTES + 1), false);
+  await assert.rejects(
+    processAgentAvatar(new BlobStub() as never, "image/png", AGENT_AVATAR_SOURCE_MAX_BYTES + 1, fakeRenderer({ sourceWidth: 10, sourceHeight: 10, dataUrl: smallWebp })),
+    /source_too_large/u
+  );
+
+  // Dimension cap: any edge over 4096px is rejected after decode.
+  await assert.rejects(
+    processAgentAvatar(new BlobStub() as never, "image/png", 100, fakeRenderer({ sourceWidth: 5000, sourceHeight: 100, dataUrl: smallWebp })),
+    /image_too_large/u
+  );
+
+  // Output contract: 256x256 webp state.
+  const ok = await processAgentAvatar(
+    new BlobStub() as never, "image/jpeg", 100,
+    fakeRenderer({ sourceWidth: 800, sourceHeight: 600, dataUrl: smallWebp })
+  );
+  assert.equal(ok.kind, "custom");
+  assert.equal(ok.mimeType, "image/webp");
+  assert.equal(ok.width, 256);
+  assert.equal(ok.height, 256);
+  assert.equal(ok.dataUrl, smallWebp);
+
+  // JPEG data URL output is invalid (must be re-encoded to webp/png).
+  await assert.rejects(
+    processAgentAvatar(new BlobStub() as never, "image/jpeg", 100, fakeRenderer({ sourceWidth: 800, sourceHeight: 600, dataUrl: "data:image/jpeg;base64,QUJD" })),
+    /output_invalid/u
+  );
+
+  // Oversized output Data URL is rejected before persistence.
+  const huge = `data:image/webp;base64,${"A".repeat(AGENT_AVATAR_OUTPUT_MAX_DATA_URL_CHARS)}`;
+  await assert.rejects(
+    processAgentAvatar(new BlobStub() as never, "image/png", 100, fakeRenderer({ sourceWidth: 800, sourceHeight: 600, dataUrl: huge })),
+    /output_too_large/u
+  );
+
+  // Decode failure surfaces decode_failed, never a raw fallback.
+  await assert.rejects(
+    processAgentAvatar(new BlobStub() as never, "image/png", 100, async () => { throw new Error("boom"); }),
+    /decode_failed/u
+  );
+
+  // The identity JSON only ever contains the processed (small) Data URL,
+  // never the raw source bytes.
+  const rawMarker = "RAW_SOURCE_BYTES_MUST_NOT_APPEAR";
+  const processed = await processAgentAvatar(
+    { size: AGENT_AVATAR_SOURCE_MAX_BYTES } as never,
+    "image/png",
+    AGENT_AVATAR_SOURCE_MAX_BYTES,
+    fakeRenderer({ sourceWidth: 4096, sourceHeight: 4096, dataUrl: smallWebp })
+  );
+  const json = agentIdentityStateJson({
+    schema: AGENT_IDENTITY_STATE_SCHEMA,
+    revision: 1,
+    displayName: "小墨",
+    avatar: processed,
+    updatedAt: 1
+  });
+  assert.ok(json.length < AGENT_AVATAR_OUTPUT_MAX_DATA_URL_CHARS + 10_000);
+  assert.ok(!json.includes(rawMarker));
+  console.log("PASS settings: avatar processor type/size/dimension/output contract");
+}
+
+class BlobStub {}
+
+function findLatestModalElement<T extends ProviderModalTestElement>(selector: string): T | null {
+  const modal = openTestModals[openTestModals.length - 1];
+  if (!modal) return null;
+  const root = modal.contentEl as unknown as ProviderModalTestElement;
+  if (selector === "name-input") {
+    return root.querySelectorAll<T>("input")
+      .find((input) => !input.hasClass("echoink-agent-identity-file")) ?? null;
+  }
+  return root.querySelector<T>(selector);
+}
+
+async function settleMicrotasks(): Promise<void> {
+  for (let i = 0; i < 4; i += 1) await Promise.resolve();
+}
+
 function installProviderModalDomFixture(): void {
   if (providerModalTestDocument) return;
   providerModalTestDocument = new ProviderModalTestDocument();
@@ -2387,6 +2858,36 @@ class ProviderModalTestElement {
   onchange: ((event?: any) => void) | null = null;
   oninput: ((event?: any) => void) | null = null;
   onkeydown: ((event: any) => void) | null = null;
+  private readonly eventListeners = new Map<string, Array<(event: any) => void>>();
+
+  addEventListener(type: string, handler: ((event: any) => void) | null): void {
+    if (!handler) return;
+    const list = this.eventListeners.get(type) ?? [];
+    list.push(handler);
+    this.eventListeners.set(type, list);
+  }
+
+  removeEventListener(type: string, handler: ((event: any) => void) | null): void {
+    const list = this.eventListeners.get(type);
+    if (!list || !handler) return;
+    const index = list.indexOf(handler);
+    if (index >= 0) list.splice(index, 1);
+  }
+
+  /** Fire both on<type> property handlers and addEventListener handlers. */
+  fireEvent(type: string, event: Record<string, unknown> = {}): void {
+    const synthetic = {
+      target: this,
+      currentTarget: this,
+      preventDefault: () => undefined,
+      stopPropagation: () => undefined,
+      stopImmediatePropagation: () => undefined,
+      ...event
+    };
+    const onHandler = (this as unknown as Record<string, ((e: any) => void) | null>)[`on${type}`];
+    onHandler?.(synthetic);
+    for (const listener of this.eventListeners.get(type) ?? []) listener(synthetic);
+  }
   private readonly attributeValues = new Map<string, string>();
   private ownTextContent = "";
   private connected = true;
@@ -2603,13 +3104,7 @@ class ProviderModalTestElement {
   }
 
   click(): void {
-    this.onclick?.({
-      target: this,
-      currentTarget: this,
-      preventDefault: () => undefined,
-      stopPropagation: () => undefined,
-      stopImmediatePropagation: () => undefined
-    });
+    this.fireEvent("click");
   }
 
   dispatchEvent(): boolean {

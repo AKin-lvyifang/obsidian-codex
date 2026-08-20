@@ -21,6 +21,7 @@ await esbuild.build({
       'import { runPiConversationStartupTests } from "./src/tests/pi-native/conversation-startup";',
       'import { runPiConversationTabsTests } from "./src/tests/pi-native/conversation-tabs";',
       'import { runPiNativeTurnRunnerTests } from "./src/tests/pi-native/turn-runner";',
+      'import { runMessageListIdentityTests } from "./src/tests/message-list-identity";',
       "await runPiNativeFileStoreTests();",
       "await runPiSessionDurabilityTests();",
       "await runPiNativeConversationRuntimeTests();",
@@ -29,6 +30,7 @@ await esbuild.build({
       "await runPiConversationTabsTests();",
       "await runPiChatUiProjectorTests();",
       "await runPiNativeTurnRunnerTests();",
+      "await runMessageListIdentityTests();",
       'console.log("Current Pi Conversation acceptance: PASS");'
     ].join("\n"),
     resolveDir: rootDir,
