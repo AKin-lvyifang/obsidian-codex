@@ -18,9 +18,16 @@ import {
   applySecondaryDecay,
   computeSecondaryConfidence,
   createSecondaryRecord,
+  reconcileSecondaryForParent,
   secondaryRelativePath,
-  SECONDARY_CONFIDENCE_THRESHOLD
+  SECONDARY_CONFIDENCE_THRESHOLD,
+  type SecondaryFactCandidate
 } from "../harness/memory/secondary-memory-store";
+import {
+  measureFinalInjectionTokens,
+  PersonalMemoryRecallHarness
+} from "../harness/memory/personal-memory-recall-harness";
+import type { PersonalMemoryTurnCatalogCandidate } from "../harness/memory/personal-memory-repository";
 import { currentPersonalityScores, type PersonalityState } from "../harness/memory/personality-state";
 import { USER_OBSERVED_MIN_SOURCES, type UserProfileState } from "../harness/memory/user-profile-state";
 import { renderUserMarkdown } from "../harness/memory/cognitive-projection";
@@ -87,7 +94,7 @@ async function createSystem(
   llm: () => DreamLlmPort | null,
   config?: { enabled?: boolean; runsPerDay?: number }
 ): Promise<CognitiveSystem> {
-  return await CognitiveSystem.create({
+  const system = await CognitiveSystem.create({
     repository: fixture.repository,
     llm,
     getDreamConfig: () => ({
@@ -98,6 +105,10 @@ async function createSystem(
     registerInterval: () => {},
     now: fixture.now
   });
+  // 测试只使用 forceDreamRun；停掉 60s 心跳，防止它在 fixture Vault 被
+  // 清理后继续空转（测试环境没有可卸载的生命周期）。
+  system.scheduler.stop();
+  return system;
 }
 
 async function readJson(file: string): Promise<Record<string, unknown>> {
@@ -1130,6 +1141,404 @@ async function scenarioV2MigrationAndCustomFilesPreserved(): Promise<void> {
 
 // ---------------------------------------------------------------------------
 
+
+// ---------------------------------------------------------------------------
+// 18. Zero-fact bookkeeping: processed parents never re-call the Provider (§10)
+// ---------------------------------------------------------------------------
+
+async function scenarioZeroFactsBookkeeping(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    let llmCalls = 0;
+    const llm: DreamLlmPort = {
+      call: async () => {
+        llmCalls += 1;
+        return JSON.stringify(EMPTY_DREAM_OUTPUT);
+      }
+    };
+    const system = await createSystem(fixture, () => llm);
+    const memory = await createMemory(fixture, {
+      title: "没有可靠推理的记忆",
+      content: "这条记忆推导不出任何值得保存的二级事实。"
+    });
+
+    const run1 = await system.forceDreamRun();
+    assert.ok(run1);
+    assert.ok(run1!.processedMemoryIds.includes(memory.id), "0-fact parent must still be marked processed");
+    assert.equal(run1!.factsCreated, 0);
+    assert.equal((await system.listSecondaryForParent(memory.id)).length, 0);
+    assert.equal(llmCalls, 1);
+
+    // processedSources recorded the revision → no re-selection on later runs.
+    const personality = await system.readPersonalityState();
+    const processed = personality.processedSources.find(
+      (source) => source.memoryId === memory.id
+    );
+    assert.ok(processed, "processedSources must record the 0-fact parent");
+
+    const run2 = await system.forceDreamRun();
+    assert.equal(llmCalls, 1, "second dream must not call the Provider again");
+    assert.ok(!run2 || !run2.processedMemoryIds.includes(memory.id));
+
+    fixture.advance(31 * DAY_MS);
+    await system.forceDreamRun();
+    assert.equal(llmCalls, 1, "decay rounds must not re-process a 0-fact parent");
+  });
+  console.log("PASS cognitive: zero-fact bookkeeping avoids repeat Provider calls");
+}
+
+// ---------------------------------------------------------------------------
+// 19. Consecutive redreams must not accumulate duplicates (§9 / 回归 #4)
+// ---------------------------------------------------------------------------
+
+async function scenarioRedreamNoAccumulation(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    const system = await createSystem(fixture, () => scriptedDreamLlm(() => ({
+      ...EMPTY_DREAM_OUTPUT,
+      secondaryFacts: [
+        {
+          title: "重复做梦事实甲",
+          content: "语义稳定的联想甲。",
+          recallWhen: "相关话题出现时",
+          matchTerms: ["重复甲"],
+          relation: "instance",
+          supportLevel: "strong_inference",
+          reason: "测试",
+          evidence: "由一级记忆推导"
+        },
+        {
+          title: "重复做梦事实乙",
+          content: "语义稳定的联想乙。",
+          recallWhen: "相关话题出现时",
+          matchTerms: ["重复乙"],
+          relation: "category",
+          supportLevel: "direct",
+          reason: "测试",
+          evidence: "由一级记忆直接推导"
+        }
+      ]
+    })));
+    const memory = await createMemory(fixture, {
+      title: "重复做梦测试记忆",
+      content: "验证连续做梦不会累积重复事实。"
+    });
+
+    const run1 = await system.forceDreamRun();
+    assert.ok(run1);
+    const first = await system.listSecondaryForParent(memory.id);
+    assert.equal(first.length, 2);
+    const firstIds = first.map((fact) => fact.id).sort();
+
+    // Reset re-marks valid memories as dream sources → same parent redreamed.
+    await system.selectPersonalityTemplate("executor", { reset: true });
+    const run2 = await system.forceDreamRun();
+    assert.ok(run2);
+    assert.ok(run2!.processedMemoryIds.includes(memory.id));
+    assert.equal(run2!.factsReused, 2, "identical semantics must reuse, not append");
+    assert.equal(run2!.factsCreated, 0);
+
+    const second = await system.listSecondaryForParent(memory.id);
+    assert.equal(second.length, 2, "no accumulation across redreams");
+    assert.deepEqual(second.map((fact) => fact.id).sort(), firstIds);
+  });
+  console.log("PASS cognitive: consecutive redreams do not accumulate duplicates");
+}
+
+// ---------------------------------------------------------------------------
+// 20. Diversity: coverage first, no blind top-8 truncation, small keeps (§8)
+// ---------------------------------------------------------------------------
+
+function pipelineCandidate(
+  title: string,
+  relation: SecondaryFactCandidate["relation"],
+  supportLevel: SecondaryFactCandidate["supportLevel"]
+): SecondaryFactCandidate {
+  return Object.freeze({
+    title,
+    content: `关于「${title}」的保守联想内容。`,
+    recallWhen: "相关话题出现时",
+    matchTerms: [title],
+    relation,
+    supportLevel,
+    reason: "测试",
+    evidence: `由一级记忆推导：${title}`
+  });
+}
+
+async function scenarioDiversityCoverageNoTruncation(): Promise<void> {
+  // 12 candidates: the BEST one sits at position 12 — a blind "keep first 8"
+  // truncation would drop it; diversity must keep one per qualifying relation.
+  const candidates: SecondaryFactCandidate[] = [
+    ...[1, 2, 3, 4, 5, 6].map((i) => pipelineCandidate(`属性候选${i}`, "attribute", "strong_inference")),
+    ...[1, 2, 3].map((i) => pipelineCandidate(`场景候选${i}`, "context", "strong_inference")),
+    pipelineCandidate("弱实例候选", "instance", "weak_inference"),     // 0.45 below threshold
+    pipelineCandidate("弱关联候选", "associated", "weak_inference"),   // 0.30 below threshold
+    pipelineCandidate("高分分类候选", "category", "direct")            // 0.85, position 12
+  ];
+  const result = reconcileSecondaryForParent({
+    parentId: "mem_diversity_parent",
+    parentBasis: "explicit",
+    parentRevision: 1,
+    existing: [],
+    candidates,
+    now: 1_800_000_000_000,
+    idFactory: (() => { let n = 0; return () => `sec_div_${++n}`; })()
+  });
+  const current = result.records.filter((record) => record.status === "current");
+  const titles = current.map((record) => record.title);
+
+  assert.ok(titles.includes("高分分类候选"), "position-12 candidate must survive (no top-8 truncation)");
+  assert.equal(current.filter((r) => r.relation === "attribute").length, 2, "attribute capped at 2");
+  assert.equal(current.filter((r) => r.relation === "context").length, 2, "context capped at 2");
+  assert.ok(!titles.includes("弱实例候选"));
+  assert.ok(!titles.includes("弱关联候选"));
+  assert.equal(current.length, 5);
+  assert.ok(current.length <= 8);
+
+  // Only 2 candidates pass the threshold → keep exactly 2 (不凑数).
+  const sparse = reconcileSecondaryForParent({
+    parentId: "mem_sparse_parent",
+    parentBasis: "explicit",
+    parentRevision: 1,
+    existing: [],
+    candidates: [
+      pipelineCandidate("稀疏分类", "category", "direct"),          // 0.85 keep
+      pipelineCandidate("稀疏实例", "instance", "strong_inference"), // 0.70 keep
+      pipelineCandidate("稀疏弱一", "context", "weak_inference"),    // 0.45 drop
+      pipelineCandidate("稀疏弱二", "associated", "weak_inference"), // 0.30 drop
+      pipelineCandidate("稀疏弱三", "attribute", "weak_inference")   // 0.40 drop
+    ],
+    now: 1_800_000_000_000,
+    idFactory: (() => { let n = 0; return () => `sec_sparse_${++n}`; })()
+  });
+  const sparseCurrent = sparse.records.filter((record) => record.status === "current");
+  assert.equal(sparseCurrent.length, 2, "only threshold-passing candidates persist");
+  console.log("PASS cognitive: diversity coverage without top-8 truncation");
+}
+
+// ---------------------------------------------------------------------------
+// 21. Final-payload budget + single secondary injection (§12 / 回归 #15)
+// ---------------------------------------------------------------------------
+
+async function scenarioFinalPayloadBudgetSingleInjection(): Promise<void> {
+  const base: PersonalMemoryTurnCatalogCandidate = Object.freeze({
+    id: "mem_budget_parent",
+    kind: "fact",
+    status: "current",
+    title: "预算测试一级记忆",
+    recallWhen: "相关话题出现时",
+    summary: "用于验证预算按最终注入内容计算。",
+    date: "2026-08-20",
+    basis: "explicit",
+    sourceSummary: "",
+    score: 1
+  });
+  const withMatches: PersonalMemoryTurnCatalogCandidate = Object.freeze({
+    ...base,
+    secondaryMatches: Object.freeze([
+      Object.freeze({
+        id: "sec_budget_fact",
+        parentId: base.id,
+        title: "预算测试二级事实",
+        content: "这段较长的二级事实正文必须计入最终注入预算，不能被遗漏。".repeat(4),
+        recallWhen: "相关话题出现时",
+        matchTerms: ["预算测试"],
+        relation: "instance" as const,
+        basis: "llm_inferred" as const
+      })
+    ])
+  });
+  const withTokens = measureFinalInjectionTokens(withMatches);
+  const withoutTokens = measureFinalInjectionTokens(base);
+  assert.ok(withTokens > withoutTokens,
+    "budget must include secondary fact text, parentTitle and wrappers");
+
+  // End-to-end: a tiny budget must not inject the candidate; a large one does.
+  await withPersonalMemoryFixture(async (fixture) => {
+    const system = await createSystem(fixture, () => fakeDreamLlm(validDreamJson));
+    const memory = await createMemory(fixture, {
+      title: "预算端到端记忆",
+      content: "用户每天早晨都有一套固定的手冲流程。"
+    });
+    await system.forceDreamRun();
+    const harness = new PersonalMemoryRecallHarness(fixture.repository);
+    const common = {
+      memoryMode: "normal" as const,
+      query: "咖啡豆",
+      vaultId: fixture.vaultId,
+      conversationId: "conversation-budget",
+      piSessionId: "pi-budget",
+      productRunId: "run-budget"
+    };
+    const starved = await harness.prepareTurnContext({ ...common, tokenBudget: 8 });
+    assert.equal(starved.recall?.injected ?? 0, 0, "tiny budget must inject nothing");
+
+    const plenty = await harness.prepareTurnContext({ ...common, tokenBudget: 2_000 });
+    assert.equal(plenty.recall?.injected, 1);
+    const injected = plenty.recall!.candidates[0];
+    assert.equal(injected.id, memory.id);
+    assert.ok(injected.matchedSecondaryId, "decisive secondary id must stay on the candidate");
+    assert.ok((injected.secondaryMatches ?? []).length >= 1,
+      "full facts stay available for the single secondary block");
+  });
+  console.log("PASS cognitive: final-payload budget + single secondary injection");
+}
+
+// ---------------------------------------------------------------------------
+// 22. Allergy bridge recall: 甜食过敏 → 芒果 query hits llm-inferred fact (#16/#17)
+// ---------------------------------------------------------------------------
+
+async function scenarioMangoRecallBridge(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    const system = await createSystem(fixture, () => scriptedDreamLlm(() => ({
+      ...EMPTY_DREAM_OUTPUT,
+      secondaryFacts: [{
+        title: "甜食过敏相关食物",
+        content: "用户可能对水果、含糖食物也需要留意（保守参考，非诊断）。",
+        recallWhen: "聊到水果、甜食或点餐时",
+        matchTerms: ["水果", "芒果", "含糖食物"],
+        relation: "instance",
+        supportLevel: "strong_inference",
+        reason: "甜食过敏与水果/含糖食物可能相关",
+        evidence: "一级记忆记录了甜食过敏"
+      }]
+    })));
+    const memory = await createMemory(fixture, {
+      title: "甜食过敏",
+      content: "我对甜食过敏。"
+    });
+    await system.forceDreamRun();
+    const facts = await system.listSecondaryForParent(memory.id);
+    assert.equal(facts.length, 1);
+
+    const snapshot = await fixture.repository.prepareTurnSnapshot({
+      memoryMode: "normal",
+      query: "我想吃芒果"
+    }, fixture.runtime());
+    assert.ok(snapshot.search);
+    assert.equal(snapshot.search!.items.length, 1);
+    const item = snapshot.search!.items[0];
+    assert.equal(item.id, memory.id, "bridge fact must pull the primary memory into recall");
+    assert.ok(item.matchedSecondaryId);
+    const match = (item.secondaryMatches ?? [])[0];
+    assert.ok(match);
+    assert.equal(match!.basis, "llm_inferred");
+    assert.equal(snapshot.search!.pendingSecondaryHits.length, 1);
+  });
+  console.log("PASS cognitive: allergy bridge recall (芒果 → llm-inferred-reference fact)");
+}
+
+// ---------------------------------------------------------------------------
+// 23. Hit stats transaction + decay revisions + disabledReason restore gate
+//     (§11 / 回归 #18 #19)
+// ---------------------------------------------------------------------------
+
+async function scenarioHitStatsAndDisabledReasonRestore(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    const system = await createSystem(fixture, () => scriptedDreamLlm((memory) => ({
+      ...EMPTY_DREAM_OUTPUT,
+      secondaryFacts: [
+        {
+          title: "甲寅统计事实",
+          content: "用于验证命中事务与衰减。",
+          recallWhen: "相关话题出现时",
+          matchTerms: ["甲寅统计"],
+          relation: "instance",
+          supportLevel: "strong_inference",
+          reason: "测试",
+          evidence: "由一级记忆推导"
+        },
+        {
+          title: "用户会编辑的事实",
+          content: "用于验证 restore 限制。",
+          recallWhen: "相关话题出现时",
+          matchTerms: ["编辑验证"],
+          relation: "category",
+          supportLevel: "direct",
+          reason: "测试",
+          evidence: "由一级记忆直接推导"
+        }
+      ]
+    })));
+    const memory = await createMemory(fixture, {
+      title: "命中与恢复测试记忆",
+      content: "验证命中事务、衰减与 restore 限制。"
+    });
+    await system.forceDreamRun();
+    let facts = await system.listSecondaryForParent(memory.id);
+    assert.equal(facts.length, 2);
+    const hitFact = facts.find((fact) => fact.title === "甲寅统计事实")!;
+    const editedFact = facts.find((fact) => fact.title === "用户会编辑的事实")!;
+    const hitRevision0 = hitFact.revision;
+
+    // --- Hit: revision bump + repository transaction (manifest bumps). ---
+    const manifestBefore = await readJson(fixture.repository.layout.manifest);
+    const snapshot = await fixture.repository.prepareTurnSnapshot({
+      memoryMode: "normal",
+      query: "甲寅统计"
+    }, fixture.runtime());
+    assert.equal(snapshot.search!.pendingSecondaryHits.length, 1);
+    await fixture.repository.recordSecondaryRecallHits(snapshot.search!.pendingSecondaryHits);
+    const manifestAfter = await readJson(fixture.repository.layout.manifest);
+    assert.ok(
+      (manifestAfter.revision as number) > (manifestBefore.revision as number),
+      "hit stats must commit through a repository transaction"
+    );
+    facts = await system.listSecondaryForParent(memory.id);
+    const hitAfter = facts.find((fact) => fact.id === hitFact.id)!;
+    assert.equal(hitAfter.hitCount, 1);
+    assert.equal(hitAfter.confidence, 0.75);
+    assert.equal(hitAfter.revision, hitRevision0 + 1, "hit must bump the fact's own revision");
+
+    // --- User edit protects the second fact from auto-disable. ---
+    await system.updateSecondaryFact(editedFact.id, { content: "用户手工修正后的内容。" });
+
+    // --- Decay rounds: index removal at <0.60, auto-disable at <0.10. ---
+    let lowConfidence: typeof hitAfter | undefined;
+    let indexDroppedChecked = false;
+    for (let round = 0; round < 16; round += 1) {
+      fixture.advance(30 * DAY_MS + 1_000);
+      await system.forceDreamRun();
+      facts = await system.listSecondaryForParent(memory.id);
+      const current = facts.find((fact) => fact.id === hitFact.id)!;
+      if (!indexDroppedChecked && current.status === "current" && current.confidence < 0.60) {
+        const index = await readJson(fixture.repository.layout.searchIndex) as {
+          secondaryCatalog: readonly { id: string }[];
+        };
+        assert.ok(!index.secondaryCatalog.some((entry) => entry.id === hitFact.id),
+          "below-threshold facts leave the Recall Index but keep their files");
+        indexDroppedChecked = true;
+      }
+      if (current.status === "disabled") {
+        lowConfidence = current;
+        break;
+      }
+    }
+    assert.ok(lowConfidence, "llm_inferred fact must auto-disable below 0.10");
+    assert.equal(lowConfidence!.disabledReason, "low_confidence");
+    assert.ok(indexDroppedChecked);
+    facts = await system.listSecondaryForParent(memory.id);
+    const editedAfterDecay = facts.find((fact) => fact.id === editedFact.id)!;
+    assert.equal(editedAfterDecay.status, "current", "user_edited_inference never auto-disables");
+    assert.equal(editedAfterDecay.basis, "user_edited_inference");
+
+    // --- Forget disables by parent lifecycle; restore only re-enables those. ---
+    await fixture.repository.forgetFromUserControl(memory.id, "测试忘记");
+    facts = await system.secondaryStore.refresh();
+    const editedDisabled = facts.find((fact) => fact.id === editedFact.id)!;
+    assert.equal(editedDisabled.status, "disabled");
+    assert.equal(editedDisabled.disabledReason, "parent_lifecycle");
+
+    await fixture.repository.restoreForgotten(memory.id);
+    facts = await system.secondaryStore.refresh();
+    const editedRestored = facts.find((fact) => fact.id === editedFact.id)!;
+    assert.equal(editedRestored.status, "current", "parent_lifecycle facts restore");
+    const stillDisabled = facts.find((fact) => fact.id === hitFact.id)!;
+    assert.equal(stillDisabled.status, "disabled", "low_confidence facts must NOT restore");
+    assert.equal(stillDisabled.disabledReason, "low_confidence");
+  });
+  console.log("PASS cognitive: hit transaction + decay revisions + restore gate");
+}
+
 export async function runCognitiveSystemScenarios(): Promise<void> {
   await scenarioTemplateSelectionPersistsWithoutProvider();
   await scenarioResetFlowSingleTransaction();
@@ -1148,4 +1557,10 @@ export async function runCognitiveSystemScenarios(): Promise<void> {
   await scenarioSecondaryLifecycle();
   await scenarioSecondaryUserEditDelete();
   await scenarioV2MigrationAndCustomFilesPreserved();
+  await scenarioZeroFactsBookkeeping();
+  await scenarioRedreamNoAccumulation();
+  await scenarioDiversityCoverageNoTruncation();
+  await scenarioFinalPayloadBudgetSingleInjection();
+  await scenarioMangoRecallBridge();
+  await scenarioHitStatsAndDisabledReasonRestore();
 }

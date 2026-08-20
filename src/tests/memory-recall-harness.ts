@@ -74,7 +74,8 @@ async function scenarioHarnessScansPastFiftyByBudget(): Promise<void> {
     const prepared = await new PersonalMemoryRecallHarness(fixture.repository).prepareTurnContext({
       memoryMode: "normal",
       query,
-      tokenBudget: 90,
+      // 预算包含一次性 JSON/XML 包装开销（Recall PRD §12），因此比旧值略高。
+      tokenBudget: 120,
       vaultId: runtime.vaultId,
       conversationId: runtime.conversationId,
       piSessionId: runtime.piSessionId,

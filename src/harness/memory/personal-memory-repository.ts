@@ -29,7 +29,7 @@ import {
   type SecondaryMatchView,
   type SecondaryMemoryRecord
 } from "./personal-memory-contracts";
-import { applySecondaryHit, serializeSecondaryRecord } from "./secondary-memory-store";
+import { applySecondaryHit, indexableSecondaryRecords, serializeSecondaryRecord } from "./secondary-memory-store";
 import {
   buildSearchIndexV3,
   indexChecksum,
@@ -192,7 +192,13 @@ export interface PersonalMemoryTurnSnapshot {
 
 export type PersonalMemoryTurnCatalogCandidate = Pick<PersonalMemorySearchItem,
   "id" | "kind" | "status" | "title" | "recallWhen" | "summary" | "date" | "basis" | "sourceSummary" | "scope" | "score"
->;
+> & Readonly<{
+  /**
+   * 该一级记忆命中查询的全部二级事实（Recall PRD §12）：预算选择必须
+   * 按「一级候选 + 这些二级事实」的最终注入形态计算 Token。
+   */
+  secondaryMatches?: readonly SecondaryMatchView[];
+}>;
 
 export interface PersonalMemoryTurnSearchResult {
   readonly revision: number;
@@ -700,19 +706,25 @@ export class PersonalMemoryRepository {
         || right.record.date.localeCompare(left.record.date)
         || left.record.id.localeCompare(right.record.id)
       );
-    const catalogCandidates = Object.freeze(ranked.map(({ record, score }) => Object.freeze({
-      id: record.id,
-      kind: record.kind,
-      status: record.status,
-      title: record.title,
-      recallWhen: record.recallWhen,
-      summary: record.summary,
-      date: record.date,
-      basis: record.basis,
-      sourceSummary: record.sourceSummary,
-      ...(record.scope ? { scope: record.scope } : {}),
-      score
-    })));
+    const catalogCandidates = Object.freeze(ranked.map(({ record, score }) => {
+      const matches = secondaryMatches.get(record.id);
+      return Object.freeze({
+        id: record.id,
+        kind: record.kind,
+        status: record.status,
+        title: record.title,
+        recallWhen: record.recallWhen,
+        summary: record.summary,
+        date: record.date,
+        basis: record.basis,
+        sourceSummary: record.sourceSummary,
+        ...(record.scope ? { scope: record.scope } : {}),
+        score,
+        ...(matches && matches.length > 0
+          ? { secondaryMatches: Object.freeze(matches.map((entry) => Object.freeze({ ...entry }))) }
+          : {})
+      });
+    }));
     const requestedIds = selectCandidateIds
       ? [...selectCandidateIds(catalogCandidates)]
       : catalogCandidates.slice(0, MAX_SEARCH_LIMIT).map((candidate) => candidate.id);
@@ -955,8 +967,9 @@ export class PersonalMemoryRepository {
 
   /**
    * Record hit stats on secondary facts that decisively pulled their parent
-   * into recall candidates. Stats-only (hitCount/lastHitAt): the derived
-   * index does not store them, so no index rebuild is required.
+   * into recall candidates (做梦 PRD §11)：confidence += 0.05（上限 1）、
+   * hitCount += 1、更新 lastHitAt、增加二级事实自身 revision；保存必须走
+   * Repository 事务，不允许直接裸写文件。
    */
   async recordSecondaryRecallHits(
     hits: readonly Readonly<{ secondaryId: string; parentId: string }>[]
@@ -966,8 +979,8 @@ export class PersonalMemoryRepository {
     await this.withMutation(async () => {
       await this.assertManagedTreeSafe();
       const now = this.now();
-      let changed = false;
       const cache = [...this.secondaryCache];
+      const updatedRecords: SecondaryMemoryRecord[] = [];
       for (const hit of hits) {
         const position = cache.findIndex(
           (record) => record.id === hit.secondaryId && record.status === "current"
@@ -975,13 +988,29 @@ export class PersonalMemoryRepository {
         if (position < 0) continue;
         const updated = applySecondaryHit(cache[position], now);
         cache[position] = updated;
-        await atomicWrite(this.absoluteFromRelative(updated.file), serializeSecondaryRecord(updated));
-        changed = true;
+        updatedRecords.push(updated);
       }
-      if (changed) {
-        this.secondaryCache = cache;
-        try { this.secondaryChangedHook?.(); } catch { /* never break recall */ }
-      }
+      if (updatedRecords.length === 0) return;
+      // 与 applyCognitiveUpdate 相同的单事务提交（不能嵌套 withMutation）。
+      const manifest = await this.readManifest();
+      await this.assertFixedFilesMatchManifest(manifest);
+      const records = await this.readAllRecords(manifest);
+      const targetRevision = manifest.revision + 1;
+      const next = cloneManifest(manifest);
+      next.revision = targetRevision;
+      next.updatedAt = now;
+      this.secondaryCache = cache;
+      const changes = await this.stateChanges(next, records, updatedRecords.map((record) => ({
+        relativePath: record.file,
+        content: serializeSecondaryRecord(record)
+      })), {
+        type: "cognitive_update",
+        revision: targetRevision,
+        at: now,
+        detail: `secondary-recall-hits:${updatedRecords.length}`
+      });
+      await this.runTransaction("cognitive-update", manifest.revision, targetRevision, changes);
+      try { this.secondaryChangedHook?.(); } catch { /* never break recall */ }
     });
   }
 
@@ -994,7 +1023,7 @@ export class PersonalMemoryRepository {
       const expected = buildSearchIndexV3(
         manifest.revision,
         records.map((record) => this.catalogInput(record)),
-        this.secondaryCache
+        indexableSecondaryRecords(this.secondaryCache)
       );
       const raw = await readJsonOrNull<Record<string, unknown>>(this.layout.searchIndex);
       if (raw && (raw as { checksum?: unknown }).checksum === expected.checksum) return;
@@ -1636,7 +1665,7 @@ export class PersonalMemoryRepository {
         fixedFileHashes
       };
       await atomicWrite(this.layout.manifest, jsonText(manifest));
-      await atomicWrite(this.layout.searchIndex, jsonText(buildSearchIndexV3(manifest.revision, markdownRecords.map((record) => this.catalogInput(record)), this.secondaryCache)));
+      await atomicWrite(this.layout.searchIndex, jsonText(buildSearchIndexV3(manifest.revision, markdownRecords.map((record) => this.catalogInput(record)), indexableSecondaryRecords(this.secondaryCache))));
       await atomicWrite(this.layout.sourceMap, jsonText(buildSourceMap(manifest)));
       await atomicWrite(this.layout.memory, renderOverview(manifest, markdownRecords));
       if (hasExistingContent) {
@@ -1994,7 +2023,7 @@ export class PersonalMemoryRepository {
     return dedupeChanges([
       ...extra,
       { relativePath: path.relative(this.layout.root, this.layout.manifest), content: jsonText(manifest) },
-      { relativePath: path.relative(this.layout.root, this.layout.searchIndex), content: jsonText(buildSearchIndexV3(manifest.revision, records.map((record) => this.catalogInput(record)), this.secondaryCache)) },
+      { relativePath: path.relative(this.layout.root, this.layout.searchIndex), content: jsonText(buildSearchIndexV3(manifest.revision, records.map((record) => this.catalogInput(record)), indexableSecondaryRecords(this.secondaryCache))) },
       { relativePath: path.relative(this.layout.root, this.layout.sourceMap), content: jsonText(buildSourceMap(manifest)) },
       { relativePath: path.relative(this.layout.root, this.layout.memory), content: renderOverview(manifest, records) },
       {
@@ -2097,7 +2126,7 @@ export class PersonalMemoryRepository {
   private async repairDerivedFiles(manifest: PersonalMemoryManifest, records: readonly PersonalMemoryRecord[]): Promise<void> {
     const index = await readJsonOrNull<SearchIndex>(this.layout.searchIndex);
     const sourceMap = await readJsonOrNull<SourceMapFile>(this.layout.sourceMap);
-    const expectedIndex = buildSearchIndexV3(manifest.revision, records.map((record) => this.catalogInput(record)), this.secondaryCache);
+    const expectedIndex = buildSearchIndexV3(manifest.revision, records.map((record) => this.catalogInput(record)), indexableSecondaryRecords(this.secondaryCache));
     const expectedSourceMap = buildSourceMap(manifest);
     if (!index || stableJson(index) !== stableJson(expectedIndex)) {
       await atomicWrite(this.layout.searchIndex, jsonText(expectedIndex));
@@ -2166,7 +2195,7 @@ export class PersonalMemoryRepository {
     const rebuilt = buildSearchIndexV3(
       manifest.revision,
       records.map((record) => this.catalogInput(record)),
-      this.secondaryCache
+      indexableSecondaryRecords(this.secondaryCache)
     );
     await atomicWrite(this.layout.searchIndex, jsonText(rebuilt));
     return rebuilt;

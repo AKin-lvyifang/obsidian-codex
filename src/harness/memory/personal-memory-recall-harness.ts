@@ -146,14 +146,47 @@ export class PersonalMemoryRecallHarness {
   }
 }
 
+/**
+ * One-time wrapper overhead of the final injection: the candidates JSON
+ * envelope and the `<echoink_memory_secondary>` block around it.
+ */
+const RECALL_WRAPPER_OVERHEAD = JSON.stringify({
+  candidates: [],
+  secondaryFacts: []
+}) + "<echoink_memory_secondary trust=\"llm-inferred-reference\"></echoink_memory_secondary>";
+
+/**
+ * Token 预算必须按照最终真实注入内容计算（做梦/Recall PRD §12）：
+ * 一级候选（只带 matchedSecondaryId，不携带完整 secondaryMatches）+
+ * 该候选带来的完整二级事实（含 parentTitle）+ JSON 包装。先完成最终
+ * payload，再根据预算选择候选，不能先按一级内容选完再追加二级事实。
+ */
+export function measureFinalInjectionTokens(
+  item: Readonly<PersonalMemoryTurnCatalogCandidate>
+): number {
+  const candidate = toRecallCandidate(item);
+  const injectedCandidate: Record<string, unknown> = { ...candidate };
+  delete injectedCandidate.secondaryMatches;
+  const secondaryFacts = (candidate.secondaryMatches ?? []).map((fact) => ({
+    parentId: item.id,
+    parentTitle: item.title,
+    fact
+  }));
+  const payload = JSON.stringify({
+    candidates: [injectedCandidate],
+    secondaryFacts
+  });
+  return estimatePiContextTokens(payload).tokens;
+}
+
 function selectRecallCandidateIds(
   candidates: readonly Readonly<PersonalMemoryTurnCatalogCandidate>[],
   tokenBudget: number
 ): readonly string[] {
   const selected: string[] = [];
-  let usedTokens = 0;
+  let usedTokens = estimatePiContextTokens(RECALL_WRAPPER_OVERHEAD).tokens;
   for (const item of candidates) {
-    const measured = estimatePiContextTokens(JSON.stringify(toRecallCandidate(item))).tokens;
+    const measured = measureFinalInjectionTokens(item);
     if (measured > tokenBudget || usedTokens + measured > tokenBudget) continue;
     selected.push(item.id);
     usedTokens += measured;

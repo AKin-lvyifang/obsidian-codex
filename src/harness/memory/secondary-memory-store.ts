@@ -14,6 +14,7 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 import {
+  isSecondaryDisabledReason,
   SECONDARY_DECAY_FACTOR,
   SECONDARY_DECAY_GRACE_DAYS,
   SECONDARY_HIT_CONFIDENCE_STEP,
@@ -27,6 +28,7 @@ import {
   type SecondaryBasis,
   type SecondaryMemoryRecord,
   type SecondaryRelation,
+  type SecondaryDisabledReason,
   type SecondaryStatus,
   type SecondarySupportLevel
 } from "./personal-memory-contracts";
@@ -52,6 +54,7 @@ export function serializeSecondaryRecord(record: Readonly<SecondaryMemoryRecord>
     ["id", record.id],
     ["parent_id", record.parentId],
     ["status", record.status],
+    ["disabled_reason", record.disabledReason],
     ["title", record.title],
     ["recall_when", record.recallWhen],
     ["match_terms", record.matchTerms],
@@ -142,6 +145,11 @@ export function parseSecondaryRecord(text: string, file: string): SecondaryMemor
     id,
     parentId,
     status: status as SecondaryStatus,
+    disabledReason: status === "disabled"
+      ? (isSecondaryDisabledReason(fields.get("disabled_reason"))
+          ? (fields.get("disabled_reason") as SecondaryDisabledReason)
+          : "parent_lifecycle")
+      : null,
     title: requireString("title", 200),
     content: lines.slice(end + 1).join("\n").trim().slice(0, 24_000),
     recallWhen: requireString("recall_when", 500),
@@ -289,6 +297,7 @@ export function createSecondaryRecord(input: NewSecondaryFactInput): SecondaryMe
     id,
     parentId: input.parentId,
     status: "current",
+    disabledReason: null,
     title: input.title.trim().slice(0, 200),
     content: input.content.trim().slice(0, 2_000),
     recallWhen: (input.recallWhen.trim() || input.title.trim()).slice(0, 500),
@@ -548,6 +557,7 @@ export function reconcileSecondaryForParent(
     const retired: SecondaryMemoryRecord = Object.freeze({
       ...record,
       status: "disabled",
+      disabledReason: "redream_replaced",
       updatedAt: input.now,
       revision: record.revision + 1
     });
@@ -581,7 +591,8 @@ export function applySecondaryHit(
     hitCount: record.hitCount + 1,
     lastHitAt: now,
     confidence: Math.min(1, record.confidence + SECONDARY_HIT_CONFIDENCE_STEP),
-    updatedAt: now
+    updatedAt: now,
+    revision: record.revision + 1
   });
 }
 
@@ -596,6 +607,18 @@ export interface SecondaryDecayResult {
  * lastDecayAt; running again inside the same period (e.g. day 31 right after
  * day 30) does NOT decay twice.
  */
+/**
+ * 进入 Recall Index 的二级事实（做梦 PRD §11）：confidence 低于准入阈值
+ * 0.60 后从索引移除（不再参与召回），但历史文件与记录保留。
+ */
+export function indexableSecondaryRecords(
+  records: readonly SecondaryMemoryRecord[]
+): readonly SecondaryMemoryRecord[] {
+  return records.filter(
+    (record) => record.status === "current" && record.confidence >= SECONDARY_CONFIDENCE_THRESHOLD
+  );
+}
+
 export function applySecondaryDecay(
   record: SecondaryMemoryRecord,
   now: number
@@ -621,7 +644,7 @@ export function applySecondaryDecay(
   });
   let autoDisabled = false;
   if (next.basis === "llm_inferred" && next.confidence < SECONDARY_MIN_CONFIDENCE) {
-    next = Object.freeze({ ...next, status: "disabled" });
+    next = Object.freeze({ ...next, status: "disabled", disabledReason: "low_confidence" });
     autoDisabled = true;
   }
   return { record: next, decayed: true, autoDisabled };

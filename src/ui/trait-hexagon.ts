@@ -12,6 +12,7 @@
 
 import type { TraitDimension } from "../harness/memory/personal-memory-contracts";
 import { TRAIT_DIMENSIONS } from "../harness/memory/personal-memory-contracts";
+import { TRAIT_DIMENSION_META } from "../harness/memory/personality-templates";
 
 export interface TraitHexagonData {
   readonly dimension: TraitDimension;
@@ -32,32 +33,18 @@ const DEFAULT_SIZE = 240;
 const DEFAULT_RINGS = 4;
 const PADDING = 36; // space for labels around the hexagon
 
-/** Dimension labels in Chinese for display. */
-const DIMENSION_LABELS: Record<TraitDimension, string> = {
-  tempo: "节奏",
-  energy: "能量",
-  mind: "思维",
-  warmth: "温度",
-  order: "秩序",
-  stance: "立场",
-};
-
-/** Left-pole and right-pole labels for each dimension. */
-const DIMENSION_POLES: Record<TraitDimension, [string, string]> = {
-  tempo: ["急性子", "慢条斯理"],
-  energy: ["外向热烈", "内向安静"],
-  mind: ["天马行空", "脚踏实地"],
-  warmth: ["理性冷静", "感性共情"],
-  order: ["规矩严谨", "随性灵活"],
-  stance: ["随和配合", "坚持主见"],
-};
-
+/**
+ * 图表、文字、模板和 Prompt 共享同一份维度常量（TRAIT_DIMENSION_META），
+ * 不再维护重复的方向说明（做梦 PRD §13）。
+ */
 export function getDimensionLabel(dim: TraitDimension): string {
-  return DIMENSION_LABELS[dim];
+  return TRAIT_DIMENSION_META[dim].labelZh;
 }
 
+/** First pole segment of each side, e.g. tempo → ["快", "慢"]. */
 export function getDimensionPoles(dim: TraitDimension): readonly [string, string] {
-  return DIMENSION_POLES[dim];
+  const meta = TRAIT_DIMENSION_META[dim];
+  return [meta.leftZh.split("、")[0] ?? "", meta.rightZh.split("、")[0] ?? ""];
 }
 
 /**
@@ -171,7 +158,7 @@ export function renderTraitHexagon(
     text.setAttribute("text-anchor", "middle");
     text.setAttribute("dominant-baseline", "central");
     text.addClass("echoink-trait-hexagon-label");
-    text.textContent = DIMENSION_LABELS[dim];
+    text.textContent = TRAIT_DIMENSION_META[dim].labelZh;
     svg.appendChild(text);
   }
 

@@ -461,6 +461,7 @@ async function assertResourceScanErrorsClearAcrossTabs(): Promise<void> {
     app: new App(),
     manifest: { id: "codex-echoink" },
     settings,
+    getCognitiveSystem: async () => createCognitiveSystemStub(),
     buildRuntimeEchoInkResourceCatalog: async () => {
       settings.resources.lastError = scanError;
       return [];
@@ -505,6 +506,7 @@ async function assertSkillToggleNotCommittedRestoresAuthoritativeUi(): Promise<v
     app: new App(),
     manifest: { id: "codex-echoink" },
     settings: structuredClone(persisted),
+    getCognitiveSystem: async () => createCognitiveSystemStub(),
     loadData: async () => structuredClone(persisted),
     saveData: async () => {
       throw new Error("fixture-not-committed");
@@ -699,6 +701,7 @@ async function assertProviderApiKeyPersistenceLifecycle(): Promise<void> {
   const tabPlugin = {
     app: new App(),
     settings: editingSettings,
+    getCognitiveSystem: async () => createCognitiveSystemStub(),
     activateApiProviderSettings: async (
       apply: (candidate: typeof editingSettings) => void
     ) => apply(editingSettings)
@@ -932,6 +935,38 @@ function relativeLuminance(color: readonly number[]): number {
   return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
 }
 
+
+/** Minimal CognitiveSystem stub for settings-tab tests (no Provider, no files). */
+function createCognitiveSystemStub(): Record<string, any> {
+  return {
+    listTemplates: async () => [],
+    readPersonalityState: async () => ({
+      schema: "echoink.personality.v1",
+      revision: 0,
+      templateId: null,
+      explicit: { tempo: null, energy: null, mind: null, warmth: null, order: null, stance: null },
+      observed: { tempo: null, energy: null, mind: null, warmth: null, order: null, stance: null },
+      history: [],
+      candidates: [],
+      learnedRequirements: [],
+      processedSources: [],
+      updatedAt: 0
+    }),
+    renderPersonalitySummary: async () => "",
+    selectPersonalityTemplate: async () => {
+      throw new Error("cognitive stub: template selection not available in this test");
+    },
+    listSecondaryForParent: async () => [],
+    listAllSecondary: async () => [],
+    updateSecondaryFact: async () => {
+      throw new Error("cognitive stub");
+    },
+    deleteSecondaryFact: async () => {
+      throw new Error("cognitive stub");
+    }
+  };
+}
+
 function assertSettingsAccessibleNamesAndOverflow(): void {
   installProviderModalDomFixture();
   const settings = structuredClone(DEFAULT_SETTINGS);
@@ -976,6 +1011,7 @@ function assertSettingsAccessibleNamesAndOverflow(): void {
     manifest: { id: "codex-echoink" },
     settings,
     saveSettings: async () => undefined,
+    getCognitiveSystem: async () => createCognitiveSystemStub(),
     getEchoInkPersonalMemoryState: async () => identityState,
     listPiConversations: async () => [],
     setPiConversationStatus: async () => undefined,
@@ -1113,13 +1149,10 @@ function assertSettingsAccessibleNamesAndOverflow(): void {
   ]) {
     assertSettingsToggleAccessibleName(tab.containerEl, label);
   }
-  for (const label of ["AGENT.md", "USER.md"]) {
-    const row = Array.from(tab.containerEl.querySelectorAll(".setting-item"))
-      .find((candidate) => candidate.textContent.includes(label));
-    const button = row?.querySelector("button");
-    assert.match(button?.getAttribute("aria-label") ?? "", /保存文件/u);
-    assert.match(button?.getAttribute("aria-label") ?? "", new RegExp(label, "u"));
-  }
+  // 人格系统重构草案 §1.1：用户不能手动编辑 AGENT.md / USER.md，设置页
+  // 不再有「保存文件」编辑按钮；两份文件只由模板选择与做梦投影写入。
+  assert.ok(!Array.from(tab.containerEl.querySelectorAll("button"))
+    .some((button) => (button.getAttribute("aria-label") ?? "").includes("保存文件")));
 
   settings.settingsTab = "knowledgeBase";
   tab.display();
@@ -1685,6 +1718,7 @@ function assertKnowledgeSettingsDetailRetiresLegacyControls(): void {
     manifest: { id: "codex-echoink" },
     settings,
     saveSettings: async () => undefined,
+    getCognitiveSystem: async () => createCognitiveSystemStub(),
     getEchoInkKnowledgeMaintenancePreferenceState: async () => preference,
     saveEchoInkKnowledgeMaintenancePreferences: async () => preference
   };

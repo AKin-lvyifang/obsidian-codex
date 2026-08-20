@@ -646,9 +646,16 @@ export class DreamEngine {
       if (processedAt === undefined || processedAt < record.revision) consider(record, false);
     }
     // 4. Backfill: existing memories without secondary facts, cursor-ordered.
+    //    合法生成 0 条二级事实的记忆已被 processedSources 登记，不得因为
+    //    「没有二级事实文件」而再次调用 Provider；只有 revision 变化、
+    //    重置或手动重标才能重新进入队列。
     if (selected.length < cap) {
       const backfill = currentRecords
-        .filter((record) => !parentsWithFacts.has(record.id))
+        .filter((record) => {
+          if (parentsWithFacts.has(record.id)) return false;
+          const processedAt = processedRevisions.get(record.id);
+          return processedAt === undefined || processedAt < record.revision;
+        })
         .sort((left, right) => left.id.localeCompare(right.id));
       const cursor = dreamState.backfillCursor;
       const start = cursor ? backfill.findIndex((record) => record.id > cursor) : 0;

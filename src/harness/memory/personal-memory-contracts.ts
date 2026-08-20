@@ -269,11 +269,30 @@ export function isSecondarySupportLevel(value: unknown): value is SecondarySuppo
 
 export type SecondaryStatus = "current" | "disabled";
 
+/**
+ * 停用原因（最新决定）：restore 只能重新启用因 parent forget/close 停用的
+ * 事实，不能恢复低 confidence 自动停用或被重新做梦替换的事实。
+ */
+export type SecondaryDisabledReason =
+  | "parent_lifecycle"  // 父 Memory supersede/forget/close 连带停用
+  | "low_confidence"    // 长期未命中衰减到阈值以下自动停用
+  | "redream_replaced"; // 重新做梦后未再入选
+
+export const SECONDARY_DISABLED_REASONS: readonly SecondaryDisabledReason[] = Object.freeze([
+  "parent_lifecycle", "low_confidence", "redream_replaced"
+]);
+
+export function isSecondaryDisabledReason(value: unknown): value is SecondaryDisabledReason {
+  return typeof value === "string" && (SECONDARY_DISABLED_REASONS as readonly string[]).includes(value);
+}
+
 export interface SecondaryMemoryRecord {
   readonly schema: typeof SECONDARY_MEMORY_SCHEMA;
   readonly id: string;
   readonly parentId: string;
   readonly status: SecondaryStatus;
+  /** status=disabled 时的停用原因；current 时为 null。 */
+  readonly disabledReason: SecondaryDisabledReason | null;
   readonly title: string;
   readonly content: string;
   readonly recallWhen: string;

@@ -11,6 +11,8 @@ export interface PersonalMemoryFixture {
   readonly vaultId: string;
   readonly repository: PersonalMemoryRepository;
   readonly now: () => number;
+  /** 把测试时钟向前推进（做梦衰减等时间语义测试用）。 */
+  advance(ms: number): number;
   runtime(input?: Partial<PersonalMemoryRuntimeContext>): PersonalMemoryRuntimeContext;
   reopen(): Promise<PersonalMemoryRepository>;
 }
@@ -36,6 +38,7 @@ export async function withPersonalMemoryFixture<T>(
     vaultId,
     repository,
     now,
+    advance: (ms: number) => (timestamp += Math.max(0, Math.floor(ms))),
     runtime: (input = {}) => ({
       vaultId,
       conversationId: "conversation-fixture",
@@ -55,6 +58,18 @@ export async function withPersonalMemoryFixture<T>(
   try {
     return await callback(fixture);
   } finally {
-    await rm(vaultPath, { recursive: true, force: true });
+    // macOS APFS 上 node fs.rm(recursive) 偶发 ENOTEMPTY（目录项在
+    // readdir/rmdir 间隙短暂重现）。测试进程内没有并发写者；带退避重试。
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      try {
+        await rm(vaultPath, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+        break;
+      } catch (error) {
+        if (attempt === 5) {
+          console.error("fixture teardown gave up:", (error as Error).message);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 60 * (attempt + 1)));
+      }
+    }
   }
 }

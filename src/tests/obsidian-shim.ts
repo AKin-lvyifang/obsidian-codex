@@ -167,6 +167,42 @@ export class Setting {
     callback(component);
     return this;
   }
+  addSlider(callback: (component: {
+    sliderEl: HTMLElement;
+    setLimits: (min: number, max: number, step?: number | "any") => any;
+    setValue: (value: number) => any;
+    setDynamicTooltip: (format?: (value: number) => string) => any;
+    onChange: (handler: (value: number) => any) => any;
+  }) => any): this {
+    const sliderEl = this.controlEl.createEl("input", {
+      attr: { type: "range" }
+    });
+    let value = 0;
+    const component = {
+      sliderEl,
+      setLimits: (min: number, max: number, step?: number | "any") => {
+        sliderEl.setAttr("min", String(min));
+        sliderEl.setAttr("max", String(max));
+        if (step !== undefined) sliderEl.setAttr("step", String(step));
+        return component;
+      },
+      setValue: (next: number) => {
+        value = next;
+        sliderEl.setAttr("value", String(next));
+        return component;
+      },
+      setDynamicTooltip: () => component,
+      onChange: (handler: (value: number) => any) => {
+        sliderEl.onchange = () => {
+          value = Number((sliderEl as unknown as { value: string }).value ?? value);
+          handler(value);
+        };
+        return component;
+      }
+    };
+    callback(component);
+    return this;
+  }
   addDropdown(callback: (component: { selectEl: HTMLSelectElement; addOption: (value: string, label: string) => any; setValue: (value: string) => any; onChange: (handler: (value: string) => any) => any }) => any): this {
     const selectEl = this.controlEl.createEl("select") as HTMLSelectElement;
     const options: HTMLOptionElement[] = [];

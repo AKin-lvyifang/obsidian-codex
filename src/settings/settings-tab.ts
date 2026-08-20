@@ -7,10 +7,13 @@ import type {
 } from "../harness/memory/personal-memory-contracts";
 import {
   currentPersonalityScores,
+  templateBaselineScores,
   type PersonalityState
 } from "../harness/memory/personality-state";
 import {
   PERSONALITY_TEMPLATES,
+  TRAIT_DIMENSIONS,
+  TRAIT_DIMENSION_META,
   getPersonalityTemplate
 } from "../harness/memory/personality-templates";
 import { buildActiveEchoInkResourceCatalog } from "../resources/registry";
@@ -713,14 +716,18 @@ export class CodexSettingTab extends PluginSettingTab {
     const body = card.createDiv({ cls: "echoink-agent-profile-card-body" });
     const hexSide = body.createDiv({ cls: "echoink-agent-profile-hex-side" });
     const textSide = body.createDiv({ cls: "echoink-agent-profile-text-side" });
-    const dimLabels: [string, string, string][] = [
-      ["tempo", zh ? "节奏" : "Tempo", zh ? "快·短平快 ←→ 慢·深思熟虑" : "Fast ↔ Slow"],
-      ["energy", zh ? "能量" : "Energy", zh ? "外向·主动 ←→ 内向·安静" : "Outgoing ↔ Quiet"],
-      ["mind", zh ? "思维" : "Mind", zh ? "发散·联想 ←→ 聚焦·务实" : "Divergent ↔ Focused"],
-      ["warmth", zh ? "温度" : "Warmth", zh ? "冷静·对事 ←→ 共情·顾及感受" : "Cool ↔ Empathetic"],
-      ["order", zh ? "秩序" : "Order", zh ? "严谨·结构化 ←→ 随性·自然" : "Structured ↔ Casual"],
-      ["stance", zh ? "立场" : "Stance", zh ? "配合·以你为准 ←→ 主见·据理力争" : "Cooperative ↔ Opinionated"]
-    ];
+    // 图表、文字、模板和 Prompt 共享同一份维度常量（TRAIT_DIMENSION_META）。
+    const dimLabels: [string, string, string][] = TRAIT_DIMENSIONS.map((dim) => {
+      const meta = TRAIT_DIMENSION_META[dim];
+      const pole = (value: string) => value.split("、").slice(0, 2).join("·");
+      return [
+        dim,
+        zh ? meta.labelZh : meta.labelEn,
+        zh
+          ? `${pole(meta.leftZh)} ←→ ${pole(meta.rightZh)}`
+          : `${meta.leftEn.split(",")[0]?.trim() ?? ""} ↔ ${meta.rightEn.split(",")[0]?.trim() ?? ""}`
+      ];
+    });
     const barFgs: HTMLElement[] = [];
     const pctSpans: HTMLElement[] = [];
     for (let i = 0; i < dimLabels.length; i++) {
@@ -773,6 +780,17 @@ export class CodexSettingTab extends PluginSettingTab {
         ? (zh ? "收起描述" : "Collapse")
         : (zh ? "查看完整描述" : "Full description"));
       expandBtn.classList.toggle("is-open", isOpen);
+      if (isOpen) {
+        // 做梦可能在后台更新了人格状态和 AGENT.md；展开时重新读取。
+        void (async () => {
+          try {
+            const system = await this.plugin.getCognitiveSystem();
+            const files = await system.readFixedFiles();
+            rawPre.setText(files.agent);
+          } catch { /* keep previous text */ }
+          void this.loadPersonalityIntoCard(refs, zh);
+        })();
+      }
     };
 
     const refs: AgentProfileCardRefs = {
@@ -831,9 +849,15 @@ export class CodexSettingTab extends PluginSettingTab {
     refs.footerStatus.setText(template
       ? (zh ? `基于「${template.labelZh}」模板` : `Template: ${template.labelEn}`)
       : (zh ? "尚未选择初始风格" : "No style selected yet"));
+    const baseline = templateBaselineScores(state);
     void import("../ui/trait-hexagon").then(({ renderTraitHexagon }) => {
       refs.hexSide.empty();
-      renderTraitHexagon(refs.hexSide, scores as Record<string, number> as never, { size: 170, rings: 4 });
+      renderTraitHexagon(refs.hexSide, scores as Record<string, number> as never, {
+        size: 170,
+        rings: 4,
+        // 同时显示模板基线与当前 observed 值。
+        baselineScores: baseline ?? undefined
+      });
     }).catch(() => {});
     for (let i = 0; i < refs.dimLabels.length; i++) {
       const dim = refs.dimLabels[i][0] as keyof typeof scores;
@@ -1713,7 +1737,28 @@ export class CodexSettingTab extends PluginSettingTab {
     const head = factRow.createDiv({ cls: "echoink-secondary-fact-head" });
     head.createSpan({
       cls: "echoink-secondary-fact-badge",
-      text: zh ? "二级事实·LLM 推理" : "Secondary fact · LLM inferred"
+      text: fact.basis === "user_edited_inference"
+        ? (zh ? "二级事实·用户修正" : "Secondary fact · User edited")
+        : (zh ? "二级事实·LLM 推理" : "Secondary fact · LLM inferred")
+    });
+    const relationLabels: Record<string, string> = {
+      category: zh ? "分类" : "category",
+      instance: zh ? "具体实例" : "instance",
+      attribute: zh ? "属性" : "attribute",
+      context: zh ? "情境" : "context",
+      associated: zh ? "关联" : "associated"
+    };
+    head.createSpan({
+      cls: "echoink-secondary-fact-badge",
+      text: relationLabels[fact.relation] ?? fact.relation
+    });
+    head.createSpan({
+      cls: "echoink-secondary-fact-badge",
+      text: fact.confidence >= 0.75
+        ? (zh ? "高置信度" : "High confidence")
+        : fact.confidence >= 0.6
+          ? (zh ? "中置信度" : "Medium confidence")
+          : (zh ? "低置信度" : "Low confidence")
     });
     head.createSpan({ cls: "echoink-secondary-fact-title", text: fact.title });
     factRow.createDiv({ cls: "echoink-secondary-fact-content", text: fact.content });

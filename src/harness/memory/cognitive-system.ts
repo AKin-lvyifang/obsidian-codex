@@ -150,6 +150,12 @@ export class CognitiveSystem {
     this.scheduler = parts.scheduler;
   }
 
+  /** 设置页展开时需要重新读取做梦投影后的 AGENT.md / USER.md。 */
+  async readFixedFiles(): Promise<Readonly<{ agent: string; user: string }>> {
+    const state = await this.repository.readUserControlState();
+    return Object.freeze({ agent: state.agent, user: state.user });
+  }
+
   /** Build the system against an initialized repository and attach hooks. */
   static async create(options: CognitiveSystemOptions): Promise<CognitiveSystem> {
     const layout = await options.repository.initialize();
@@ -416,9 +422,14 @@ export class CognitiveSystem {
       if (record.parentId !== parentId) continue;
       if (operation === "restore") {
         if (record.status !== "disabled") continue;
+        // 因低 confidence 自动停用或被重新做梦替换的事实不随 restore 复活。
+        if (record.disabledReason !== null && record.disabledReason !== "parent_lifecycle") {
+          continue;
+        }
         const updated: SecondaryMemoryRecord = Object.freeze({
           ...record,
           status: "current",
+          disabledReason: null,
           revision: record.revision + 1,
           updatedAt: now
         });
@@ -429,6 +440,8 @@ export class CognitiveSystem {
         const updated: SecondaryMemoryRecord = Object.freeze({
           ...record,
           status: "disabled",
+          // restore 只能重新启用 parent forget/close 连带停用的事实。
+          disabledReason: "parent_lifecycle",
           revision: record.revision + 1,
           updatedAt: now
         });
