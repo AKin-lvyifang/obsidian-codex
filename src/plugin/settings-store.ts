@@ -1,6 +1,5 @@
 import { Notice } from "obsidian";
 import type CodexForObsidianPlugin from "../main";
-import { swallowError } from "../core/error-handling";
 import { prepareRawMessage, readRawText, writeRawText } from "../core/raw-message-store";
 import {
   ConversationMutationLane
@@ -111,7 +110,8 @@ export class EchoInkSettingsStore {
     if (this.saveTimer) return;
     this.saveTimer = setTimeout(() => {
       this.saveTimer = null;
-      void this.flushSettingsSave().catch(swallowError("scheduled settings save failed"));
+      // flushSettingsSave already emits one redacted diagnostic and Notice.
+      void this.flushSettingsSave().catch(() => undefined);
     }, 750);
   }
 
@@ -349,7 +349,12 @@ export class EchoInkSettingsStore {
   }
 
   private reportSettingsSaveError(error: unknown): void {
-    console.error("[EchoInk] settings save failed:", error);
+    const code = error instanceof SettingsPersistenceError
+      ? error.code
+      : error instanceof ResourceMutationError
+        ? "resource_mutation_failed"
+        : "settings_save_failed";
+    console.error("[EchoInk] settings save failed:", code);
     new Notice(this.plugin.settings.settingsLanguage === "en" ? "EchoInk settings save failed" : "EchoInk 设置保存失败，请稍后重试");
   }
 

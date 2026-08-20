@@ -5,6 +5,7 @@ import type {
   Model
 } from "@earendil-works/pi-ai";
 import type {
+  ApiProviderAuthMode,
   ApiProviderProtocol
 } from "../../settings/provider-presets";
 
@@ -13,6 +14,7 @@ import type {
 export interface PiProviderRuntimeConfig {
   providerId: string;
   apiProtocol: ApiProviderProtocol;
+  authMode: ApiProviderAuthMode;
   baseUrl: string;
   modelRef: string;
 }

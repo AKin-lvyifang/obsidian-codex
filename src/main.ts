@@ -1,5 +1,6 @@
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
+import type { AuthInteraction } from "@earendil-works/pi-ai";
 import { Plugin } from "obsidian";
 import { closeMcpBrokerConnectionPool } from "./resources/mcp-broker";
 import {
@@ -10,7 +11,7 @@ import type { EchoInkResource } from "./resources/types";
 import { enabledSkillResources } from "./resources/registry";
 import type { ReviewManager } from "./review/manager";
 import {
-  apiProviderHasUsableApiKey,
+  apiProviderHasUsableCredential,
   getActiveApiProvider,
   type ChatMessage,
   type CodexForObsidianSettings,
@@ -83,6 +84,10 @@ import {
   type PersonalMemoryCorrectionRecord
 } from "./plugin/personal-memory-correction-service";
 import { normalizeApiProviderId } from "./settings/provider-presets";
+import {
+  OpenAICodexOAuthService,
+  type OpenAICodexAuthStatus
+} from "./plugin/openai-codex-oauth-service";
 
 interface PiConversationActivationTask {
   readonly generation: number;
@@ -108,6 +113,8 @@ export default class CodexForObsidianPlugin extends Plugin {
   private mcpSettingsService: EchoInkMcpSettingsService | null = null;
   private piProviderConfigurationService:
     PiProviderConfigurationService | null = null;
+  private openAICodexOAuthService:
+    OpenAICodexOAuthService | null = null;
   private piRuntimeBundle: PiProductionRuntimeBundle | null = null;
   private piRuntimeFlight: Promise<PiProductionRuntimeBundle> | null = null;
   private piConversationActivationGeneration = 0;
@@ -208,6 +215,20 @@ export default class CodexForObsidianPlugin extends Plugin {
   ): Promise<PiProviderConnectionTestResult> {
     return await this.getPiProviderConfigurationService()
       .testConnection(draft);
+  }
+  async getOpenAICodexAuthStatus(): Promise<OpenAICodexAuthStatus> {
+    return await this.getOpenAICodexOAuthService().status();
+  }
+  async loginOpenAICodex(
+    interaction: AuthInteraction
+  ): Promise<OpenAICodexAuthStatus> {
+    return await this.getOpenAICodexOAuthService().login(interaction);
+  }
+  async logoutOpenAICodex(): Promise<void> {
+    await this.getOpenAICodexOAuthService().logout();
+  }
+  async resolveOpenAICodexAccessToken(): Promise<string> {
+    return await this.getOpenAICodexOAuthService().resolveAccessToken();
   }
   async translateEditorSelectionToEnglish(selectedText: string): Promise<string> {
     return await this.withProductActivity(
@@ -731,9 +752,18 @@ export default class CodexForObsidianPlugin extends Plugin {
   PiProviderConfigurationService {
     if (!this.piProviderConfigurationService) {
       this.piProviderConfigurationService =
-        new PiProviderConfigurationService(this);
+        new PiProviderConfigurationService(this, {
+          resolveOAuthAccessToken: async () =>
+            await this.resolveOpenAICodexAccessToken()
+        });
     }
     return this.piProviderConfigurationService;
+  }
+  private getOpenAICodexOAuthService(): OpenAICodexOAuthService {
+    if (!this.openAICodexOAuthService) {
+      this.openAICodexOAuthService = new OpenAICodexOAuthService(this);
+    }
+    return this.openAICodexOAuthService;
   }
   private getEditorTranslationService(): EditorTranslationService {
     if (!this.editorTranslation) {
@@ -751,6 +781,7 @@ export default class CodexForObsidianPlugin extends Plugin {
               ),
               runtimeProviderId: provider.runtimeProviderId,
               apiProtocol: provider.apiProtocol,
+              authMode: provider.authMode,
               baseUrl: provider.baseUrl,
               modelId: provider.model,
               apiKey: "",
@@ -787,6 +818,7 @@ export default class CodexForObsidianPlugin extends Plugin {
               ),
               runtimeProviderId: provider.runtimeProviderId,
               apiProtocol: provider.apiProtocol,
+              authMode: provider.authMode,
               baseUrl: provider.baseUrl,
               modelId: provider.model,
               apiKey: "",
@@ -999,7 +1031,10 @@ export default class CodexForObsidianPlugin extends Plugin {
 
   private piProviderCanActivateAgentSession(): boolean {
     const provider = getActiveApiProvider(this.settings);
-    return Boolean(provider && apiProviderHasUsableApiKey(provider));
+    return Boolean(provider && apiProviderHasUsableCredential(
+      provider,
+      this.settings.openAICodexCredential
+    ));
   }
 
   private async ensurePiProductionRuntime(): Promise<PiProductionRuntimeBundle> {

@@ -48,6 +48,17 @@ const VIOLATION_MARKERS = [
   "Downloading... ripgrep"
 ];
 
+const CODEX_REQUIRED_MARKERS = [
+  "auth/oauth/openai-codex.js",
+  "api/openai-codex-responses.js",
+  "OpenAI Codex OAuth"
+];
+
+const CODEX_UNRESOLVED_IMPORT_MARKERS = [
+  'importOAuthModule("./openai-codex.ts")',
+  'import("./openai-codex.js")'
+];
+
 /** Browser-side modules the production bundle keeps external. */
 const EXTERNAL_MODULES = [
   "obsidian",
@@ -98,6 +109,16 @@ function checkMarkers() {
   for (const marker of VIOLATION_MARKERS) {
     if (contents.includes(marker)) {
       failures.push(`forbidden marker present in bundle: ${marker}`);
+    }
+  }
+  for (const marker of CODEX_REQUIRED_MARKERS) {
+    if (!contents.includes(marker)) {
+      failures.push(`required Codex OAuth marker missing from bundle: ${marker}`);
+    }
+  }
+  for (const marker of CODEX_UNRESOLVED_IMPORT_MARKERS) {
+    if (contents.includes(marker)) {
+      failures.push(`unresolved Codex OAuth import present in bundle: ${marker}`);
     }
   }
 }

@@ -16,12 +16,15 @@ import {
   type CodexForObsidianSettings
 } from "../settings/settings";
 import {
+  apiProviderAuthMode,
   apiProviderApiKeyRequired,
   apiProviderMaxOutputReserve,
   apiProviderModelsUrl,
   isLoopbackApiProviderUrl,
   normalizeApiProviderBaseUrl,
   normalizeApiProviderId,
+  getApiProviderPreset,
+  type ApiProviderAuthMode,
   type ApiProviderId,
   type ApiProviderProtocol
 } from "../settings/provider-presets";
@@ -38,6 +41,7 @@ export interface PiProviderConfigurationDraft {
   readonly providerId: ApiProviderId;
   readonly runtimeProviderId: string;
   readonly apiProtocol: ApiProviderProtocol;
+  readonly authMode: ApiProviderAuthMode;
   readonly baseUrl: string;
   readonly modelId: string;
   readonly apiKey: string;
@@ -92,8 +96,9 @@ export class PiProviderConfigurationService {
     private readonly host: PiProviderConfigurationHost,
     private readonly options: {
       fetchImpl?: PiProviderFetch;
-      adapters?: Readonly<Record<ApiProviderProtocol, ProviderStreams>>;
+      adapters?: Readonly<Partial<Record<ApiProviderProtocol, ProviderStreams>>>;
       textGenerationDispatcher?: Pick<PiProviderProtocolDispatcher, "stream">;
+      resolveOAuthAccessToken?: () => Promise<string>;
       timeoutMs?: number;
     } = {}
   ) {}
@@ -102,9 +107,16 @@ export class PiProviderConfigurationService {
     draft: PiProviderConfigurationDraft
   ): Promise<PiProviderModelListResult> {
     const normalized = normalizeDraft(draft, false);
+    if (normalized.providerId === "openai-codex") {
+      return {
+        status: "available",
+        models: getApiProviderPreset("openai-codex")
+          .models.map((model) => model.id)
+      };
+    }
     let apiKey: string;
     try {
-      apiKey = await this.resolveApiKey(normalized);
+      apiKey = await this.resolveAuthToken(normalized);
     } catch {
       return { status: "api_key_error", models: [] };
     }
@@ -125,7 +137,7 @@ export class PiProviderConfigurationService {
     const normalized = normalizeDraft(draft, true);
     let apiKey: string;
     try {
-      apiKey = await this.resolveApiKey(normalized);
+      apiKey = await this.resolveAuthToken(normalized);
     } catch {
       return { status: "failed", failure: "auth" };
     }
@@ -152,7 +164,7 @@ export class PiProviderConfigurationService {
       throw new Error("provider_text_generation_aborted");
     }
     const normalized = normalizeDraft(input.draft, true);
-    const apiKey = await this.resolveApiKey(normalized);
+    const apiKey = await this.resolveAuthToken(normalized);
     if (input.signal?.aborted) {
       throw new Error("provider_text_generation_aborted");
     }
@@ -236,9 +248,16 @@ export class PiProviderConfigurationService {
     }
   }
 
-  private async resolveApiKey(
+  private async resolveAuthToken(
     draft: PiProviderConfigurationDraft
   ): Promise<string> {
+    if (draft.authMode === "oauth") {
+      if (
+        draft.providerId !== "openai-codex"
+        || !this.options.resolveOAuthAccessToken
+      ) throw new Error("provider_oauth_missing");
+      return await this.options.resolveOAuthAccessToken();
+    }
     if (draft.apiKey.trim()) return draft.apiKey.trim();
     if (!apiProviderApiKeyRequired(draft.providerId)) return "";
     const provider = this.host.settings.apiProviders.find(
@@ -390,6 +409,12 @@ function normalizeDraft(
     throw new Error("provider_model_invalid");
   }
   if (
+    draft.authMode !== apiProviderAuthMode(draft.providerId)
+    || (
+      draft.providerId === "openai-codex"
+      && draft.apiProtocol !== "openai-codex-responses"
+    )
+    ||
     !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u.test(
       draft.runtimeProviderId.trim()
     )
@@ -410,6 +435,7 @@ function normalizeDraft(
     providerId: draft.providerId,
     runtimeProviderId: draft.runtimeProviderId.trim(),
     apiProtocol: draft.apiProtocol,
+    authMode: draft.authMode,
     baseUrl: normalizeApiProviderBaseUrl(
       draft.baseUrl,
       draft.apiProtocol

@@ -4185,6 +4185,7 @@ button.echoink-settings-navigation-row:focus-visible {
 
 .codex-provider-active-badge,
 .codex-provider-mode-badge,
+.codex-provider-beta-pill,
 .codex-provider-credential-badge,
 .codex-provider-connection-badge {
   display: inline-flex;
@@ -4211,6 +4212,15 @@ button.echoink-settings-navigation-row:focus-visible {
   background: var(--background-primary);
 }
 
+.codex-provider-beta-pill {
+  color: var(--text-accent);
+  background: color-mix(
+    in srgb,
+    var(--interactive-accent) 12%,
+    var(--background-primary)
+  );
+}
+
 .codex-provider-credential-badge,
 .codex-provider-connection-badge {
   color: var(--text-muted);
@@ -4227,7 +4237,17 @@ button.echoink-settings-navigation-row:focus-visible {
   );
 }
 
-.codex-provider-credential-badge.is-missing {
+.codex-provider-credential-badge.is-oauth-ready {
+  color: var(--text-normal);
+  background: color-mix(
+    in srgb,
+    var(--text-success, var(--interactive-accent)) 12%,
+    var(--background-primary)
+  );
+}
+
+.codex-provider-credential-badge.is-missing,
+.codex-provider-credential-badge.is-oauth-missing {
   color: var(--text-warning, var(--text-muted));
   background: var(--background-modifier-warning, var(--background-primary-alt));
 }
@@ -4375,6 +4395,49 @@ button.echoink-settings-navigation-row:focus-visible {
   font-size: 14px;
   font-weight: 400;
   white-space: nowrap;
+}
+
+.codex-provider-modal-title > .codex-provider-beta-pill {
+  min-height: 28px;
+  padding: 0 12px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.codex-provider-oauth-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  background: var(--background-secondary);
+}
+
+.codex-provider-oauth-copy,
+.codex-provider-oauth-manual {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.codex-provider-oauth-title {
+  color: var(--text-normal);
+  font-weight: 600;
+}
+
+.codex-provider-oauth-description,
+.codex-provider-oauth-manual label {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  line-height: 1.45;
+}
+
+.codex-provider-oauth-actions,
+.codex-provider-oauth-manual-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .codex-provider-modal-content {

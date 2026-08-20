@@ -267,6 +267,7 @@ function loopbackControlledInput(
     provider: {
       providerId: model.provider,
       apiProtocol: "openai-completions",
+      authMode: "api-key",
       baseUrl: model.baseUrl,
       modelRef: model.id
     },

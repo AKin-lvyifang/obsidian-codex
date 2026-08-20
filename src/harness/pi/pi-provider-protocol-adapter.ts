@@ -6,6 +6,7 @@ import {
   type Context,
   type Model,
   type ProviderStreams,
+  type SimpleStreamOptions,
   type StreamOptions,
   getOverflowPatterns,
   isContextOverflow
@@ -19,6 +20,9 @@ import {
 import {
   openAIResponsesApi
 } from "@earendil-works/pi-ai/api/openai-responses.lazy";
+import {
+  openAICodexResponsesApi
+} from "@earendil-works/pi-ai/api/openai-codex-responses.lazy";
 import type {
   ApiProviderProtocol
 } from "../../settings/provider-presets";
@@ -41,6 +45,7 @@ export type PiProviderConnectionFailureKind =
 
 const DEFAULT_PI_PROVIDER_PROTOCOL_ADAPTERS:
 PiProviderProtocolAdapters = Object.freeze({
+  "openai-codex-responses": createOpenAICodexSseAdapter(),
   "openai-responses": openAIResponsesApi(),
   "openai-completions": openAICompletionsApi(),
   "anthropic-messages": anthropicMessagesApi()
@@ -83,7 +88,7 @@ implements ControlledPiStreamPort {
   constructor(private readonly options: {
     authorityId: string;
     storeSetId: string;
-    readApiKey(): string;
+    resolveAuthToken(): string | Promise<string>;
     dispatcher?: PiProviderProtocolDispatcher;
   }) {
     this.authorityId = options.authorityId;
@@ -95,7 +100,7 @@ implements ControlledPiStreamPort {
   ): Promise<AssistantMessageEventStream> {
     let apiKey: string;
     try {
-      apiKey = this.options.readApiKey();
+      apiKey = await this.options.resolveAuthToken();
     } catch {
       return failedStream(input.model, "provider_api_key_missing");
     }
@@ -350,11 +355,37 @@ export function requireApiProviderProtocol(
   value: Api
 ): ApiProviderProtocol {
   if (
-    value === "openai-responses"
+    value === "openai-codex-responses"
+    || value === "openai-responses"
     || value === "openai-completions"
     || value === "anthropic-messages"
   ) {
     return value as ApiProviderProtocol;
   }
   throw new Error("provider_protocol_unsupported");
+}
+
+export function createOpenAICodexSseAdapter(
+  upstream: ProviderStreams = openAICodexResponsesApi()
+): ProviderStreams {
+  return Object.freeze({
+    stream: (
+      model: Model<Api>,
+      context: Context,
+      options?: StreamOptions
+    ) => upstream.stream(
+      model,
+      context,
+      { ...options, transport: "sse" }
+    ),
+    streamSimple: (
+      model: Model<Api>,
+      context: Context,
+      options?: SimpleStreamOptions
+    ) => upstream.streamSimple(
+      model,
+      context,
+      { ...options, transport: "sse" }
+    )
+  });
 }

@@ -33,6 +33,21 @@ assert.doesNotMatch(
   /Promise\.withResolvers\s*\(/,
   "production bundle must not call Node 22-only Promise.withResolvers"
 );
+assert.match(
+  bundle,
+  /auth\/oauth\/openai-codex\.js/,
+  "production bundle must statically contain the OpenAI Codex OAuth flow"
+);
+assert.match(
+  bundle,
+  /api\/openai-codex-responses\.js/,
+  "production bundle must contain the OpenAI Codex Responses SSE adapter"
+);
+assert.doesNotMatch(
+  bundle,
+  /importOAuthModule\(["']\.\/openai-codex\.(?:ts|js)["']\)/,
+  "production bundle must not retain the package-relative Codex OAuth import"
+);
 
 const require = createRequire(import.meta.url);
 const originalLoad = Module._load;
