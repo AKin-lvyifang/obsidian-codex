@@ -14,7 +14,9 @@ import {
   PERSONALITY_TEMPLATES,
   TRAIT_DIMENSIONS,
   TRAIT_DIMENSION_META,
-  getPersonalityTemplate
+  getPersonalityTemplate,
+  traitBehaviorBand,
+  type TraitDimension
 } from "../harness/memory/personality-templates";
 import { AGENT_AVATAR_PRESETS, resolveAgentAvatarUrl } from "../ui/agent-avatar-presets";
 import { AgentIdentityModal } from "../ui/agent-identity-modal";
@@ -115,6 +117,7 @@ interface AgentProfileCardRefs {
   readonly hexSide: HTMLElement;
   readonly barFgs: HTMLElement[];
   readonly pctSpans: HTMLElement[];
+  readonly barDescs: HTMLElement[];
   readonly dimLabels: [string, string, string][];
   readonly footerStatus: HTMLElement;
   readonly templateBtn: HTMLElement;
@@ -721,32 +724,36 @@ export class CodexSettingTab extends PluginSettingTab {
     const hexSide = body.createDiv({ cls: "echoink-agent-profile-hex-side" });
     const textSide = body.createDiv({ cls: "echoink-agent-profile-text-side" });
     // 图表、文字、模板和 Prompt 共享同一份维度常量（TRAIT_DIMENSION_META）。
+    // 单向语义：数值越高 = 该特质表现越多；文案全部来自行为档 Meta。
     const dimLabels: [string, string, string][] = TRAIT_DIMENSIONS.map((dim) => {
       const meta = TRAIT_DIMENSION_META[dim];
-      const pole = (value: string) => value.split("、").slice(0, 2).join("·");
-      return [
-        dim,
-        zh ? meta.labelZh : meta.labelEn,
-        zh
-          ? `${pole(meta.leftZh)} ←→ ${pole(meta.rightZh)}`
-          : `${meta.leftEn.split(",")[0]?.trim() ?? ""} ↔ ${meta.rightEn.split(",")[0]?.trim() ?? ""}`
-      ];
+      return [dim, zh ? meta.labelZh : meta.labelEn, ""];
     });
     const barFgs: HTMLElement[] = [];
     const pctSpans: HTMLElement[] = [];
+    const barDescs: HTMLElement[] = [];
     for (let i = 0; i < dimLabels.length; i++) {
-      const [dim, label, poles] = dimLabels[i];
+      const [dim, label] = dimLabels[i];
       const row = textSide.createDiv({ cls: "echoink-trait-row" });
-      row.createSpan({ cls: "echoink-trait-dim", text: label });
+      const head = row.createDiv({ cls: "echoink-trait-head" });
+      head.createSpan({ cls: "echoink-trait-dim", text: label });
+      const value = head.createSpan({ cls: "echoink-trait-value", text: "" });
+      pctSpans.push(value);
       const barBg = row.createDiv({ cls: "echoink-trait-bar-bg" });
       const barFg = barBg.createDiv({ cls: "echoink-trait-bar-fg" });
       barFg.style.width = "50%";
       barFgs.push(barFg);
-      const pct = row.createSpan({ cls: "echoink-trait-pct", text: "50%" });
-      pctSpans.push(pct);
-      textSide.createDiv({ cls: "echoink-trait-poles", text: poles });
+      const desc = textSide.createDiv({ cls: "echoink-trait-band-desc", text: "" });
+      barDescs.push(desc);
       void dim;
     }
+    // 人格轮廓说明：六边形表示行为特质强弱组合，不代表能力高低。
+    hexSide.createDiv({
+      cls: "echoink-trait-hexagon-caption",
+      text: zh
+        ? "人格轮廓表示六种行为特质的强弱组合，不代表 Agent 能力高低。"
+        : "The personality profile shows six behavioral traits; area does not mean capability."
+    });
     void body;
 
     // --- Footer ---
@@ -798,7 +805,7 @@ export class CodexSettingTab extends PluginSettingTab {
     };
 
     const refs: AgentProfileCardRefs = {
-      hexSide, barFgs, pctSpans, dimLabels, footerStatus, templateBtn, pickerPanel, summaryText, rawPre
+      hexSide, barFgs, pctSpans, barDescs, dimLabels, footerStatus, templateBtn, pickerPanel, summaryText, rawPre
     };
 
     templateBtn.onclick = () => {
@@ -866,8 +873,14 @@ export class CodexSettingTab extends PluginSettingTab {
     for (let i = 0; i < refs.dimLabels.length; i++) {
       const dim = refs.dimLabels[i][0] as keyof typeof scores;
       const score = scores[dim] ?? 0.5;
+      const behaviorBand = traitBehaviorBand(dim, score);
       refs.barFgs[i].style.width = `${Math.round(score * 100)}%`;
-      refs.pctSpans[i].setText(`${Math.round(score * 100)}%`);
+      refs.pctSpans[i].setText(
+        `${Math.round(score * 100)} · ${zh ? behaviorBand.labelZh : behaviorBand.labelEn}`
+      );
+      refs.barDescs[i].setText(
+        zh ? behaviorBand.uiDescriptionZh : behaviorBand.uiDescriptionEn
+      );
     }
     if (agentText !== null) refs.rawPre.setText(agentText);
   }
@@ -892,27 +905,7 @@ export class CodexSettingTab extends PluginSettingTab {
           : "Choose the closest style (applies locally and immediately, no model calls)"));
     const list = panel.createDiv({ cls: "echoink-picker-list" });
 
-    const richDescsZh: Record<string, string> = {
-      executor: "回答先给结论再展开，不废话不寒暄，发现问题直接指出",
-      advisor: "每个建议都附依据和利弊分析，宁可慢一步也不给模糊答案",
-      butler: "安静执行你的指令，不主动起话题，有不同意见也只轻声提醒",
-      companion: "先回应你的情绪再处理事情，措辞温和，批评也会留面子",
-      steward: "输出永远结构化——列表、表格、分步骤，帮你把混乱理清楚",
-      enthusiast: "聊天氛围轻松活跃，会主动追问和延伸话题，什么都能接",
-      creative: "讨论时爱发散联想，经常提出你没想到的角度和可能性",
-      pragmatist: "边聊边干，说话直来直去，有分歧会据理力争但尊重你的最终决定"
-    };
-    const richDescsEn: Record<string, string> = {
-      executor: "Leads with conclusions, no filler, flags problems directly",
-      advisor: "Every suggestion backed by evidence and trade-off analysis",
-      butler: "Quietly executes your instructions, only gently flags disagreements",
-      companion: "Acknowledges your feelings first, criticism always delivered kindly",
-      steward: "Always structured output — lists, tables, step-by-step breakdowns",
-      enthusiast: "Lively and proactive, asks follow-ups, picks up any topic",
-      creative: "Loves divergent thinking, surfaces angles you hadn't considered",
-      pragmatist: "Talks and does simultaneously, argues with evidence, respects your call"
-    };
-    const descs = zh ? richDescsZh : richDescsEn;
+    // 描述统一来自 PERSONALITY_TEMPLATES 常量，不再在此重复维护（避免漂移）。
 
     for (const tpl of PERSONALITY_TEMPLATES) {
       const row = list.createEl("button", {
@@ -920,7 +913,7 @@ export class CodexSettingTab extends PluginSettingTab {
         attr: { type: "button" }
       });
       row.createDiv({ cls: "echoink-picker-row-name" }).setText(zh ? tpl.labelZh : tpl.labelEn);
-      row.createDiv({ cls: "echoink-picker-row-desc" }).setText(descs[tpl.id] ?? (zh ? tpl.cardZh : tpl.cardEn));
+      row.createDiv({ cls: "echoink-picker-row-desc" }).setText(zh ? tpl.richDescZh : tpl.richDescEn);
 
       row.onclick = () => {
         row.setAttr("disabled", "true");

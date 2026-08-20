@@ -38,6 +38,7 @@ import {
 } from "./personal-memory-contracts";
 import {
   applyDreamPersonalityUpdate,
+  emptyPersonalityState,
   reconcilePersonalitySources,
   type DreamPersonalityInput,
   type PersonalityState
@@ -75,7 +76,12 @@ import {
 } from "./dream-state";
 import type { PersonalityStateStore } from "./personality-state";
 import type { UserProfileStateStore } from "./user-profile-state";
-import { TRAIT_DIMENSION_META, TRAIT_DIMENSIONS } from "./personality-templates";
+import {
+  TRAIT_DIMENSION_META,
+  TRAIT_DIMENSIONS,
+  isTraitDimension,
+  type TraitDimension
+} from "./personality-templates";
 
 // ---------------------------------------------------------------------------
 // Ports
@@ -597,19 +603,7 @@ export class DreamEngine {
   }
 
   private emptyPersonality(now: number): PersonalityState {
-    // Local import cycle is one-directional; build the empty shape inline.
-    return {
-      schema: "echoink.personality.v1",
-      revision: 0,
-      templateId: null,
-      explicit: Object.freeze({ tempo: null, energy: null, mind: null, warmth: null, order: null, stance: null }),
-      observed: Object.freeze({ tempo: null, energy: null, mind: null, warmth: null, order: null, stance: null }),
-      history: Object.freeze([]),
-      candidates: Object.freeze([]),
-      learnedRequirements: Object.freeze([]),
-      processedSources: Object.freeze([]),
-      updatedAt: now
-    } as PersonalityState;
+    return emptyPersonalityState(now);
   }
 
   private emptyProfile(now: number): UserProfileState {
@@ -719,7 +713,8 @@ function isProfileEligible(record: PersonalMemoryRecord): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Prompts (方向说明必须来自 TRAIT_DIMENSION_META，0 = 左极)
+// Prompts (六维单向语义：increase=该特质更多，decrease=该特质更少；
+// 维度含义必须来自 TRAIT_DIMENSION_META，不允许各模块自行维护)
 // ---------------------------------------------------------------------------
 
 export function buildDreamPrompts(
@@ -727,9 +722,9 @@ export function buildDreamPrompts(
   maxInputChars: number,
   knownProfileKeys: readonly string[] = []
 ): { systemPrompt: string; userPrompt: string } {
-  const directionLines = TRAIT_DIMENSIONS.map((dimension) => {
+  const dimensionLines = TRAIT_DIMENSIONS.map((dimension) => {
     const meta = TRAIT_DIMENSION_META[dimension];
-    return `- ${dimension}：decrease=偏「${meta.leftZh}」；increase=偏「${meta.rightZh}」。`;
+    return `- ${dimension}（${meta.labelZh}）：${meta.summaryZh}。increase=该特质表现更多，decrease=该特质表现更少。`;
   });
   const systemPrompt = [
     "你是 EchoInk 的离线记忆整理模块。你只基于给定的一条长期记忆做保守推理，输出严格 JSON。",
@@ -738,8 +733,11 @@ export function buildDreamPrompts(
     `2. secondaryFacts：0-${SECONDARY_MAX_CANDIDATES} 条临时候选（宁缺毋滥，没有可靠推理就输出空数组），作为未来相关查询召回这条记忆的桥梁概念（上位类别、具体实例、属性、场景、常见联想）。`,
     `3. 每条 secondaryFact 必须包含：{\"title\":≤30字, \"content\":≤120字且使用不确定语气如\"可能/也许相关/可参考\", \"recallWhen\":何时可能想起, \"matchTerms\":≤${SECONDARY_MAX_MATCH_TERMS}个完整词或短语（禁止单个汉字）, \"relation\":\"category|instance|attribute|context|associated\", \"supportLevel\":\"direct|strong_inference|weak_inference\"（direct=记忆直接陈述，strong_inference=强推理，weak_inference=弱联想）, \"reason\":≤80字, \"evidence\":≤120字，说明该事实如何由这条一级记忆推导}。缺少 supportLevel 或 evidence 的候选会被丢弃。`,
     "4. 允许带「可能、也许相关、可参考」等不确定口径的保守推理（包括饮食禁忌关联到相关食物类别这类生活化桥接）；但禁止：把推理表述为用户亲口说过的话；给出确定诊断、确定因果或确定身份结论；把二级事实写成一级事实口径；生成三级或更深的推理链。",
-    "5. personalitySignals：仅当这条记忆体现用户对 Agent 表达方式或处事方式的长期偏好时给出 0-2 条，形如 {\"dimension\":\"tempo|energy|mind|warmth|order|stance\", \"direction\":\"increase|decrease\", \"strength\":0-1, \"evidence\":≤80字}；方向语义如下（分数 0=左极，1=右极）：",
-    ...directionLines,
+    `5. personalitySignals：0-2 条，形如 {\"dimension\":\"${TRAIT_DIMENSIONS.join("|")}\", \"direction\":\"increase|decrease\", \"strength\":0-1, \"evidence\":≤80字}。方向是单向语义：increase=该特质表现更多，decrease=该特质表现更少。六个维度的含义：`,
+    ...dimensionLines,
+    "5.1 人格信号只允许来自：用户对 Agent 长期相处方式的明确要求；用户多次一致表达的稳定合作偏好；修正后的 current 一级记忆；与 Agent 表达或做事风格直接相关的 explicit/observed view。",
+    "5.2 不得从以下内容推断人格：用户自己说话毒舌或说脏话；当前任务内容；用户的职业、爱好或身份；Provider 或模型选择；reasoning 强度；用户临时要求「这次详细一点」这类单次指令；引用、代码、Tool 输出和 Knowledge；单次情绪。",
+    "5.3 区分「人格信号」和「长期行为要求」：回答长度、举例数量、固定格式、称呼、语言习惯（如「以后回答先给结论」「以后详细解释」「每次最多三段」「多举例」「少用表格」「使用中文」「称呼我为方哥」「每次附验收步骤」）只进入 agentRequirements，不产生 personalitySignals；只有直接改变性格或工作方式稳定强度的表达才形成 trait signal，例如「以后说话毒舌一点」→sharpness increase、「以后你来替我收敛方案」→dominance increase、「不要能跑就算完成」→rigor increase、「输出习惯按第一、第二、第三」→structure increase、「低风险步骤别总问我」→boldness increase、「多给非传统方案」→creativity increase；这类表达可以同时进入 agentRequirements。「思考深一点」不属于任何人格维度。",
     "6. agentRequirements：仅当记忆是用户对 Agent 的明确长期要求（如\"以后回复简短\"）时给出 0-2 条短语；否则空数组。",
     `7. userProfileItems：仅当记忆包含稳定、当前有效的用户画像（身份、长期偏好、合作方式）时给出 0-2 条 {"section":"identity|preference|collaboration", "profileKey":≤${PROFILE_KEY_MAX_CHARS}字的稳定主题词（如"清晨散步"，同义表述必须复用同一 key）, "text":≤120字}；一次性任务、临时指令、引用、假设不得进入。${knownProfileKeys.length > 0 ? `已有 profileKey（主题相同必须复用，不要新造近义 key）：${knownProfileKeys.join("、")}` : ""}`,
     "8. 不得声称用户亲口说过记忆之外的话；语言与记忆保持一致。"
@@ -775,7 +773,7 @@ export interface ParsedDreamFact {
 export interface ParsedDreamOutput {
   readonly facts: readonly ParsedDreamFact[];
   readonly signals: Array<{
-    dimension: "tempo" | "energy" | "mind" | "warmth" | "order" | "stance";
+    dimension: TraitDimension;
     direction: "increase" | "decrease";
     strength: number;
     evidence: string;
@@ -832,13 +830,12 @@ export function parseDreamOutput(raw: string): ParsedDreamOutput | null {
     }
   }
 
-  const dimensions = new Set(["tempo", "energy", "mind", "warmth", "order", "stance"]);
   const signals: ParsedDreamOutput["signals"] = [];
   if (Array.isArray(root.personalitySignals)) {
     for (const entry of root.personalitySignals) {
       if (!entry || typeof entry !== "object") continue;
       const signal = entry as Record<string, unknown>;
-      if (!dimensions.has(signal.dimension as string)) continue;
+      if (!isTraitDimension(signal.dimension)) continue;
       if (signal.direction !== "increase" && signal.direction !== "decrease") continue;
       signals.push(Object.freeze({
         dimension: signal.dimension as ParsedDreamOutput["signals"][number]["dimension"],

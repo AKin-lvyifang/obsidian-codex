@@ -232,10 +232,22 @@ export {
   getPersonalityTemplate,
   isTraitDimension,
   renderTraitLine,
+  traitBehaviorBand,
   type TraitDimension,
   type PersonalityTemplate,
-  type TraitDimensionMeta
+  type TraitDimensionMeta,
+  type TraitBehaviorBand
 } from "./personality-templates";
+
+// v1 → v2 personality migration (single source of truth lives in
+// ./personality-state to avoid import cycles).
+export {
+  parsePersonalityStateV2,
+  parseLegacyPersonalityStateV1,
+  detectPersonalityStateSchema,
+  buildPersonalityV2FromLegacy,
+  type LegacyPersonalityStateV1
+} from "./personality-state";
 
 // ---------------------------------------------------------------------------
 // Cognitive System v2: Secondary memory (二级事实) records.
@@ -341,5 +353,8 @@ export const SECONDARY_DECAY_FACTOR = 0.8 as const;
 export const SECONDARY_MIN_CONFIDENCE = 0.1 as const;
 
 export const DREAM_STATE_SCHEMA = "echoink.dream.v1" as const;
-export const PERSONALITY_STATE_SCHEMA = "echoink.personality.v1" as const;
+/** 当前人格状态 schema（新六维行为语义）。 */
+export const PERSONALITY_STATE_SCHEMA = "echoink.personality.v2" as const;
+/** 旧人格状态 schema（tempo/energy/… 六维）；仅用于迁移识别与备份。 */
+export const PERSONALITY_STATE_SCHEMA_V1 = "echoink.personality.v1" as const;
 export const USER_PROFILE_STATE_SCHEMA = "echoink.user-profile.v1" as const;

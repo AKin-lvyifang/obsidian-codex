@@ -10,8 +10,10 @@ import assert from "node:assert/strict";
 import { readFile, readdir, writeFile } from "node:fs/promises";
 import { withPersonalMemoryFixture, type PersonalMemoryFixture } from "./personal-memory-fixture";
 import { CognitiveSystem } from "../harness/memory/cognitive-system";
+import path from "node:path";
 import {
   buildDreamPrompts,
+  parseDreamOutput,
   type DreamLlmPort
 } from "../harness/memory/dream-engine";
 import {
@@ -31,10 +33,25 @@ import {
 } from "../harness/memory/personal-memory-recall-harness";
 import { estimatePiContextTokens } from "../harness/pi-native/pi-context-budget";
 import type { PersonalMemoryTurnCatalogCandidate } from "../harness/memory/personal-memory-repository";
-import { currentPersonalityScores, type PersonalityState } from "../harness/memory/personality-state";
+import {
+  applyDreamPersonalityUpdate,
+  applyTemplateToState,
+  currentPersonalityScores,
+  emptyPersonalityState,
+  type DreamPersonalityInput,
+  type PersonalityState
+} from "../harness/memory/personality-state";
 import { parseUserProfileState, USER_OBSERVED_MIN_SOURCES, type UserProfileState } from "../harness/memory/user-profile-state";
 import { renderUserMarkdown } from "../harness/memory/cognitive-projection";
-import { getPersonalityTemplate, TRAIT_DIMENSION_META } from "../harness/memory/personality-templates";
+import {
+  getPersonalityTemplate,
+  isTraitDimension,
+  PERSONALITY_TEMPLATES,
+  renderTraitLine,
+  TRAIT_DIMENSIONS,
+  TRAIT_DIMENSION_META,
+  traitBehaviorBand
+} from "../harness/memory/personality-templates";
 import { defaultUserProfile } from "../harness/memory/personal-memory-repository";
 import { lexicalTokens } from "../harness/memory/search-index-v3";
 import type { PersonalMemoryRecord } from "../harness/memory/personal-memory-contracts";
@@ -62,10 +79,10 @@ function validDreamJson(): string {
       evidence: "记忆描述了每天早晨固定的手冲流程"
     }],
     personalitySignals: [{
-      dimension: "tempo",
+      dimension: "sharpness",
       direction: "decrease",
       strength: 0.7,
-      evidence: "用户偏好简短直接的回答"
+      evidence: "用户希望语气温和一点"
     }],
     agentRequirements: ["回复保持简短直接"],
     userProfileItems: [{
@@ -156,7 +173,7 @@ async function scenarioTemplateSelectionPersistsWithoutProvider(): Promise<void>
     const stateFile = await readJson(fixture.repository.layout.personalityState);
     assert.equal(stateFile.templateId, "executor");
     const explicit = stateFile.explicit as Record<string, { score: number } | undefined>;
-    for (const dimension of ["tempo", "energy", "mind", "warmth", "order", "stance"] as const) {
+    for (const dimension of ["sharpness", "dominance", "rigor", "structure", "boldness", "creativity"] as const) {
       assert.equal(explicit[dimension]?.score, template.scores[dimension]);
     }
     const agent = await readFile(fixture.repository.layout.agent, "utf8");
@@ -164,7 +181,7 @@ async function scenarioTemplateSelectionPersistsWithoutProvider(): Promise<void>
     const after = await readJson(fixture.repository.layout.manifest);
     assert.equal(after.revision, (before.revision as number) + 1);
     const scores = currentPersonalityScores(result.state);
-    assert.equal(scores.tempo, template.scores.tempo);
+    assert.equal(scores.sharpness, template.scores.sharpness);
     const systemAgain = await createSystem(fixture, () => null);
     const reread = await systemAgain.readPersonalityState();
     assert.equal(reread.templateId, "executor");
@@ -211,15 +228,15 @@ async function scenarioResetFlowSingleTransaction(): Promise<void> {
 
     // New explicit template saved.
     assert.equal(result.state.templateId, "executor");
-    const explicit = result.state.explicit.tempo!;
-    assert.equal(explicit.score, template.scores.tempo);
+    const explicit = result.state.explicit.sharpness!;
+    assert.equal(explicit.score, template.scores.sharpness);
 
     // Old observed + learnedRequirements superseded with reason=reset, history kept.
     for (const requirement of result.state.learnedRequirements) {
       assert.equal(requirement.status, "superseded");
       assert.equal(requirement.reason, "reset");
     }
-    for (const dimension of ["tempo", "energy", "mind", "warmth", "order", "stance"] as const) {
+    for (const dimension of ["sharpness", "dominance", "rigor", "structure", "boldness", "creativity"] as const) {
       assert.equal(result.state.observed[dimension], null);
     }
     assert.ok(result.state.history.some((record) => record.reason === "reset"));
@@ -301,7 +318,7 @@ async function scenarioDreamCreatesSecondaryFacts(): Promise<void> {
     assert.equal(personality.templateId, "advisor");
     const candidates = personality.candidates as Array<{ dimension: string; direction: string }>;
     assert.ok(candidates.some((candidate) =>
-      candidate.dimension === "tempo" && candidate.direction === "decrease"
+      candidate.dimension === "sharpness" && candidate.direction === "decrease"
     ));
 
     const user = await readFile(fixture.repository.layout.user, "utf8");
@@ -557,25 +574,25 @@ async function scenarioSourceReconciliation(): Promise<void> {
 async function scenarioObservedTraitFallback(): Promise<void> {
   await withPersonalMemoryFixture(async (fixture) => {
     const system = await createSystem(fixture, () => scriptedDreamLlm((memory) => {
-      if (memory.title.includes("简短")) {
+      if (memory.title.includes("温和")) {
         return {
           ...EMPTY_DREAM_OUTPUT,
           personalitySignals: [{
-            dimension: "tempo", direction: "decrease", strength: 0.8, evidence: memory.title
+            dimension: "sharpness", direction: "decrease", strength: 0.8, evidence: memory.title
           }]
         };
       }
       return EMPTY_DREAM_OUTPUT;
     }));
-    await system.selectPersonalityTemplate("advisor", { // explicit tempo = 0.75
+    await system.selectPersonalityTemplate("advisor", { // explicit sharpness = 0.50
       initialIdentity: { displayName: "小问", avatar: { kind: "default" } }
     });
 
     const sources: PersonalMemoryRecord[] = [];
     for (let index = 0; index < 3; index += 1) {
       sources.push(await createMemory(fixture, {
-        title: `用户偏好简短回复 ${index + 1}`,
-        content: `第 ${index + 1} 条：用户多次要求回复简短直接。`,
+        title: `用户希望语气温和 ${index + 1}`,
+        content: `第 ${index + 1} 条：用户多次要求说话温和一点，不要太冲。`,
         kind: "view",
         basis: "observed"
       }));
@@ -583,11 +600,11 @@ async function scenarioObservedTraitFallback(): Promise<void> {
     await system.forceDreamRun();
 
     const evolved = await system.readPersonalityState();
-    const observedTempo = evolved.observed.tempo;
-    assert.ok(observedTempo, "3 consistent observed sources must create an observed trait");
-    assert.ok(observedTempo!.score < 0.75, "tempo decrease moves toward the fast pole");
+    const observedSharpness = evolved.observed.sharpness;
+    assert.ok(observedSharpness, "3 consistent observed sources must create an observed trait");
+    assert.ok(observedSharpness!.score < 0.50, "sharpness decrease lowers the trait score");
     const evolvedScores = currentPersonalityScores(evolved);
-    assert.ok(evolvedScores.tempo < 0.75);
+    assert.ok(evolvedScores.sharpness < 0.50);
 
     // All evidence forgotten → observed must fall back to explicit baseline.
     for (const record of sources) {
@@ -595,10 +612,10 @@ async function scenarioObservedTraitFallback(): Promise<void> {
     }
     await system.forceDreamRun();
     const fallen = await system.readPersonalityState();
-    assert.equal(fallen.observed.tempo, null);
-    assert.equal(currentPersonalityScores(fallen).tempo, 0.75);
+    assert.equal(fallen.observed.sharpness, null);
+    assert.equal(currentPersonalityScores(fallen).sharpness, 0.50);
     const agent = await readFile(fixture.repository.layout.agent, "utf8");
-    assert.match(agent, /节奏/);
+    assert.match(agent, /锋利度/);
   });
   console.log("PASS cognitive: observed trait falls back when evidence dies");
 }
@@ -615,12 +632,21 @@ async function scenarioEvolutionPromptAndAllergyBridge(): Promise<void> {
     basis: "explicit", source: "test", revision: 1, file: "views/mem_prompt_probe.md"
   } as unknown as PersonalMemoryRecord;
   const { systemPrompt } = buildDreamPrompts(record, 2000);
-  for (const dimension of ["tempo", "energy", "mind", "warmth", "order", "stance"] as const) {
+  for (const dimension of TRAIT_DIMENSIONS) {
     const meta = TRAIT_DIMENSION_META[dimension];
-    assert.ok(systemPrompt.includes(`${dimension}：decrease`), `prompt must explain ${dimension} directions`);
-    assert.ok(systemPrompt.includes(meta.leftZh), `prompt must use meta left pole for ${dimension}`);
-    assert.ok(systemPrompt.includes(meta.rightZh), `prompt must use meta right pole for ${dimension}`);
+    assert.ok(systemPrompt.includes(`${dimension}（${meta.labelZh}）`),
+      `prompt must explain ${dimension} meaning`);
+    assert.ok(systemPrompt.includes(meta.summaryZh),
+      `prompt must use meta summary for ${dimension}`);
   }
+  // 单向语义：increase=更多该特质，decrease=更少该特质；不再出现左右极。
+  assert.ok(systemPrompt.includes("increase=该特质表现更多"));
+  assert.ok(systemPrompt.includes("decrease=该特质表现更少"));
+  assert.ok(!systemPrompt.includes("左极") && !systemPrompt.includes("右极"));
+  assert.ok(!systemPrompt.includes("偏左") && !systemPrompt.includes("偏右"));
+  // 人格信号与长期行为要求的区分必须写进 Prompt。
+  assert.ok(systemPrompt.includes("只进入 agentRequirements"));
+  assert.ok(systemPrompt.includes("不得从以下内容推断人格"));
   // The blanket medical ban must be gone; hedged bridging is allowed.
   assert.ok(!systemPrompt.includes("疾病或医疗建议"));
   assert.ok(systemPrompt.includes("可能"));
@@ -2415,10 +2441,10 @@ async function scenarioDreamPreservesIdentity(): Promise<void> {
     const system = await createSystem(fixture, () => scriptedDreamLlm(() => ({
       ...EMPTY_DREAM_OUTPUT,
       personalitySignals: [{
-        dimension: "tempo",
+        dimension: "sharpness",
         direction: "decrease",
         strength: 0.7,
-        evidence: "记忆显示用户偏好简短回复"
+        evidence: "记忆显示用户希望语气温和"
       }]
     })));
     await system.selectPersonalityTemplate("executor", {
@@ -2479,6 +2505,502 @@ async function scenarioLegacyVaultIdentityFallback(): Promise<void> {
   console.log("PASS cognitive: legacy vault without identity falls back without writing");
 }
 
+
+// ---------------------------------------------------------------------------
+// R5. 新六维人格：维度契约、五档边界、行为指令、演化规则、v1→v2 迁移
+// ---------------------------------------------------------------------------
+
+const NEW_DIMS = ["sharpness", "dominance", "rigor", "structure", "boldness", "creativity"] as const;
+const OLD_DIMS = ["tempo", "energy", "mind", "warmth", "order", "stance"] as const;
+const BAND_SCORES = [0, 0.20, 0.21, 0.40, 0.41, 0.59, 0.60, 0.79, 0.80, 1] as const;
+const EXPECTED_BAND_INDEX = [0, 0, 1, 1, 2, 2, 3, 3, 4, 4] as const;
+
+async function scenarioTraitDimensionContract(): Promise<void> {
+  // 1. TRAIT_DIMENSIONS 只包含六个新 ID，顺序冻结。
+  assert.deepEqual([...TRAIT_DIMENSIONS], [...NEW_DIMS]);
+  for (const dimension of NEW_DIMS) assert.ok(isTraitDimension(dimension));
+  for (const dimension of OLD_DIMS) assert.ok(!isTraitDimension(dimension), `old id ${dimension} must be gone`);
+
+  // 2. 八模板每个都有且只有六个新分数，templateId 保持兼容。
+  const expectedIds = ["executor", "advisor", "butler", "companion", "steward", "enthusiast", "creative", "pragmatist"];
+  assert.deepEqual(PERSONALITY_TEMPLATES.map((template) => template.id), expectedIds);
+  for (const template of PERSONALITY_TEMPLATES) {
+    assert.deepEqual(Object.keys(template.scores).sort(), [...NEW_DIMS].sort(),
+      `${template.id} must have exactly the six new dimensions`);
+    for (const dimension of NEW_DIMS) {
+      const score = template.scores[dimension];
+      assert.ok(score >= 0 && score <= 1, `${template.id}.${dimension} in [0,1]`);
+    }
+    for (const dimension of OLD_DIMS) {
+      assert.ok(!(dimension in template.scores), `${template.id} must not carry ${dimension}`);
+    }
+    assert.ok(template.richDescZh.trim().length > 0 && template.richDescEn.trim().length > 0,
+      `${template.id} descriptions must come from the shared constant`);
+  }
+
+  // 3. 旧 ID 不进入做梦 Prompt 与 AGENT.md 投影。
+  const probeRecord = {
+    schema: "echoink.memory.v1", id: "mem_contract_probe", kind: "view", status: "current",
+    title: "风格", content: "用户偏好温和的表达。", recallWhen: "聊到风格时",
+    basis: "explicit", source: "test", revision: 1, file: "views/mem_contract_probe.md"
+  } as unknown as PersonalMemoryRecord;
+  const { systemPrompt, userPrompt } = buildDreamPrompts(probeRecord, 2000);
+  const asWord = (dimension: string) => new RegExp(`(^|[^a-zA-Z])${dimension}([^a-zA-Z]|$)`, "u");
+  for (const dimension of OLD_DIMS) {
+    assert.ok(!asWord(dimension).test(systemPrompt), `prompt must not mention ${dimension}`);
+  }
+  for (const dimension of NEW_DIMS) {
+    assert.ok(asWord(dimension).test(systemPrompt), `prompt must mention ${dimension}`);
+  }
+  void userPrompt;
+  for (const dimension of NEW_DIMS) {
+    for (const score of [0.05, 0.3, 0.5, 0.7, 0.95]) {
+      const line = renderTraitLine(dimension, score);
+      for (const legacy of OLD_DIMS) assert.ok(!line.includes(legacy));
+      assert.ok(!line.includes("偏左") && !line.includes("偏右") && !line.includes("靠右极"));
+      assert.ok(!line.includes("%"), "trait line must not carry percentages");
+    }
+  }
+  console.log("PASS cognitive: trait dimension contract (six new ids only, no legacy residue)");
+}
+
+async function scenarioBandBoundaries(): Promise<void> {
+  // 4/5. 每个维度五档，边界 0.20/0.21/0.40/0.41/0.59/0.60/0.79/0.80 全部逐项。
+  for (const dimension of NEW_DIMS) {
+    const bands = TRAIT_DIMENSION_META[dimension].bands;
+    assert.equal(bands.length, 5, `${dimension} must have exactly five bands`);
+    for (let i = 0; i < BAND_SCORES.length; i += 1) {
+      const picked = traitBehaviorBand(dimension, BAND_SCORES[i]);
+      assert.equal(picked, bands[EXPECTED_BAND_INDEX[i]],
+        `${dimension} score ${BAND_SCORES[i]} must land in band ${EXPECTED_BAND_INDEX[i]} (${picked.labelZh})`);
+    }
+  }
+  // 档位文案字段完整。
+  for (const dimension of NEW_DIMS) {
+    for (const current of TRAIT_DIMENSION_META[dimension].bands) {
+      assert.ok(current.labelZh && current.labelEn);
+      assert.ok(current.uiDescriptionZh && current.uiDescriptionEn);
+      assert.ok(current.agentInstructionZh && current.agentInstructionEn);
+      assert.ok(current.min <= current.max);
+    }
+  }
+  console.log("PASS cognitive: five-band boundaries correct for every dimension");
+}
+
+async function scenarioBandBehaviorInstructions(): Promise<void> {
+  const line = (dimension: (typeof NEW_DIMS)[number], score: number) =>
+    renderTraitLine(dimension, score);
+
+  // 7. 锋利度 0.10 → 恭敬指令。
+  const respectful = line("sharpness", 0.10);
+  assert.match(respectful, /恭敬/u);
+  assert.match(respectful, /敬语/u);
+  assert.match(respectful, /不吐槽用户/u);
+
+  // 8. 锋利度 0.90 → 毒舌指令 + 行为边界（吐槽必须带改法；痛苦时不二次伤害）。
+  const scathing = line("sharpness", 0.90);
+  assert.match(scathing, /毒舌/u);
+  assert.match(scathing, /错在哪里/u);
+  assert.match(scathing, /怎么改/u);
+  assert.match(scathing, /二次伤害/u);
+
+  // 9. 主导度 0.90 → 强势带领 + 用户否决后服从。
+  const dominant = line("dominance", 0.90);
+  assert.match(dominant, /强势/u);
+  assert.match(dominant, /尊重最终决定/u);
+
+  // 10. 较真度 0.90 → 当前范围内真正闭环，不扩围。
+  const exacting = line("rigor", 0.90);
+  assert.match(exacting, /极致/u);
+  assert.match(exacting, /闭环/u);
+  assert.match(exacting, /不得为了追求完美扩展/u);
+
+  // 11. 条理性 0.90 → 步骤、层级、验收 + 简单问题不机械结构化。
+  const structured = line("structure", 0.90);
+  assert.match(structured, /强结构/u);
+  assert.match(structured, /编号步骤/u);
+  assert.match(structured, /验收条件/u);
+  assert.match(structured, /不得机械创建复杂结构/u);
+
+  // 12. 果敢度 0.90 → 果敢推进，但保留不可逆/授权边界。
+  const bold = line("boldness", 0.90);
+  assert.match(bold, /果敢/u);
+  assert.match(bold, /不可逆/u);
+  assert.match(bold, /授权边界/u);
+
+  // 13. 创意度 0.90 → 仅在允许多方案的任务上要求三个以上方向。
+  const imaginative = line("creativity", 0.90);
+  assert.match(imaginative, /天马行空/u);
+  assert.match(imaginative, /3 个以上/u);
+  assert.match(imaginative, /不得机械凑三个方案/u);
+
+  console.log("PASS cognitive: band instructions encode behavior and hard boundaries");
+}
+
+async function scenarioSignalClassificationPrompt(): Promise<void> {
+  const record = {
+    schema: "echoink.memory.v1", id: "mem_class_probe", kind: "view", status: "current",
+    title: "长期相处方式", content: "用户对 Agent 的风格要求。", recallWhen: "聊到风格时",
+    basis: "explicit", source: "test", revision: 1, file: "views/mem_class_probe.md"
+  } as unknown as PersonalMemoryRecord;
+  const { systemPrompt } = buildDreamPrompts(record, 2000);
+
+  // 只进入 requirement、不形成 trait signal 的例子必须写进 Prompt。
+  for (const example of [
+    "以后回答先给结论", "以后详细解释", "每次最多三段", "多举例",
+    "少用表格", "使用中文", "称呼我为方哥", "每次附验收步骤"
+  ]) {
+    assert.ok(systemPrompt.includes(example), `requirement-only example missing: ${example}`);
+  }
+  // 可以同时形成 trait signal 的例子（六个维度各一）。
+  assert.ok(systemPrompt.includes("以后说话毒舌一点」→sharpness increase"));
+  assert.ok(systemPrompt.includes("以后你来替我收敛方案」→dominance increase"));
+  assert.ok(systemPrompt.includes("不要能跑就算完成」→rigor increase"));
+  assert.ok(systemPrompt.includes("输出习惯按第一、第二、第三」→structure increase"));
+  assert.ok(systemPrompt.includes("低风险步骤别总问我」→boldness increase"));
+  assert.ok(systemPrompt.includes("多给非传统方案」→creativity increase"));
+  // 明确排除项。
+  assert.ok(systemPrompt.includes("用户自己说话毒舌或说脏话"));
+  assert.ok(systemPrompt.includes("reasoning 强度"));
+  assert.ok(systemPrompt.includes("「思考深一点」不属于任何人格维度"));
+
+  // parseDreamOutput：新维度接受，旧维度一律丢弃。
+  const parsed = parseDreamOutput(JSON.stringify({
+    secondaryFacts: [],
+    personalitySignals: [
+      { dimension: "sharpness", direction: "increase", strength: 0.8, evidence: "要求毒舌" },
+      { dimension: "tempo", direction: "increase", strength: 0.8, evidence: "旧维度必须被丢弃" },
+      { dimension: "warmth", direction: "decrease", strength: 0.5, evidence: "旧维度必须被丢弃" }
+    ],
+    agentRequirements: [],
+    userProfileItems: []
+  }));
+  assert.ok(parsed);
+  assert.equal(parsed!.signals.length, 1);
+  assert.equal(parsed!.signals[0].dimension, "sharpness");
+  console.log("PASS cognitive: signal vs requirement classification rules in prompt and parser");
+}
+
+function templateBaseState(): PersonalityState {
+  return applyTemplateToState(emptyPersonalityState(0), {
+    templateId: "executor", // sharpness baseline 0.75
+    now: 1,
+    reset: false
+  });
+}
+
+function signalsFor(
+  entries: ReadonlyArray<{ id: string; direction: "increase" | "decrease"; revision?: number }>
+): DreamPersonalityInput["signals"] {
+  return entries.map((entry) => ({
+    dimension: "sharpness",
+    direction: entry.direction,
+    strength: 0.9,
+    evidence: `来源 ${entry.id}`,
+    sourceMemoryId: entry.id,
+    sourceMemoryRevision: entry.revision ?? 1
+  }));
+}
+
+async function scenarioEvolutionRulesOnNewDimensions(): Promise<void> {
+  // 14. 三个 increase 来源推动新维度上升。
+  let state = templateBaseState();
+  state = applyDreamPersonalityUpdate(state, {
+    signals: signalsFor([
+      { id: "mem-inc-1", direction: "increase" },
+      { id: "mem-inc-2", direction: "increase" },
+      { id: "mem-inc-3", direction: "increase" }
+    ]),
+    requirements: [],
+    processedSources: [],
+    now: 2
+  });
+  const raised = state.observed.sharpness;
+  assert.ok(raised, "3 increase sources must create observed sharpness");
+  assert.ok(raised!.score > 0.75, "increase raises the trait score");
+
+  // 15. 三个 decrease 来源推动下降。
+  state = templateBaseState();
+  state = applyDreamPersonalityUpdate(state, {
+    signals: signalsFor([
+      { id: "mem-dec-1", direction: "decrease" },
+      { id: "mem-dec-2", direction: "decrease" },
+      { id: "mem-dec-3", direction: "decrease" }
+    ]),
+    requirements: [],
+    processedSources: [],
+    now: 2
+  });
+  const lowered = state.observed.sharpness;
+  assert.ok(lowered, "3 decrease sources must create observed sharpness");
+  assert.ok(lowered!.score < 0.75, "decrease lowers the trait score");
+
+  // 16. increase/decrease 平票不更新，候选保留。
+  state = templateBaseState();
+  state = applyDreamPersonalityUpdate(state, {
+    signals: signalsFor([
+      { id: "mem-tie-a", direction: "increase" },
+      { id: "mem-tie-b", direction: "increase" },
+      { id: "mem-tie-c", direction: "increase" },
+      { id: "mem-tie-d", direction: "decrease" },
+      { id: "mem-tie-e", direction: "decrease" },
+      { id: "mem-tie-f", direction: "decrease" }
+    ]),
+    requirements: [],
+    processedSources: [],
+    now: 2
+  });
+  assert.equal(state.observed.sharpness, null, "a tie must not update personality");
+  assert.equal(state.candidates.length, 6, "tie candidates stay for later evidence");
+
+  // 17. 只有两个来源不更新。
+  state = templateBaseState();
+  state = applyDreamPersonalityUpdate(state, {
+    signals: signalsFor([
+      { id: "mem-two-1", direction: "increase" },
+      { id: "mem-two-2", direction: "increase" }
+    ]),
+    requirements: [],
+    processedSources: [],
+    now: 2
+  });
+  assert.equal(state.observed.sharpness, null, "2 sources are not enough");
+  assert.equal(state.candidates.length, 2);
+
+  // 同一 source+dimension+revision 不重复进入 candidates。
+  state = templateBaseState();
+  const once = signalsFor([{ id: "mem-dup", direction: "increase" }]);
+  state = applyDreamPersonalityUpdate(state, { signals: once, requirements: [], processedSources: [], now: 2 });
+  state = applyDreamPersonalityUpdate(state, { signals: once, requirements: [], processedSources: [], now: 3 });
+  assert.equal(state.candidates.length, 1, "same source+revision must not duplicate");
+
+  // 同一来源 revision 变化时，旧 candidate 被替换而不是并存。
+  state = applyDreamPersonalityUpdate(state, {
+    signals: signalsFor([{ id: "mem-dup", direction: "decrease", revision: 2 }]),
+    requirements: [],
+    processedSources: [],
+    now: 4
+  });
+  assert.equal(state.candidates.length, 1, "revised source replaces the old candidate");
+  assert.equal(state.candidates[0].direction, "decrease");
+  assert.equal(state.candidates[0].sourceMemoryRevision, 2);
+
+  console.log("PASS cognitive: evolution rules (3 sources, tie, replace, dedupe) on new dimensions");
+}
+
+async function scenarioResetRestoresNewBaseline(): Promise<void> {
+  // 19/20. 重置恢复新模板 baseline，templateId 兼容。
+  await withPersonalMemoryFixture(async (fixture) => {
+    const system = await createSystem(fixture, () => null);
+    await system.selectPersonalityTemplate("executor", {
+      initialIdentity: { displayName: "小执", avatar: { kind: "default" } }
+    });
+    const result = await system.selectPersonalityTemplate("advisor", { reset: true });
+    assert.equal(result.state.templateId, "advisor");
+    const template = getPersonalityTemplate("advisor")!;
+    for (const dimension of NEW_DIMS) {
+      assert.equal(result.state.explicit[dimension]?.score, template.scores[dimension]);
+      assert.equal(result.state.observed[dimension], null);
+    }
+    const agent = await readFile(fixture.repository.layout.agent, "utf8");
+    assert.match(agent, /锋利度/u);
+    assert.match(agent, /较真度/u);
+  });
+  console.log("PASS cognitive: reset restores new-dimension template baseline");
+}
+
+// ---------------------------------------------------------------------------
+// v1 → v2 migration scenarios
+// ---------------------------------------------------------------------------
+
+function legacyV1State(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    schema: "echoink.personality.v1",
+    revision: 5,
+    templateId: "advisor",
+    explicit: {
+      tempo: { id: "trait-old-1", dimension: "tempo", basis: "explicit", status: "current", score: 0.75, sourceMemoryIds: [], evidence: "", createdAt: 1, updatedAt: 1, revision: 1 }
+    },
+    observed: {
+      tempo: { id: "trait-old-2", dimension: "tempo", basis: "observed", status: "current", score: 0.6, sourceMemoryIds: ["mem-old"], evidence: "", createdAt: 2, updatedAt: 2, revision: 2 }
+    },
+    history: [],
+    candidates: [{ id: "cand-old", dimension: "tempo", direction: "decrease", strength: 0.7, sourceMemoryId: "mem-old", sourceMemoryRevision: 1, evidence: "", createdAt: 3 }],
+    learnedRequirements: [{
+      id: "req-kept",
+      text: "以后回答先给结论",
+      basis: "explicit_memory",
+      status: "current",
+      sourceMemoryIds: ["mem-req-1"],
+      revision: 3
+    }],
+    processedSources: [{ memoryId: "mem-old", memoryRevision: 1, processedAt: 4 }],
+    updatedAt: 100,
+    ...overrides
+  };
+}
+
+async function seedLegacyPersonality(
+  fixture: PersonalMemoryFixture,
+  overrides: Record<string, unknown> = {}
+): Promise<void> {
+  await writeFile(
+    fixture.repository.layout.personalityState,
+    JSON.stringify(legacyV1State(overrides), null, 2),
+    "utf8"
+  );
+}
+
+async function listMigrationBackups(fixture: PersonalMemoryFixture): Promise<string[]> {
+  const dir = path.join(fixture.repository.layout.root, "agents", "echoink", "history");
+  try {
+    const entries = await readdir(dir);
+    return entries.filter((entry) => entry.startsWith("personality-state-v1-"));
+  } catch {
+    return [];
+  }
+}
+
+async function scenarioPersonalityV1ToV2Migration(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    // Pre-seed: v1 personality + identity + one current memory.
+    await seedLegacyPersonality(fixture);
+    const identityPath = fixture.repository.layout.agentIdentity;
+    await writeFile(identityPath, JSON.stringify({
+      schema: "echoink.agent-identity.v1",
+      revision: 1,
+      displayName: "小墨",
+      avatar: { kind: "default" },
+      updatedAt: 50
+    }), "utf8");
+    const memory = await createMemory(fixture, {
+      title: "用户喜欢早晨散步",
+      content: "用户经常早晨散步。"
+    });
+    const manifestBefore = await readJson(fixture.repository.layout.manifest) as { revision: number };
+
+    // create() runs the migration locally, no Provider.
+    const system = await createSystem(fixture, () => null);
+
+    // 1/2/3/4/5. v2 file: template + requirements kept, baseline rebuilt, rest emptied.
+    const raw = await readJson(fixture.repository.layout.personalityState) as Record<string, any>;
+    assert.equal(raw.schema, "echoink.personality.v2");
+    assert.equal(raw.templateId, "advisor", "templateId preserved");
+    assert.equal(raw.learnedRequirements.length, 1);
+    assert.equal(raw.learnedRequirements[0].text, "以后回答先给结论");
+    assert.deepEqual(raw.learnedRequirements[0].sourceMemoryIds, ["mem-req-1"]);
+    assert.equal(raw.learnedRequirements[0].basis, "explicit_memory");
+    assert.equal(raw.learnedRequirements[0].status, "current");
+    const template = getPersonalityTemplate("advisor")!;
+    for (const dimension of NEW_DIMS) {
+      assert.equal(raw.explicit[dimension].score, template.scores[dimension],
+        `explicit ${dimension} rebuilt from the new template baseline`);
+    }
+    for (const dimension of NEW_DIMS) assert.equal(raw.observed[dimension], null);
+    assert.deepEqual(raw.candidates, []);
+    assert.deepEqual(raw.processedSources, []);
+
+    // 6. Complete v1 backup exists.
+    const backups = await listMigrationBackups(fixture);
+    assert.equal(backups.length, 1, "exactly one v1 backup");
+    const backupRaw = await readJson(path.join(
+      fixture.repository.layout.root, "agents", "echoink", "history", backups[0]
+    )) as Record<string, unknown>;
+    assert.equal(backupRaw.schema, "echoink.personality.v1");
+    assert.ok(Array.isArray(backupRaw.candidates) && (backupRaw.candidates as unknown[]).length === 1,
+      "backup keeps the full legacy JSON");
+
+    // 7. Current memory re-queued for dreaming; progress reset.
+    const dreamState = await readJson(fixture.repository.layout.dreamState) as Record<string, any>;
+    assert.equal(dreamState.lastProcessedMemoryRevision, 0);
+    assert.equal(dreamState.backfillCursor, null);
+    const pending = dreamState.pendingMemoryIds as readonly string[];
+    assert.ok(pending.includes(memory.id), "current memory re-enters the pending queue");
+
+    // 8. AGENT.md uses the new six dimensions and keeps the identity name.
+    const agent = await readFile(fixture.repository.layout.agent, "utf8");
+    assert.match(agent, /锋利度/u);
+    assert.match(agent, /当前名称：小墨/u, "migration keeps the identity name");
+    for (const dimension of OLD_DIMS) assert.ok(!agent.includes(`${dimension}（`));
+    assert.ok(!agent.includes("偏右") && !agent.includes("靠右极"));
+
+    // 9. ONE repository transaction.
+    const manifestAfter = await readJson(fixture.repository.layout.manifest) as { revision: number };
+    assert.equal(manifestAfter.revision, manifestBefore.revision + 1);
+
+    // 11/13. Restart: no duplicate migration/backup; identity untouched.
+    const systemAgain = await createSystem(fixture, () => null);
+    const backupsAfterRestart = await listMigrationBackups(fixture);
+    assert.equal(backupsAfterRestart.length, 1, "restart must not create a second backup");
+    const manifestRestart = await readJson(fixture.repository.layout.manifest) as { revision: number };
+    assert.equal(manifestRestart.revision, manifestAfter.revision, "restart adds no transaction");
+    const identity = await systemAgain.readAgentIdentity();
+    assert.equal(identity.displayName, "小墨");
+    assert.equal(identity.revision, 1);
+    void system;
+  });
+  console.log("PASS cognitive: personality v1→v2 migration single transaction");
+}
+
+async function scenarioMigrationFailureKeepsV1(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    await seedLegacyPersonality(fixture);
+    const agentBefore = await readFile(fixture.repository.layout.agent, "utf8");
+
+    // Deterministic failure: occupy the backup target for a fixed now.
+    const fixedNow = 1_800_000_000_000;
+    const stamp = new Date(fixedNow).toISOString().replace(/[:.]/g, "-");
+    const backupPath = path.join(
+      fixture.repository.layout.root, "agents", "echoink", "history",
+      `personality-state-v1-${stamp}.json`
+    );
+    const { mkdirSync, rmSync } = await import("node:fs");
+    mkdirSync(backupPath, { recursive: true });
+
+    const { PersonalityStateStore } = await import("../harness/memory/personality-state");
+    const { DreamStateStore } = await import("../harness/memory/dream-state");
+    const { AgentIdentityStateStore } = await import("../harness/memory/agent-identity-state");
+    const { SecondaryMemoryStore } = await import("../harness/memory/secondary-memory-store");
+    const { migratePersonalityV1ToV2 } = await import("../harness/memory/cognitive-system");
+    await assert.rejects(migratePersonalityV1ToV2({
+      repository: fixture.repository,
+      personalityStore: new PersonalityStateStore(fixture.repository.layout.root),
+      dreamStateStore: new DreamStateStore(fixture.repository.layout.root),
+      agentIdentityStore: new AgentIdentityStateStore(fixture.repository.layout.root),
+      secondaryStore: new SecondaryMemoryStore(path.join(fixture.repository.layout.root, "shared-user", "memory")),
+      now: fixedNow
+    }));
+    rmSync(backupPath, { recursive: true, force: true });
+
+    // 10. Failure keeps the original v1 and old AGENT.md (no half migration).
+    const raw = await readJson(fixture.repository.layout.personalityState) as Record<string, unknown>;
+    assert.equal(raw.schema, "echoink.personality.v1", "failed migration keeps v1");
+    assert.equal(await readFile(fixture.repository.layout.agent, "utf8"), agentBefore);
+    assert.equal((await listMigrationBackups(fixture)).length, 0);
+  });
+  console.log("PASS cognitive: failed migration keeps original v1 and AGENT.md");
+}
+
+async function scenarioMigrationWithoutTemplateKeepsCustomAgent(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    // 12. No template chosen: migration must not overwrite a custom AGENT.md.
+    const customAgent = "# 我的自定义 Agent\n\n这是用户手写的画像。\n";
+    await writeFile(fixture.repository.layout.agent, customAgent, "utf8");
+    await seedLegacyPersonality(fixture, { templateId: null });
+
+    await createSystem(fixture, () => null);
+
+    const raw = await readJson(fixture.repository.layout.personalityState) as Record<string, any>;
+    assert.equal(raw.schema, "echoink.personality.v2");
+    assert.equal(raw.templateId, null);
+    for (const dimension of NEW_DIMS) assert.equal(raw.explicit[dimension], null);
+    assert.equal(await readFile(fixture.repository.layout.agent, "utf8"), customAgent,
+      "custom AGENT.md must survive migration when no template is selected");
+    assert.equal((await listMigrationBackups(fixture)).length, 1);
+  });
+  console.log("PASS cognitive: migration without template keeps custom AGENT.md");
+}
+
 export async function runCognitiveSystemScenarios(): Promise<void> {
   await scenarioTemplateSelectionPersistsWithoutProvider();
   await scenarioResetFlowSingleTransaction();
@@ -2520,4 +3042,13 @@ export async function runCognitiveSystemScenarios(): Promise<void> {
   await scenarioDreamPreservesIdentity();
   await scenarioIdentitySurvivesRestart();
   await scenarioLegacyVaultIdentityFallback();
+  await scenarioTraitDimensionContract();
+  await scenarioBandBoundaries();
+  await scenarioBandBehaviorInstructions();
+  await scenarioSignalClassificationPrompt();
+  await scenarioEvolutionRulesOnNewDimensions();
+  await scenarioResetRestoresNewBaseline();
+  await scenarioPersonalityV1ToV2Migration();
+  await scenarioMigrationFailureKeepsV1();
+  await scenarioMigrationWithoutTemplateKeepsCustomAgent();
 }

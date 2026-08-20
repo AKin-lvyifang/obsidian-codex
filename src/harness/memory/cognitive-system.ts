@@ -17,9 +17,15 @@ import {
   PERSONALITY_STATE_RELATIVE_PATH,
   PersonalityStateStore,
   applyTemplateToState,
+  buildPersonalityV2FromLegacy,
+  detectPersonalityStateSchema,
+  emptyPersonalityState,
+  parseLegacyPersonalityStateV1,
   personalityStateJson,
+  type LegacyPersonalityStateV1,
   type PersonalityState
 } from "./personality-state";
+import { cognitiveReadJsonOrNull } from "./cognitive-file-utils";
 import { UserProfileStateStore } from "./user-profile-state";
 import {
   DREAM_STATE_RELATIVE_PATH,
@@ -183,6 +189,21 @@ export class CognitiveSystem {
     // 启动时读取一次身份（文件不存在则返回默认运行状态，不写文件），
     // 让 peek/current 快照可以同步供给 UI；不调用 Provider。
     await agentIdentityStore.read();
+
+    // 人格状态 v1 → v2 一次性本地迁移（单事务、无 Provider）。
+    // 迁移失败不阻断启动：v1 文件原样保留，下次启动重试。
+    try {
+      await migratePersonalityV1ToV2({
+        repository: options.repository,
+        personalityStore,
+        dreamStateStore,
+        agentIdentityStore,
+        secondaryStore,
+        now: (options.now ?? Date.now)()
+      });
+    } catch (error) {
+      console.error("[EchoInk] personality v1→v2 migration failed; keeping v1", error);
+    }
 
     const engine = new DreamEngine({
       repository: new RepositoryDreamPort(options.repository),
@@ -623,16 +644,87 @@ export class CognitiveSystem {
 
 /** Empty personality shape for vaults that never selected a template. */
 function emptyPersonalityShape(now: number): PersonalityState {
-  return {
-    schema: "echoink.personality.v1",
-    revision: 0,
-    templateId: null,
-    explicit: Object.freeze({ tempo: null, energy: null, mind: null, warmth: null, order: null, stance: null }),
-    observed: Object.freeze({ tempo: null, energy: null, mind: null, warmth: null, order: null, stance: null }),
-    history: Object.freeze([]),
-    candidates: Object.freeze([]),
-    learnedRequirements: Object.freeze([]),
-    processedSources: Object.freeze([]),
-    updatedAt: now
-  } as PersonalityState;
+  return emptyPersonalityState(now);
+}
+
+// ---------------------------------------------------------------------------
+// Personality v1 → v2 migration (one local transaction, NO Provider)
+//
+// 旧六维（tempo/energy/…）与新六维语义不兼容，不做机械分数映射：
+// - templateId 保留，explicit 用同模板新六维基线重建；
+// - learnedRequirements 保留；observed/history/candidates/processedSources 置空；
+// - 完整旧 v1 JSON 备份到 agents/echoink/history/personality-state-v1-<ts>.json；
+// - dream-state.lastProcessedMemoryRevision 归 0、backfillCursor 置 null，
+//   当前有效一级 Memory 重新进入 pending 队列（每轮仍最多处理 10 条）；
+// - 已选择模板时用当前身份名称重写 AGENT.md；未选择模板不覆盖自定义 AGENT.md；
+// - 身份的 revision、名称和头像不受迁移影响。
+// ---------------------------------------------------------------------------
+
+export interface PersonalityMigrationInput {
+  readonly repository: PersonalMemoryRepository;
+  readonly personalityStore: PersonalityStateStore;
+  readonly dreamStateStore: DreamStateStore;
+  readonly agentIdentityStore: AgentIdentityStateStore;
+  readonly secondaryStore: SecondaryMemoryStore;
+  readonly now: number;
+}
+
+export async function migratePersonalityV1ToV2(
+  input: PersonalityMigrationInput
+): Promise<Readonly<{ migrated: boolean; legacy?: LegacyPersonalityStateV1 }>> {
+  const { repository, personalityStore, dreamStateStore, agentIdentityStore, secondaryStore } = input;
+  const raw = await cognitiveReadJsonOrNull<Record<string, unknown>>(personalityStore.filePath);
+  if (!raw) return Object.freeze({ migrated: false });
+  if (detectPersonalityStateSchema(raw) !== "v1") return Object.freeze({ migrated: false });
+  const legacy = parseLegacyPersonalityStateV1(raw);
+  if (!legacy) return Object.freeze({ migrated: false });
+
+  const next = buildPersonalityV2FromLegacy(legacy, { now: input.now });
+
+  // 模板尚未选择时，不得因迁移覆盖现有自定义 AGENT.md。
+  let agentContent: string | undefined;
+  if (next.templateId) {
+    const identity = await agentIdentityStore.read();
+    agentContent = renderAgentMarkdown(next, identity);
+  }
+
+  const inspected = await repository.readUserControlState();
+  const currentIds = inspected.records
+    .filter((record) => record.status === "current")
+    .map((record) => record.id);
+  const dreamState = await dreamStateStore.read();
+  let nextDream: DreamState = Object.freeze({
+    ...dreamState,
+    revision: dreamState.revision + 1,
+    lastProcessedMemoryRevision: 0,
+    backfillCursor: null,
+    updatedAt: input.now
+    // lastRunAt / lastSuccessAt 保留
+  });
+  nextDream = enqueuePendingMemoryIds(nextDream, currentIds, input.now);
+
+  const stamp = new Date(input.now).toISOString().replace(/[:.]/g, "-");
+  const result = await repository.applyCognitiveUpdate({
+    ...(agentContent ? { agentContent } : {}),
+    secondaryRecords: await secondaryStore.loadAll(),
+    extraChanges: [
+      {
+        relativePath: `agents/echoink/history/personality-state-v1-${stamp}.json`,
+        content: cognitiveJsonText(legacy.raw)
+      },
+      {
+        relativePath: PERSONALITY_STATE_RELATIVE_PATH,
+        content: personalityStateJson(next)
+      },
+      {
+        relativePath: DREAM_STATE_RELATIVE_PATH,
+        content: cognitiveJsonText(nextDream)
+      }
+    ],
+    detail: "personality-v1-v2-migration"
+  });
+  void result;
+  // 事务成功后才更新缓存；失败时原 v1 与旧 AGENT.md 全部保留。
+  dreamStateStore.updateCache(nextDream);
+  return Object.freeze({ migrated: true, legacy });
 }

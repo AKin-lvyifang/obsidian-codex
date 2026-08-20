@@ -82,6 +82,18 @@ import {
   AGENT_IDENTITY_STATE_SCHEMA,
   agentIdentityStateJson
 } from "../harness/memory/agent-identity-state";
+import {
+  applyTemplateToState,
+  emptyPersonalityState
+} from "../harness/memory/personality-state";
+import {
+  PERSONALITY_TEMPLATES,
+  TRAIT_DIMENSIONS,
+  TRAIT_DIMENSION_META,
+  traitBehaviorBand,
+  type PersonalityTemplate
+} from "../harness/memory/personality-templates";
+import { getDimensionShortLabel } from "../ui/trait-hexagon";
 
 export async function runProviderSettingsBehaviorTests(): Promise<void> {
   assertSettingsV49MigrationContract();
@@ -121,6 +133,7 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   await assertIdentityModalNameValidation();
   await assertAvatarPresetCatalogBehavior();
   await assertAvatarProcessorContract();
+  await assertPersonalityCardUsesNewBehaviorDimensions();
 }
 
 async function assertMemoryCorrectionModalContract(): Promise<void> {
@@ -966,8 +979,8 @@ function createCognitiveSystemStub(): Record<string, any> {
       schema: "echoink.personality.v1",
       revision: 0,
       templateId: null,
-      explicit: { tempo: null, energy: null, mind: null, warmth: null, order: null, stance: null },
-      observed: { tempo: null, energy: null, mind: null, warmth: null, order: null, stance: null },
+      explicit: { sharpness: null, dominance: null, rigor: null, structure: null, boldness: null, creativity: null },
+      observed: { sharpness: null, dominance: null, rigor: null, structure: null, boldness: null, creativity: null },
       history: [],
       candidates: [],
       learnedRequirements: [],
@@ -2301,8 +2314,8 @@ function createIdentityFixtureState(overrides: Record<string, unknown> = {}): Re
       schema: "echoink.personality.v1",
       revision: 1,
       templateId: "executor",
-      explicit: { tempo: null, energy: null, mind: null, warmth: null, order: null, stance: null },
-      observed: { tempo: null, energy: null, mind: null, warmth: null, order: null, stance: null },
+      explicit: { sharpness: null, dominance: null, rigor: null, structure: null, boldness: null, creativity: null },
+      observed: { sharpness: null, dominance: null, rigor: null, structure: null, boldness: null, creativity: null },
       history: [],
       candidates: [],
       learnedRequirements: [],
@@ -2447,8 +2460,8 @@ async function assertFirstNamingModalZeroWriteOnCancel(): Promise<void> {
       schema: "echoink.personality.v1",
       revision: 0,
       templateId: null,
-      explicit: { tempo: null, energy: null, mind: null, warmth: null, order: null, stance: null },
-      observed: { tempo: null, energy: null, mind: null, warmth: null, order: null, stance: null },
+      explicit: { sharpness: null, dominance: null, rigor: null, structure: null, boldness: null, creativity: null },
+      observed: { sharpness: null, dominance: null, rigor: null, structure: null, boldness: null, creativity: null },
       history: [], candidates: [], learnedRequirements: [], processedSources: [],
       updatedAt: 0
     }
@@ -2723,6 +2736,107 @@ function findLatestModalElement<T extends ProviderModalTestElement>(selector: st
 
 async function settleMicrotasks(): Promise<void> {
   for (let i = 0; i < 4; i += 1) await Promise.resolve();
+}
+
+
+// ---------------------------------------------------------------------------
+// R5: settings UI — new six behavioral dimensions (bars, bands, hexagon copy)
+// ---------------------------------------------------------------------------
+
+async function assertPersonalityCardUsesNewBehaviorDimensions(): Promise<void> {
+  installProviderModalDomFixture();
+  const { plugin } = createIdentityTestPlugin(createIdentityFixtureState());
+  // executor template: sharpness 0.75 → band 犀利.
+  const executorState = applyTemplateToState(emptyPersonalityState(0), {
+    templateId: "executor",
+    now: 1,
+    reset: false
+  });
+  plugin.getCognitiveSystem = async () => ({
+    ...createCognitiveSystemStub(),
+    readPersonalityState: async () => executorState,
+    renderPersonalitySummary: async () => "summary"
+  });
+
+  const tab = new CodexSettingTab(plugin as never);
+  const mutable = tab as unknown as { personalMemoryState: Record<string, any> | null };
+  mutable.personalMemoryState = createIdentityFixtureState();
+  tab.display();
+  await settleMicrotasks();
+
+  const card = tab.containerEl.querySelector<ProviderModalTestElement>(
+    ".echoink-agent-profile-card"
+  );
+  assert.ok(card, "personality card renders");
+  const text = card!.textContent;
+
+  // 1. New dimension labels; 2. no legacy labels anywhere in the card.
+  for (const dimension of TRAIT_DIMENSIONS) {
+    assert.ok(text.includes(TRAIT_DIMENSION_META[dimension].labelZh),
+      `card must show ${dimension} label`);
+  }
+  for (const legacy of ["节奏", "能量", "思维", "温度", "秩序", "立场"]) {
+    assert.ok(!text.includes(legacy), `legacy label ${legacy} must be gone`);
+  }
+
+  // 3/5. Value format "75 · 犀利"; no percent signs.
+  const sharpRow = card!.querySelectorAll<ProviderModalTestElement>(".echoink-trait-value");
+  assert.equal(sharpRow.length, 6, "six trait value labels");
+  assert.equal(sharpRow[0].textContent, "75 · 犀利",
+    "executor sharpness 0.75 renders as 75 · 犀利");
+  for (const valueEl of sharpRow) {
+    assert.ok(!valueEl.textContent.includes("%"), "no percent signs");
+    assert.match(valueEl.textContent, /^\d+ · /u, "value uses 'N · band' format");
+  }
+  assert.ok(!text.includes("30%"), "old percent copy must be gone");
+
+  // 4. No two-pole arrows.
+  assert.ok(!text.includes("←→") && !text.includes("↔"), "no bidirectional pole arrows");
+  assert.ok(!text.includes("偏左") && !text.includes("偏右") && !text.includes("靠右极"));
+
+  // 6. Description line comes from the shared band Meta.
+  const descs = card!.querySelectorAll<ProviderModalTestElement>(".echoink-trait-band-desc");
+  assert.equal(descs.length, 6);
+  const sharpBand = traitBehaviorBand("sharpness", 0.75);
+  assert.equal(descs[0].textContent, sharpBand.uiDescriptionZh);
+
+  // 7. Bar order matches TRAIT_DIMENSIONS; hexagon short labels come from the
+  //    same Meta in the same order.
+  const dimSpans = card!.querySelectorAll<ProviderModalTestElement>(".echoink-trait-dim");
+  assert.deepEqual(
+    dimSpans.map((span) => span.textContent),
+    TRAIT_DIMENSIONS.map((dimension) => TRAIT_DIMENSION_META[dimension].labelZh)
+  );
+  assert.deepEqual(
+    TRAIT_DIMENSIONS.map((dimension) => getDimensionShortLabel(dimension)),
+    ["锋利", "主导", "较真", "条理", "果敢", "创意"]
+  );
+
+  // 8. Baseline + current layers use the new dimensions (hexagon input keys).
+  for (const template of PERSONALITY_TEMPLATES) {
+    assert.deepEqual(
+      Object.keys((template as PersonalityTemplate).scores).sort(),
+      [...TRAIT_DIMENSIONS].sort()
+    );
+  }
+
+  // 9. Still no direct score editor on the personality card.
+  assert.ok(!card!.querySelectorAll("input").some((input) => input.type === "range"),
+    "no slider score editor");
+
+  // 10. Round-4 identity card and Agent画像 copy are not regressed.
+  const identityCard = tab.containerEl.querySelector<ProviderModalTestElement>(
+    ".echoink-agent-identity-card"
+  );
+  assert.ok(identityCard, "identity card still present");
+  assert.match(tab.containerEl.textContent, /Agent 画像/u);
+  assert.match(tab.containerEl.textContent, /用户画像/u);
+
+  // Template picker descriptions come from the shared template constants.
+  const executorTemplate = PERSONALITY_TEMPLATES.find((template) => template.id === "executor")!;
+  assert.equal(executorTemplate.richDescZh, executorTemplate.cardZh,
+    "picker and card read the same description constant");
+  console.log("PASS settings: personality card uses new behavior dimensions and bands");
 }
 
 function installProviderModalDomFixture(): void {

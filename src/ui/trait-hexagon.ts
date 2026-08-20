@@ -12,7 +12,7 @@
 
 import type { TraitDimension } from "../harness/memory/personal-memory-contracts";
 import { TRAIT_DIMENSIONS } from "../harness/memory/personal-memory-contracts";
-import { TRAIT_DIMENSION_META } from "../harness/memory/personality-templates";
+import { TRAIT_DIMENSION_META, traitBehaviorBand } from "../harness/memory/personality-templates";
 
 export interface TraitHexagonData {
   readonly dimension: TraitDimension;
@@ -41,10 +41,17 @@ export function getDimensionLabel(dim: TraitDimension): string {
   return TRAIT_DIMENSION_META[dim].labelZh;
 }
 
-/** First pole segment of each side, e.g. tempo → ["快", "慢"]. */
-export function getDimensionPoles(dim: TraitDimension): readonly [string, string] {
-  const meta = TRAIT_DIMENSION_META[dim];
-  return [meta.leftZh.split("、")[0] ?? "", meta.rightZh.split("、")[0] ?? ""];
+/** 六边形短标签（锋利/主导/较真/条理/果敢/创意）。 */
+export function getDimensionShortLabel(dim: TraitDimension): string {
+  return TRAIT_DIMENSION_META[dim].shortLabelZh;
+}
+
+/**
+ * 当前行为档帮助函数（替代旧 getDimensionPoles）：返回该维度在当前分数下
+ * 的行为档标签，例如 sharpness 0.75 → 「犀利」。
+ */
+export function getDimensionBandLabel(dim: TraitDimension, score: number): string {
+  return traitBehaviorBand(dim, score).labelZh;
 }
 
 /**
@@ -158,7 +165,9 @@ export function renderTraitHexagon(
     text.setAttribute("text-anchor", "middle");
     text.setAttribute("dominant-baseline", "central");
     text.addClass("echoink-trait-hexagon-label");
-    text.textContent = TRAIT_DIMENSION_META[dim].labelZh;
+    // 短标签（锋利/主导/…）：中心=该特质表现较少，外圈=表现更多；
+    // 面积不代表能力、智力或人格好坏。
+    text.textContent = TRAIT_DIMENSION_META[dim].shortLabelZh;
     svg.appendChild(text);
   }
 

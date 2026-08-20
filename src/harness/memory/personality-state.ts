@@ -2,7 +2,8 @@
  * personality-state.ts — durable personality truth source and evolution rules.
  *
  * Stored at `.echoink/agents/echoink/personality-state.json`
- * (schema `echoink.personality.v1`, 人格系统重构草案 §6).
+ * (schema `echoink.personality.v2`, 人格系统重构草案 §6；v1→v2 迁移见
+ * buildPersonalityV2FromLegacy 与 CognitiveSystem.create)。
  *
  * Hard rules implemented here:
  * - explicit 与 observed 是两个独立槽位，绝不互相覆盖。
@@ -16,6 +17,7 @@
 import path from "node:path";
 import {
   PERSONALITY_STATE_SCHEMA,
+  PERSONALITY_STATE_SCHEMA_V1,
   type PersonalMemoryBasis
 } from "./personal-memory-contracts";
 import {
@@ -121,7 +123,7 @@ export class PersonalityStateStore {
   async read(): Promise<PersonalityState | null> {
     const raw = await cognitiveReadJsonOrNull<Record<string, unknown>>(this.filePath);
     if (!raw) return null;
-    return parsePersonalityState(raw);
+    return parsePersonalityStateV2(raw);
   }
 }
 
@@ -152,9 +154,8 @@ export function personalityStateJson(state: PersonalityState): string {
 export function currentPersonalityScores(
   state: PersonalityState | null
 ): Readonly<Record<TraitDimension, number>> {
-  const scores: Record<TraitDimension, number> = {
-    tempo: 0.5, energy: 0.5, mind: 0.5, warmth: 0.5, order: 0.5, stance: 0.5
-  };
+  const scores = {} as Record<TraitDimension, number>;
+  for (const dimension of TRAIT_DIMENSIONS) scores[dimension] = 0.5;
   if (!state) return Object.freeze(scores);
   for (const dimension of TRAIT_DIMENSIONS) {
     const observed = state.observed[dimension];
@@ -308,14 +309,20 @@ export function applyDreamPersonalityUpdate(
   const history: PersonalityTraitRecord[] = [...previous.history];
   let candidates: TraitCandidateRecord[] = [...previous.candidates];
 
-  // 1. Persist incoming candidates (dedupe by source+dimension).
+  // 1. Persist incoming candidates.
+  //    同一 sourceMemoryId + dimension + sourceMemoryRevision 不重复进入；
+  //    同一来源 revision 变化时，旧 candidate 必须被替换，不能继续占位。
   for (const signal of input.signals) {
     if (!TRAIT_DIMENSIONS.includes(signal.dimension)) continue;
-    const duplicate = candidates.some((candidate) =>
+    const existingIndex = candidates.findIndex((candidate) =>
       candidate.dimension === signal.dimension
       && candidate.sourceMemoryId === signal.sourceMemoryId
     );
-    if (duplicate) continue;
+    if (existingIndex >= 0) {
+      const existing = candidates[existingIndex];
+      if (existing.sourceMemoryRevision === signal.sourceMemoryRevision) continue;
+      candidates.splice(existingIndex, 1);
+    }
     candidates.push(Object.freeze({
       id: newCognitiveId("cand"),
       dimension: signal.dimension,
@@ -342,9 +349,13 @@ export function applyDreamPersonalityUpdate(
     };
     const increases = byDirection("increase");
     const decreases = byDirection("decrease");
-    const dominant = increases.length >= decreases.length ? increases : decreases;
+    // 必须方向占明显多数：dominantSources >= 3 且严格多于对立来源。
+    // increase 与 decrease 平票时不更新，候选继续保留，不武断选 increase。
+    const dominant = increases.length > decreases.length ? increases : decreases;
+    const opposite = dominant === increases ? decreases : increases;
     const direction: "increase" | "decrease" = dominant === increases ? "increase" : "decrease";
     if (dominant.length < PERSONALITY_OBSERVED_MIN_SOURCES) continue;
+    if (dominant.length <= opposite.length) continue;
 
     const baseRecord = observed[dimension] ?? previous.explicit[dimension];
     const baseScore = baseRecord ? clampTraitScore(baseRecord.score) : 0.5;
@@ -576,7 +587,8 @@ export function renderableRequirements(
 // Parsing / validation
 // ---------------------------------------------------------------------------
 
-export function parsePersonalityState(raw: Record<string, unknown>): PersonalityState | null {
+/** Parse a v2 personality state; v1 or unknown schemas return null. */
+export function parsePersonalityStateV2(raw: Record<string, unknown>): PersonalityState | null {
   if (raw.schema !== PERSONALITY_STATE_SCHEMA) return null;
   if (typeof raw.revision !== "number" || !Number.isSafeInteger(raw.revision)) return null;
   const explicit = parseTraitSlots(raw.explicit);
@@ -622,9 +634,8 @@ export function parsePersonalityState(raw: Record<string, unknown>): Personality
 // ---------------------------------------------------------------------------
 
 function emptyTraitSlots(): Readonly<Record<TraitDimension, PersonalityTraitRecord | null>> {
-  const slots: Record<TraitDimension, PersonalityTraitRecord | null> = {
-    tempo: null, energy: null, mind: null, warmth: null, order: null, stance: null
-  };
+  const slots = {} as Record<TraitDimension, PersonalityTraitRecord | null>;
+  for (const dimension of TRAIT_DIMENSIONS) slots[dimension] = null;
   return Object.freeze(slots);
 }
 
@@ -633,9 +644,8 @@ function parseTraitSlots(
 ): Readonly<Record<TraitDimension, PersonalityTraitRecord | null>> | null {
   if (!raw || typeof raw !== "object") return null;
   const record = raw as Record<string, unknown>;
-  const slots: Record<TraitDimension, PersonalityTraitRecord | null> = {
-    tempo: null, energy: null, mind: null, warmth: null, order: null, stance: null
-  };
+  const slots = {} as Record<TraitDimension, PersonalityTraitRecord | null>;
+  for (const dimension of TRAIT_DIMENSIONS) slots[dimension] = null;
   for (const dimension of TRAIT_DIMENSIONS) {
     const value = record[dimension];
     if (value === null || value === undefined) {
@@ -735,4 +745,101 @@ export function isMemoryProcessedByPersonality(
   return Boolean(processed && processed.memoryRevision >= memoryRevision);
 }
 
+/** Compatibility alias: parsePersonalityState === parsePersonalityStateV2. */
+export const parsePersonalityState = parsePersonalityStateV2;
+
 export type PersonalityRequirementBasisInput = PersonalMemoryBasis;
+
+// ---------------------------------------------------------------------------
+// v1 → v2 migration (Round 5 冻结决定；草案 §6/§10)
+//
+// 旧六维（tempo/energy/mind/warmth/order/stance）与新六维语义不兼容：
+// - 保留 templateId、learnedRequirements（含 sourceMemoryIds/basis/status/reason）。
+// - 用同模板的新六维分数重建 explicit baseline。
+// - 旧 observed、history、candidates、processedSources 一律不进入 v2 current。
+// - 迁移落盘由 CognitiveSystem.create 的一个 Repository 事务完成
+//   （v1 备份 + v2 状态 + dream-state 重置 + 必要 AGENT.md 重写）。
+// ---------------------------------------------------------------------------
+
+export interface LegacyPersonalityStateV1 {
+  readonly schema: typeof PERSONALITY_STATE_SCHEMA_V1;
+  readonly revision: number;
+  readonly templateId: string | null;
+  readonly learnedRequirements: readonly AgentRequirementRecord[];
+  readonly updatedAt: number;
+  /** 完整原始 JSON：只用于生成历史备份；observed/history/candidates 不进入 v2。 */
+  readonly raw: Readonly<Record<string, unknown>>;
+}
+
+/** 识别落盘人格状态 schema；未知或损坏返回 null。 */
+export function detectPersonalityStateSchema(
+  raw: Record<string, unknown>
+): "v2" | "v1" | null {
+  if (raw.schema === PERSONALITY_STATE_SCHEMA) return "v2";
+  if (raw.schema === PERSONALITY_STATE_SCHEMA_V1) return "v1";
+  return null;
+}
+
+/** 解析旧 v1 状态（只取迁移需要的字段；旧维度分数不解析为 trait 记录）。 */
+export function parseLegacyPersonalityStateV1(
+  raw: Record<string, unknown>
+): LegacyPersonalityStateV1 | null {
+  if (raw.schema !== PERSONALITY_STATE_SCHEMA_V1) return null;
+  if (typeof raw.revision !== "number" || !Number.isSafeInteger(raw.revision)) return null;
+  const learnedRequirements = Array.isArray(raw.learnedRequirements)
+    ? raw.learnedRequirements
+        .map(parseRequirement)
+        .filter((requirement): requirement is AgentRequirementRecord => requirement !== null)
+    : [];
+  return Object.freeze({
+    schema: PERSONALITY_STATE_SCHEMA_V1,
+    revision: raw.revision,
+    templateId: typeof raw.templateId === "string" ? raw.templateId : null,
+    learnedRequirements: Object.freeze(learnedRequirements),
+    updatedAt: typeof raw.updatedAt === "number" ? raw.updatedAt : 0,
+    raw
+  });
+}
+
+/**
+ * 由 v1 状态构建 v2 状态（纯函数）。
+ * explicit = 同模板新六维基线；observed/candidates/processedSources 置空；
+ * learnedRequirements 原样保留（status/basis/sourceMemoryIds/reason 不变）。
+ */
+export function buildPersonalityV2FromLegacy(
+  legacy: LegacyPersonalityStateV1,
+  input: Readonly<{ now: number; idFactory?: () => string }>
+): PersonalityState {
+  const makeId = input.idFactory ?? (() => newCognitiveId("trait"));
+  const revision = legacy.revision + 1;
+  const template = getPersonalityTemplate(legacy.templateId);
+  const explicit = {} as Record<TraitDimension, PersonalityTraitRecord | null>;
+  for (const dimension of TRAIT_DIMENSIONS) {
+    explicit[dimension] = template
+      ? Object.freeze({
+          id: makeId(),
+          dimension,
+          basis: "explicit",
+          status: "current",
+          score: clampTraitScore(template.scores[dimension]),
+          sourceMemoryIds: Object.freeze([]),
+          evidence: `v1→v2 迁移：用户选择模板「${template.labelZh}」，按新六维重建基线`,
+          createdAt: input.now,
+          updatedAt: input.now,
+          revision
+        })
+      : null;
+  }
+  return Object.freeze({
+    schema: PERSONALITY_STATE_SCHEMA,
+    revision,
+    templateId: template ? template.id : null,
+    explicit: Object.freeze(explicit),
+    observed: emptyTraitSlots(),
+    history: Object.freeze([]),
+    candidates: Object.freeze([]),
+    learnedRequirements: legacy.learnedRequirements,
+    processedSources: Object.freeze([]),
+    updatedAt: input.now
+  });
+}

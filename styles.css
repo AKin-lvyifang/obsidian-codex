@@ -12732,9 +12732,6 @@ body.theme-dark .codex-session-picker {
 
 /* Trait dimension rows */
 .echoink-trait-row {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
   padding: 2px 0;
 }
 
@@ -12761,20 +12758,41 @@ body.theme-dark .codex-session-picker {
   transition: width 0.4s ease;
 }
 
-.echoink-trait-pct {
+.echoink-trait-row {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+}
+
+.echoink-trait-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.echoink-trait-value {
   font-size: 11px;
   font-family: var(--font-monospace);
   color: var(--text-muted);
-  min-width: 32px;
+  margin-left: auto;
   text-align: right;
 }
 
-.echoink-trait-poles {
+.echoink-trait-band-desc {
   font-size: 10px;
   color: var(--text-muted);
-  opacity: 0.7;
-  padding-left: 42px;
+  opacity: 0.8;
   margin-bottom: 4px;
+}
+
+.echoink-trait-hexagon-caption {
+  font-size: 10px;
+  color: var(--text-muted);
+  opacity: 0.75;
+  text-align: center;
+  margin-top: 6px;
+  max-width: 170px;
 }
 
 /* --- Footer --- */
