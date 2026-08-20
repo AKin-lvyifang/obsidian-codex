@@ -1,220 +1,119 @@
 /**
- * DreamScheduler — offline background task for memory consolidation.
+ * dream-scheduler.ts — production dream scheduler (做梦 PRD §4).
  *
- * Runs on a configurable schedule (N times per day) while Obsidian is open.
- * Each run performs two tasks on recent memories:
- *   1. Personality signal detection (M1) → inject into TraitEvolution
- *   2. Divergent expansion / anchor generation (B2) → update search index
- *
- * Schedule design:
- *   - User configures "runs per day" (1-6)
- *   - Scheduler divides 24h into equal intervals
- *   - 60s heartbeat checks if the next interval has arrived
- *   - Tracks last run timestamp to avoid duplicate runs
- *   - Only runs when Obsidian is open (setInterval lifecycle)
+ * - Created once by the plugin when it starts; disposed with the plugin.
+ * - 60s heartbeat checks whether the next daily slot is due.
+ * - Default 3 runs/day; interval = 24h / runsPerDay.
+ * - Toggle / runs-per-day changes apply immediately — no restart needed.
+ * - Dreaming pauses while a foreground Provider request is running (deferred,
+ *   never cancelled).
+ * - The scheduler itself never calls the LLM; DreamEngine does the work.
  */
 
-import type { ExpansionLlmPort } from "./memory-expansion-service";
-import { expandMemory } from "./memory-expansion-service";
-import { detectPersonalitySignal } from "./memory-personality-signal";
-import type { TraitEvolution } from "./trait-evolution";
-import type { PersonalMemoryRecord } from "./personal-memory-contracts";
-import { isSignalEligibleKind } from "./memory-personality-signal-prompt";
+import type { DreamEngine, DreamRunResult } from "./dream-engine";
 
-// ---------------------------------------------------------------------------
-// Configuration
-// ---------------------------------------------------------------------------
-
-export interface DreamScheduleConfig {
-  /** Whether dreaming is enabled. */
+export interface DreamSchedulerConfig {
   readonly enabled: boolean;
-  /** Number of dream runs per day (1-6). Default 3. */
   readonly runsPerDay: number;
-  /** Max tokens budget per dream run. Default 50000. */
-  readonly tokenBudget: number;
-  /** How many days back to scan for new/changed memories. Default 7. */
-  readonly lookbackDays: number;
 }
 
-export const DEFAULT_DREAM_CONFIG: DreamScheduleConfig = {
-  enabled: false,
-  runsPerDay: 3,
-  tokenBudget: 50_000,
-  lookbackDays: 7
-};
+export const DEFAULT_DREAM_RUNS_PER_DAY = 3;
 
-const HEARTBEAT_INTERVAL_MS = 60_000; // 60 seconds
-const MS_PER_DAY = 86_400_000;
+const HEARTBEAT_MS = 60_000;
+const DAY_MS = 86_400_000;
 
-// ---------------------------------------------------------------------------
-// Ports (decouple from plugin internals)
-// ---------------------------------------------------------------------------
-
-/** Port for reading recent memories that need processing. */
-export interface DreamMemoryReaderPort {
-  /** Get memories created or modified within the lookback window. */
-  getRecentMemories(lookbackDays: number): Promise<readonly PersonalMemoryRecord[]>;
+export interface DreamSchedulerDeps {
+  readonly engine: DreamEngine;
+  /** Live settings — read on every heartbeat, so toggles apply without restart. */
+  readonly getConfig: () => DreamSchedulerConfig;
+  /** True while a foreground chat/Provider request is in flight. */
+  readonly isForegroundBusy: () => boolean;
+  /** Last successful/started run timestamp from dream-state (0 = never). */
+  readonly readLastRunAt: () => Promise<number>;
+  /** Register the heartbeat interval with the plugin lifecycle. */
+  readonly registerInterval: (handle: number) => void;
+  readonly now?: () => number;
 }
-
-/** Port for persisting anchor results back to memory records. */
-export interface DreamMemoryWriterPort {
-  /** Update a memory record's anchors field. */
-  updateAnchors(memoryId: string, anchors: readonly import("./personal-memory-contracts").MemoryAnchor[]): Promise<void>;
-}
-
-/** Port for checking/updating the last-run timestamp. */
-export interface DreamStatePort {
-  getLastRunAt(): number; // epoch ms, 0 if never run
-  setLastRunAt(timestamp: number): Promise<void>;
-}
-
-// ---------------------------------------------------------------------------
-// DreamScheduler class
-// ---------------------------------------------------------------------------
 
 export class DreamScheduler {
   private timer: number | null = null;
-  private running = false;
-  private config: DreamScheduleConfig;
+  private checking = false;
+  private disposed = false;
+  /** Test/diagnostic hook, called after every completed run. */
+  onRunFinished: ((result: DreamRunResult) => void) | null = null;
 
-  constructor(
-    private readonly llm: ExpansionLlmPort,
-    private readonly traitEvolution: TraitEvolution,
-    private readonly memoryReader: DreamMemoryReaderPort,
-    private readonly memoryWriter: DreamMemoryWriterPort,
-    private readonly state: DreamStatePort,
-    private readonly registerInterval: (timer: number) => void,
-    config?: Partial<DreamScheduleConfig>
-  ) {
-    this.config = { ...DEFAULT_DREAM_CONFIG, ...config };
+  constructor(private readonly deps: DreamSchedulerDeps) {}
+
+  get active(): boolean {
+    return this.timer !== null;
   }
 
-  // --- Lifecycle ---
-
+  /** Start the heartbeat. Idempotent. */
   start(): void {
-    if (this.timer !== null) return;
-    this.timer = window.setInterval(() => void this.tick(), HEARTBEAT_INTERVAL_MS);
-    this.registerInterval(this.timer);
+    if (this.disposed || this.timer !== null) return;
+    const handle = setInterval(() => {
+      void this.tick();
+    }, HEARTBEAT_MS) as unknown as number;
+    this.timer = handle;
+    this.deps.registerInterval(handle);
   }
 
+  /** Stop the heartbeat (dreaming off or plugin unloading). */
   stop(): void {
     if (this.timer !== null) {
-      window.clearInterval(this.timer);
+      clearInterval(this.timer);
       this.timer = null;
     }
   }
 
-  updateConfig(config: Partial<DreamScheduleConfig>): void {
-    this.config = { ...this.config, ...config };
+  dispose(): void {
+    this.stop();
+    this.disposed = true;
   }
 
-  /** Force a run regardless of schedule (for testing / manual trigger). */
-  async forceRun(): Promise<DreamRunResult> {
-    return this.runDreamCycle();
+  /** Whether a run is due right now given the configured runs/day. */
+  async isDue(nowInput?: number): Promise<boolean> {
+    const config = this.deps.getConfig();
+    if (!config.enabled) return false;
+    const runsPerDay = normalizeRunsPerDay(config.runsPerDay);
+    const lastRunAt = await this.deps.readLastRunAt();
+    if (lastRunAt <= 0) return true;
+    const now = nowInput ?? this.now();
+    return now - lastRunAt >= DAY_MS / runsPerDay;
   }
 
-  // --- Heartbeat ---
-
-  private async tick(): Promise<void> {
-    if (!this.config.enabled || this.running) return;
-    if (!this.isDue()) return;
-    await this.runDreamCycle();
-  }
-
-  private isDue(): boolean {
-    const lastRun = this.state.getLastRunAt();
-    if (lastRun === 0) return true; // never run before
-    const intervalMs = MS_PER_DAY / Math.max(1, this.config.runsPerDay);
-    return Date.now() - lastRun >= intervalMs;
-  }
-
-  // --- Dream cycle ---
-
-  private async runDreamCycle(): Promise<DreamRunResult> {
-    this.running = true;
-    const startTime = Date.now();
-    const result: DreamRunResult = {
-      startedAt: startTime,
-      memoriesScanned: 0,
-      signalsDetected: 0,
-      expansionsPerformed: 0,
-      anchorsGenerated: 0,
-      errors: []
-    };
-
+  /** Heartbeat step: run when enabled, due, and the foreground is idle. */
+  async tick(): Promise<void> {
+    if (this.disposed || this.checking) return;
+    this.checking = true;
     try {
-      // 1. Get recent memories
-      const memories = await this.memoryReader.getRecentMemories(this.config.lookbackDays);
-      result.memoriesScanned = memories.length;
-
-      let tokensUsed = 0;
-
-      for (const memory of memories) {
-        // Budget check
-        if (tokensUsed >= this.config.tokenBudget) break;
-
-        // --- Task 1: Personality signal detection ---
-        if (isSignalEligibleKind(memory.kind) && !this.traitEvolution.isMemoryProcessed(memory.id)) {
-          try {
-            const signal = await detectPersonalitySignal(this.llm, memory.content, memory.kind);
-            if (signal) {
-              // Weight by source: dream extraction = 0.5
-              await this.traitEvolution.observeFromMemory(signal, "dream", 0.5, memory.id);
-              result.signalsDetected++;
-            }
-            tokensUsed += 300; // rough estimate for signal detection call
-          } catch (error) {
-            result.errors.push(`signal detection failed for ${memory.id}: ${errorMessage(error)}`);
-          }
-        }
-
-        // --- Task 2: Anchor expansion (only if no anchors yet) ---
-        if (!memory.anchors || memory.anchors.length === 0) {
-          try {
-            const expansion = await expandMemory(this.llm, memory.content, memory.kind);
-            if (expansion.anchors.length > 0) {
-              await this.memoryWriter.updateAnchors(memory.id, expansion.anchors);
-              result.expansionsPerformed++;
-              result.anchorsGenerated += expansion.anchors.length;
-            }
-            tokensUsed += 1200; // rough estimate for expansion call
-          } catch (error) {
-            result.errors.push(`expansion failed for ${memory.id}: ${errorMessage(error)}`);
-          }
-        }
-      }
-    } catch (error) {
-      result.errors.push(`dream cycle failed: ${errorMessage(error)}`);
+      const config = this.deps.getConfig();
+      if (!config.enabled) return;
+      if (this.deps.isForegroundBusy()) return; // 延后，不打断前台请求
+      if (this.deps.engine.isRunning) return;
+      if (!(await this.isDue())) return;
+      const result = await this.deps.engine.runOnce();
+      this.onRunFinished?.(result);
+    } catch {
+      // A failed round keeps pending state intact; the next heartbeat retries.
     } finally {
-      this.running = false;
-      result.completedAt = Date.now();
-      result.durationMs = result.completedAt - startTime;
-      await this.state.setLastRunAt(result.completedAt);
+      this.checking = false;
     }
+  }
 
-    return result;
+  /** Manual trigger (e.g. diagnostics). Respects the foreground-busy gate. */
+  async forceRun(): Promise<DreamRunResult | null> {
+    if (this.disposed || this.deps.engine.isRunning) return null;
+    if (this.deps.isForegroundBusy()) return null;
+    return await this.deps.engine.runOnce();
+  }
+
+  private now(): number {
+    return this.deps.now ? this.deps.now() : Date.now();
   }
 }
 
-// ---------------------------------------------------------------------------
-// Result type
-// ---------------------------------------------------------------------------
-
-export interface DreamRunResult {
-  startedAt: number;
-  completedAt?: number;
-  durationMs?: number;
-  memoriesScanned: number;
-  signalsDetected: number;
-  expansionsPerformed: number;
-  anchorsGenerated: number;
-  errors: string[];
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+export function normalizeRunsPerDay(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_DREAM_RUNS_PER_DAY;
+  return Math.max(1, Math.min(6, Math.round(value)));
 }

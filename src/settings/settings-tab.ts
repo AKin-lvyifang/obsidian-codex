@@ -5,6 +5,14 @@ import type {
   PersonalMemoryKind,
   PersonalMemoryRecord
 } from "../harness/memory/personal-memory-contracts";
+import {
+  currentPersonalityScores,
+  type PersonalityState
+} from "../harness/memory/personality-state";
+import {
+  PERSONALITY_TEMPLATES,
+  getPersonalityTemplate
+} from "../harness/memory/personality-templates";
 import { buildActiveEchoInkResourceCatalog } from "../resources/registry";
 import {
   mcpConnectionStatus,
@@ -97,6 +105,18 @@ type KnowledgeMaintenancePreferenceControlState = Awaited<
     "getEchoInkKnowledgeMaintenancePreferenceState"
   ]>
 >;
+
+interface AgentProfileCardRefs {
+  readonly hexSide: HTMLElement;
+  readonly barFgs: HTMLElement[];
+  readonly pctSpans: HTMLElement[];
+  readonly dimLabels: [string, string, string][];
+  readonly footerStatus: HTMLElement;
+  readonly templateBtn: HTMLElement;
+  readonly pickerPanel: HTMLElement;
+  readonly summaryText: HTMLElement;
+  readonly rawPre: HTMLElement;
+}
 
 export class CodexSettingTab extends PluginSettingTab {
   private resourceSnapshot: WorkspaceResourceSnapshot | null = null;
@@ -456,8 +476,8 @@ export class CodexSettingTab extends PluginSettingTab {
     applySettingsRow(new Setting(memoryGroup)
       .setName(zh ? "离线记忆整理（做梦）" : "Offline memory consolidation (dreaming)")
       .setDesc(zh
-        ? "定期在后台对近期记忆做语义展开和人格信号提取。仅在 Obsidian 打开时运行。"
-        : "Periodically expand recent memories and extract personality signals in the background. Only runs while Obsidian is open.")
+        ? "开启后，Obsidian 打开期间按定时在后台复盘一级记忆：生成二级事实，并更新 USER.md、人格状态与 AGENT.md。"
+        : "While Obsidian is open, periodically reviews primary memories on a timer: generates secondary facts and updates USER.md, personality state and AGENT.md.")
       .addToggle((toggle) => {
         labelSettingsToggle(toggle, zh ? "离线记忆整理" : "Memory consolidation");
         toggle.setValue(this.plugin.settings.memory.dreamEnabled).onChange(async (enabled) => {
@@ -532,8 +552,8 @@ export class CodexSettingTab extends PluginSettingTab {
     }
     // Agent profile: read-only hexagon card + collapsible text (no editing)
     this.addAgentProfileCard(group, this.personalMemoryState.agent);
-    // User profile: still editable
-    this.addPersonalMemoryProfileEditor(group, "user", this.personalMemoryState.user);
+    // User profile: read-only (maintained by dreaming / memory corrections)
+    this.addReadOnlyUserProfileCard(group, this.personalMemoryState.user);
     applySettingsRow(new Setting(group)
       .setName(this.copy.general.showWelcome)
       .setDesc(this.copy.general.showWelcomeDesc)
@@ -653,24 +673,15 @@ export class CodexSettingTab extends PluginSettingTab {
   }
 
   /**
-   * Agent profile card: left-right layout (hexagon + trait bars) with a
-   * top-right expand button that toggles a drawer containing a personality
-   * summary and the raw AGENT.md text.
-   *
-   * Footer has a template button: "初始风格选择" (first time) or "重置" (after).
-   * Clicking opens an inline template picker with 8 presets + scenario questions.
-   *
-   * Read-only — AGENT.md is a projection from trait records, not user-editable.
+   * Agent profile card: read-only projection of personality-state.json.
+   * Template selection / reset persist the state and rewrite AGENT.md in ONE
+   * local transaction — no Provider involved. Nothing here is manually editable.
    */
   private addAgentProfileCard(container: HTMLElement, agentContent: string): void {
     const zh = this.plugin.settings.settingsLanguage !== "en";
-    // Check if a template has been selected before
-    const hasTemplate = Boolean(this.plugin.settings.personality?.templateId);
-
-    // Card wrapper
     const card = container.createDiv({ cls: "echoink-agent-profile-card" });
 
-    // --- Header (with expand button in top-right) ---
+    // --- Header ---
     const header = card.createDiv({ cls: "echoink-agent-profile-card-header" });
     const titleArea = header.createDiv({ cls: "echoink-agent-profile-card-title-area" });
     titleArea.createDiv({ cls: "echoink-agent-profile-card-label", text: "AGENT.md" });
@@ -678,7 +689,6 @@ export class CodexSettingTab extends PluginSettingTab {
       cls: "echoink-agent-profile-card-badge",
       text: zh ? "自动生成" : "Auto-generated"
     });
-    // Expand/collapse button — top-right corner, morph animation
     const expandBtn = header.createEl("button", {
       cls: "echoink-agent-profile-expand-btn",
       attr: { type: "button" }
@@ -695,24 +705,13 @@ export class CodexSettingTab extends PluginSettingTab {
     header.createDiv({
       cls: "echoink-agent-profile-card-desc",
       text: zh
-        ? "人格由 trait 记录投影生成，不可手动编辑。随对话和记忆校准缓慢演化。"
-        : "Personality projected from trait records. Evolves slowly via conversation and memory calibration."
+        ? "人格由人格状态文件投影生成，不可手动编辑；选择模板或做梦后自动更新。"
+        : "Personality is projected from the personality state file; it updates automatically after template selection or dreaming."
     });
 
     // --- Body: left hexagon + right trait bars ---
     const body = card.createDiv({ cls: "echoink-agent-profile-card-body" });
     const hexSide = body.createDiv({ cls: "echoink-agent-profile-hex-side" });
-    const currentScores = { ...this.getCurrentTraitScores() } as Record<string, number>;
-    import("../ui/trait-hexagon").then(({ renderTraitHexagon }) => {
-      hexSide.empty();
-      renderTraitHexagon(hexSide, currentScores as any, { size: 170, rings: 4 });
-    }).catch(() => {
-      hexSide.createDiv({
-        cls: "echoink-settings-state is-neutral",
-        text: zh ? "加载中…" : "Loading…"
-      });
-    });
-
     const textSide = body.createDiv({ cls: "echoink-agent-profile-text-side" });
     const dimLabels: [string, string, string][] = [
       ["tempo", zh ? "节奏" : "Tempo", zh ? "快·短平快 ←→ 慢·深思熟虑" : "Fast ↔ Slow"],
@@ -730,62 +729,35 @@ export class CodexSettingTab extends PluginSettingTab {
       row.createSpan({ cls: "echoink-trait-dim", text: label });
       const barBg = row.createDiv({ cls: "echoink-trait-bar-bg" });
       const barFg = barBg.createDiv({ cls: "echoink-trait-bar-fg" });
-      const score = currentScores[dim as keyof typeof currentScores] ?? 0.5;
-      barFg.style.width = `${Math.round(score * 100)}%`;
+      barFg.style.width = "50%";
       barFgs.push(barFg);
-      const pct = row.createSpan({ cls: "echoink-trait-pct", text: `${Math.round(score * 100)}%` });
+      const pct = row.createSpan({ cls: "echoink-trait-pct", text: "50%" });
       pctSpans.push(pct);
       textSide.createDiv({ cls: "echoink-trait-poles", text: poles });
+      void dim;
     }
+    void body;
 
     // --- Footer ---
     const footer = card.createDiv({ cls: "echoink-agent-profile-card-footer" });
     const footerStatus = footer.createSpan({});
-    footerStatus.setText(hasTemplate
-      ? (zh ? `基于「${this.getTemplateName()}」模板` : `Template: ${this.getTemplateName()}`)
-      : (zh ? "尚未选择初始风格" : "No style selected yet"));
+    footerStatus.setText(zh ? "正在读取人格状态…" : "Loading personality state…");
     const templateBtn = footer.createEl("a", {
       cls: "echoink-agent-profile-reselect",
-      text: hasTemplate
-        ? (zh ? "重置" : "Reset")
-        : (zh ? "初始风格选择" : "Choose initial style")
+      text: zh ? "初始风格选择" : "Choose initial style"
     });
+    templateBtn.dataset.hasTemplate = "false";
 
     // --- Template picker panel (hidden by default) ---
     const pickerPanel = card.createDiv({ cls: "echoink-template-picker" });
-    let pickerVisible = false;
 
-    templateBtn.onclick = () => {
-      if (hasTemplate && !pickerVisible) {
-        // Show reset confirmation first
-        void confirmModal(
-          this.app,
-          zh ? "重置人格" : "Reset personality",
-          zh
-            ? "重置后 AGENT.md 的内容会马上覆盖更新。未来靠做梦也会不断成长，可能最后也会变得和现在一样——除非你把相关记忆也删了。确定要重置吗？"
-            : "After reset, AGENT.md will be immediately overwritten. Future dreaming may evolve it back to something similar — unless you also delete the related memories. Proceed?",
-          zh ? "确定重置" : "Confirm reset",
-          zh ? "取消" : "Cancel"
-        ).then((confirmed) => {
-          if (confirmed) this.showTemplatePicker(pickerPanel, body, footer, footerStatus, templateBtn, hexSide, barFgs, pctSpans, dimLabels, zh);
-        });
-      } else {
-        this.showTemplatePicker(pickerPanel, body, footer, footerStatus, templateBtn, hexSide, barFgs, pctSpans, dimLabels, zh);
-      }
-    };
-
-    // --- Drawer (toggled by expand button only, no separate collapse btn) ---
+    // --- Drawer (toggled by expand button) ---
     const drawer = card.createDiv({ cls: "echoink-agent-profile-drawer" });
     const drawerInner = drawer.createDiv({ cls: "echoink-agent-profile-drawer-inner" });
-
     const summaryCard = drawerInner.createDiv({ cls: "echoink-agent-profile-summary-card" });
     summaryCard.createDiv({ cls: "echoink-agent-profile-summary-title", text: zh ? "人格总结" : "Personality Summary" });
     const summaryText = summaryCard.createDiv({ cls: "echoink-agent-profile-summary-text" });
-    summaryText.setText(zh
-      ? "完成初始风格选择后，这里会根据你的六维人格分数自动生成个性化的性格描述和行为特征总结。随着对话和做梦的积累，总结会持续更新。"
-      : "After choosing an initial style, a personalized character description will be auto-generated here. It updates as conversations and dreaming accumulate."
-    );
-
+    summaryText.setText(zh ? "正在读取…" : "Loading…");
     drawerInner.createDiv({ cls: "echoink-agent-profile-raw-title", text: "AGENT.md" });
     const rawPre = drawerInner.createEl("pre", {
       cls: "echoink-agent-profile-raw-text",
@@ -793,7 +765,6 @@ export class CodexSettingTab extends PluginSettingTab {
     });
     rawPre.setAttr("tabindex", "0");
 
-    // Toggle logic — expand button only, no separate collapse button
     let isOpen = false;
     expandBtn.onclick = () => {
       isOpen = !isOpen;
@@ -803,169 +774,182 @@ export class CodexSettingTab extends PluginSettingTab {
         : (zh ? "查看完整描述" : "Full description"));
       expandBtn.classList.toggle("is-open", isOpen);
     };
+
+    const refs: AgentProfileCardRefs = {
+      hexSide, barFgs, pctSpans, dimLabels, footerStatus, templateBtn, pickerPanel, summaryText, rawPre
+    };
+
+    templateBtn.onclick = () => {
+      if (templateBtn.dataset.hasTemplate === "true") {
+        // 重置人格：每次都确认；记忆不删除。
+        void confirmModal(
+          this.app,
+          zh ? "重置人格" : "Reset personality",
+          zh
+            ? "重置会清空当前人格设定并立即重写 AGENT.md（所有记忆都会保留）。确定要重置吗？"
+            : "Reset clears the current personality and rewrites AGENT.md immediately (all memories are kept). Proceed?",
+          zh ? "确定重置" : "Confirm reset",
+          zh ? "取消" : "Cancel"
+        ).then((confirmed) => {
+          if (!confirmed) return;
+          void (async () => {
+            try {
+              const system = await this.plugin.getCognitiveSystem();
+              const result = await system.resetPersonality();
+              new Notice(zh ? "人格已重置" : "Personality reset");
+              this.applyPersonalityToCard(refs, result.state, result.agent, zh);
+              refs.summaryText.setText(await system.renderPersonalitySummary(zh ? "zh" : "en"));
+              this.showTemplatePicker(refs, zh);
+            } catch (error) {
+              console.error("EchoInk personality reset failed", error);
+              new Notice(zh ? "人格重置失败，请重试" : "Personality reset failed");
+            }
+          })();
+        });
+      } else {
+        this.showTemplatePicker(refs, zh);
+      }
+    };
+
+    void this.loadPersonalityIntoCard(refs, zh);
   }
 
-  /** Get current trait scores from settings (or defaults). */
-  private getCurrentTraitScores(): Readonly<Record<string, number>> {
-    const p = this.plugin.settings.personality;
-    if (p?.scores) return p.scores;
-    return { tempo: 0.5, energy: 0.5, mind: 0.5, warmth: 0.5, order: 0.5, stance: 0.5 };
+  private async loadPersonalityIntoCard(refs: AgentProfileCardRefs, zh: boolean): Promise<void> {
+    try {
+      const system = await this.plugin.getCognitiveSystem();
+      const state = await system.readPersonalityState();
+      this.applyPersonalityToCard(refs, state, null, zh);
+      refs.summaryText.setText(await system.renderPersonalitySummary(zh ? "zh" : "en"));
+    } catch (error) {
+      console.error("EchoInk personality state load failed", error);
+      refs.footerStatus.setText(zh ? "人格状态读取失败" : "Failed to load personality state");
+    }
   }
 
-  /** Get the display name of the selected template. */
-  private getTemplateName(): string {
-    const id = this.plugin.settings.personality?.templateId;
-    if (!id) return "default";
-    const { PERSONALITY_TEMPLATES } = require("../harness/memory/personal-memory-contracts");
-    const t = (PERSONALITY_TEMPLATES as readonly { id: string; label: string }[]).find((x) => x.id === id);
-    return t?.label ?? id;
-  }
-
-  /** Show the inline template picker with 8 presets and scenario questions. */
-  private showTemplatePicker(
-    panel: HTMLElement,
-    body: HTMLElement,
-    footer: HTMLElement,
-    footerStatus: HTMLElement,
-    templateBtn: HTMLElement,
-    hexSide: HTMLElement,
-    barFgs: HTMLElement[],
-    pctSpans: HTMLElement[],
-    dimLabels: [string, string, string][],
+  private applyPersonalityToCard(
+    refs: AgentProfileCardRefs,
+    state: PersonalityState,
+    agentText: string | null,
     zh: boolean
   ): void {
-    panel.empty();
-    panel.addClass("is-visible");
-
-    import("../harness/memory/personal-memory-contracts").then(({ PERSONALITY_TEMPLATES, TRAIT_DIMENSIONS }) => {
-      import("../ui/trait-hexagon").then(({ renderTraitHexagon }) => {
-        const stepLabel = panel.createDiv({ cls: "echoink-picker-step-label" });
-        stepLabel.setText(zh ? "选择一个最接近你期望的风格" : "Choose the closest style");
-
-        // List layout — one row per template
-        const list = panel.createDiv({ cls: "echoink-picker-list" });
-
-        // Richer descriptions that explain what the Agent will DO
-        const richDescsZh: Record<string, string> = {
-          executor: "回答先给结论再展开，不废话不寒暄，发现问题直接指出",
-          advisor: "每个建议都附依据和利弊分析，宁可慢一步也不给模糊答案",
-          butler: "安静执行你的指令，不主动起话题，有不同意见也只轻声提醒",
-          companion: "先回应你的情绪再处理事情，措辞温和，批评也会留面子",
-          steward: "输出永远结构化——列表、表格、分步骤，帮你把混乱理清楚",
-          enthusiast: "聊天氛围轻松活跃，会主动追问和延伸话题，什么都能接",
-          creative: "讨论时爱发散联想，经常提出你没想到的角度和可能性",
-          pragmatist: "边聊边干，说话直来直去，有分歧会据理力争但尊重你的最终决定"
-        };
-        const richDescsEn: Record<string, string> = {
-          executor: "Leads with conclusions, no filler, flags problems directly",
-          advisor: "Every suggestion backed by evidence and trade-off analysis",
-          butler: "Quietly executes your instructions, only gently flags disagreements",
-          companion: "Acknowledges your feelings first, criticism always delivered kindly",
-          steward: "Always structured output — lists, tables, step-by-step breakdowns",
-          enthusiast: "Lively and proactive, asks follow-ups, picks up any topic",
-          creative: "Loves divergent thinking, surfaces angles you hadn't considered",
-          pragmatist: "Talks and does simultaneously, argues with evidence, respects your call"
-        };
-        const descs = zh ? richDescsZh : richDescsEn;
-
-        for (const tpl of PERSONALITY_TEMPLATES) {
-          const row = list.createEl("button", {
-            cls: "echoink-picker-row",
-            attr: { type: "button" }
-          });
-          const nameCol = row.createDiv({ cls: "echoink-picker-row-name" });
-          nameCol.setText(tpl.label);
-          const descCol = row.createDiv({ cls: "echoink-picker-row-desc" });
-          descCol.setText(descs[tpl.id] ?? tpl.description);
-
-          row.onclick = () => {
-            const scores: Record<string, number> = {};
-            for (const dim of TRAIT_DIMENSIONS) scores[dim] = tpl.scores[dim];
-
-            this.plugin.settings.personality = {
-              ...(this.plugin.settings.personality ?? {}),
-              templateId: tpl.id,
-              scores
-            };
-            void this.plugin.saveSettings();
-
-            footerStatus.setText(zh ? `基于「${tpl.label}」模板` : `Template: ${tpl.label}`);
-            templateBtn.setText(zh ? "重置" : "Reset");
-
-            hexSide.empty();
-            renderTraitHexagon(hexSide, scores as any, { size: 170, rings: 4 });
-
-            for (let i = 0; i < dimLabels.length; i++) {
-              const dim = dimLabels[i][0];
-              const score = scores[dim] ?? 0.5;
-              barFgs[i].style.width = `${Math.round(score * 100)}%`;
-              pctSpans[i].setText(`${Math.round(score * 100)}%`);
-            }
-
-            panel.removeClass("is-visible");
-            panel.empty();
-          };
-        }
-
-        const cancelRow = panel.createDiv({ cls: "echoink-picker-cancel-row" });
-        const cancelBtn = cancelRow.createEl("button", {
-          cls: "echoink-picker-cancel-btn",
-          text: zh ? "取消" : "Cancel",
-          attr: { type: "button" }
-        });
-        cancelBtn.onclick = () => {
-          panel.removeClass("is-visible");
-          panel.empty();
-        };
-      });
-    });
+    const scores = currentPersonalityScores(state);
+    const template = state.templateId ? getPersonalityTemplate(state.templateId) : null;
+    refs.templateBtn.dataset.hasTemplate = template ? "true" : "false";
+    refs.templateBtn.setText(template
+      ? (zh ? "重置人格" : "Reset personality")
+      : (zh ? "初始风格选择" : "Choose initial style"));
+    refs.footerStatus.setText(template
+      ? (zh ? `基于「${template.labelZh}」模板` : `Template: ${template.labelEn}`)
+      : (zh ? "尚未选择初始风格" : "No style selected yet"));
+    void import("../ui/trait-hexagon").then(({ renderTraitHexagon }) => {
+      refs.hexSide.empty();
+      renderTraitHexagon(refs.hexSide, scores as Record<string, number> as never, { size: 170, rings: 4 });
+    }).catch(() => {});
+    for (let i = 0; i < refs.dimLabels.length; i++) {
+      const dim = refs.dimLabels[i][0] as keyof typeof scores;
+      const score = scores[dim] ?? 0.5;
+      refs.barFgs[i].style.width = `${Math.round(score * 100)}%`;
+      refs.pctSpans[i].setText(`${Math.round(score * 100)}%`);
+    }
+    if (agentText !== null) refs.rawPre.setText(agentText);
   }
 
-  private addPersonalMemoryProfileEditor(
-    container: HTMLElement,
-    profile: "agent" | "user",
-    initialValue: string
-  ): void {
+  /** Inline picker: 8 templates; applying one is a single local transaction. */
+  private showTemplatePicker(refs: AgentProfileCardRefs, zh: boolean): void {
+    const panel = refs.pickerPanel;
+    panel.empty();
+    panel.addClass("is-visible");
+    const stepLabel = panel.createDiv({ cls: "echoink-picker-step-label" });
+    stepLabel.setText(zh
+      ? "选择一个最接近你期望的风格（本地立即生效，不调用模型）"
+      : "Choose the closest style (applies locally and immediately, no model calls)");
+    const list = panel.createDiv({ cls: "echoink-picker-list" });
+
+    const richDescsZh: Record<string, string> = {
+      executor: "回答先给结论再展开，不废话不寒暄，发现问题直接指出",
+      advisor: "每个建议都附依据和利弊分析，宁可慢一步也不给模糊答案",
+      butler: "安静执行你的指令，不主动起话题，有不同意见也只轻声提醒",
+      companion: "先回应你的情绪再处理事情，措辞温和，批评也会留面子",
+      steward: "输出永远结构化——列表、表格、分步骤，帮你把混乱理清楚",
+      enthusiast: "聊天氛围轻松活跃，会主动追问和延伸话题，什么都能接",
+      creative: "讨论时爱发散联想，经常提出你没想到的角度和可能性",
+      pragmatist: "边聊边干，说话直来直去，有分歧会据理力争但尊重你的最终决定"
+    };
+    const richDescsEn: Record<string, string> = {
+      executor: "Leads with conclusions, no filler, flags problems directly",
+      advisor: "Every suggestion backed by evidence and trade-off analysis",
+      butler: "Quietly executes your instructions, only gently flags disagreements",
+      companion: "Acknowledges your feelings first, criticism always delivered kindly",
+      steward: "Always structured output — lists, tables, step-by-step breakdowns",
+      enthusiast: "Lively and proactive, asks follow-ups, picks up any topic",
+      creative: "Loves divergent thinking, surfaces angles you hadn't considered",
+      pragmatist: "Talks and does simultaneously, argues with evidence, respects your call"
+    };
+    const descs = zh ? richDescsZh : richDescsEn;
+
+    for (const tpl of PERSONALITY_TEMPLATES) {
+      const row = list.createEl("button", {
+        cls: "echoink-picker-row",
+        attr: { type: "button" }
+      });
+      row.createDiv({ cls: "echoink-picker-row-name" }).setText(zh ? tpl.labelZh : tpl.labelEn);
+      row.createDiv({ cls: "echoink-picker-row-desc" }).setText(descs[tpl.id] ?? (zh ? tpl.cardZh : tpl.cardEn));
+
+      row.onclick = () => {
+        row.setAttr("disabled", "true");
+        void (async () => {
+          try {
+            const system = await this.plugin.getCognitiveSystem();
+            const result = await system.selectPersonalityTemplate(tpl.id);
+            this.applyPersonalityToCard(refs, result.state, result.agent, zh);
+            refs.summaryText.setText(await system.renderPersonalitySummary(zh ? "zh" : "en"));
+            new Notice(zh ? `已应用「${tpl.labelZh}」人格模板` : `Applied template: ${tpl.labelEn}`);
+            panel.removeClass("is-visible");
+            panel.empty();
+          } catch (error) {
+            console.error("EchoInk personality template selection failed", error);
+            new Notice(zh ? "人格模板保存失败，请重试" : "Failed to save personality template");
+          } finally {
+            row.removeAttribute("disabled");
+          }
+        })();
+      };
+    }
+
+    const cancelRow = panel.createDiv({ cls: "echoink-picker-cancel-row" });
+    const cancelBtn = cancelRow.createEl("button", {
+      cls: "echoink-picker-cancel-btn",
+      text: zh ? "取消" : "Cancel",
+      attr: { type: "button" }
+    });
+    cancelBtn.onclick = () => {
+      panel.removeClass("is-visible");
+      panel.empty();
+    };
+  }
+
+  /** USER.md is maintained by dreaming / memory corrections — read-only here. */
+  private addReadOnlyUserProfileCard(container: HTMLElement, userContent: string): void {
     const zh = this.plugin.settings.settingsLanguage !== "en";
-    const row = applySettingsRow(new Setting(container)
-      .setName(profile === "agent" ? "AGENT.md" : "USER.md")
-      .setDesc(profile === "agent"
-        ? (zh ? "定义 EchoInk 的身份、表达与协作方式；Memory Tool 永远不能修改它。" : "Defines EchoInk identity and voice; Memory Tools can never modify it.")
-        : (zh ? "只保存用户明确确认的稳定资料与合作要求。" : "Stores only explicitly confirmed stable user profile and collaboration preferences."))
-      .setClass("echoink-personal-memory-profile-row"));
-    row.controlEl.empty();
-    const textarea = row.controlEl.createEl("textarea", {
-      cls: "echoink-personalization-textarea",
-      attr: {
-        rows: "7",
-        maxlength: "16000",
-        "aria-label": zh
-          ? `编辑 ${profile === "agent" ? "AGENT.md 身份" : "USER.md 用户画像"}`
-          : `Edit ${profile === "agent" ? "AGENT.md identity" : "USER.md profile"}`,
-        "data-echoink-focus-key": `personal-memory:${profile}`
-      }
+    const card = container.createDiv({ cls: "echoink-agent-profile-card" });
+    const header = card.createDiv({ cls: "echoink-agent-profile-card-header" });
+    const titleArea = header.createDiv({ cls: "echoink-agent-profile-card-title-area" });
+    titleArea.createDiv({ cls: "echoink-agent-profile-card-label", text: "USER.md" });
+    titleArea.createSpan({
+      cls: "echoink-agent-profile-card-badge",
+      text: zh ? "只读" : "Read-only"
     });
-    textarea.value = initialValue;
-    const actions = row.controlEl.createDiv({ cls: "echoink-personalization-actions" });
-    const save = actions.createEl("button", {
-      text: zh ? "保存文件" : "Save file",
-      attr: {
-        type: "button",
-        "aria-label": zh
-          ? `保存文件：${profile === "agent" ? "AGENT.md 身份" : "USER.md 用户画像"}`
-          : `Save file: ${profile === "agent" ? "AGENT.md identity" : "USER.md profile"}`
-      }
+    header.createDiv({
+      cls: "echoink-agent-profile-card-desc",
+      text: zh
+        ? "用户画像由做梦与记忆修正自动维护，不提供手动编辑。"
+        : "The user profile is maintained by dreaming and memory corrections; manual editing is not available."
     });
-    save.onclick = () => void this.runPersonalMemoryAction(async () => {
-      const state = this.personalMemoryState;
-      if (!state) return;
-      await this.plugin.updateEchoInkPersonalMemoryProfile(
-        profile,
-        textarea.value,
-        state.revision
-      );
-      new Notice(zh ? `${profile === "agent" ? "AGENT" : "USER"}.md 已保存` : `${profile.toUpperCase()}.md saved`);
+    const pre = card.createEl("pre", {
+      cls: "echoink-agent-profile-raw-text",
+      text: userContent
     });
+    pre.setAttr("tabindex", "0");
   }
 
   private renderKnowledgeBaseSettings(container: HTMLElement): void {
@@ -1670,7 +1654,179 @@ export class CodexSettingTab extends PluginSettingTab {
       });
       correct.disabled = this.memoryActionRunning;
       correct.onclick = () => void this.correctPersonalMemoryRecord(record);
+
+      // --- Secondary facts (二级事实 · LLM 推理): collapsed by default ---
+      const secWrap = row.createDiv({ cls: "echoink-secondary-facts" });
+      const secToggle = secWrap.createEl("button", {
+        cls: "echoink-secondary-facts-toggle",
+        attr: { type: "button" }
+      });
+      secToggle.setText(zh ? "二级事实·LLM 推理（…）" : "Secondary facts · LLM inferred (…)");
+      const secPanel = secWrap.createDiv({ cls: "echoink-secondary-facts-panel" });
+      secPanel.style.display = "none";
+      let secOpen = false;
+      let secLoaded = false;
+      const refreshSecondaryPanel = async (): Promise<void> => {
+        try {
+          const system = await this.plugin.getCognitiveSystem();
+          const facts = [...(await system.listSecondaryForParent(record.id))]
+            .filter((fact) => fact.status === "current");
+          secToggle.setText(zh
+            ? `二级事实·LLM 推理（${facts.length}）`
+            : `Secondary facts · LLM inferred (${facts.length})`);
+          if (!secOpen) return;
+          secPanel.empty();
+          if (!facts.length) {
+            secPanel.createDiv({
+              cls: "echoink-secondary-empty",
+              text: zh ? "做梦还没有为这条记忆生成二级事实。" : "Dreaming has not generated secondary facts for this memory yet."
+            });
+            return;
+          }
+          for (const fact of facts) {
+            this.renderSecondaryFactRow(secPanel, fact, zh, () => void refreshSecondaryPanel());
+          }
+        } catch (error) {
+          console.error("EchoInk secondary facts load failed", error);
+          secToggle.setText(zh ? "二级事实读取失败" : "Failed to load secondary facts");
+        }
+      };
+      secToggle.onclick = () => {
+        secOpen = !secOpen;
+        secPanel.style.display = secOpen ? "" : "none";
+        if (secOpen && !secLoaded) secLoaded = true;
+        void refreshSecondaryPanel();
+      };
+      void refreshSecondaryPanel();
     }
+  }
+
+  private renderSecondaryFactRow(
+    panel: HTMLElement,
+    fact: Readonly<import("../harness/memory/personal-memory-contracts").SecondaryMemoryRecord>,
+    zh: boolean,
+    onMutated: () => void
+  ): void {
+    const factRow = panel.createDiv({ cls: "echoink-secondary-fact-row" });
+    const head = factRow.createDiv({ cls: "echoink-secondary-fact-head" });
+    head.createSpan({
+      cls: "echoink-secondary-fact-badge",
+      text: zh ? "二级事实·LLM 推理" : "Secondary fact · LLM inferred"
+    });
+    head.createSpan({ cls: "echoink-secondary-fact-title", text: fact.title });
+    factRow.createDiv({ cls: "echoink-secondary-fact-content", text: fact.content });
+    factRow.createDiv({
+      cls: "echoink-settings-feature-meta",
+      text: `${zh ? "联想词" : "Match terms"}：${fact.matchTerms.join("、") || "—"}`
+    });
+    if (fact.reason) {
+      factRow.createDiv({
+        cls: "echoink-settings-feature-meta",
+        text: `${zh ? "依据" : "Reason"}：${fact.reason}`
+      });
+    }
+    const factActions = factRow.createDiv({ cls: "echoink-secondary-fact-actions" });
+    const editBtn = factActions.createEl("button", {
+      text: zh ? "编辑" : "Edit",
+      attr: { type: "button" }
+    });
+    const deleteBtn = factActions.createEl("button", {
+      text: zh ? "删除" : "Delete",
+      attr: { type: "button" }
+    });
+    editBtn.onclick = () => this.openSecondaryFactEditor(factRow, fact, zh, onMutated);
+    deleteBtn.onclick = () => {
+      void confirmModal(
+        this.app,
+        zh ? "删除二级事实" : "Delete secondary fact",
+        zh
+          ? `确定删除「${fact.title}」这条二级事实吗？一级记忆不受影响。`
+          : `Delete the secondary fact "${fact.title}"? The primary memory is not affected.`,
+        zh ? "删除" : "Delete",
+        zh ? "取消" : "Cancel"
+      ).then((confirmed) => {
+        if (!confirmed) return;
+        void (async () => {
+          try {
+            const system = await this.plugin.getCognitiveSystem();
+            await system.deleteSecondaryFact(fact.id);
+            new Notice(zh ? "二级事实已删除" : "Secondary fact deleted");
+            onMutated();
+          } catch (error) {
+            console.error("EchoInk secondary fact delete failed", error);
+            new Notice(zh ? "删除失败，请重试" : "Delete failed; please retry");
+          }
+        })();
+      });
+    };
+  }
+
+  private openSecondaryFactEditor(
+    factRow: HTMLElement,
+    fact: Readonly<import("../harness/memory/personal-memory-contracts").SecondaryMemoryRecord>,
+    zh: boolean,
+    onMutated: () => void
+  ): void {
+    factRow.empty();
+    const titleInput = factRow.createEl("input", {
+      cls: "echoink-secondary-edit-input",
+      attr: { type: "text", placeholder: zh ? "标题" : "Title" }
+    });
+    titleInput.value = fact.title;
+    const contentArea = factRow.createEl("textarea", {
+      cls: "echoink-secondary-edit-textarea",
+      attr: { rows: "3", placeholder: zh ? "内容" : "Content" }
+    });
+    contentArea.value = fact.content;
+    const recallInput = factRow.createEl("input", {
+      cls: "echoink-secondary-edit-input",
+      attr: { type: "text", placeholder: zh ? "何时可能想起" : "When it may be recalled" }
+    });
+    recallInput.value = fact.recallWhen;
+    const termsInput = factRow.createEl("input", {
+      cls: "echoink-secondary-edit-input",
+      attr: {
+        type: "text",
+        placeholder: zh ? "联想词（用逗号分隔，最多 5 个）" : "Match terms (comma separated, max 5)"
+      }
+    });
+    termsInput.value = fact.matchTerms.join(", ");
+    const reasonInput = factRow.createEl("input", {
+      cls: "echoink-secondary-edit-input",
+      attr: { type: "text", placeholder: zh ? "推理依据（可选）" : "Reason (optional)" }
+    });
+    reasonInput.value = fact.reason;
+    const editorActions = factRow.createDiv({ cls: "echoink-secondary-fact-actions" });
+    const saveBtn = editorActions.createEl("button", {
+      text: zh ? "保存" : "Save",
+      attr: { type: "button" }
+    });
+    const cancelBtn = editorActions.createEl("button", {
+      text: zh ? "取消" : "Cancel",
+      attr: { type: "button" }
+    });
+    cancelBtn.onclick = () => onMutated();
+    saveBtn.onclick = () => {
+      saveBtn.setAttr("disabled", "true");
+      void (async () => {
+        try {
+          const system = await this.plugin.getCognitiveSystem();
+          await system.updateSecondaryFact(fact.id, {
+            title: titleInput.value,
+            content: contentArea.value,
+            recallWhen: recallInput.value,
+            matchTerms: termsInput.value.split(/[,，]/u).map((term) => term.trim()).filter(Boolean),
+            reason: reasonInput.value.trim()
+          });
+          new Notice(zh ? "二级事实已更新" : "Secondary fact updated");
+          onMutated();
+        } catch (error) {
+          console.error("EchoInk secondary fact edit failed", error);
+          new Notice(zh ? "保存失败，请重试" : "Save failed; please retry");
+          saveBtn.removeAttribute("disabled");
+        }
+      })();
+    };
   }
 
   private currentPersonalMemoryRecords(

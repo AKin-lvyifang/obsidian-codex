@@ -976,6 +976,21 @@ function buildPersonalMemoryContextMessage(fixed: Readonly<{
   recall?: PersonalMemoryPreparedTurnContext["recall"];
   injectionKeys: readonly string[];
 }>): AgentMessage {
+  const secondaryFacts: Array<{
+    parentId: string;
+    parentTitle: string;
+    fact: import("../harness/memory/personal-memory-contracts").SecondaryMatchView;
+  }> = [];
+  {
+    const seen = new Set<string>();
+    for (const candidate of fixed.recall?.candidates ?? []) {
+      for (const view of candidate.secondaryMatches ?? []) {
+        if (seen.has(view.id)) continue;
+        seen.add(view.id);
+        secondaryFacts.push({ parentId: candidate.id, parentTitle: candidate.title, fact: view });
+      }
+    }
+  }
   return {
     role: "custom",
     customType: PI_PERSONAL_MEMORY_CONTEXT_CUSTOM_TYPE,
@@ -1003,7 +1018,14 @@ function buildPersonalMemoryContextMessage(fixed: Readonly<{
               injected: fixed.recall.injected,
               remaining: fixed.recall.remaining
             }),
-            "</echoink_memory_recall>"
+            "</echoink_memory_recall>",
+            ...(secondaryFacts.length === 0
+              ? []
+              : [
+                  "<echoink_memory_secondary trust=\"llm-inferred-reference\">",
+                  JSON.stringify({ secondaryFacts }),
+                  "</echoink_memory_secondary>"
+                ])
           ])
     ].join("\n\n"),
     display: false,

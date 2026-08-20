@@ -83,6 +83,8 @@ import {
   type PersonalMemoryCorrectionRecord
 } from "./plugin/personal-memory-correction-service";
 import { normalizeApiProviderId } from "./settings/provider-presets";
+import { CognitiveSystem } from "./harness/memory/cognitive-system";
+import type { DreamLlmPort } from "./harness/memory/dream-engine";
 
 interface PiConversationActivationTask {
   readonly generation: number;
@@ -119,6 +121,8 @@ export default class CodexForObsidianPlugin extends Plugin {
   private piActivatedConversationId: string | null = null;
   private piLocalData: PiLocalDataService | null = null;
   private piLocalDataFlight: Promise<PiLocalDataService> | null = null;
+  private cognitiveSystem: CognitiveSystem | null = null;
+  private cognitiveSystemFlight: Promise<CognitiveSystem> | null = null;
   private readonly piRunConversations = new Map<string, string>();
   private readonly apiProviderActivation = new ApiProviderActivationService();
   private editorTranslation: EditorTranslationService | null = null;
@@ -127,6 +131,11 @@ export default class CodexForObsidianPlugin extends Plugin {
   async onload(): Promise<void> {
     await this.loadSettings();
     await this.initializePiLocalData();
+    // Cognitive main-chain (personality / dreaming / secondary facts): start the
+    // scheduler as soon as local data is ready; failures never block the plugin.
+    void this.getCognitiveSystem().catch((error) => {
+      console.error("EchoInk cognitive system init failed", error);
+    });
     const controllers = registerEchoInkPluginFeatures(this);
     this.knowledgeBase = controllers.knowledgeBase;
     this.review = controllers.review;
@@ -138,6 +147,8 @@ export default class CodexForObsidianPlugin extends Plugin {
   }
 
   private async performUnload(): Promise<void> {
+    this.cognitiveSystem?.dispose();
+    this.cognitiveSystem = null;
     await this.knowledgeBase?.unload();
     this.review?.unload();
     await this.cancelAllPiConversationActivations();
@@ -769,6 +780,66 @@ export default class CodexForObsidianPlugin extends Plugin {
       });
     }
     return this.editorTranslation;
+  }
+
+  /**
+   * Cognitive system facade: personality templates, dreaming scheduler and
+   * secondary facts. Created once per Vault against the Personal Memory repo.
+   */
+  async getCognitiveSystem(): Promise<CognitiveSystem> {
+    if (this.cognitiveSystem) return this.cognitiveSystem;
+    if (!this.cognitiveSystemFlight) {
+      this.cognitiveSystemFlight = (async () => {
+        const localData = await this.ensurePiLocalData();
+        const system = await CognitiveSystem.create({
+          repository: localData.personalMemory,
+          llm: () => this.createDreamLlmPort(),
+          getDreamConfig: () => ({
+            enabled: this.settings.memory.dreamEnabled,
+            runsPerDay: this.settings.memory.dreamRunsPerDay
+          }),
+          isForegroundBusy: () =>
+            this.piRunConversations.size > 0 || this.productActivity.hasActivity,
+          registerInterval: (handle) => this.registerInterval(handle)
+        });
+        system.startDreamScheduler();
+        this.cognitiveSystem = system;
+        return system;
+      })();
+    }
+    return await this.cognitiveSystemFlight;
+  }
+
+  /** One-shot dream LLM port; null when no Provider is configured. */
+  private createDreamLlmPort(): DreamLlmPort | null {
+    const provider = getActiveApiProvider(this.settings);
+    if (!provider) return null;
+    return {
+      call: async (input) => await this.getPiProviderConfigurationService().generateText({
+        draft: {
+          providerSettingsId: provider.id,
+          providerId: normalizeApiProviderId(
+            provider.providerId,
+            provider.baseUrl,
+            provider.name
+          ),
+          runtimeProviderId: provider.runtimeProviderId,
+          apiProtocol: provider.apiProtocol,
+          baseUrl: provider.baseUrl,
+          modelId: provider.model,
+          apiKey: "",
+          toolCalling: false,
+          imageInput: false,
+          reasoning: provider.reasoning,
+          contextWindow: provider.contextWindow,
+          maxOutputTokens: provider.maxOutputTokens
+        },
+        systemPrompt: input.systemPrompt,
+        userPrompt: input.userPrompt,
+        timeoutMs: 120_000,
+        maxTokens: input.maxTokens
+      })
+    };
   }
 
   private getPersonalMemoryCorrectionService(): PersonalMemoryCorrectionService {

@@ -1,14 +1,20 @@
 import { estimatePiContextTokens } from "../pi-native/pi-context-budget";
 import type {
   PersonalMemoryMode,
-  PersonalMemorySearchItem
+  PersonalMemorySearchItem,
+  SecondaryMatchView
 } from "./personal-memory-contracts";
 import { PersonalMemoryRepository } from "./personal-memory-repository";
 import type { PersonalMemoryTurnCatalogCandidate } from "./personal-memory-repository";
 
 export type PersonalMemoryRecallCandidate = Pick<PersonalMemorySearchItem,
   "id" | "kind" | "title" | "recallWhen" | "summary" | "date" | "scope" | "score"
->;
+> & Readonly<{
+  /** Secondary fact that decisively pulled this Memory into the candidates. */
+  matchedSecondaryId?: string;
+  /** All secondary facts of this Memory that matched the turn query. */
+  secondaryMatches?: readonly SecondaryMatchView[];
+}>;
 
 export interface PersonalMemoryPreparedTurnContext {
   readonly revision: number;
@@ -104,6 +110,11 @@ export class PersonalMemoryRecallHarness {
       });
     }
     if (!search) throw new Error("personal_memory_recall_snapshot_missing_search");
+    // Stats-only, fire-and-forget: never blocks or fails the turn.
+    const pendingSecondaryHits = search.pendingSecondaryHits ?? [];
+    if (pendingSecondaryHits.length > 0) {
+      void this.repository.recordSecondaryRecallHits(pendingSecondaryHits).catch(() => {});
+    }
     await input.onProgress?.("matching");
     await input.onProgress?.("budgeting");
     const candidates = search.items.map(toRecallCandidate);
@@ -153,7 +164,7 @@ function selectRecallCandidateIds(
 function toRecallCandidate(
   item: Readonly<Pick<PersonalMemorySearchItem,
     "id" | "kind" | "title" | "recallWhen" | "summary" | "date" | "scope" | "score"
-  >>
+  >> & Partial<Pick<PersonalMemorySearchItem, "matchedSecondaryId" | "secondaryMatches">>
 ): Readonly<PersonalMemoryRecallCandidate> {
   return Object.freeze({
     id: item.id,
@@ -163,7 +174,11 @@ function toRecallCandidate(
     summary: item.summary,
     date: item.date,
     ...(item.scope ? { scope: item.scope } : {}),
-    score: item.score
+    score: item.score,
+    ...(item.matchedSecondaryId ? { matchedSecondaryId: item.matchedSecondaryId } : {}),
+    ...(item.secondaryMatches && item.secondaryMatches.length > 0
+      ? { secondaryMatches: Object.freeze(item.secondaryMatches.map((view) => Object.freeze({ ...view }))) }
+      : {})
   });
 }
 

@@ -201,6 +201,7 @@ async function scenarioRecallUsesOneBoundedTurnSnapshot(): Promise<void> {
           returned: 1,
           remaining: 0,
           exhausted: true,
+          pendingSecondaryHits: [],
           nextCursor: null,
           items: [{
             id: "mem_snapshot",
@@ -418,7 +419,7 @@ async function scenarioCompleteCatalogAndStablePagination(): Promise<void> {
       schemaVersion?: number;
       catalog?: readonly unknown[];
     };
-    assert.equal(index.schemaVersion, 2);
+    assert.equal(index.schemaVersion, 3);
     assert.equal(index.catalog?.length, 105);
 
     await writeFile(fixture.repository.layout.searchIndex, JSON.stringify({
