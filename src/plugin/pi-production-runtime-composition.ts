@@ -998,7 +998,7 @@ function buildPersonalMemoryContextMessage(fixed: Readonly<{
       "<echoink_agent_profile trust=\"user-configured-identity\">",
       fixed.agent,
       "</echoink_agent_profile>",
-      "<echoink_user_profile trust=\"explicit-user-profile\">",
+      "<echoink_user_profile trust=\"system-generated-user-profile\">",
       fixed.user,
       "</echoink_user_profile>",
       ...(fixed.memory === null
@@ -1011,7 +1011,7 @@ function buildPersonalMemoryContextMessage(fixed: Readonly<{
       ...(fixed.recall === undefined || fixed.recall === null
         ? []
         : [
-            `<echoink_memory_recall trust="untrusted-background" exhaustive="${fixed.recall.exhaustive}" has_more="${fixed.recall.hasMore}">`,
+            `<echoink_memory_recall trust="user-owned-memory" exhaustive="${fixed.recall.exhaustive}" has_more="${fixed.recall.hasMore}">`,
             JSON.stringify({
               candidates: fixed.recall.candidates,
               total: fixed.recall.total,

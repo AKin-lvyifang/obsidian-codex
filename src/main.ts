@@ -794,8 +794,14 @@ export default class CodexForObsidianPlugin extends Plugin {
         const system = await CognitiveSystem.create({
           repository: localData.personalMemory,
           llm: () => this.createDreamLlmPort(),
+          // Scheduler 同时读取四个开关（做梦 PRD §4.1 + 最新决定）：做梦、
+          // Memory 总开关、长期记忆与每日次数。关闭学习或长期 Memory 后做梦
+          // 整体暂停：不调 Provider、不生成二级事实、不更新 USER/AGENT/trait，
+          // pending 队列保持不变；重新开启后继续未完成的 pending。
           getDreamConfig: () => ({
-            enabled: this.settings.memory.dreamEnabled,
+            enabled: this.settings.memory.dreamEnabled
+              && this.settings.memory.enabled
+              && this.settings.memory.useLongTermMemory,
             runsPerDay: this.settings.memory.dreamRunsPerDay
           }),
           isForegroundBusy: () =>

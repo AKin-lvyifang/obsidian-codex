@@ -17,12 +17,17 @@ import {
   PERSONALITY_STATE_RELATIVE_PATH,
   PersonalityStateStore,
   applyTemplateToState,
-  emptyPersonalityState,
   personalityStateJson,
   type PersonalityState
 } from "./personality-state";
 import { UserProfileStateStore } from "./user-profile-state";
-import { DreamStateStore, enqueuePendingMemoryIds } from "./dream-state";
+import {
+  DREAM_STATE_RELATIVE_PATH,
+  DreamStateStore,
+  enqueuePendingMemoryIds,
+  type DreamState
+} from "./dream-state";
+import { cognitiveJsonText } from "./cognitive-file-utils";
 import {
   SecondaryMemoryStore,
   serializeSecondaryRecord
@@ -44,7 +49,7 @@ import type {
   PersonalMemoryRecord,
   SecondaryMemoryRecord
 } from "./personal-memory-contracts";
-import type { PersonalMemoryRepository } from "./personal-memory-repository";
+import { defaultAgentProfile, type PersonalMemoryRepository } from "./personal-memory-repository";
 
 export interface CognitiveSystemLlmOptions {
   /** null → Provider 未配置：做梦当轮不产生模型结果，队列保持 pending。 */
@@ -102,8 +107,7 @@ class RepositoryDreamPort implements DreamRepositoryPort {
       content: input.content,
       recallWhen: input.recallWhen,
       basis: input.basis,
-      contentOrigin: "user_statement",
-      expectedRevision: null
+      contentOrigin: "user_statement"
     } as never, {
       vaultId,
       conversationId: "echoink-dream",
@@ -208,7 +212,7 @@ export class CognitiveSystem {
   }
 
   async readPersonalityState(): Promise<PersonalityState> {
-    return (await this.personalityStore.read()) ?? emptyPersonalityState(this.now());
+    return (await this.personalityStore.read()) ?? emptyPersonalityShape(this.now());
   }
 
   async renderPersonalitySummary(language: "zh" | "en"): Promise<string> {
@@ -216,10 +220,22 @@ export class CognitiveSystem {
   }
 
   /**
-   * 选择人格模板：立即持久化 personality-state 并重写 AGENT.md，
-   * 全部在一个本地事务中完成，不调用任何 Provider。
+   * 选择人格模板（含「重置人格」后重新选择）：单事务完成全部写入，
+   * 不调用任何 Provider（人格草案 §4.2 / §10.3 + 最新决定）。
+   *
+   * reset=true（重置流程的第二步）时，同一事务还会：
+   * - 将旧 observed 与 learnedRequirements 以 reason=reset 标记 superseded；
+   * - 清空尚未成立的候选；
+   * - 把当前有效 Memory 重新标记为待做梦来源（清空 processedSources、
+   *   重置 lastProcessedMemoryRevision 并入队 pending）；
+   * - 重写 AGENT.md、更新人格状态与六边形。
+   *
+   * 取消选择零写入：本方法只在用户真正选中新模板后被调用。
    */
-  async selectPersonalityTemplate(templateId: string): Promise<Readonly<{
+  async selectPersonalityTemplate(
+    templateId: string,
+    options?: Readonly<{ reset?: boolean }>
+  ): Promise<Readonly<{
     revision: number;
     state: PersonalityState;
     agent: string;
@@ -227,48 +243,71 @@ export class CognitiveSystem {
     const template = getPersonalityTemplate(templateId);
     if (!template) throw new Error(`Unknown personality template: ${templateId}`);
     const now = this.now();
-    const previous = (await this.personalityStore.read()) ?? emptyPersonalityState(now);
-    const next = applyTemplateToState(previous, { templateId: template.id, now, reset: false });
-    const agentContent = renderAgentMarkdown(next);
-    const result = await this.repository.applyCognitiveUpdate({
-      agentContent,
-      secondaryRecords: await this.secondaryStore.loadAll(),
-      extraChanges: [{
-        relativePath: PERSONALITY_STATE_RELATIVE_PATH,
-        content: personalityStateJson(next)
-      }],
-      detail: `personality-template:${template.id}`
+    const previous = (await this.personalityStore.read()) ?? emptyPersonalityShape(now);
+    const next = applyTemplateToState(previous, {
+      templateId: template.id,
+      now,
+      reset: Boolean(options?.reset)
     });
-    return Object.freeze({ revision: result.revision, state: next, agent: agentContent });
-  }
+    const agentContent = renderAgentMarkdown(next);
 
-  /**
-   * 重置人格：清空 explicit/observed/候选/长期要求并重写 AGENT.md 为默认身份。
-   * 每次都需上层先向用户确认；Memory 不受影响。
-   */
-  async resetPersonality(): Promise<Readonly<{
-    revision: number;
-    state: PersonalityState;
-    agent: string;
-  }>> {
-    const now = this.now();
-    const previous = await this.personalityStore.read();
-    const next = Object.freeze({
-      ...emptyPersonalityState(now),
-      revision: (previous?.revision ?? 0) + 1,
-      updatedAt: now
-    });
-    const agentContent = renderAgentMarkdown(next);
-    const result = await this.repository.applyCognitiveUpdate({
-      agentContent,
-      secondaryRecords: await this.secondaryStore.loadAll(),
-      extraChanges: [{
-        relativePath: PERSONALITY_STATE_RELATIVE_PATH,
-        content: personalityStateJson(next)
-      }],
-      detail: "personality-reset"
-    });
-    return Object.freeze({ revision: result.revision, state: next, agent: agentContent });
+    const extraChanges: Array<{ relativePath: string; content: string }> = [{
+      relativePath: PERSONALITY_STATE_RELATIVE_PATH,
+      content: personalityStateJson(next)
+    }];
+
+    // 首次选择模板覆盖自定义 AGENT.md 前，保存一份持久、可恢复的本地
+    // 历史版本（事务临时备份提交后会删除，不能冒充历史备份；草案 §12.2）。
+    const controlState = await this.repository.readUserControlState();
+    const fixedAgent = controlState.agent;
+    if (previous.revision === 0
+      && fixedAgent.trim().length > 0
+      && fixedAgent !== defaultAgentProfile()) {
+      const stamp = new Date(now).toISOString().replace(/[:.]/g, "-");
+      extraChanges.push({
+        relativePath: `agents/echoink/history/AGENT-${stamp}.md`,
+        content: fixedAgent.endsWith("\n") ? fixedAgent : `${fixedAgent}\n`
+      });
+    }
+
+    // 重置：把当前有效 Memory 重新标记为待做梦来源（同一事务）。
+    let resultRevision: number;
+    if (options?.reset) {
+      const inspected = await this.repository.readUserControlState();
+      const currentIds = inspected.records
+        .filter((record) => record.status === "current")
+        .map((record) => record.id);
+      const dreamState = await this.dreamStateStore.read();
+      let nextDream: DreamState = Object.freeze({
+        ...dreamState,
+        revision: dreamState.revision + 1,
+        lastProcessedMemoryRevision: 0,
+        backfillCursor: null,
+        updatedAt: now
+      });
+      nextDream = enqueuePendingMemoryIds(nextDream, currentIds, now);
+      extraChanges.push({
+        relativePath: DREAM_STATE_RELATIVE_PATH,
+        content: cognitiveJsonText(nextDream)
+      });
+      const result = await this.repository.applyCognitiveUpdate({
+        agentContent,
+        secondaryRecords: await this.secondaryStore.loadAll(),
+        extraChanges,
+        detail: `personality-reset-template:${template.id}`
+      });
+      resultRevision = result.revision;
+      this.dreamStateStore.updateCache(nextDream);
+    } else {
+      const result = await this.repository.applyCognitiveUpdate({
+        agentContent,
+        secondaryRecords: await this.secondaryStore.loadAll(),
+        extraChanges,
+        detail: `personality-template:${template.id}`
+      });
+      resultRevision = result.revision;
+    }
+    return Object.freeze({ revision: resultRevision, state: next, agent: agentContent });
   }
 
   // -------------------------------------------------------------------------
@@ -401,3 +440,19 @@ export class CognitiveSystem {
   }
 }
 
+
+/** Empty personality shape for vaults that never selected a template. */
+function emptyPersonalityShape(now: number): PersonalityState {
+  return {
+    schema: "echoink.personality.v1",
+    revision: 0,
+    templateId: null,
+    explicit: Object.freeze({ tempo: null, energy: null, mind: null, warmth: null, order: null, stance: null }),
+    observed: Object.freeze({ tempo: null, energy: null, mind: null, warmth: null, order: null, stance: null }),
+    history: Object.freeze([]),
+    candidates: Object.freeze([]),
+    learnedRequirements: Object.freeze([]),
+    processedSources: Object.freeze([]),
+    updatedAt: now
+  } as PersonalityState;
+}

@@ -12,7 +12,11 @@ import {
   renderableRequirements,
   type PersonalityState
 } from "./personality-state";
-import type { UserProfileState } from "./user-profile-state";
+import {
+  isProfileItemRenderable,
+  type UserProfileItem,
+  type UserProfileState
+} from "./user-profile-state";
 
 export function renderAgentMarkdown(state: PersonalityState): string {
   const template = getPersonalityTemplate(state.templateId);
@@ -53,21 +57,41 @@ export function renderAgentMarkdown(state: PersonalityState): string {
   return lines.join("\n");
 }
 
+/**
+ * USER.md 投影。口径区分（最新决定）：
+ * - explicit_memory / legacy_import：用户明确确认过的画像，直接渲染；
+ * - observed_memory：系统长期观察，必须达到 USER_OBSERVED_MIN_SOURCES 个
+ *   独立有效来源才允许进入 USER.md，且渲染时带「观察」标记。
+ * 整份 USER.md 不再统一冒充「用户明确确认」。
+ */
 export function renderUserMarkdown(state: UserProfileState): string {
-  const current = state.items.filter((item) => item.status === "current");
-  const identity = current.filter((item) => item.section === "identity");
-  const preferences = current.filter((item) => item.section !== "identity");
+  const renderable = state.items.filter((item) => isProfileItemRenderable(item));
+  const identity = renderable.filter((item) => item.section === "identity");
+  const preferences = renderable.filter((item) => item.section !== "identity");
 
-  const lines: string[] = ["# USER", "", "这里保存用户明确确认的当前稳定画像与合作方式。", ""];
+  const lines: string[] = [
+    "# USER",
+    "",
+    "本文件是系统生成的用户画像投影：无标记条目来自用户明确确认的记忆；",
+    "带「系统观察」标记的条目是做梦从长期记忆中归纳的参考信息，不等于用户亲口确认。",
+    ""
+  ];
   lines.push("## 当前稳定画像", "");
   if (identity.length === 0) lines.push("- 尚无已确认内容。");
-  else for (const item of identity) lines.push(`- ${item.text}`);
+  else for (const item of identity) lines.push(renderProfileItemLine(item));
   lines.push("");
   lines.push("## 长期偏好与合作方式", "");
   if (preferences.length === 0) lines.push("- 尚无已确认内容。");
-  else for (const item of preferences) lines.push(`- ${item.text}`);
+  else for (const item of preferences) lines.push(renderProfileItemLine(item));
   lines.push("");
   return lines.join("\n");
+}
+
+function renderProfileItemLine(item: UserProfileItem): string {
+  if (item.basis === "observed_memory") {
+    return `- ${item.text}（系统观察，供参考）`;
+  }
+  return `- ${item.text}`;
 }
 
 /**

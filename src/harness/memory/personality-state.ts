@@ -438,6 +438,131 @@ export function applyDreamPersonalityUpdate(
   });
 }
 
+/**
+ * Memory 来源失效回收（人格草案 §10.1 + 做梦 PRD 最新决定）：
+ * 用仍然 current 的一级 Memory 对账。失效来源从候选、已处理来源、长期要求
+ * 和 observed trait 中移除；要求/候选失去全部来源后标记 superseded；
+ * observed trait 证据全部失效时回退上一条仍有有效证据的 observed，
+ * 再没有则回退 explicit 模板基线（observed 槽位置空）。
+ * 纯函数：无变化时返回原引用。
+ */
+export function reconcilePersonalitySources(
+  previous: PersonalityState,
+  validMemoryIds: ReadonlySet<string>,
+  now: number
+): PersonalityState {
+  let changed = false;
+
+  // 1. Candidates whose source memory is no longer current.
+  const candidates = previous.candidates.filter(
+    (candidate) => validMemoryIds.has(candidate.sourceMemoryId)
+  );
+  if (candidates.length !== previous.candidates.length) changed = true;
+
+  // 2. Processed sources for memories that no longer exist as current.
+  const processedSources = previous.processedSources.filter(
+    (source) => validMemoryIds.has(source.memoryId)
+  );
+  if (processedSources.length !== previous.processedSources.length) changed = true;
+
+  // 3. Learned requirements: drop dead sources; retire when none remain.
+  const revision = previous.revision + 1;
+  const learnedRequirements: AgentRequirementRecord[] = [];
+  for (const requirement of previous.learnedRequirements) {
+    if (requirement.status !== "current") {
+      learnedRequirements.push(requirement);
+      continue;
+    }
+    const alive = requirement.sourceMemoryIds.filter((id) => validMemoryIds.has(id));
+    if (alive.length === requirement.sourceMemoryIds.length) {
+      learnedRequirements.push(requirement);
+      continue;
+    }
+    changed = true;
+    if (alive.length === 0) {
+      learnedRequirements.push({
+        ...requirement,
+        status: "superseded",
+        sourceMemoryIds: Object.freeze([]),
+        revision,
+        reason: "source_lost"
+      });
+    } else {
+      learnedRequirements.push({
+        ...requirement,
+        sourceMemoryIds: Object.freeze(alive),
+        revision
+      });
+    }
+  }
+
+  // 4. Observed traits: retire or fall back when all evidence dies.
+  const history: PersonalityTraitRecord[] = [...previous.history];
+  const observed: Record<TraitDimension, PersonalityTraitRecord | null> = { ...previous.observed };
+  for (const dimension of TRAIT_DIMENSIONS) {
+    const record = observed[dimension];
+    if (!record || record.status !== "current") continue;
+    const alive = record.sourceMemoryIds.filter((id) => validMemoryIds.has(id));
+    if (alive.length === record.sourceMemoryIds.length) continue;
+    changed = true;
+    if (alive.length > 0) {
+      observed[dimension] = Object.freeze({
+        ...record,
+        sourceMemoryIds: Object.freeze(alive),
+        updatedAt: now,
+        revision
+      });
+      continue;
+    }
+    // All evidence invalid → supersede current observed, then fall back to the
+    // newest historical observed that still has valid evidence; otherwise the
+    // slot empties and scores fall back to the explicit template baseline.
+    history.push({
+      ...record,
+      status: "superseded",
+      updatedAt: now,
+      revision,
+      reason: "source_lost"
+    });
+    const fallback = [...history]
+      .reverse()
+      .find((entry) =>
+        entry.dimension === dimension
+        && entry.basis === "observed"
+        && entry.status === "superseded"
+        && entry.id !== record.id
+        && entry.sourceMemoryIds.some((id) => validMemoryIds.has(id))
+      );
+    if (fallback) {
+      observed[dimension] = Object.freeze({
+        ...fallback,
+        status: "current",
+        sourceMemoryIds: Object.freeze(
+          fallback.sourceMemoryIds.filter((id) => validMemoryIds.has(id))
+        ),
+        updatedAt: now,
+        revision
+      });
+    } else {
+      observed[dimension] = null;
+    }
+  }
+
+  if (!changed) return previous;
+  return Object.freeze({
+    schema: PERSONALITY_STATE_SCHEMA,
+    revision,
+    templateId: previous.templateId,
+    explicit: previous.explicit,
+    observed: Object.freeze(observed),
+    history: Object.freeze(pruneHistory(history)),
+    candidates: Object.freeze(candidates),
+    learnedRequirements: Object.freeze(learnedRequirements),
+    processedSources: Object.freeze(processedSources),
+    updatedAt: now
+  });
+}
+
 /** Requirements that should render into AGENT.md (current, max 12). */
 export function renderableRequirements(
   state: PersonalityState

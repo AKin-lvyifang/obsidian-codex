@@ -101,9 +101,13 @@ export class DreamScheduler {
     }
   }
 
-  /** Manual trigger (e.g. diagnostics). Respects the foreground-busy gate. */
+  /**
+   * Manual trigger (e.g. diagnostics). Respects the same gates as the
+   * heartbeat: dreaming off / long-term memory off / learning off / busy.
+   */
   async forceRun(): Promise<DreamRunResult | null> {
     if (this.disposed || this.deps.engine.isRunning) return null;
+    if (!this.deps.getConfig().enabled) return null;
     if (this.deps.isForegroundBusy()) return null;
     return await this.deps.engine.runOnce();
   }

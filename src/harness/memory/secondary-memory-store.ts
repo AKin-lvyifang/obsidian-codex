@@ -20,13 +20,15 @@ import {
   SECONDARY_MAX_MATCH_TERMS,
   SECONDARY_MAX_PER_PARENT,
   SECONDARY_MEMORY_SCHEMA,
-  SECONDARY_RELATION_INITIAL_CONFIDENCE,
   SECONDARY_MIN_CONFIDENCE,
   isSecondaryRelation,
+  isSecondarySupportLevel,
+  type PersonalMemoryBasis,
   type SecondaryBasis,
   type SecondaryMemoryRecord,
   type SecondaryRelation,
-  type SecondaryStatus
+  type SecondaryStatus,
+  type SecondarySupportLevel
 } from "./personal-memory-contracts";
 import { cognitivePathExists, newCognitiveId } from "./cognitive-file-utils";
 import { mkdir, readdir, readFile } from "node:fs/promises";
@@ -55,6 +57,8 @@ export function serializeSecondaryRecord(record: Readonly<SecondaryMemoryRecord>
     ["match_terms", record.matchTerms],
     ["relation", record.relation],
     ["reason", record.reason],
+    ["support_level", record.supportLevel],
+    ["evidence", record.evidence],
     ["basis", record.basis],
     ["source_memory_revision", record.sourceMemoryRevision],
     ["confidence", record.confidence],
@@ -144,6 +148,10 @@ export function parseSecondaryRecord(text: string, file: string): SecondaryMemor
     matchTerms: Object.freeze(matchTerms),
     relation: isSecondaryRelation(relation) ? relation : "associated",
     reason: typeof fields.get("reason") === "string" ? (fields.get("reason") as string).slice(0, 500) : "",
+    supportLevel: isSecondarySupportLevel(fields.get("support_level"))
+      ? (fields.get("support_level") as SecondarySupportLevel)
+      : "strong_inference",
+    evidence: typeof fields.get("evidence") === "string" ? (fields.get("evidence") as string).slice(0, 800) : "",
     basis: basis as SecondaryBasis,
     sourceMemoryRevision: requireNumber("source_memory_revision"),
     confidence: Math.max(0, Math.min(1, requireNumber("confidence"))),
@@ -243,6 +251,10 @@ export interface NewSecondaryFactInput {
   readonly relation: SecondaryRelation;
   readonly reason: string;
   readonly basis: SecondaryBasis;
+  /** 代码计算的准入 confidence（不做真实概率解释）。 */
+  readonly confidence: number;
+  readonly supportLevel: SecondarySupportLevel;
+  readonly evidence: string;
   readonly sourceMemoryRevision: number;
   readonly now: number;
   readonly idFactory?: () => string;
@@ -272,9 +284,6 @@ export function createSecondaryRecord(input: NewSecondaryFactInput): SecondaryMe
     terms.push(term);
     if (terms.length >= SECONDARY_MAX_MATCH_TERMS) break;
   }
-  const confidence = input.basis === "user_edited_inference"
-    ? 0.7
-    : SECONDARY_RELATION_INITIAL_CONFIDENCE[input.relation] ?? 0.4;
   return Object.freeze({
     schema: SECONDARY_MEMORY_SCHEMA,
     id,
@@ -286,9 +295,11 @@ export function createSecondaryRecord(input: NewSecondaryFactInput): SecondaryMe
     matchTerms: Object.freeze(terms),
     relation: input.relation,
     reason: input.reason.trim().slice(0, 500),
+    supportLevel: input.supportLevel,
+    evidence: input.evidence.trim().slice(0, 800),
     basis: input.basis,
     sourceMemoryRevision: input.sourceMemoryRevision,
-    confidence,
+    confidence: Math.max(0, Math.min(1, input.confidence)),
     hitCount: 0,
     lastHitAt: null,
     lastDecayAt: null,
@@ -299,30 +310,262 @@ export function createSecondaryRecord(input: NewSecondaryFactInput): SecondaryMe
   });
 }
 
-/** Enforce max 8 facts per parent, dedupe by normalized title+content+terms. */
-export function dedupeSecondaryFacts(
-  existing: readonly SecondaryMemoryRecord[],
-  incoming: readonly SecondaryMemoryRecord[]
-): readonly SecondaryMemoryRecord[] {
-  const kept: SecondaryMemoryRecord[] = [];
-  const fingerprints = new Set<string>();
-  for (const record of [...existing, ...incoming]) {
-    if (kept.length >= SECONDARY_MAX_PER_PARENT && !existing.includes(record)) break;
-    const fingerprint = fingerprintSecondary(record);
-    if (fingerprints.has(fingerprint)) continue;
-    fingerprints.add(fingerprint);
-    kept.push(record);
-  }
-  return kept;
+// ---------------------------------------------------------------------------
+// Candidate pipeline: 候选生成 → 字段验证 → 置信度计算 → 去重 → 多样性选择
+// → 动态落盘（做梦 PRD 最新决定；8 条是硬上限，不是生成目标）
+// ---------------------------------------------------------------------------
+
+/** supportLevel 基础分（不用 LLM 自评数字）。 */
+export const SECONDARY_SUPPORT_BASE_SCORE: Readonly<Record<SecondarySupportLevel, number>> = Object.freeze({
+  direct: 0.85,
+  strong_inference: 0.70,
+  weak_inference: 0.45
+});
+
+/** 一级 Memory basis 系数。 */
+export const SECONDARY_BASIS_WEIGHT: Readonly<Record<PersonalMemoryBasis, number>> = Object.freeze({
+  explicit: 1.00,
+  observed: 0.90,
+  inferred: 0.75
+});
+
+/** relation 调整项。 */
+export const SECONDARY_RELATION_ADJUSTMENT: Readonly<Record<SecondaryRelation, number>> = Object.freeze({
+  category: 0,
+  instance: 0,
+  attribute: -0.05,
+  context: -0.05,
+  associated: -0.15
+});
+
+/** confidence 准入阈值：低于它的候选不落盘、不索引、不等待凑数。 */
+export const SECONDARY_CONFIDENCE_THRESHOLD = 0.60 as const;
+/** 同一 relation 最多保留的 current 二级事实数。 */
+export const SECONDARY_MAX_PER_RELATION = 2 as const;
+
+/**
+ * confidence = clamp(baseScore × basisWeight + relationAdjustment, 0, 1)。
+ * 它只是「是否值得进入召回系统」的准入分，不宣称是真实概率。
+ */
+export function computeSecondaryConfidence(
+  supportLevel: SecondarySupportLevel,
+  parentBasis: PersonalMemoryBasis,
+  relation: SecondaryRelation
+): number {
+  const score = SECONDARY_SUPPORT_BASE_SCORE[supportLevel]
+    * SECONDARY_BASIS_WEIGHT[parentBasis]
+    + SECONDARY_RELATION_ADJUSTMENT[relation];
+  return Math.max(0, Math.min(1, Math.round(score * 1000) / 1000));
 }
 
-function fingerprintSecondary(record: SecondaryMemoryRecord): string {
-  const payload = [
-    record.title.normalize("NFKC").toLocaleLowerCase(),
-    record.content.normalize("NFKC").toLocaleLowerCase(),
-    record.matchTerms.map((term) => term.normalize("NFKC").toLocaleLowerCase()).sort().join("|")
-  ].join("\n");
-  return createHash("sha256").update(payload).digest("hex");
+/** 语义身份指纹：规范化 title + 排序后的匹配词（content 允许重新表述）。 */
+export function secondaryFingerprint(title: string, matchTerms: readonly string[]): string {
+  const normalizedTitle = title.normalize("NFKC").toLocaleLowerCase().trim();
+  const normalizedTerms = matchTerms
+    .map((term) => term.normalize("NFKC").toLocaleLowerCase().trim())
+    .filter(Boolean)
+    .sort()
+    .join("|");
+  return createHash("sha256").update(`${normalizedTitle}\n${normalizedTerms}`).digest("hex");
+}
+
+export interface SecondaryFactCandidate {
+  readonly title: string;
+  readonly content: string;
+  readonly recallWhen: string;
+  readonly matchTerms: readonly string[];
+  readonly relation: SecondaryRelation;
+  readonly supportLevel: SecondarySupportLevel;
+  readonly reason: string;
+  readonly evidence: string;
+}
+
+export interface SecondaryReconcileInput {
+  readonly parentId: string;
+  readonly parentBasis: PersonalMemoryBasis;
+  readonly parentRevision: number;
+  /** 该父节点名下全部二级记录（含 disabled）。 */
+  readonly existing: readonly SecondaryMemoryRecord[];
+  /** 本轮通过字段验证的临时候选（尚未落盘）。 */
+  readonly candidates: readonly SecondaryFactCandidate[];
+  readonly now: number;
+  readonly idFactory?: () => string;
+}
+
+export interface SecondaryReconcileResult {
+  /** 该父节点名下全部最终记录（含未改动的 disabled 历史）。 */
+  readonly records: readonly SecondaryMemoryRecord[];
+  /** 需要写盘的二级文件（新建 / 复用更新 / 停用）。 */
+  readonly fileChanges: readonly Readonly<{ relativePath: string; content: string }>[];
+  readonly factsCreated: number;
+  readonly factsReused: number;
+  readonly factsRetired: number;
+}
+
+/**
+ * 父 Memory 做梦（含重新做梦）的统一 dedupe + reconcile：
+ *
+ * 1. user_edited_inference 永远保留，做梦不得覆盖；
+ * 2. 本轮候选重新评分筛选（confidence ≥ 阈值）；
+ * 3. 入选结果替换旧 llm_inferred：语义相同（fingerprint）复用旧 ID、
+ *    hitCount、lastHitAt 与历史 confidence；
+ * 4. 不再入选的旧 llm_inferred 标记 disabled；
+ * 5. 最终 current 集合重新满足：阈值、relation 多样性、每 relation ≤2、
+ *    硬上限 8 条。禁止 append。
+ */
+export function reconcileSecondaryForParent(
+  input: SecondaryReconcileInput
+): SecondaryReconcileResult {
+  const makeId = input.idFactory ?? (() => newCognitiveId("sec"));
+  const fileChanges: Array<{ relativePath: string; content: string }> = [];
+
+  const userEdited = input.existing.filter(
+    (record) => record.basis === "user_edited_inference" && record.status === "current"
+  );
+  const oldLlm = input.existing.filter(
+    (record) => record.basis === "llm_inferred" && record.status === "current"
+  );
+  const untouched = input.existing.filter(
+    (record) => record.status !== "current"
+      || (record.basis !== "llm_inferred" && record.basis !== "user_edited_inference")
+  );
+
+  // --- 1. Confidence + threshold ------------------------------------------
+  const scored = input.candidates
+    .filter((candidate) => candidate.title.trim() && candidate.content.trim()
+      && candidate.evidence.trim() && candidate.matchTerms.length > 0)
+    .map((candidate) => ({
+      candidate,
+      confidence: computeSecondaryConfidence(
+        candidate.supportLevel, input.parentBasis, candidate.relation
+      ),
+      fingerprint: secondaryFingerprint(candidate.title, candidate.matchTerms)
+    }))
+    .filter((entry) => entry.confidence >= SECONDARY_CONFIDENCE_THRESHOLD);
+
+  // --- 2. Dedupe: same title or same term set → keep highest confidence ----
+  const keptUserFingerprints = new Set(
+    userEdited.map((record) => secondaryFingerprint(record.title, record.matchTerms))
+  );
+  const deduped: typeof scored = [];
+  for (const entry of scored.sort((left, right) => right.confidence - left.confidence)) {
+    if (keptUserFingerprints.has(entry.fingerprint)) continue;
+    const duplicate = deduped.some((kept) => kept.fingerprint === entry.fingerprint);
+    if (duplicate) continue;
+    deduped.push(entry);
+  }
+
+  // --- 3. Diversity: one best per relation first, then fill by confidence --
+  const relationCount = new Map<SecondaryRelation, number>();
+  for (const record of userEdited) {
+    relationCount.set(record.relation, (relationCount.get(record.relation) ?? 0) + 1);
+  }
+  let slots = SECONDARY_MAX_PER_PARENT - userEdited.length;
+  const selected: typeof scored = [];
+  const picked = new Set<typeof scored[number]>();
+  const tryTake = (entry: typeof scored[number]): boolean => {
+    if (slots <= 0) return false;
+    const count = relationCount.get(entry.candidate.relation) ?? 0;
+    if (count >= SECONDARY_MAX_PER_RELATION) return false;
+    relationCount.set(entry.candidate.relation, count + 1);
+    slots -= 1;
+    selected.push(entry);
+    picked.add(entry);
+    return true;
+  };
+  const relationsInOrder: SecondaryRelation[] = [];
+  for (const entry of deduped) {
+    if (!relationsInOrder.includes(entry.candidate.relation)) {
+      relationsInOrder.push(entry.candidate.relation);
+    }
+  }
+  for (const relation of relationsInOrder) {
+    const best = deduped.find((entry) => entry.candidate.relation === relation && !picked.has(entry));
+    if (best) tryTake(best);
+  }
+  for (const entry of deduped) {
+    if (!picked.has(entry)) tryTake(entry);
+  }
+
+  // --- 4. Replace: reuse ids for fingerprint-equal old llm facts ------------
+  const oldByFingerprint = new Map(
+    oldLlm.map((record) => [secondaryFingerprint(record.title, record.matchTerms), record])
+  );
+  const finalRecords: SecondaryMemoryRecord[] = [...userEdited, ...untouched];
+  let factsCreated = 0;
+  let factsReused = 0;
+  let factsRetired = 0;
+  const reusedIds = new Set<string>();
+  for (const entry of selected) {
+    const previous = oldByFingerprint.get(entry.fingerprint);
+    if (previous) {
+      const reused: SecondaryMemoryRecord = Object.freeze({
+        ...previous,
+        title: entry.candidate.title.trim().slice(0, 200),
+        content: entry.candidate.content.trim().slice(0, 2_000),
+        recallWhen: (entry.candidate.recallWhen.trim() || entry.candidate.title.trim()).slice(0, 500),
+        matchTerms: Object.freeze(entry.candidate.matchTerms
+          .map((term) => normalizeMatchTerm(term))
+          .filter((term): term is string => term !== null)
+          .slice(0, SECONDARY_MAX_MATCH_TERMS)),
+        relation: entry.candidate.relation,
+        reason: entry.candidate.reason.trim().slice(0, 500),
+        supportLevel: entry.candidate.supportLevel,
+        evidence: entry.candidate.evidence.trim().slice(0, 800),
+        // 历史 confidence / hitCount / lastHitAt 原样复用。
+        sourceMemoryRevision: input.parentRevision,
+        updatedAt: input.now,
+        revision: previous.revision + 1
+      });
+      reusedIds.add(previous.id);
+      finalRecords.push(reused);
+      fileChanges.push({ relativePath: reused.file, content: serializeSecondaryRecord(reused) });
+      factsReused += 1;
+      continue;
+    }
+    const created = createSecondaryRecord({
+      parentId: input.parentId,
+      title: entry.candidate.title,
+      content: entry.candidate.content,
+      recallWhen: entry.candidate.recallWhen,
+      matchTerms: entry.candidate.matchTerms,
+      relation: entry.candidate.relation,
+      reason: entry.candidate.reason,
+      basis: "llm_inferred",
+      confidence: entry.confidence,
+      supportLevel: entry.candidate.supportLevel,
+      evidence: entry.candidate.evidence,
+      sourceMemoryRevision: input.parentRevision,
+      now: input.now,
+      idFactory: makeId
+    });
+    finalRecords.push(created);
+    fileChanges.push({ relativePath: created.file, content: serializeSecondaryRecord(created) });
+    factsCreated += 1;
+  }
+  for (const record of oldLlm) {
+    if (reusedIds.has(record.id)) continue;
+    const retired: SecondaryMemoryRecord = Object.freeze({
+      ...record,
+      status: "disabled",
+      updatedAt: input.now,
+      revision: record.revision + 1
+    });
+    finalRecords.push(retired);
+    fileChanges.push({ relativePath: retired.file, content: serializeSecondaryRecord(retired) });
+    factsRetired += 1;
+  }
+
+  finalRecords.sort(
+    (left, right) => left.id.localeCompare(right.id)
+  );
+  return Object.freeze({
+    records: Object.freeze(finalRecords),
+    fileChanges: Object.freeze(fileChanges),
+    factsCreated,
+    factsReused,
+    factsRetired
+  });
 }
 
 // ---------------------------------------------------------------------------

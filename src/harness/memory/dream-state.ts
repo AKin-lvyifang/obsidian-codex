@@ -72,6 +72,11 @@ export class DreamStateStore {
   invalidate(): void {
     this.cache = null;
   }
+
+  /** Update the cache after the state was committed through a transaction. */
+  updateCache(state: DreamState): void {
+    this.cache = state;
+  }
 }
 
 export function parseDreamState(raw: Record<string, unknown>): DreamState | null {

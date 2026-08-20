@@ -56,6 +56,13 @@ export const USER_PROFILE_STATE_RELATIVE_PATH = path.posix.join(
   "shared-user", "user-profile-state.json"
 );
 
+/**
+ * observed 画像至少需要多少个独立、方向一致的有效一级 Memory 来源，
+ * 才能进入 USER.md（人格草案 §9.2 / 最新决定）。一条 observed view
+ * 绝不能直接写入 USER.md。
+ */
+export const USER_OBSERVED_MIN_SOURCES = 3 as const;
+
 export class UserProfileStateStore {
   readonly filePath: string;
 
@@ -162,6 +169,69 @@ export function applyDreamProfileUpdate(
     lastProjectedUserHash: input.lastProjectedUserHash ?? previous.lastProjectedUserHash,
     updatedAt: input.now
   });
+}
+
+/**
+ * Memory 来源失效回收：USER 画像项失去全部有效一级 Memory 来源后标记
+ * superseded；已处理来源同步清理。纯函数：无变化时返回原引用。
+ */
+export function reconcileProfileSources(
+  previous: UserProfileState,
+  validMemoryIds: ReadonlySet<string>,
+  now: number
+): UserProfileState {
+  let changed = false;
+  const revision = previous.revision + 1;
+  const items: UserProfileItem[] = [];
+  for (const item of previous.items) {
+    if (item.status !== "current") {
+      items.push(item);
+      continue;
+    }
+    const alive = item.sourceMemoryIds.filter((id) => validMemoryIds.has(id));
+    if (alive.length === item.sourceMemoryIds.length) {
+      items.push(item);
+      continue;
+    }
+    changed = true;
+    if (alive.length === 0) {
+      items.push(Object.freeze({
+        ...item,
+        status: "superseded" as const,
+        sourceMemoryIds: Object.freeze([]),
+        revision
+      }));
+    } else {
+      items.push(Object.freeze({
+        ...item,
+        sourceMemoryIds: Object.freeze(alive),
+        revision
+      }));
+    }
+  }
+  const processedSources = previous.processedSources.filter(
+    (source) => validMemoryIds.has(source.memoryId)
+  );
+  if (processedSources.length !== previous.processedSources.length) changed = true;
+  if (!changed) return previous;
+  return Object.freeze({
+    schema: USER_PROFILE_STATE_SCHEMA,
+    revision,
+    items: Object.freeze(items),
+    processedSources: Object.freeze(processedSources),
+    legacyUserMigration: previous.legacyUserMigration,
+    lastProjectedUserHash: previous.lastProjectedUserHash,
+    updatedAt: now
+  });
+}
+
+/** Whether an observed profile item has earned the right to enter USER.md. */
+export function isProfileItemRenderable(item: UserProfileItem): boolean {
+  if (item.status !== "current") return false;
+  if (item.basis === "observed_memory") {
+    return item.sourceMemoryIds.length >= USER_OBSERVED_MIN_SOURCES;
+  }
+  return true;
 }
 
 export function parseUserProfileState(raw: Record<string, unknown>): UserProfileState | null {

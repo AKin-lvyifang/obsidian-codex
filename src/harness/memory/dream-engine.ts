@@ -1,44 +1,51 @@
 /**
- * dream-engine.ts — one dreaming round (做梦 PRD §5).
+ * dream-engine.ts — one dreaming round (做梦 PRD §5 + 最新决定).
  *
  * Flow:
- *  1. Gates: dreaming enabled, long-term memory on, learning on, provider ready.
- *  2. Select ≤10 primary memories: pending/changed first, then backfill of
- *     existing memories without secondary facts (≤10 total per run).
- *  3. For each memory (concurrency 1): call the LLM once, parse strict JSON,
- *     produce ≤8 secondary facts (≤5 matchTerms each) plus optional
- *     personality signals / Agent requirements / user-profile items.
- *  4. Recompute personality state, user-profile state, AGENT.md, USER.md and
- *     the secondary lifecycle (hits handled by Recall, decay handled here).
- *  5. Commit EVERYTHING through one repository transaction. Only after the
- *     transaction succeeds do lastSuccessAt / processed revision advance.
- *
- * Failure rules (做梦 PRD §5): provider unavailable, invalid JSON, or a file
- * write failure keep the affected sources pending; empty results are never
- * written and lastSuccessAt is never advanced for a failed round.
+ *  1. Gates live in the scheduler (dreamEnabled + memory.enabled +
+ *     useLongTermMemory + runsPerDay). Here we only detect Provider absence.
+ *  2. 来源对账: USER items / learnedRequirements / observed traits /
+ *     candidates / processedSources are reconciled against still-current
+ *     primary memories BEFORE any LLM work.
+ *  3. Legacy USER.md migration (local, no Provider).
+ *  4. Select ≤10 primary memories: pending/changed first, then backfill.
+ *  5. Per memory (concurrency 1): LLM → strict JSON → 0–12 临时候选
+ *     (不落盘) → 字段验证 → 置信度计算 → 阈值 0.60 → 去重 → 多样性选择
+ *     → 与旧 llm_inferred reconcile（复用 fingerprint 相同的旧 ID/hitCount）。
+ *  6. Decay pass (idempotent via lastDecayAt).
+ *  7. ONE repository transaction commits: personality-state, user-profile-state,
+ *     AGENT.md, USER.md, secondary files, Search Index and dream-state
+ *     (pendingMemoryIds / processed revision / backfillCursor / lastRunAt /
+ *     lastSuccessAt). Never split.
+ *  8. lastSuccessAt advances only when the round committed AND the Provider
+ *     was available AND no memory failed. Provider unavailable, invalid JSON,
+ *     token overflow or write failure: lastSuccessAt untouched, pending kept,
+ *     no empty results. lastRunAt always records the real attempt so failed
+ *     rounds are not re-paid every 60s.
  */
 
 import { createHash } from "node:crypto";
 import {
+  SECONDARY_MAX_CANDIDATES,
   SECONDARY_MAX_MATCH_TERMS,
   SECONDARY_MAX_PER_PARENT,
   isSecondaryRelation,
+  isSecondarySupportLevel,
   type PersonalMemoryRecord,
   type SecondaryMemoryRecord,
-  type SecondaryRelation
+  type SecondaryRelation,
+  type SecondarySupportLevel
 } from "./personal-memory-contracts";
 import {
   applyDreamPersonalityUpdate,
-  applyTemplateToState,
-  emptyPersonalityState,
-  personalityStateJson,
+  reconcilePersonalitySources,
   type DreamPersonalityInput,
   type PersonalityState
 } from "./personality-state";
 import {
   applyDreamProfileUpdate,
-  emptyUserProfileState,
-  userProfileStateJson,
+  reconcileProfileSources,
+  isProfileItemRenderable,
   type DreamProfileInput,
   type UserProfileSection,
   type UserProfileState
@@ -46,13 +53,23 @@ import {
 import { renderAgentMarkdown, renderUserMarkdown } from "./cognitive-projection";
 import {
   applySecondaryDecay,
-  createSecondaryRecord,
+  reconcileSecondaryForParent,
   serializeSecondaryRecord,
+  type SecondaryFactCandidate,
   type SecondaryMemoryStore
 } from "./secondary-memory-store";
-import type { DreamState, DreamStateStore } from "./dream-state";
+import {
+  cognitiveJsonText
+} from "./cognitive-file-utils";
+import {
+  DREAM_STATE_RELATIVE_PATH,
+  enqueuePendingMemoryIds,
+  type DreamState,
+  type DreamStateStore
+} from "./dream-state";
 import type { PersonalityStateStore } from "./personality-state";
 import type { UserProfileStateStore } from "./user-profile-state";
+import { TRAIT_DIMENSION_META, TRAIT_DIMENSIONS } from "./personality-templates";
 
 // ---------------------------------------------------------------------------
 // Ports
@@ -90,7 +107,7 @@ export interface DreamRepositoryPort {
 export interface DreamEngineConfig {
   /** 单次最多处理一级记忆，默认 10。 */
   readonly maxMemoriesPerRun: number;
-  /** 单条最多生成二级事实，默认 8。 */
+  /** 每条一级记忆最终最多保存的二级事实（硬上限），默认 8。 */
   readonly maxFactsPerMemory: number;
   /** 单条二级事实最多匹配词，默认 5。 */
   readonly maxMatchTermsPerFact: number;
@@ -129,7 +146,8 @@ export interface DreamRunResult {
   readonly processedMemoryIds: readonly string[];
   readonly failedMemoryIds: readonly string[];
   readonly factsCreated: number;
-  readonly factsReplaced: number;
+  readonly factsReused: number;
+  readonly factsRetired: number;
   readonly decayed: number;
   readonly autoDisabled: number;
   readonly agentUpdated: boolean;
@@ -175,58 +193,84 @@ export class DreamEngine {
   private async execute(startedAt: number): Promise<DreamRunResult> {
     const { repository, personalityStore, profileStore, secondaryStore, dreamStateStore } = this.deps;
     const dreamState = await dreamStateStore.read();
-    const personalityState = (await personalityStore.read()) ?? emptyPersonalityState(startedAt);
-    const profileState = (await profileStore.read()) ?? emptyUserProfileState(startedAt);
+    const personalityState = (await personalityStore.read())
+      ?? this.emptyPersonality(startedAt);
+    const profileState = (await profileStore.read())
+      ?? this.emptyProfile(startedAt);
     const secondaryRecords = [...(await secondaryStore.loadAll())];
     const inspected = await repository.inspect();
     const currentRecords = inspected.records.filter((record) => record.status === "current");
+    const validMemoryIds = new Set(currentRecords.map((record) => record.id));
+    const fixedFiles = await repository.readFixedFiles();
 
     const failedMemoryIds: string[] = [];
     const processedMemoryIds: string[] = [];
     let factsCreated = 0;
-    let factsReplaced = 0;
+    let factsReused = 0;
+    let factsRetired = 0;
     let agentUpdated = false;
     let userUpdated = false;
+    let migrationError: string | null = null;
+    const migrationEnqueue: string[] = [];
 
-    // --- Legacy USER.md migration (草案 §12.3) ---------------------------
-    let workingProfileState = profileState;
-    const fixedFiles = await repository.readFixedFiles();
+    // --- 1. 来源对账 (Memory 来源失效回收) ---------------------------------
+    let workingPersonality = reconcilePersonalitySources(personalityState, validMemoryIds, startedAt);
+    let workingProfile = reconcileProfileSources(profileState, validMemoryIds, startedAt);
+
+    // --- 2. Legacy USER.md migration (草案 §12.3, local, no Provider) ------
     const userHash = sha256Text(fixedFiles.user);
     const defaultUserHash = sha256Text(DEFAULT_USER_PROFILE_TEXT);
-    if (workingProfileState.revision === 0 && workingProfileState.legacyUserMigration === null) {
-      workingProfileState = Object.freeze({
-        ...workingProfileState,
-        revision: workingProfileState.revision + 1,
-        legacyUserMigration: userHash !== defaultUserHash ? "pending" as const : "done" as const,
-        lastProjectedUserHash: userHash !== defaultUserHash ? "" : userHash,
+    const userIsCustom = userHash !== defaultUserHash;
+    if (workingProfile.revision === 0 && workingProfile.legacyUserMigration === null) {
+      workingProfile = Object.freeze({
+        ...workingProfile,
+        revision: workingProfile.revision + 1,
+        legacyUserMigration: userIsCustom ? "pending" as const : "done" as const,
+        lastProjectedUserHash: userIsCustom ? "" : userHash,
         updatedAt: startedAt
       });
     }
-    if (workingProfileState.legacyUserMigration === "pending") {
+    if (workingProfile.legacyUserMigration === "pending") {
       try {
-        const migrated = await repository.writeSystemMemory({
-          kind: "fact",
-          title: "迁移自 USER.md 的用户画像",
-          content: fixedFiles.user.trim(),
-          recallWhen: "需要用户稳定画像、身份或长期合作方式时",
-          basis: "explicit"
-        });
-        workingProfileState = Object.freeze({
-          ...workingProfileState,
-          revision: workingProfileState.revision + 1,
-          legacyUserMigration: "done" as const,
-          updatedAt: startedAt
-        });
-        await dreamStateStore.write(enqueuePending(dreamStateStore.peek(), [migrated.id], startedAt));
-      } catch {
-        // Migration stays pending; the old USER.md is never overwritten.
+        const alreadyMigrated = inspected.records.find(
+          (record) => record.status === "current" && record.title === USER_MIGRATION_TITLE
+        );
+        if (alreadyMigrated) {
+          workingProfile = Object.freeze({
+            ...workingProfile,
+            revision: workingProfile.revision + 1,
+            legacyUserMigration: "done" as const,
+            updatedAt: startedAt
+          });
+          migrationEnqueue.push(alreadyMigrated.id);
+        } else {
+          const migrated = await repository.writeSystemMemory({
+            kind: "fact",
+            title: USER_MIGRATION_TITLE,
+            content: fixedFiles.user.trim(),
+            recallWhen: "需要用户稳定画像、身份或长期合作方式时",
+            basis: "explicit"
+          });
+          workingProfile = Object.freeze({
+            ...workingProfile,
+            revision: workingProfile.revision + 1,
+            legacyUserMigration: "done" as const,
+            updatedAt: startedAt
+          });
+          migrationEnqueue.push(migrated.id);
+        }
+      } catch (error) {
+        // 迁移失败绝不静默标记成功：marker 保持 pending，下一轮重试，
+        // 旧 USER.md 不会被覆盖。
+        migrationError = errorMessage(error);
       }
     }
 
-    // --- Select memories to process ---------------------------------------
-    const selected = this.selectMemories(currentRecords, dreamState, personalityState, secondaryRecords);
+    // --- 3. Select memories to process --------------------------------------
+    const selection = this.selectMemories(currentRecords, dreamState, workingPersonality, secondaryRecords);
+    const selected = selection.selected;
 
-    // --- Provider gate -----------------------------------------------------
+    // --- 4. Provider gate ----------------------------------------------------
     const llm = this.deps.llm();
     const providerUnavailable = llm === null;
     const processable = providerUnavailable ? [] : selected;
@@ -234,13 +278,13 @@ export class DreamEngine {
       failedMemoryIds.push(...selected.map((record) => record.id));
     }
 
-    // --- Per-memory LLM work (concurrency fixed at 1) ---------------------
+    // --- 5. Per-memory LLM work (concurrency fixed at 1) --------------------
     const signals: Array<DreamPersonalityInput["signals"][number]> = [];
     const requirements: Array<DreamPersonalityInput["requirements"][number]> = [];
     const profileItems: Array<DreamProfileInput["items"][number]> = [];
     const processedSources: Array<{ memoryId: string; memoryRevision: number }> = [];
+    const candidatesByParent = new Map<string, SecondaryFactCandidate[]>();
     let tokensUsed = 0;
-    const newSecondary: SecondaryMemoryRecord[] = [];
 
     for (const record of processable) {
       if (!llm) break;
@@ -264,40 +308,19 @@ export class DreamEngine {
           continue;
         }
 
-        // Replace existing llm_inferred facts for this parent; keep user edits.
-        const keptForParent: SecondaryMemoryRecord[] = [];
-        let replaced = 0;
-        for (const existing of secondaryRecords) {
-          if (existing.parentId !== record.id) continue;
-          if (existing.basis === "user_edited_inference" || existing.status === "disabled") {
-            keptForParent.push(existing);
-          } else if (existing.status === "current") {
-            replaced += 1;
-          }
-        }
-        const generated: SecondaryMemoryRecord[] = [];
-        for (const fact of parsed.facts.slice(0, this.config.maxFactsPerMemory)) {
-          generated.push(createSecondaryRecord({
-            parentId: record.id,
+        // 候选暂不落盘：字段验证在 parse 阶段完成，置信度/去重/多样性在
+        // reconcileSecondaryForParent 中统一执行。
+        candidatesByParent.set(record.id, parsed.facts.slice(0, SECONDARY_MAX_CANDIDATES)
+          .map((fact) => ({
             title: fact.title,
             content: fact.content,
             recallWhen: fact.recallWhen,
             matchTerms: fact.matchTerms.slice(0, this.config.maxMatchTermsPerFact),
             relation: fact.relation,
+            supportLevel: fact.supportLevel,
             reason: fact.reason,
-            basis: "llm_inferred",
-            sourceMemoryRevision: inspected.revision,
-            now: this.now()
-          }));
-        }
-        const allowed = Math.max(
-          0,
-          SECONDARY_MAX_PER_PARENT - keptForParent.filter((kept) => kept.status === "current").length
-        );
-        const added = generated.slice(0, allowed);
-        factsCreated += added.length;
-        factsReplaced += replaced;
-        newSecondary.push(...added);
+            evidence: fact.evidence
+          })));
 
         if (isSignalEligible(record)) {
           const seenDimensions = new Set<string>();
@@ -333,75 +356,111 @@ export class DreamEngine {
       }
     }
 
-    // --- Apply personality / profile updates -------------------------------
-    let nextPersonality = personalityState;
+    // --- 6. Secondary reconcile per processed parent (no append) -------------
+    let finalSecondary: SecondaryMemoryRecord[] = secondaryRecords.filter(
+      (record) => !candidatesByParent.has(record.parentId)
+    );
+    const secondaryFileChanges: Array<{ relativePath: string; content: string }> = [];
+    for (const [parentId, candidates] of candidatesByParent) {
+      const parentRecord = currentRecords.find((record) => record.id === parentId);
+      const result = reconcileSecondaryForParent({
+        parentId,
+        parentBasis: parentRecord?.basis ?? "inferred",
+        parentRevision: inspected.revision,
+        existing: secondaryRecords.filter((record) => record.parentId === parentId),
+        candidates,
+        now: this.now()
+      });
+      finalSecondary.push(...result.records);
+      secondaryFileChanges.push(...result.fileChanges);
+      factsCreated += result.factsCreated;
+      factsReused += result.factsReused;
+      factsRetired += result.factsRetired;
+    }
+
+    // --- 7. Apply personality / profile updates ------------------------------
+    let nextPersonality = workingPersonality;
     if (signals.length > 0 || requirements.length > 0 || processedSources.length > 0) {
-      nextPersonality = applyDreamPersonalityUpdate(personalityState, {
+      nextPersonality = applyDreamPersonalityUpdate(workingPersonality, {
         signals,
         requirements,
         processedSources,
         now: this.now()
       });
     }
-    let nextProfile = workingProfileState;
+    let nextProfile = workingProfile;
     if (profileItems.length > 0 || processedSources.length > 0) {
-      nextProfile = applyDreamProfileUpdate(workingProfileState, {
+      nextProfile = applyDreamProfileUpdate(workingProfile, {
         items: profileItems,
         processedSources,
         now: this.now()
       });
     }
 
-    // --- Decay pass (idempotent via lastDecayAt) ---------------------------
+    // --- 8. Decay pass (idempotent via lastDecayAt) --------------------------
     let decayed = 0;
     let autoDisabled = 0;
-    const allSecondary = [...secondaryRecords, ...newSecondary];
     const decayedSecondary: SecondaryMemoryRecord[] = [];
-    for (const record of allSecondary) {
+    for (const record of finalSecondary) {
       const result = applySecondaryDecay(record, this.now());
-      if (result.decayed) decayed += 1;
+      if (result.decayed) {
+        decayed += 1;
+        decayedSecondary.push(result.record);
+      } else {
+        decayedSecondary.push(record);
+      }
       if (result.autoDisabled) autoDisabled += 1;
-      decayedSecondary.push(result.record);
     }
+    const decayedFileChanges = decayedSecondary
+      .filter((record) => record.lastDecayAt !== null)
+      .map((record) => ({ relativePath: record.file, content: serializeSecondaryRecord(record) }));
 
-    // --- Projections ---------------------------------------------------------
+    // --- 9. Projections -------------------------------------------------------
     let agentContent: string | undefined;
     let userContent: string | undefined;
     if (nextPersonality.templateId && nextPersonality !== personalityState) {
-      agentContent = renderAgentMarkdown(nextPersonality);
-      agentUpdated = agentContent !== fixedFiles.agent;
-      if (!agentUpdated) agentContent = undefined;
-    } else if (nextPersonality.templateId && personalityState.revision === 0 && nextPersonality.revision === 0) {
-      // Never fabricate AGENT.md before a template exists.
+      const rendered = renderAgentMarkdown(nextPersonality);
+      if (rendered !== fixedFiles.agent) {
+        agentContent = rendered;
+        agentUpdated = true;
+      }
     }
-    const currentItems = nextProfile.items.filter((item) => item.status === "current");
-    const userCustom = fixedFiles.user.trim() !== DEFAULT_USER_PROFILE_TEXT.trim();
-    const projectionAllowed = currentItems.length > 0
+    const renderableItems = nextProfile.items.filter((item) => isProfileItemRenderable(item));
+    const migrationDone = nextProfile.legacyUserMigration === "done";
+    const projectionAllowed = (renderableItems.length > 0
       || nextProfile.lastProjectedUserHash === userHash
-      || !userCustom;
-    if (nextProfile !== workingProfileState && projectionAllowed) {
-      userContent = renderUserMarkdown(nextProfile);
-      userUpdated = userContent !== fixedFiles.user;
-      if (!userUpdated) userContent = undefined;
-      else nextProfile = Object.freeze({
-        ...nextProfile,
-        lastProjectedUserHash: sha256Text(userContent)
-      });
+      || !userIsCustom)
+      && (!userIsCustom || migrationDone);
+    if (nextProfile !== profileState && projectionAllowed) {
+      const rendered = renderUserMarkdown(nextProfile);
+      if (rendered !== fixedFiles.user) {
+        userContent = rendered;
+        userUpdated = true;
+        nextProfile = Object.freeze({
+          ...nextProfile,
+          lastProjectedUserHash: sha256Text(rendered.endsWith("\n") ? rendered : `${rendered}\n`)
+        });
+      }
     }
 
+    // --- 10. Decide whether there is anything to commit ----------------------
     const hasWork = processedMemoryIds.length > 0
+      || secondaryFileChanges.length > 0
       || decayed > 0
       || Boolean(agentContent)
       || Boolean(userContent)
-      || workingProfileState !== profileState
-      || nextPersonality !== personalityState;
+      || workingProfile !== profileState
+      || nextPersonality !== personalityState
+      || migrationEnqueue.length > 0;
     if (!hasWork) {
+      await this.recordAttemptOnly(dreamState);
       return this.finish({
         startedAt,
         processedMemoryIds: [],
         failedMemoryIds,
         factsCreated: 0,
-        factsReplaced: 0,
+        factsReused: 0,
+        factsRetired: 0,
         decayed: 0,
         autoDisabled: 0,
         agentUpdated: false,
@@ -412,24 +471,44 @@ export class DreamEngine {
       });
     }
 
-    // --- Commit all files through one transaction --------------------------
-    const extraChanges: Array<{ relativePath: string; content: string }> = [];
-    for (const record of newSecondary) {
-      extraChanges.push({ relativePath: record.file, content: serializeSecondaryRecord(record) });
+    // --- 11. Next durable dream progress --------------------------------------
+    const success = !providerUnavailable && failedMemoryIds.length === 0;
+    const processedSet = new Set(processedMemoryIds);
+    let nextDream: DreamState = Object.freeze({
+      ...dreamState,
+      revision: dreamState.revision + 1,
+      lastRunAt: this.now(),
+      lastSuccessAt: success ? this.now() : dreamState.lastSuccessAt,
+      lastProcessedMemoryRevision: success ? inspected.revision : dreamState.lastProcessedMemoryRevision,
+      pendingMemoryIds: Object.freeze(
+        dreamState.pendingMemoryIds.filter((id) => !processedSet.has(id))
+      ),
+      backfillCursor: selection.backfillProcessed.length > 0
+        ? selection.backfillProcessed[selection.backfillProcessed.length - 1]
+        : dreamState.backfillCursor,
+      updatedAt: this.now()
+    });
+    if (migrationEnqueue.length > 0) {
+      nextDream = enqueuePendingMemoryIds(nextDream, migrationEnqueue, this.now());
     }
-    for (const record of decayedSecondary) {
-      if (record.lastDecayAt !== null && !newSecondary.includes(record)) {
-        extraChanges.push({ relativePath: record.file, content: serializeSecondaryRecord(record) });
+
+    // --- 12. ONE transaction: all cognitive files + dream-state --------------
+    const extraChanges: Array<{ relativePath: string; content: string }> = [
+      ...secondaryFileChanges,
+      ...decayedFileChanges,
+      {
+        relativePath: "agents/echoink/personality-state.json",
+        content: personalityJson(nextPersonality)
+      },
+      {
+        relativePath: "shared-user/user-profile-state.json",
+        content: userProfileJson(nextProfile)
+      },
+      {
+        relativePath: DREAM_STATE_RELATIVE_PATH,
+        content: cognitiveJsonText(nextDream)
       }
-    }
-    extraChanges.push({
-      relativePath: "agents/echoink/personality-state.json",
-      content: personalityStateJson(nextPersonality)
-    });
-    extraChanges.push({
-      relativePath: "shared-user/user-profile-state.json",
-      content: userProfileStateJson(nextProfile)
-    });
+    ];
 
     try {
       await repository.applyCognitiveUpdate({
@@ -437,16 +516,19 @@ export class DreamEngine {
         ...(userContent ? { userContent } : {}),
         secondaryRecords: decayedSecondary,
         extraChanges,
-        detail: `dream: processed=${processedMemoryIds.length} facts=${factsCreated} decayed=${decayed}`
+        detail: `dream: processed=${processedMemoryIds.length} facts=+${factsCreated}/~${factsReused}/-${factsRetired} decayed=${decayed}${migrationError ? ` migration_error=${migrationError}` : ""}`
       });
     } catch (error) {
-      // Transaction failed → nothing persisted; pending sources stay pending.
+      // Transaction failed → nothing persisted; still record the attempt so we
+      // do not re-pay every heartbeat, but never advance success semantics.
+      await this.recordAttemptOnly(dreamState);
       return this.finish({
         startedAt,
         processedMemoryIds: [],
         failedMemoryIds: [...new Set([...failedMemoryIds, ...processedMemoryIds])],
         factsCreated: 0,
-        factsReplaced: 0,
+        factsReused: 0,
+        factsRetired: 0,
         decayed: 0,
         autoDisabled: 0,
         agentUpdated: false,
@@ -457,34 +539,64 @@ export class DreamEngine {
       });
     }
 
-    // --- Transaction succeeded: advance durable dream progress --------------
+    // --- 13. Transaction succeeded -------------------------------------------
+    dreamStateStore.updateCache(nextDream);
     await secondaryStore.refresh();
-    const processedSet = new Set(processedMemoryIds);
-    const remainingPending = dreamState.pendingMemoryIds.filter((id) => !processedSet.has(id));
-    await dreamStateStore.write(Object.freeze({
-      ...dreamState,
-      revision: dreamState.revision + 1,
-      lastRunAt: this.now(),
-      lastSuccessAt: this.now(),
-      lastProcessedMemoryRevision: inspected.revision,
-      pendingMemoryIds: Object.freeze(remainingPending),
-      updatedAt: this.now()
-    }));
 
     return this.finish({
       startedAt,
       processedMemoryIds,
       failedMemoryIds,
       factsCreated,
-      factsReplaced,
+      factsReused,
+      factsRetired,
       decayed,
       autoDisabled,
       agentUpdated,
       userUpdated,
       providerUnavailable,
       committed: true,
-      error: null
+      error: migrationError
     });
+  }
+
+  /** Persist lastRunAt when a round attempted but committed nothing. */
+  private async recordAttemptOnly(dreamState: DreamState): Promise<void> {
+    const next: DreamState = Object.freeze({
+      ...dreamState,
+      revision: dreamState.revision + 1,
+      lastRunAt: this.now(),
+      updatedAt: this.now()
+    });
+    await this.deps.dreamStateStore.write(next);
+  }
+
+  private emptyPersonality(now: number): PersonalityState {
+    // Local import cycle is one-directional; build the empty shape inline.
+    return {
+      schema: "echoink.personality.v1",
+      revision: 0,
+      templateId: null,
+      explicit: Object.freeze({ tempo: null, energy: null, mind: null, warmth: null, order: null, stance: null }),
+      observed: Object.freeze({ tempo: null, energy: null, mind: null, warmth: null, order: null, stance: null }),
+      history: Object.freeze([]),
+      candidates: Object.freeze([]),
+      learnedRequirements: Object.freeze([]),
+      processedSources: Object.freeze([]),
+      updatedAt: now
+    } as PersonalityState;
+  }
+
+  private emptyProfile(now: number): UserProfileState {
+    return {
+      schema: "echoink.user-profile.v1",
+      revision: 0,
+      items: Object.freeze([]),
+      processedSources: Object.freeze([]),
+      legacyUserMigration: null,
+      lastProjectedUserHash: "",
+      updatedAt: now
+    } as UserProfileState;
   }
 
   /**
@@ -496,11 +608,12 @@ export class DreamEngine {
     dreamState: DreamState,
     personalityState: PersonalityState,
     secondaryRecords: readonly SecondaryMemoryRecord[]
-  ): PersonalMemoryRecord[] {
+  ): { selected: PersonalMemoryRecord[]; backfillProcessed: string[] } {
     const cap = this.config.maxMemoriesPerRun;
     const byId = new Map(currentRecords.map((record) => [record.id, record]));
     const selected: PersonalMemoryRecord[] = [];
     const picked = new Set<string>();
+    const fromBackfill = new Set<string>();
 
     const processedRevisions = new Map(
       personalityState.processedSources.map((source) => [source.memoryId, source.memoryRevision])
@@ -511,25 +624,26 @@ export class DreamEngine {
         .map((record) => record.parentId)
     );
 
-    const consider = (record: PersonalMemoryRecord): void => {
+    const consider = (record: PersonalMemoryRecord, backfill: boolean): void => {
       if (selected.length >= cap || picked.has(record.id)) return;
       picked.add(record.id);
       selected.push(record);
+      if (backfill) fromBackfill.add(record.id);
     };
 
     // 1. Explicit pending queue (new writes enqueue here).
     for (const id of dreamState.pendingMemoryIds) {
       const record = byId.get(id);
-      if (record) consider(record);
+      if (record) consider(record, false);
     }
     // 2. Changed since the last processed manifest revision.
     for (const record of currentRecords) {
-      if (record.revision > dreamState.lastProcessedMemoryRevision) consider(record);
+      if (record.revision > dreamState.lastProcessedMemoryRevision) consider(record, false);
     }
     // 3. Unprocessed (e.g. after a reset cleared processedSources).
     for (const record of currentRecords) {
       const processedAt = processedRevisions.get(record.id);
-      if (processedAt === undefined || processedAt < record.revision) consider(record);
+      if (processedAt === undefined || processedAt < record.revision) consider(record, false);
     }
     // 4. Backfill: existing memories without secondary facts, cursor-ordered.
     if (selected.length < cap) {
@@ -540,10 +654,14 @@ export class DreamEngine {
       const start = cursor ? backfill.findIndex((record) => record.id > cursor) : 0;
       for (const record of backfill.slice(Math.max(0, start))) {
         if (selected.length >= cap) break;
-        consider(record);
+        consider(record, true);
       }
     }
-    return selected.slice(0, cap);
+    const backfillProcessed = selected
+      .filter((record) => fromBackfill.has(record.id))
+      .map((record) => record.id)
+      .sort((left, right) => left.localeCompare(right));
+    return { selected: selected.slice(0, cap), backfillProcessed };
   }
 
   private finish(result: Omit<DreamRunResult, "finishedAt">): DreamRunResult {
@@ -571,24 +689,29 @@ function isProfileEligible(record: PersonalMemoryRecord): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Prompts
+// Prompts (方向说明必须来自 TRAIT_DIMENSION_META，0 = 左极)
 // ---------------------------------------------------------------------------
 
 export function buildDreamPrompts(
   record: PersonalMemoryRecord,
   maxInputChars: number
 ): { systemPrompt: string; userPrompt: string } {
+  const directionLines = TRAIT_DIMENSIONS.map((dimension) => {
+    const meta = TRAIT_DIMENSION_META[dimension];
+    return `- ${dimension}：decrease=偏「${meta.leftZh}」；increase=偏「${meta.rightZh}」。`;
+  });
   const systemPrompt = [
     "你是 EchoInk 的离线记忆整理模块。你只基于给定的一条长期记忆做保守推理，输出严格 JSON。",
     "规则：",
     "1. 只输出一个 JSON 对象，键为 secondaryFacts、personalitySignals、agentRequirements、userProfileItems；不要 Markdown 围栏、注释或解释。",
-    `2. secondaryFacts：0-${SECONDARY_MAX_PER_PARENT} 条二级事实，作为未来相关查询召回这条记忆的桥梁概念（上位类别、具体实例、属性、场景、常见联想）。`,
-    `3. 每条 secondaryFact 形如 {\"title\":≤30字, \"content\":≤120字且使用不确定语气如\"可能/也许相关\", \"recallWhen\":何时可能想起, \"matchTerms\":≤${SECONDARY_MAX_MATCH_TERMS}个完整词或短语（禁止单个汉字）, \"relation\":\"category|instance|attribute|context|associated\", \"reason\":≤80字}。`,
-    "4. 禁止推断：疾病或医疗建议、财务或投资建议、法律结论、未说明的人际态度、一次性事件细节、政治敏感立场。",
-    "5. personalitySignals：仅当这条记忆体现用户对 Agent 表达方式或处事方式的长期偏好时给出 0-2 条，形如 {\"dimension\":\"tempo|energy|mind|warmth|order|stance\", \"direction\":\"increase|decrease\", \"strength\":0-1, \"evidence\":≤80字}；否则空数组。",
+    `2. secondaryFacts：0-${SECONDARY_MAX_CANDIDATES} 条临时候选（宁缺毋滥，没有可靠推理就输出空数组），作为未来相关查询召回这条记忆的桥梁概念（上位类别、具体实例、属性、场景、常见联想）。`,
+    `3. 每条 secondaryFact 必须包含：{\"title\":≤30字, \"content\":≤120字且使用不确定语气如\"可能/也许相关/可参考\", \"recallWhen\":何时可能想起, \"matchTerms\":≤${SECONDARY_MAX_MATCH_TERMS}个完整词或短语（禁止单个汉字）, \"relation\":\"category|instance|attribute|context|associated\", \"supportLevel\":\"direct|strong_inference|weak_inference\"（direct=记忆直接陈述，strong_inference=强推理，weak_inference=弱联想）, \"reason\":≤80字, \"evidence\":≤120字，说明该事实如何由这条一级记忆推导}。缺少 supportLevel 或 evidence 的候选会被丢弃。`,
+    "4. 允许带「可能、也许相关、可参考」等不确定口径的保守推理（包括饮食禁忌关联到相关食物类别这类生活化桥接）；但禁止：把推理表述为用户亲口说过的话；给出确定诊断、确定因果或确定身份结论；把二级事实写成一级事实口径；生成三级或更深的推理链。",
+    "5. personalitySignals：仅当这条记忆体现用户对 Agent 表达方式或处事方式的长期偏好时给出 0-2 条，形如 {\"dimension\":\"tempo|energy|mind|warmth|order|stance\", \"direction\":\"increase|decrease\", \"strength\":0-1, \"evidence\":≤80字}；方向语义如下（分数 0=左极，1=右极）：",
+    ...directionLines,
     "6. agentRequirements：仅当记忆是用户对 Agent 的明确长期要求（如\"以后回复简短\"）时给出 0-2 条短语；否则空数组。",
     "7. userProfileItems：仅当记忆包含稳定、当前有效的用户画像（身份、长期偏好、合作方式）时给出 0-2 条 {\"section\":\"identity|preference|collaboration\", \"text\":≤120字}；一次性任务、临时指令、引用、假设不得进入。",
-    "8. 不得声称用户亲口说过记忆之外的话；不得生成三级或更深的推理；语言与记忆保持一致。"
+    "8. 不得声称用户亲口说过记忆之外的话；语言与记忆保持一致。"
   ].join("\n");
   const content = record.content.slice(0, maxInputChars);
   const userPrompt = JSON.stringify({
@@ -613,7 +736,9 @@ export interface ParsedDreamFact {
   readonly recallWhen: string;
   readonly matchTerms: readonly string[];
   readonly relation: SecondaryRelation;
+  readonly supportLevel: SecondarySupportLevel;
   readonly reason: string;
+  readonly evidence: string;
 }
 
 export interface ParsedDreamOutput {
@@ -644,7 +769,7 @@ export function parseDreamOutput(raw: string): ParsedDreamOutput | null {
 
   const facts: ParsedDreamFact[] = [];
   if (Array.isArray(root.secondaryFacts)) {
-    for (const entry of root.secondaryFacts) {
+    for (const entry of root.secondaryFacts.slice(0, SECONDARY_MAX_CANDIDATES)) {
       if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
       const fact = entry as Record<string, unknown>;
       const title = boundedString(fact.title, 60);
@@ -658,6 +783,10 @@ export function parseDreamOutput(raw: string): ParsedDreamOutput | null {
             .slice(0, SECONDARY_MAX_MATCH_TERMS)
         : [];
       if (matchTerms.length === 0) continue;
+      // supportLevel 与 evidence 是候选必填项：缺失即丢弃。
+      if (!isSecondarySupportLevel(fact.supportLevel)) continue;
+      const evidence = boundedString(fact.evidence, 300);
+      if (!evidence) continue;
       const relation = isSecondaryRelation(fact.relation) ? fact.relation : "associated";
       facts.push(Object.freeze({
         title,
@@ -665,7 +794,9 @@ export function parseDreamOutput(raw: string): ParsedDreamOutput | null {
         recallWhen: boundedString(fact.recallWhen, 500) || title,
         matchTerms: Object.freeze(matchTerms),
         relation,
-        reason: boundedString(fact.reason, 300)
+        supportLevel: fact.supportLevel,
+        reason: boundedString(fact.reason, 300),
+        evidence
       }));
     }
   }
@@ -732,20 +863,15 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function enqueuePending(
-  state: DreamState,
-  ids: readonly string[],
-  now: number
-): DreamState {
-  const known = new Set(state.pendingMemoryIds);
-  const merged = [...state.pendingMemoryIds, ...ids.filter((id) => !known.has(id))];
-  return Object.freeze({
-    ...state,
-    revision: state.revision + 1,
-    pendingMemoryIds: Object.freeze(merged),
-    updatedAt: now
-  });
+function personalityJson(state: PersonalityState): string {
+  return cognitiveJsonText(state);
 }
+
+function userProfileJson(state: UserProfileState): string {
+  return cognitiveJsonText(state);
+}
+
+const USER_MIGRATION_TITLE = "迁移自 USER.md 的用户画像";
 
 /**
  * The canonical default USER.md text; kept in sync with the repository's
@@ -759,6 +885,3 @@ export const DEFAULT_USER_PROFILE_TEXT = [
   "- 尚无已确认内容。",
   ""
 ].join("\n");
-
-// Re-export for callers that build a template-less empty state.
-export { applyTemplateToState };

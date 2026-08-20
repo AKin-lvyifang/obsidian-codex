@@ -781,30 +781,20 @@ export class CodexSettingTab extends PluginSettingTab {
 
     templateBtn.onclick = () => {
       if (templateBtn.dataset.hasTemplate === "true") {
-        // 重置人格：每次都确认；记忆不删除。
+        // 重置人格（人格草案 §10.3）：每次都确认；确认后只打开模板列表，
+        // 不修改任何文件；取消零写入，原人格继续生效。
         void confirmModal(
           this.app,
           zh ? "重置人格" : "Reset personality",
           zh
-            ? "重置会清空当前人格设定并立即重写 AGENT.md（所有记忆都会保留）。确定要重置吗？"
-            : "Reset clears the current personality and rewrites AGENT.md immediately (all memories are kept). Proceed?",
-          zh ? "确定重置" : "Confirm reset",
+            ? "重置会把 Agent 当前人格恢复到你重新选择的模板，并清除当前自动演化结果。\n\n你的长期 Memory 不会被删除。只要相关记忆仍然存在，后续做梦很可能再次形成相似的处事和回复风格。若某条记忆不准确，请先到「复盘 → 记忆修正」中修正或忘记它。"
+            : "Reset restores the Agent's personality to the template you pick next and clears the current auto-evolved results.\n\nYour long-term Memory will NOT be deleted. As long as the related memories remain, future dreaming will very likely re-form a similar style. If a memory is inaccurate, correct or forget it first in Review → Memory correction.",
+          zh ? "继续选择模板" : "Continue to templates",
           zh ? "取消" : "Cancel"
         ).then((confirmed) => {
           if (!confirmed) return;
-          void (async () => {
-            try {
-              const system = await this.plugin.getCognitiveSystem();
-              const result = await system.resetPersonality();
-              new Notice(zh ? "人格已重置" : "Personality reset");
-              this.applyPersonalityToCard(refs, result.state, result.agent, zh);
-              refs.summaryText.setText(await system.renderPersonalitySummary(zh ? "zh" : "en"));
-              this.showTemplatePicker(refs, zh);
-            } catch (error) {
-              console.error("EchoInk personality reset failed", error);
-              new Notice(zh ? "人格重置失败，请重试" : "Personality reset failed");
-            }
-          })();
+          // 确认后仅打开 8 套模板列表；真正写入只发生在选中新模板时。
+          this.showTemplatePicker(refs, zh, { reset: true });
         });
       } else {
         this.showTemplatePicker(refs, zh);
@@ -855,14 +845,23 @@ export class CodexSettingTab extends PluginSettingTab {
   }
 
   /** Inline picker: 8 templates; applying one is a single local transaction. */
-  private showTemplatePicker(refs: AgentProfileCardRefs, zh: boolean): void {
+  private showTemplatePicker(
+    refs: AgentProfileCardRefs,
+    zh: boolean,
+    options?: Readonly<{ reset?: boolean }>
+  ): void {
+    const reset = Boolean(options?.reset);
     const panel = refs.pickerPanel;
     panel.empty();
     panel.addClass("is-visible");
     const stepLabel = panel.createDiv({ cls: "echoink-picker-step-label" });
     stepLabel.setText(zh
-      ? "选择一个最接近你期望的风格（本地立即生效，不调用模型）"
-      : "Choose the closest style (applies locally and immediately, no model calls)");
+      ? (reset
+          ? "选择新模板完成重置（取消不做任何修改）"
+          : "选择一个最接近你期望的风格（本地立即生效，不调用模型）")
+      : (reset
+          ? "Pick a new template to finish the reset (cancel changes nothing)"
+          : "Choose the closest style (applies locally and immediately, no model calls)"));
     const list = panel.createDiv({ cls: "echoink-picker-list" });
 
     const richDescsZh: Record<string, string> = {
@@ -900,7 +899,10 @@ export class CodexSettingTab extends PluginSettingTab {
         void (async () => {
           try {
             const system = await this.plugin.getCognitiveSystem();
-            const result = await system.selectPersonalityTemplate(tpl.id);
+            const result = await system.selectPersonalityTemplate(
+              tpl.id,
+              reset ? { reset: true } : undefined
+            );
             this.applyPersonalityToCard(refs, result.state, result.agent, zh);
             refs.summaryText.setText(await system.renderPersonalitySummary(zh ? "zh" : "en"));
             new Notice(zh ? `已应用「${tpl.labelZh}」人格模板` : `Applied template: ${tpl.labelEn}`);
