@@ -1447,7 +1447,7 @@ function assistantFailure(message: PiSessionMessageView): {
       itemType: "error",
       status: "failed",
       title: "回答失败",
-      text: visibleText(message.errorMessage) || "Agent 执行失败"
+      text: assistantFailureText(message.errorMessage)
     };
   }
   if (stopReason === "aborted" || stopReason === "cancelled" || stopReason === "canceled") {
@@ -1459,6 +1459,13 @@ function assistantFailure(message: PiSessionMessageView): {
     };
   }
   return { itemType: "assistant", status: "completed", text: "" };
+}
+
+function assistantFailureText(errorMessage: unknown): string {
+  const safe = visibleText(errorMessage);
+  return safe === "provider_oauth_relogin_required"
+    ? "OpenAI Codex 授权已失效，请在设置中重新登录。"
+    : safe || "Agent 执行失败";
 }
 
 function toolCallsFromContent(

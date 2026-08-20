@@ -85,6 +85,7 @@ import {
 } from "./plugin/personal-memory-correction-service";
 import { normalizeApiProviderId } from "./settings/provider-presets";
 import {
+  logoutOpenAICodexAfterRuntimeSuspension,
   OpenAICodexOAuthService,
   type OpenAICodexAuthStatus
 } from "./plugin/openai-codex-oauth-service";
@@ -225,7 +226,19 @@ export default class CodexForObsidianPlugin extends Plugin {
     return await this.getOpenAICodexOAuthService().login(interaction);
   }
   async logoutOpenAICodex(): Promise<void> {
-    await this.getOpenAICodexOAuthService().logout();
+    const active = getActiveApiProvider(this.settings);
+    const activeCodexOAuth = active?.authMode === "oauth"
+      && normalizeApiProviderId(
+        active.providerId,
+        active.baseUrl,
+        active.name
+      ) === "openai-codex";
+    await logoutOpenAICodexAfterRuntimeSuspension({
+      active: activeCodexOAuth,
+      suspendRuntime: async () => await this.suspendPiProductionRuntime(),
+      logout: async () =>
+        await this.getOpenAICodexOAuthService().logout()
+    });
   }
   async resolveOpenAICodexAccessToken(): Promise<string> {
     return await this.getOpenAICodexOAuthService().resolveAccessToken();

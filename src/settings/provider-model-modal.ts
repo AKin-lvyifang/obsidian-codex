@@ -1126,6 +1126,15 @@ export class ProviderModelModal extends Modal {
         return this.options.copy.providers.connectionAvailable;
       }
       if (state.connectionFailure) {
+        if (
+          state.connectionFailure === "auth"
+          && this.providerId === "openai-codex"
+        ) {
+          return this.label(
+            "OpenAI Codex 授权已失效，请重新登录。",
+            "OpenAI Codex authorization expired. Sign in again."
+          );
+        }
         return this.options.copy.providers.connectionFailures[
           state.connectionFailure
         ];

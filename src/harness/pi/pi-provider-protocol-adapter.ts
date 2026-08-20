@@ -102,7 +102,12 @@ implements ControlledPiStreamPort {
     try {
       apiKey = await this.options.resolveAuthToken();
     } catch {
-      return failedStream(input.model, "provider_api_key_missing");
+      return failedStream(
+        input.model,
+        input.provider.authMode === "oauth"
+          ? "provider_oauth_relogin_required"
+          : "provider_api_key_missing"
+      );
     }
     let responseStatus: number | null = null;
     try {

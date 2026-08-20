@@ -14,6 +14,9 @@ import type { CodexForObsidianSettings } from "../settings/settings";
 
 const OPENAI_CODEX_PROVIDER_ID = "openai-codex";
 
+export const OPENAI_CODEX_RELOGIN_REQUIRED_MESSAGE =
+  "OpenAI Codex 授权已失效，请在设置中重新登录。";
+
 export type OpenAICodexAuthState =
   | "disconnected"
   | "connected"
@@ -172,10 +175,19 @@ export class OpenAICodexOAuthService {
       if (!access) throw new Error("missing");
       return access;
     } catch {
-      throw new Error("codex_oauth_auth_unavailable");
+      throw new Error(OPENAI_CODEX_RELOGIN_REQUIRED_MESSAGE);
     }
   }
 
+}
+
+export async function logoutOpenAICodexAfterRuntimeSuspension(input: {
+  readonly active: boolean;
+  readonly suspendRuntime: () => Promise<void>;
+  readonly logout: () => Promise<void>;
+}): Promise<void> {
+  if (input.active) await input.suspendRuntime();
+  await input.logout();
 }
 
 function cloneCredential(
