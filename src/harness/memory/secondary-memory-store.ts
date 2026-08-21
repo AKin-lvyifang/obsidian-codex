@@ -414,13 +414,20 @@ export interface SecondaryReconcileResult {
 /**
  * 父 Memory 做梦（含重新做梦）的统一 dedupe + reconcile：
  *
- * 1. user_edited_inference 永远保留，做梦不得覆盖；
+ * 1. user_edited_inference 永远保留、不参与衰减、不因做梦被覆盖，也不因总数
+ *    超限被删除；但它们占用 relation 配额与总数预算，并预留自己的宽 key alias；
  * 2. 本轮候选重新评分筛选（confidence ≥ 阈值）；
- * 3. 入选结果替换旧 llm_inferred：语义相同（fingerprint）复用旧 ID、
- *    hitCount、lastHitAt 与历史 confidence；
- * 4. 不再入选的旧 llm_inferred 标记 disabled；
- * 5. 最终 current 集合重新满足：阈值、relation 多样性、每 relation ≤2、
- *    硬上限 8 条。禁止 append。
+ * 3. 一个旧 llm_inferred record 一轮内只能被消费一次（consumedOldIds）：
+ *    无论原样保留、fingerprint 复用还是宽 key 原地替换，消费时删除旧记录
+ *    自身的全部查找入口，并预留旧记录与候选各自的 title/terms 四组 alias；
+ * 4. 最终预算统一核算：userEdited → keptOld → 新候选依次占用总数与
+ *    relation 配额，禁止先选满新候选再追加 keptOld；
+ * 5. 入选结果替换旧 llm_inferred：fingerprint 相同复用旧 ID、hitCount、
+ *    lastHitAt 与历史 confidence；宽 key 匹配保留旧 ID 与命中历史、
+ *    confidence 更新为获胜候选；revision 只增加一次；
+ * 6. 不再入选的旧 llm_inferred 标记 disabled；finalRecords 保证唯一 ID；
+ * 7. 最终 current 集合满足：阈值、relation 多样性、每 relation ≤2、
+ *    硬上限 SECONDARY_MAX_PER_PARENT（10）条。禁止 append。
  */
 export function reconcileSecondaryForParent(
   input: SecondaryReconcileInput
@@ -478,10 +485,32 @@ export function reconcileSecondaryForParent(
     const termKey = normalizeTermSetKey(record.matchTerms);
     if (termKey && !oldLlmByTermKey.has(termKey)) oldLlmByTermKey.set(termKey, record);
   }
-  const keptOldIds = new Set<string>();
+  // Round 6.1 修复一：一个旧 record 一轮内只能被消费一次。消费时删除旧记录
+  // 自己的全部查找入口（而不是只删当前候选的 key），并把旧记录与候选各自的
+  // title/terms 四组 alias 全部预留，封闭交叉别名路径。
+  const consumedOldIds = new Set<string>();
+  const keptOldOrder: SecondaryMemoryRecord[] = [];
   const deduped: typeof scored = [];
   const keptTitleKeys = new Set<string>();
   const keptTermKeys = new Set<string>();
+  const reserveAlias = (titleKey: string, termKey: string): void => {
+    if (titleKey) keptTitleKeys.add(titleKey);
+    if (termKey) keptTermKeys.add(termKey);
+  };
+  const consumeOldRecord = (oldRecord: SecondaryMemoryRecord, entry: typeof scored[number]): void => {
+    // 已被消费的旧记录绝不再参与本轮任何匹配/计数（防御性幂等）。
+    if (consumedOldIds.has(oldRecord.id)) return;
+    consumedOldIds.add(oldRecord.id);
+    const oldTitleKey = normalizeTitleKey(oldRecord.title);
+    if (oldTitleKey) oldLlmByTitleKey.delete(oldTitleKey);
+    const oldTermKey = normalizeTermSetKey(oldRecord.matchTerms);
+    if (oldTermKey) oldLlmByTermKey.delete(oldTermKey);
+    reserveAlias(oldTitleKey, oldTermKey);
+    reserveAlias(
+      normalizeTitleKey(entry.candidate.title),
+      normalizeTermSetKey(entry.candidate.matchTerms)
+    );
+  };
   // Round 6 修复六（问题 2）：宽 key 命中且候选 confidence 更高时，记录
   // 「候选 → 被替换旧记录」，第 4 步做原地更新（保留旧 ID 与命中历史），
   // 不再走 retire+新建。
@@ -492,6 +521,7 @@ export function reconcileSecondaryForParent(
     // 与 user_edited_inference 冲突：始终保留用户编辑版本。
     if (userTitleKeys.has(titleKey)) continue;
     if (termKey && userTermKeys.has(termKey)) continue;
+    // 任一已预留 alias（含已消费旧记录与候选带来的交叉别名）→ 不再新建。
     if (keptTitleKeys.has(titleKey)) continue;
     if (termKey && keptTermKeys.has(termKey)) continue;
     const oldMatch = (titleKey ? oldLlmByTitleKey.get(titleKey) : undefined)
@@ -500,33 +530,35 @@ export function reconcileSecondaryForParent(
       if (oldMatch.confidence >= entry.confidence) {
         // 既有事实 confidence 不低于候选：原样保留旧记录
         // （ID / hitCount / lastHitAt 不变，不重复写盘），丢弃候选。
-        keptOldIds.add(oldMatch.id);
-        oldLlmByTitleKey.delete(titleKey);
-        if (termKey) oldLlmByTermKey.delete(termKey);
-        // Round 6 修复六（问题 1）：被保留旧事实自己的标题/匹配词宽 key
-        // 必须进入 reserved，否则同轮后来者会再次匹配不到旧记录而新建重复。
-        const keptTitleKey = normalizeTitleKey(oldMatch.title);
-        if (keptTitleKey) keptTitleKeys.add(keptTitleKey);
-        const keptTermKey = normalizeTermSetKey(oldMatch.matchTerms);
-        if (keptTermKey) keptTermKeys.add(keptTermKey);
+        consumeOldRecord(oldMatch, entry);
+        keptOldOrder.push(oldMatch);
         continue;
       }
       // 候选 confidence 更高：原地替换既有记录（第 4 步保留旧 ID/命中历史）。
-      oldLlmByTitleKey.delete(titleKey);
-      if (termKey) oldLlmByTermKey.delete(termKey);
+      consumeOldRecord(oldMatch, entry);
       wideKeyReplacement.set(entry, oldMatch);
     }
-    keptTitleKeys.add(titleKey);
-    if (termKey) keptTermKeys.add(termKey);
+    reserveAlias(titleKey, termKey);
     deduped.push(entry);
   }
 
-  // --- 3. Diversity: one best per relation first, then fill by confidence --
+  // --- 3. 统一预算：userEdited → keptOld → 新候选依次占用总数与 relation
+  //    配额（Round 6.1 修复一问题 C：keptOld 不得在选择结束后无条件追加）。
   const relationCount = new Map<SecondaryRelation, number>();
   for (const record of userEdited) {
     relationCount.set(record.relation, (relationCount.get(record.relation) ?? 0) + 1);
   }
   let slots = SECONDARY_MAX_PER_PARENT - userEdited.length;
+  const acceptedKeptOld: SecondaryMemoryRecord[] = [];
+  for (const record of keptOldOrder) {
+    if (slots <= 0) continue;
+    const count = relationCount.get(record.relation) ?? 0;
+    if (count >= SECONDARY_MAX_PER_RELATION) continue;
+    relationCount.set(record.relation, count + 1);
+    slots -= 1;
+    acceptedKeptOld.push(record);
+  }
+  // Diversity: one best per relation first, then fill by confidence.
   const selected: typeof scored = [];
   const picked = new Set<typeof scored[number]>();
   const tryTake = (entry: typeof scored[number]): boolean => {
@@ -553,47 +585,33 @@ export function reconcileSecondaryForParent(
     if (!picked.has(entry)) tryTake(entry);
   }
 
-  // --- 4. Replace: reuse ids for fingerprint-equal old llm facts ------------
-  const oldByFingerprint = new Map(
-    oldLlm.map((record) => [secondaryFingerprint(record.title, record.matchTerms), record])
-  );
-  const finalRecords: SecondaryMemoryRecord[] = [...userEdited, ...untouched];
+  // --- 4. Apply：入选候选落为最终记录；旧记录只按本轮唯一消费结果处置 -----
+  // Round 6.1 修复一：finalRecords 通过 seenFinalIds 保证同一 ID 最多出现一次；
+  // reusedIds（含 acceptedKeptOld）与 consumedOldIds 口径一致。
+  const finalRecords: SecondaryMemoryRecord[] = [];
+  const seenFinalIds = new Set<string>();
+  const addFinal = (record: SecondaryMemoryRecord): void => {
+    if (seenFinalIds.has(record.id)) return;
+    seenFinalIds.add(record.id);
+    finalRecords.push(record);
+  };
+  for (const record of userEdited) addFinal(record);
+  for (const record of untouched) addFinal(record);
+
   let factsCreated = 0;
   let factsReused = 0;
   let factsRetired = 0;
   const reusedIds = new Set<string>();
   for (const entry of selected) {
-    const previous = oldByFingerprint.get(entry.fingerprint);
-    if (previous) {
-      const reused: SecondaryMemoryRecord = Object.freeze({
-        ...previous,
-        title: entry.candidate.title.trim().slice(0, 200),
-        content: entry.candidate.content.trim().slice(0, 2_000),
-        recallWhen: (entry.candidate.recallWhen.trim() || entry.candidate.title.trim()).slice(0, 500),
-        matchTerms: Object.freeze(entry.candidate.matchTerms
-          .map((term) => normalizeMatchTerm(term))
-          .filter((term): term is string => term !== null)
-          .slice(0, SECONDARY_MAX_MATCH_TERMS)),
-        relation: entry.candidate.relation,
-        reason: entry.candidate.reason.trim().slice(0, 500),
-        supportLevel: entry.candidate.supportLevel,
-        evidence: entry.candidate.evidence.trim().slice(0, 800),
-        // 历史 confidence / hitCount / lastHitAt 原样复用。
-        sourceMemoryRevision: input.parentRevision,
-        updatedAt: input.now,
-        revision: previous.revision + 1
-      });
-      reusedIds.add(previous.id);
-      finalRecords.push(reused);
-      fileChanges.push({ relativePath: reused.file, content: serializeSecondaryRecord(reused) });
-      factsReused += 1;
-      continue;
-    }
-    // Round 6 修复六（问题 2）：宽 key（标题或匹配词相同、指纹不同）替换
-    // 必须原地更新——保留旧 ID / hitCount / lastHitAt / createdAt，只更新
-    // 内容与 confidence，绝不 retire+新建（新建会丢失全部命中历史）。
+    // 宽 key 替换目标就是该候选在去重阶段唯一消费的旧记录：
+    // - fingerprint 相等 → 语义未变，历史 confidence 原样复用（Round 6 冻结行为）；
+    // - 仅宽 key 相等 → confidence 更新为获胜候选。
+    // 两者都保留旧 ID / file / hitCount / lastHitAt / createdAt，revision 只 +1，
+    // 绝不 retire+新建（新建会丢失全部命中历史）。
     const replaced = wideKeyReplacement.get(entry);
     if (replaced) {
+      const fingerprintEqual =
+        secondaryFingerprint(replaced.title, replaced.matchTerms) === entry.fingerprint;
       const updated: SecondaryMemoryRecord = Object.freeze({
         ...replaced,
         title: entry.candidate.title.trim().slice(0, 200),
@@ -607,14 +625,13 @@ export function reconcileSecondaryForParent(
         reason: entry.candidate.reason.trim().slice(0, 500),
         supportLevel: entry.candidate.supportLevel,
         evidence: entry.candidate.evidence.trim().slice(0, 800),
-        // 宽 key 替换更新 confidence 到获胜候选；命中历史原样保留。
-        confidence: entry.confidence,
+        confidence: fingerprintEqual ? replaced.confidence : entry.confidence,
         sourceMemoryRevision: input.parentRevision,
         updatedAt: input.now,
         revision: replaced.revision + 1
       });
       reusedIds.add(replaced.id);
-      finalRecords.push(updated);
+      addFinal(updated);
       fileChanges.push({ relativePath: updated.file, content: serializeSecondaryRecord(updated) });
       factsReused += 1;
       continue;
@@ -635,18 +652,19 @@ export function reconcileSecondaryForParent(
       now: input.now,
       idFactory: makeId
     });
-    finalRecords.push(created);
+    addFinal(created);
     fileChanges.push({ relativePath: created.file, content: serializeSecondaryRecord(created) });
     factsCreated += 1;
   }
-  // 去重保留下来的既有事实：原样留在最终集合中（无文件变更）。
-  for (const record of oldLlm) {
-    if (!keptOldIds.has(record.id)) continue;
-    finalRecords.push(record);
+  // 去重保留且被预算接受的既有事实：原样留在最终集合中（无文件变更）。
+  for (const record of acceptedKeptOld) {
+    reusedIds.add(record.id);
+    addFinal(record);
     factsReused += 1;
   }
+  // 其余旧 llm 记录（未入选、未被预算接受、超出预算）→ retire。
   for (const record of oldLlm) {
-    if (reusedIds.has(record.id) || keptOldIds.has(record.id)) continue;
+    if (reusedIds.has(record.id)) continue;
     const retired: SecondaryMemoryRecord = Object.freeze({
       ...record,
       status: "disabled",
@@ -654,7 +672,7 @@ export function reconcileSecondaryForParent(
       updatedAt: input.now,
       revision: record.revision + 1
     });
-    finalRecords.push(retired);
+    addFinal(retired);
     fileChanges.push({ relativePath: retired.file, content: serializeSecondaryRecord(retired) });
     factsRetired += 1;
   }

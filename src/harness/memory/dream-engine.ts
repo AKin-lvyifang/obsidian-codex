@@ -425,13 +425,16 @@ export class DreamEngine {
     }
 
     // --- 7. Apply personality / profile updates ------------------------------
-    // Round 6 修复五：同一 Memory 以更高 revision 重新处理时，先撤销旧
-    // revision 产生的派生证据（候选 / 长期要求 / observed / 画像项），
+    // Round 6 修复五 + Round 6.1 修复二：同一 Memory 以更高 revision 重新处理
+    // 时，先撤销旧 revision 产生的派生证据（候选 / 长期要求 / observed / 画像项），
     // 再应用本轮新输出。撤销与新输出在同一事务提交，因此「只有成功重新
-    // 处理才撤销」天然成立。
+    // 处理才撤销」天然成立。传入 validMemoryIds：observed 证据清空后回退历史
+    // 时只允许恢复仍 current 且未被本轮重新处理的来源，避免恢复过期证据。
     const reprocessedPersonalityIds = computeReprocessedMemoryIds(workingPersonality, processedSources);
     const personalityBase = reprocessedPersonalityIds.size > 0
-      ? revokeReprocessedPersonalitySources(workingPersonality, reprocessedPersonalityIds, this.now())
+      ? revokeReprocessedPersonalitySources(
+          workingPersonality, reprocessedPersonalityIds, this.now(), validMemoryIds
+        )
       : workingPersonality;
     const reprocessedProfileIds = computeReprocessedProfileMemoryIds(workingProfile, processedSources);
     const profileBase = reprocessedProfileIds.size > 0

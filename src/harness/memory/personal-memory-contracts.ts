@@ -337,8 +337,13 @@ export function isSecondaryRelation(value: unknown): value is SecondaryRelation 
   return typeof value === "string" && (SECONDARY_RELATIONS as readonly string[]).includes(value);
 }
 
-/** 每条一级记忆最多保存的二级事实数量（硬上限，防异常输出与资源膨胀）。 */
-export const SECONDARY_MAX_PER_PARENT = 8 as const;
+/**
+ * 每条一级记忆最多保留的 current 二级事实数量（硬上限，防异常输出与资源膨胀）。
+ * Round 6.1 产品决定：8 → 10。五种 relation、每 relation 最多 2 条 → 5 × 2 = 10。
+ * 这是「每条一级 Memory」的上限，不是整个记忆库的上限；是上限而不是生成目标，
+ * 典型保存 2–5 条，允许 0 条，禁止为凑满 10 条降低 confidence 或保存重复推理。
+ */
+export const SECONDARY_MAX_PER_PARENT = 10 as const;
 /** 每次做梦每条一级记忆允许 LLM 产出的临时候选上限（候选不落盘）。 */
 export const SECONDARY_MAX_CANDIDATES = 12 as const;
 /** 每条二级事实最多的匹配词数量。 */

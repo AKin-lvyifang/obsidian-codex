@@ -40,8 +40,10 @@ import {
   emptyPersonalityState,
   personalityStateJson,
   PersonalityStateStore,
+  revokeReprocessedPersonalitySources,
   type DreamPersonalityInput,
-  type PersonalityState
+  type PersonalityState,
+  type PersonalityTraitRecord
 } from "../harness/memory/personality-state";
 import {
   emptyUserProfileState,
@@ -65,6 +67,7 @@ import { defaultUserProfile, PersonalMemoryRepository } from "../harness/memory/
 import { lexicalTokens } from "../harness/memory/search-index-v3";
 import {
   PERSONALITY_STATE_SCHEMA,
+  SECONDARY_MAX_PER_PARENT,
   type PersonalMemoryRecord,
   type SecondaryMatchView
 } from "../harness/memory/personal-memory-contracts";
@@ -3835,6 +3838,529 @@ async function scenarioProfileKeyPromptCatalogBounded(): Promise<void> {
   console.log("PASS cognitive: profile-key prompt catalog is bounded and section-aware");
 }
 
+// ---------------------------------------------------------------------------
+// Round 6.1 修复一：宽 key reconcile 的唯一消费、交叉别名封闭与统一预算
+// ---------------------------------------------------------------------------
+
+/** Round 6.1 测试用候选工厂。 */
+function r61Candidate(input: {
+  title: string;
+  matchTerms: readonly string[];
+  relation?: SecondaryFactCandidate["relation"];
+  supportLevel?: SecondaryFactCandidate["supportLevel"];
+  content?: string;
+}): SecondaryFactCandidate {
+  return Object.freeze({
+    title: input.title,
+    content: input.content ?? `${input.title} 的内容。`,
+    recallWhen: "相关话题出现时",
+    matchTerms: Object.freeze([...input.matchTerms]),
+    relation: input.relation ?? "instance",
+    supportLevel: input.supportLevel ?? "strong_inference",
+    reason: "测试",
+    evidence: `${input.title} 的证据`
+  });
+}
+
+/** Round 6.1 测试用旧 llm 事实工厂。 */
+function r61OldFact(input: {
+  parentId: string;
+  title: string;
+  matchTerms: readonly string[];
+  relation?: SecondaryFactCandidate["relation"];
+  confidence: number;
+  now: number;
+  hit?: boolean;
+}): ReturnType<typeof createSecondaryRecord> {
+  const record = createSecondaryRecord({
+    parentId: input.parentId,
+    title: input.title,
+    content: `${input.title} 的旧内容。`,
+    recallWhen: "相关话题出现时",
+    matchTerms: input.matchTerms,
+    relation: input.relation ?? "instance",
+    reason: "测试",
+    supportLevel: "strong_inference",
+    evidence: `${input.title} 的旧证据`,
+    basis: "llm_inferred",
+    confidence: input.confidence,
+    sourceMemoryRevision: 1,
+    now: input.now
+  });
+  return input.hit ? applySecondaryHit(record, input.now + 10) : record;
+}
+
+// 场景 1：交叉别名必须封闭——旧事实被一个候选消费后，旧记录与候选各自的
+// title/terms 全部进入 reserved，后续候选不得借任一别名创建重复事实。
+async function scenarioSecondaryCrossAliasClosed(): Promise<void> {
+  const now = 1_800_000_000_000;
+
+  // (a) 保留分支：旧事实 confidence 更高被原样保留。候选一带来新 terms [手冲]，
+  //     候选二借 [手冲] 这个别名不得再建重复。
+  const keptOld = r61OldFact({
+    parentId: "mem_r61_alias", title: "咖啡偏好", matchTerms: ["咖啡豆"],
+    confidence: 0.90, now
+  });
+  const keepRound = reconcileSecondaryForParent({
+    parentId: "mem_r61_alias",
+    parentBasis: "explicit",
+    parentRevision: 2,
+    existing: [keptOld],
+    candidates: [
+      // 候选一：title 命中旧事实，confidence 0.70 < 0.90 → 保留分支。
+      r61Candidate({ title: "咖啡偏好", matchTerms: ["手冲"] }),
+      // 候选二：借候选一带来的别名「手冲」试图另建。
+      r61Candidate({ title: "饮品偏好", matchTerms: ["手冲"] })
+    ],
+    now: now + 100
+  });
+  const keepCurrent = keepRound.records.filter((record) => record.status === "current");
+  assert.equal(keepCurrent.length, 1, "cross alias (keep branch) must not create a duplicate");
+  assert.equal(keepCurrent[0].id, keptOld.id, "the old fact itself survives");
+  assert.equal(keepCurrent[0].revision, keptOld.revision, "kept old fact is untouched");
+  assert.equal(keepRound.factsCreated, 0, "no extra id may be created via cross alias");
+
+  // (b) 替换分支：候选一 confidence 更高原地替换旧事实。旧记录自己的 terms
+  //     [咖啡豆] 也必须进入 reserved，候选二借它不得再命中已消费的旧记录。
+  const replacedOld = r61OldFact({
+    parentId: "mem_r61_alias", title: "咖啡偏好", matchTerms: ["咖啡豆"],
+    confidence: 0.70, now
+  });
+  const replaceRound = reconcileSecondaryForParent({
+    parentId: "mem_r61_alias",
+    parentBasis: "explicit",
+    parentRevision: 2,
+    existing: [replacedOld],
+    candidates: [
+      r61Candidate({ title: "咖啡偏好", matchTerms: ["手冲"], supportLevel: "direct" }),
+      // 候选二：借旧记录自己的 terms 别名「咖啡豆」试图二次消费同一旧 ID。
+      r61Candidate({ title: "茶饮偏好", matchTerms: ["咖啡豆"], supportLevel: "direct" })
+    ],
+    now: now + 200
+  });
+  const replaceCurrent = replaceRound.records.filter((record) => record.status === "current");
+  assert.equal(replaceCurrent.length, 1, "cross alias (replace branch) must not create a duplicate");
+  assert.equal(replaceCurrent[0].id, replacedOld.id, "in-place update keeps the old id");
+  assert.equal(replaceRound.factsCreated, 0, "no extra id via the old record's own alias");
+  assert.equal(replaceRound.factsReused, 1);
+  console.log("PASS cognitive: secondary cross aliases stay closed within one reconcile round");
+}
+
+// 场景 2：同一旧 ID 被两个候选从不同入口（title / matchTerms）命中时，
+// 只能消费一次：finalRecords 唯一 ID、命中历史保留、fileChange/计数唯一。
+async function scenarioSecondaryOldIdConsumedOnce(): Promise<void> {
+  const now = 1_800_000_000_000;
+  const old = r61OldFact({
+    parentId: "mem_r61_dual", title: "咖啡偏好", matchTerms: ["咖啡豆"],
+    confidence: 0.70, now, hit: true
+  });
+  const result = reconcileSecondaryForParent({
+    parentId: "mem_r61_dual",
+    parentBasis: "explicit",
+    parentRevision: 3,
+    existing: [old],
+    candidates: [
+      // 候选一：通过旧 title 命中（confidence 更高 → 原地替换）。
+      r61Candidate({ title: "咖啡偏好", matchTerms: ["滤纸"], supportLevel: "direct" }),
+      // 候选二：通过旧 matchTerms 命中同一旧 ID。
+      r61Candidate({ title: "茶饮偏好", matchTerms: ["咖啡豆"], supportLevel: "direct" })
+    ],
+    now: now + 100
+  });
+  const current = result.records.filter((record) => record.status === "current");
+  assert.equal(current.length, 1, "one old id may be consumed only once");
+  assert.equal(current[0].id, old.id);
+  assert.equal(current[0].hitCount, old.hitCount, "hitCount survives");
+  assert.equal(current[0].lastHitAt, old.lastHitAt, "lastHitAt survives");
+  assert.equal(current[0].createdAt, old.createdAt, "createdAt survives");
+  assert.equal(current[0].revision, old.revision + 1, "revision advances exactly once");
+  const allIds = result.records.map((record) => record.id);
+  assert.equal(new Set(allIds).size, allIds.length, "final records must carry unique ids");
+  const fileWrites = result.fileChanges.filter((change) => change.relativePath === old.file);
+  assert.equal(fileWrites.length, 1, "the same file changes at most once");
+  assert.equal(result.factsReused, 1, "factsReused counts the fact once");
+  assert.equal(result.factsCreated, 0);
+  console.log("PASS cognitive: one old secondary id is consumed once per reconcile round");
+}
+
+// 场景 3：keptOld 必须先计入总数预算，剩余 slot 才交给新候选（7 keptOld +
+// 8 合格候选 → 最终 10 条，而不是 15 条）。
+async function scenarioSecondaryKeptOldOccupiesTotalBudget(): Promise<void> {
+  const now = 1_800_000_000_000;
+  // 7 条 keptOld：associated 调整 −0.15，其 matcher 用 direct（0.70）才能过
+  // 0.60 门槛；其余 relation 用 strong_inference 即可。
+  const relations = ["instance", "instance", "category", "category", "attribute", "context", "associated"] as const;
+  const oldFacts = relations.map((relation, index) => r61OldFact({
+    parentId: "mem_r61_total", title: `保留事实${index + 1}`,
+    matchTerms: [`保留词${index + 1}`], relation, confidence: 0.90, now
+  }));
+  const keepMatchers = relations.map((relation, index) => r61Candidate({
+    title: `保留事实${index + 1}`,
+    matchTerms: [`保留词${index + 1}`],
+    relation,
+    supportLevel: relation === "associated" ? "direct" : "strong_inference"
+  }));
+  // 8 条新候选全部过门槛；keptOld 占满 instance/category 配额后，只剩
+  // attribute/context/associated 各一个位置 → 最多再选 3 条。
+  const newRelations = ["attribute", "context", "associated", "attribute", "context", "associated", "instance", "category"] as const;
+  const newCandidates = newRelations.map((relation, index) => r61Candidate({
+    title: `新候选${index + 1}`, matchTerms: [`新词${index + 1}`], relation,
+    supportLevel: "direct"
+  }));
+  const result = reconcileSecondaryForParent({
+    parentId: "mem_r61_total",
+    parentBasis: "explicit",
+    parentRevision: 2,
+    existing: oldFacts,
+    candidates: [...keepMatchers, ...newCandidates],
+    now: now + 100
+  });
+  const current = result.records.filter((record) => record.status === "current");
+  assert.ok(current.length <= SECONDARY_MAX_PER_PARENT,
+    `current secondaries must never exceed ${SECONDARY_MAX_PER_PARENT}, got ${current.length}`);
+  const keptIds = new Set(oldFacts.map((record) => record.id));
+  const keptCount = current.filter((record) => keptIds.has(record.id)).length;
+  assert.equal(keptCount, 7, "all 7 matched old facts stay");
+  assert.equal(current.length - keptCount, SECONDARY_MAX_PER_PARENT - 7,
+    "only the remaining slots may go to new candidates");
+  const ids = result.records.map((record) => record.id);
+  assert.equal(new Set(ids).size, ids.length, "unique ids in final records");
+  console.log("PASS cognitive: keptOld occupies the total budget before new candidates");
+}
+
+// 场景 4：keptOld 也占 relation 配额——某 relation 已被 2 条 keptOld 占满时，
+// 同 relation 的高分新候选不得入选，位置让给其他 relation。
+async function scenarioSecondaryKeptOldOccupiesRelationBudget(): Promise<void> {
+  const now = 1_800_000_000_000;
+  const oldA = r61OldFact({
+    parentId: "mem_r61_relation", title: "旧实例甲", matchTerms: ["实甲"],
+    relation: "instance", confidence: 0.90, now
+  });
+  const oldB = r61OldFact({
+    parentId: "mem_r61_relation", title: "旧实例乙", matchTerms: ["实乙"],
+    relation: "instance", confidence: 0.90, now
+  });
+  const result = reconcileSecondaryForParent({
+    parentId: "mem_r61_relation",
+    parentBasis: "explicit",
+    parentRevision: 2,
+    existing: [oldA, oldB],
+    candidates: [
+      // 两条低置信同名候选触发 keptOld 保留。
+      r61Candidate({ title: "旧实例甲", matchTerms: ["实甲"], relation: "instance" }),
+      r61Candidate({ title: "旧实例乙", matchTerms: ["实乙"], relation: "instance" }),
+      // 高分新候选：instance 配额已满，不得入选；category 仍有位置。
+      r61Candidate({ title: "高分新实例", matchTerms: ["新实"], relation: "instance", supportLevel: "direct" }),
+      r61Candidate({ title: "高分新类别", matchTerms: ["新类"], relation: "category", supportLevel: "direct" })
+    ],
+    now: now + 100
+  });
+  const current = result.records.filter((record) => record.status === "current");
+  const titles = current.map((record) => record.title);
+  assert.ok(titles.includes("旧实例甲") && titles.includes("旧实例乙"),
+    "both keptOld facts stay");
+  assert.ok(!titles.includes("高分新实例"),
+    "instance quota filled by keptOld blocks another instance candidate");
+  assert.ok(titles.includes("高分新类别"),
+    "remaining slot goes to an uncovered relation");
+  assert.equal(current.filter((record) => record.relation === "instance").length, 2,
+    "same relation never exceeds 2");
+  assert.equal(result.factsCreated, 1, "only the category candidate is created");
+  console.log("PASS cognitive: keptOld occupies relation quota before new candidates");
+}
+
+// 场景 5：父节点硬上限为 10（5 relation × 2）；门槛与 0 条语义不变。
+async function scenarioSecondaryPerParentCapIsTen(): Promise<void> {
+  const now = 1_800_000_000_000;
+  assert.equal(SECONDARY_MAX_PER_PARENT, 10, "per-parent hard cap must be 10");
+
+  // (a) 5 种 relation × 2 条合格候选 → 恰好全部保存 10 条。
+  const relations = ["category", "instance", "attribute", "context", "associated"] as const;
+  const tenCandidates: SecondaryFactCandidate[] = [];
+  for (const relation of relations) {
+    for (let index = 0; index < 2; index += 1) {
+      tenCandidates.push(r61Candidate({
+        title: `事实${relation}${index + 1}`,
+        matchTerms: [`词${relation}${index + 1}`],
+        relation,
+        supportLevel: "direct"
+      }));
+    }
+  }
+  const full = reconcileSecondaryForParent({
+    parentId: "mem_r61_cap", parentBasis: "explicit", parentRevision: 1,
+    existing: [], candidates: tenCandidates, now
+  });
+  const fullCurrent = full.records.filter((record) => record.status === "current");
+  assert.equal(fullCurrent.length, 10, "5 relations x 2 fits exactly under the cap");
+  for (const relation of relations) {
+    assert.equal(fullCurrent.filter((record) => record.relation === relation).length, 2);
+  }
+
+  // (b) 只有 2 条达到门槛时仍只保存 2 条。
+  const partial = reconcileSecondaryForParent({
+    parentId: "mem_r61_cap", parentBasis: "explicit", parentRevision: 1,
+    existing: [],
+    candidates: [
+      r61Candidate({ title: "达标甲", matchTerms: ["甲"], supportLevel: "direct" }),
+      r61Candidate({ title: "达标乙", matchTerms: ["乙"], relation: "category", supportLevel: "direct" }),
+      r61Candidate({ title: "不达标丙", matchTerms: ["丙"], relation: "attribute", supportLevel: "weak_inference" })
+    ],
+    now: now + 100
+  });
+  const partialCurrent = partial.records.filter((record) => record.status === "current");
+  assert.equal(partialCurrent.length, 2, "only threshold-passing candidates persist");
+
+  // (c) 全部低于门槛时保存 0 条。
+  const none = reconcileSecondaryForParent({
+    parentId: "mem_r61_cap", parentBasis: "explicit", parentRevision: 1,
+    existing: [],
+    candidates: [
+      r61Candidate({ title: "弱甲", matchTerms: ["弱甲"], supportLevel: "weak_inference" }),
+      r61Candidate({ title: "弱乙", matchTerms: ["弱乙"], relation: "category", supportLevel: "weak_inference" })
+    ],
+    now: now + 200
+  });
+  assert.equal(none.records.filter((record) => record.status === "current").length, 0,
+    "all-below-threshold keeps zero facts");
+  console.log("PASS cognitive: secondary per-parent cap is 10 with threshold and zero semantics");
+}
+
+// 场景 6：10 条 user_edited_inference 占满预算时——全部保留、不新增 LLM 事实、
+// 不删除用户编辑内容，连 keptOld 也不再占用位置。
+async function scenarioSecondaryUserEditedFillsBudget(): Promise<void> {
+  const now = 1_800_000_000_000;
+  const relations = ["category", "instance", "attribute", "context", "associated"] as const;
+  const userFacts: ReturnType<typeof createSecondaryRecord>[] = [];
+  for (const relation of relations) {
+    for (let index = 0; index < 2; index += 1) {
+      userFacts.push(createSecondaryRecord({
+        parentId: "mem_r61_user",
+        title: `用户事实${relation}${index + 1}`,
+        content: `用户编辑内容${relation}${index + 1}。`,
+        recallWhen: "相关话题出现时",
+        matchTerms: [`用词${relation}${index + 1}`],
+        relation,
+        reason: "用户编辑",
+        supportLevel: "direct",
+        evidence: "用户证据",
+        basis: "user_edited_inference",
+        confidence: 0.80,
+        sourceMemoryRevision: 1,
+        now
+      }));
+    }
+  }
+  const oldLlm = r61OldFact({
+    parentId: "mem_r61_user", title: "旧推断", matchTerms: ["旧词"],
+    relation: "instance", confidence: 0.90, now
+  });
+  const result = reconcileSecondaryForParent({
+    parentId: "mem_r61_user",
+    parentBasis: "explicit",
+    parentRevision: 2,
+    existing: [...userFacts, oldLlm],
+    candidates: [
+      // 与旧推断宽 key 相遇的低置信候选（本应触发 keptOld 保留）。
+      r61Candidate({ title: "旧推断", matchTerms: ["旧词"], relation: "instance" }),
+      // 多个高分新候选。
+      r61Candidate({ title: "新甲", matchTerms: ["新甲"], supportLevel: "direct" }),
+      r61Candidate({ title: "新乙", matchTerms: ["新乙"], relation: "category", supportLevel: "direct" })
+    ],
+    now: now + 100
+  });
+  const current = result.records.filter((record) => record.status === "current");
+  const userIds = new Set(userFacts.map((record) => record.id));
+  assert.equal(current.filter((record) => userIds.has(record.id)).length, 10,
+    "all 10 user-edited facts survive");
+  assert.equal(current.length, 10, "no fact beyond the 10 user edits");
+  assert.equal(result.factsCreated, 0, "no new LLM fact when user edits fill the budget");
+  const oldAfter = result.records.find((record) => record.id === oldLlm.id)!;
+  assert.equal(oldAfter.status, "disabled",
+    "overflow matched old fact retires instead of pushing past the cap");
+  for (const record of userFacts) {
+    const after = result.records.find((candidate) => candidate.id === record.id)!;
+    assert.equal(after.content, record.content, "user-edited content untouched");
+    assert.equal(after.revision, record.revision, "user-edited revision untouched");
+  }
+  console.log("PASS cognitive: user-edited facts fill the budget without deletion or new LLM facts");
+}
+
+// ---------------------------------------------------------------------------
+// Round 6.1 修复二：revoke observed 来源清空后必须走历史回退，而不是直接置空
+// ---------------------------------------------------------------------------
+
+/** Round 6.1 测试用 observed trait 记录工厂。 */
+function r61TraitRecord(input: {
+  id: string;
+  dimension: PersonalityTraitRecord["dimension"];
+  score: number;
+  sourceMemoryIds: readonly string[];
+  status?: "current" | "superseded";
+  revision?: number;
+  updatedAt?: number;
+  reason?: string;
+}): PersonalityTraitRecord {
+  return Object.freeze({
+    id: input.id,
+    dimension: input.dimension,
+    basis: "observed",
+    status: input.status ?? "current",
+    score: input.score,
+    sourceMemoryIds: Object.freeze([...input.sourceMemoryIds]),
+    evidence: "测试证据",
+    createdAt: 10,
+    updatedAt: input.updatedAt ?? 10,
+    revision: input.revision ?? 1,
+    reason: input.reason
+  });
+}
+
+/** advisor 模板 explicit sharpness = 0.50 的 v2 状态，附 observed/history。 */
+function r61PersonalityState(input: {
+  observedSharpness: PersonalityTraitRecord | null;
+  history?: readonly PersonalityTraitRecord[];
+}): PersonalityState {
+  const templated = applyTemplateToState(emptyPersonalityState(0), {
+    templateId: "advisor",
+    now: 1,
+    reset: false
+  });
+  return Object.freeze({
+    ...templated,
+    observed: Object.freeze({ ...templated.observed, sharpness: input.observedSharpness }),
+    history: Object.freeze([...(input.history ?? [])])
+  });
+}
+
+// 场景 1：current observed 来源全部被撤销后，跳过来源已失效的较新历史，
+// 恢复更早但仍有效的 historical observed（而不是直接回 explicit baseline）。
+async function scenarioRevokeObservedFallsBackToValidHistory(): Promise<void> {
+  const now = 1_800_000_000_000;
+  const currentA = r61TraitRecord({
+    id: "trait_obs_current_a", dimension: "sharpness", score: 0.30,
+    sourceMemoryIds: ["memA"], updatedAt: 90, revision: 9
+  });
+  // history 按追加顺序存放：越早的在前。最新一条只来自已失效的 D，
+  // 再早一条来自仍有效的 B、C。
+  const histBC = r61TraitRecord({
+    id: "trait_obs_hist_bc", dimension: "sharpness", score: 0.42,
+    sourceMemoryIds: ["memB", "memC"], status: "superseded",
+    updatedAt: 50, revision: 5, reason: "observed_update"
+  });
+  const histD = r61TraitRecord({
+    id: "trait_obs_hist_d", dimension: "sharpness", score: 0.20,
+    sourceMemoryIds: ["memD"], status: "superseded",
+    updatedAt: 70, revision: 7, reason: "observed_update"
+  });
+  const state = r61PersonalityState({ observedSharpness: currentA, history: [histBC, histD] });
+
+  // A 以更高 revision 重新处理；A 仍存在（valid），D 已失效。
+  const result = revokeReprocessedPersonalitySources(
+    state, new Set(["memA"]), now, new Set(["memA", "memB", "memC"])
+  );
+
+  // 旧 current 进入 history，reason=source_reprocessed。
+  const supersededCurrent = result.history.find((record) => record.id === currentA.id);
+  assert.ok(supersededCurrent, "current observed must move to history");
+  assert.equal(supersededCurrent!.status, "superseded");
+  assert.equal(supersededCurrent!.reason, "source_reprocessed");
+
+  // 回退跳过来源无效的 D，恢复 B、C 对应的历史 observed。
+  const restored = result.observed.sharpness;
+  assert.ok(restored, "must fall back to a still-valid historical observed, not null");
+  assert.equal(restored!.id, histBC.id, "the B/C historical record is restored");
+  assert.equal(restored!.score, histBC.score, "historical score semantics preserved");
+  assert.equal(restored!.basis, "observed");
+  assert.deepEqual([...restored!.sourceMemoryIds], ["memB", "memC"],
+    "restored sources keep exactly the valid ids");
+  assert.equal(restored!.status, "current");
+  assert.equal(restored!.revision, result.revision, "revision updated to this round");
+  assert.equal(restored!.updatedAt, now, "updatedAt updated to this round");
+  console.log("PASS cognitive: revoke observed falls back to the newest still-valid history");
+}
+
+// 场景 2：历史记录部分来源有效 → 恢复时只保留仍有效的来源。
+async function scenarioRevokeObservedFallbackFiltersPartialSources(): Promise<void> {
+  const now = 1_800_000_000_000;
+  const currentA = r61TraitRecord({
+    id: "trait_obs_current_a", dimension: "sharpness", score: 0.30,
+    sourceMemoryIds: ["memA"], updatedAt: 90, revision: 9
+  });
+  const histBCD = r61TraitRecord({
+    id: "trait_obs_hist_bcd", dimension: "sharpness", score: 0.44,
+    sourceMemoryIds: ["memB", "memC", "memD"], status: "superseded",
+    updatedAt: 60, revision: 6, reason: "observed_update"
+  });
+  const state = r61PersonalityState({ observedSharpness: currentA, history: [histBCD] });
+
+  const result = revokeReprocessedPersonalitySources(
+    state, new Set(["memA"]), now, new Set(["memA", "memB", "memC"])
+  );
+  const restored = result.observed.sharpness;
+  assert.ok(restored);
+  assert.equal(restored!.id, histBCD.id);
+  assert.deepEqual([...restored!.sourceMemoryIds], ["memB", "memC"],
+    "dead source memD must be dropped on restore");
+  assert.equal(restored!.score, histBCD.score);
+  console.log("PASS cognitive: revoke observed fallback keeps only still-valid sources");
+}
+
+// 场景 3：没有任何有效历史记录 → observed 置空，分数回 explicit baseline，
+// 且不创建伪造的 observed 记录。
+async function scenarioRevokeObservedWithoutValidHistoryReturnsBaseline(): Promise<void> {
+  const now = 1_800_000_000_000;
+  const currentA = r61TraitRecord({
+    id: "trait_obs_current_a", dimension: "sharpness", score: 0.30,
+    sourceMemoryIds: ["memA"], updatedAt: 90, revision: 9
+  });
+  const histD = r61TraitRecord({
+    id: "trait_obs_hist_d", dimension: "sharpness", score: 0.20,
+    sourceMemoryIds: ["memD"], status: "superseded",
+    updatedAt: 70, revision: 7, reason: "observed_update"
+  });
+  const state = r61PersonalityState({ observedSharpness: currentA, history: [histD] });
+
+  const result = revokeReprocessedPersonalitySources(
+    state, new Set(["memA"]), now, new Set(["memA"])
+  );
+  assert.equal(result.observed.sharpness, null, "no valid history → observed slot empties");
+  // advisor explicit sharpness = 0.50。
+  assert.equal(currentPersonalityScores(result).sharpness, 0.50,
+    "score falls back to the explicit template baseline");
+  const currentInHistory = result.history.filter(
+    (record) => record.dimension === "sharpness" && record.status === "current"
+  );
+  assert.equal(currentInHistory.length, 0, "no fabricated observed record in history");
+  console.log("PASS cognitive: revoke observed without valid history returns explicit baseline");
+}
+
+// 场景 4：本轮重新处理 Memory 的旧 revision 证据不得被当作有效来源恢复。
+async function scenarioRevokeObservedNeverRestoresReprocessedEvidence(): Promise<void> {
+  const now = 1_800_000_000_000;
+  const currentA = r61TraitRecord({
+    id: "trait_obs_current_a", dimension: "sharpness", score: 0.30,
+    sourceMemoryIds: ["memA"], updatedAt: 90, revision: 9
+  });
+  // 历史 observed 仍然包含 A —— A 本身仍是 current Memory，但本轮正被重新
+  // 处理，其旧 revision 证据不得参与回退。
+  const histA = r61TraitRecord({
+    id: "trait_obs_hist_a", dimension: "sharpness", score: 0.35,
+    sourceMemoryIds: ["memA"], status: "superseded",
+    updatedAt: 60, revision: 6, reason: "observed_update"
+  });
+  const state = r61PersonalityState({ observedSharpness: currentA, history: [histA] });
+
+  const result = revokeReprocessedPersonalitySources(
+    state, new Set(["memA"]), now, new Set(["memA", "memB"])
+  );
+  assert.equal(result.observed.sharpness, null,
+    "reprocessed memory's stale evidence must not be restored");
+  assert.equal(currentPersonalityScores(result).sharpness, 0.50,
+    "falls back to explicit baseline instead of stale evidence");
+  console.log("PASS cognitive: revoke observed never restores reprocessed memory evidence");
+}
+
 export async function runCognitiveSystemScenarios(): Promise<void> {
   await scenarioTemplateSelectionPersistsWithoutProvider();
   await scenarioResetFlowSingleTransaction();
@@ -3896,4 +4422,15 @@ export async function runCognitiveSystemScenarios(): Promise<void> {
   await scenarioReprocessedRevisionRevokesDerivedSources();
   await scenarioBroadKeyRedreamPreservesIdAndHitHistory();
   await scenarioProfileKeyPromptCatalogBounded();
+  // Round 6.1 regressions (先失败、后通过):
+  await scenarioSecondaryCrossAliasClosed();
+  await scenarioSecondaryOldIdConsumedOnce();
+  await scenarioSecondaryKeptOldOccupiesTotalBudget();
+  await scenarioSecondaryKeptOldOccupiesRelationBudget();
+  await scenarioSecondaryPerParentCapIsTen();
+  await scenarioSecondaryUserEditedFillsBudget();
+  await scenarioRevokeObservedFallsBackToValidHistory();
+  await scenarioRevokeObservedFallbackFiltersPartialSources();
+  await scenarioRevokeObservedWithoutValidHistoryReturnsBaseline();
+  await scenarioRevokeObservedNeverRestoresReprocessedEvidence();
 }

@@ -499,19 +499,66 @@ export function computeReprocessedMemoryIds(
 }
 
 /**
- * Round 6 修复五：在应用新一轮做梦输出之前，撤销旧 revision 产生的派生证据：
+ * Round 6.1 修复二：两条 observed 失效路径共用的「寻找有效历史 observed」。
+ * 从最新历史往最旧查找：dimension 相同、basis=observed、status=superseded、
+ * 跳过刚被 superseded 的 current 记录自身，且至少存在一个有效来源。
+ */
+function findValidHistoricalObserved(
+  history: readonly PersonalityTraitRecord[],
+  dimension: TraitDimension,
+  skipRecordId: string,
+  isValidSource: (memoryId: string) => boolean
+): PersonalityTraitRecord | undefined {
+  return [...history]
+    .reverse()
+    .find((entry) =>
+      entry.dimension === dimension
+      && entry.basis === "observed"
+      && entry.status === "superseded"
+      && entry.id !== skipRecordId
+      && entry.sourceMemoryIds.some((id) => isValidSource(id))
+    );
+}
+
+/** 共用恢复逻辑：只保留仍有效的 sourceMemoryIds，revision/updatedAt 取本轮值。 */
+function restoreObservedFromHistory(
+  fallback: PersonalityTraitRecord,
+  isValidSource: (memoryId: string) => boolean,
+  revision: number,
+  now: number
+): PersonalityTraitRecord {
+  return Object.freeze({
+    ...fallback,
+    status: "current",
+    sourceMemoryIds: Object.freeze(
+      fallback.sourceMemoryIds.filter((id) => isValidSource(id))
+    ),
+    updatedAt: now,
+    revision
+  });
+}
+
+/**
+ * Round 6 修复五 + Round 6.1 修复二：在应用新一轮做梦输出之前，撤销旧 revision
+ * 产生的派生证据：
  * - candidates：按 sourceMemoryId 整体移除（新轮输出会重新生成）；
  * - learnedRequirements：从来源中移除该 Memory；来源清空则标记
  *   superseded（reason=source_reprocessed）；
- * - observed：从 sourceMemoryIds 移除该 Memory；仍有证据则保留记录，
- *   证据清空则标记 superseded（reason=source_reprocessed）、槽位置空。
+ * - observed：从 sourceMemoryIds 移除该 Memory；仍有证据则保留记录；
+ *   证据全部失效则把旧 current 写入 history（reason=source_reprocessed），
+ *   再与 reconcilePersonalitySources 同口径回退到「最新且仍有有效来源」的
+ *   历史 observed；找不到才置空，让分数回到 explicit 模板基线。
+ *   有效来源 = validMemoryIds（仍 current 的一级 Memory）且不属于本轮
+ *   reprocessedIds——重新处理 Memory 的旧 revision 证据不得参与回退。
+ *   validMemoryIds 缺省时只排除 reprocessedIds（保持向后兼容）。
  * 纯函数；无撤销对象时返回原引用。与新一轮输出在同一事务内提交，
  * 因此「只有成功重新处理才撤销」天然成立。
  */
 export function revokeReprocessedPersonalitySources(
   previous: PersonalityState,
   reprocessedIds: ReadonlySet<string>,
-  now: number
+  now: number,
+  validMemoryIds?: ReadonlySet<string>
 ): PersonalityState {
   if (reprocessedIds.size === 0) return previous;
   let changed = false;
@@ -550,7 +597,14 @@ export function revokeReprocessedPersonalitySources(
     }
   }
 
-  // 3. Observed traits: drop the reprocessed sources; retire when empty.
+  // 3. Observed traits: drop the reprocessed sources; when every source is
+  //    invalidated, supersede into history and fall back to the newest
+  //    historical observed that still has valid sources (Round 6.1 修复二).
+  //    有效来源 = 仍 current（validMemoryIds，缺省不限制）且不属于本轮
+  //    reprocessedIds——重新处理 Memory 的旧 revision 证据不得参与回退。
+  const isValidSource = (memoryId: string): boolean =>
+    !reprocessedIds.has(memoryId)
+    && (validMemoryIds === undefined || validMemoryIds.has(memoryId));
   const history: PersonalityTraitRecord[] = [...previous.history];
   const observed: Record<TraitDimension, PersonalityTraitRecord | null> = { ...previous.observed };
   for (const dimension of TRAIT_DIMENSIONS) {
@@ -575,7 +629,10 @@ export function revokeReprocessedPersonalitySources(
       revision,
       reason: "source_reprocessed"
     });
-    observed[dimension] = null;
+    const fallback = findValidHistoricalObserved(history, dimension, record.id, isValidSource);
+    observed[dimension] = fallback
+      ? restoreObservedFromHistory(fallback, isValidSource, revision, now)
+      : null;
   }
 
   if (!changed) return previous;
@@ -679,28 +736,15 @@ export function reconcilePersonalitySources(
       revision,
       reason: "source_lost"
     });
-    const fallback = [...history]
-      .reverse()
-      .find((entry) =>
-        entry.dimension === dimension
-        && entry.basis === "observed"
-        && entry.status === "superseded"
-        && entry.id !== record.id
-        && entry.sourceMemoryIds.some((id) => validMemoryIds.has(id))
-      );
-    if (fallback) {
-      observed[dimension] = Object.freeze({
-        ...fallback,
-        status: "current",
-        sourceMemoryIds: Object.freeze(
-          fallback.sourceMemoryIds.filter((id) => validMemoryIds.has(id))
-        ),
-        updatedAt: now,
-        revision
-      });
-    } else {
-      observed[dimension] = null;
-    }
+    // 与 revokeReprocessedPersonalitySources 共用同一回退逻辑（Round 6.1 修复二）。
+    const fallback = findValidHistoricalObserved(
+      history, dimension, record.id, (memoryId) => validMemoryIds.has(memoryId)
+    );
+    observed[dimension] = fallback
+      ? restoreObservedFromHistory(
+          fallback, (memoryId) => validMemoryIds.has(memoryId), revision, now
+        )
+      : null;
   }
 
   if (!changed) return previous;
