@@ -952,9 +952,8 @@ export class CodexSettingTab extends PluginSettingTab {
     const templateBtn = footer.createEl("button", {
       cls: "echoink-agent-profile-reselect",
       text: zh ? "初始风格选择" : "Choose initial style",
-      attr: { type: "button" }
+      attr: { type: "button", "data-echoink-focus-key": "general:personality-template" }
     });
-    templateBtn.dataset.echoinkFocusKey = "general:personality-template";
     templateBtn.dataset.hasTemplate = "false";
 
     // --- Template picker panel (hidden by default) ---
@@ -1110,7 +1109,19 @@ export class CodexSettingTab extends PluginSettingTab {
       : (reset
           ? "Pick a new template to finish the reset (cancel changes nothing)"
           : "Choose the closest style (applies locally and immediately, no model calls)"));
-    const list = panel.createDiv({ cls: "echoink-picker-list" });
+    // 双列表格布局：外层容器统一承担轻边框与圆角，表头与每一行共用同一套
+    // 列定义（CSS 变量集中在 .echoink-picker-columns），文案只在此处维护。
+    const columns = panel.createDiv({ cls: "echoink-picker-columns" });
+    const columnsHeader = columns.createDiv({ cls: "echoink-picker-columns-header" });
+    columnsHeader.createDiv({
+      cls: "echoink-picker-column-name",
+      text: zh ? "风格" : "Style"
+    });
+    columnsHeader.createDiv({
+      cls: "echoink-picker-column-desc",
+      text: zh ? "行为表现" : "Behavior"
+    });
+    const list = columns.createDiv({ cls: "echoink-picker-list" });
 
     // 描述统一来自 PERSONALITY_TEMPLATES 常量，不再在此重复维护（避免漂移）。
 
@@ -1119,8 +1130,10 @@ export class CodexSettingTab extends PluginSettingTab {
         cls: "echoink-picker-row",
         attr: { type: "button" }
       });
-      row.createDiv({ cls: "echoink-picker-row-name" }).setText(zh ? tpl.labelZh : tpl.labelEn);
-      row.createDiv({ cls: "echoink-picker-row-desc" }).setText(zh ? tpl.richDescZh : tpl.richDescEn);
+      row.createDiv({ cls: "echoink-picker-column-name echoink-picker-row-name" })
+        .setText(zh ? tpl.labelZh : tpl.labelEn);
+      row.createDiv({ cls: "echoink-picker-column-desc echoink-picker-row-desc" })
+        .setText(zh ? tpl.richDescZh : tpl.richDescEn);
 
       row.onclick = () => {
         row.setAttr("disabled", "true");
@@ -1250,7 +1263,9 @@ export class CodexSettingTab extends PluginSettingTab {
     copy.createDiv({
       cls: "echoink-agent-identity-desc",
       text: !hasTemplate
-        ? (zh ? "选择初始风格后设置名称与头像" : "Set a name and avatar after choosing a starting style")
+        ? (zh
+            ? "先选择一个初始风格，选中后继续设置名称和头像。"
+            : "Pick a starting style first, then continue setting the name and avatar.")
         : (zh
             ? "名称和头像会显示在 Agent 回复旁；修改身份不会重置人格或 Memory。"
             : "Name and avatar appear next to the Agent's replies; editing identity never resets personality or Memory.")
@@ -1259,15 +1274,26 @@ export class CodexSettingTab extends PluginSettingTab {
     const editButton = card.createEl("button", {
       cls: "echoink-agent-identity-edit",
       attr: { type: "button" },
-      text: zh ? "编辑身份" : "Edit identity"
+      text: hasTemplate
+        ? (zh ? "编辑身份" : "Edit identity")
+        : (zh ? "选择风格并设置身份" : "Choose style & identity")
     });
-    editButton.disabled = !hasTemplate;
+    // 不再 disabled：尚未选择模板时，按钮引导用户进入
+    // 「选择人格 → 设置名称与头像」的既有主链，而不是一个点不开的灰色入口。
     if (!identity && hasTemplate) {
       // 旧 Vault：人格模板已存在但没有身份文件 —— 显示默认值，可编辑，
       // 不强制弹窗。
       card.createSpan({ cls: "echoink-agent-identity-default-badge", text: zh ? "默认" : "Default" });
     }
     editButton.addEventListener("click", () => {
+      const currentPersonality = this.personalMemoryState?.personalityState ?? null;
+      const currentHasTemplate = Boolean(currentPersonality && currentPersonality.templateId);
+      if (!currentHasTemplate) {
+        // 首次设置：不直接打开身份编辑弹窗，也不直接写身份；
+        // 复用设置页已有的初始风格入口及其点击链。
+        this.startInitialIdentitySetup();
+        return;
+      }
       const current = this.personalMemoryState?.agentIdentity ?? null;
       const modal = new AgentIdentityModal(this.plugin.app, {
         initialName: current?.displayName ?? "EchoInk",
@@ -1287,6 +1313,29 @@ export class CodexSettingTab extends PluginSettingTab {
       });
       modal.open();
     });
+  }
+
+  /**
+   * 尚未选择人格模板时的身份入口：定位设置页已有的初始风格按钮
+   * （data-echoink-focus-key="general:personality-template"），复用它的
+   * 现有点击链打开同一个 showTemplatePicker()。fail-closed 状态下该点击链
+   * 只会触发「重试读取人格」，不会出现模板选择器，也不会写任何身份数据。
+   */
+  private startInitialIdentitySetup(): void {
+    const templateEntry = this.containerEl.querySelector<HTMLElement>(
+      '[data-echoink-focus-key="general:personality-template"]'
+    );
+    if (!templateEntry) return;
+    templateEntry.scrollIntoView({ block: "center", inline: "nearest" });
+    templateEntry.click();
+    // 模板选择器在点击链中同步展开；展开后把焦点交给第一行模板。
+    const picker = this.containerEl.querySelector<HTMLElement>(
+      ".echoink-template-picker.is-visible"
+    );
+    if (!picker) return;
+    picker.scrollIntoView({ block: "center", inline: "nearest" });
+    const firstRow = picker.querySelector<HTMLElement>(".echoink-picker-row");
+    (firstRow ?? picker).focus({ preventScroll: true });
   }
 
   /** USER.md is maintained by dreaming / memory corrections — read-only here. */
