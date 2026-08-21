@@ -4,8 +4,11 @@ import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+  buildKnowledgeInitializationGuideTemplate,
   KnowledgeBaseInitializer,
   KNOWLEDGE_INITIALIZATION_GUIDE_PATH,
+  knowledgeInitializationParentFolder,
+  knowledgeInitializationPathExists,
   type KnowledgeInitializationBatchResult,
   type KnowledgeInitializationHost,
   type KnowledgeInitializationJob,
@@ -14,6 +17,8 @@ import {
 } from "../knowledge-base/initializer";
 
 export async function runKnowledgeInitializationTests(): Promise<void> {
+  assertRootLevelInitializationFileHasNoFolderCreation();
+  await assertHiddenInitializationFileExistsOutsideVaultIndex();
   await assertRecommendedAndCustomPreview();
   await assertProviderOrModelChangeRequiresNewPreview();
   await assertZeroQueuePreservesUserFilesAndSkipsProvider();
@@ -22,7 +27,39 @@ export async function runKnowledgeInitializationTests(): Promise<void> {
   await assertVerifiedMoveAndSourceChangePause();
   await assertConflictCancellationAndProviderRecoveryStops();
   await assertGuideConflictPreservesUserFile();
+  await assertPriorGeneratedGuideIsReusableAfterNewPreview();
   await assertRestartPausesWithoutProviderReplay();
+}
+
+function assertRootLevelInitializationFileHasNoFolderCreation(): void {
+  assert.equal(knowledgeInitializationParentFolder("LLM-WIKI.md"), null);
+  assert.equal(
+    knowledgeInitializationParentFolder("wiki/开始使用 EchoInk 知识库.md"),
+    "wiki"
+  );
+}
+
+async function assertHiddenInitializationFileExistsOutsideVaultIndex(): Promise<void> {
+  const vaultRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "echoink-kb-path-exists-"));
+  try {
+    await fsp.mkdir(path.join(vaultRoot, "outputs"));
+    await fsp.writeFile(path.join(vaultRoot, "outputs", ".ingest-tracker.md"), "tracker");
+    assert.equal(
+      await knowledgeInitializationPathExists(
+        vaultRoot,
+        "outputs/.ingest-tracker.md",
+        false
+      ),
+      true,
+      "disk files hidden from Obsidian's Vault index must still count as existing"
+    );
+    assert.equal(
+      await knowledgeInitializationPathExists(vaultRoot, "LLM-WIKI.md", false),
+      false
+    );
+  } finally {
+    await fsp.rm(vaultRoot, { recursive: true, force: true });
+  }
 }
 
 async function assertProviderOrModelChangeRequiresNewPreview(): Promise<void> {
@@ -134,6 +171,23 @@ async function assertGuideConflictPreservesUserFile(): Promise<void> {
     assert.equal(blocked.status, "blocked_conflict");
     assert.equal(host.read(KNOWLEDGE_INITIALIZATION_GUIDE_PATH), "# User guide\n");
     assert.equal(host.initializedJob, null);
+  }, null);
+}
+
+async function assertPriorGeneratedGuideIsReusableAfterNewPreview(): Promise<void> {
+  await withHost(async (host) => {
+    const priorGuide = buildKnowledgeInitializationGuideTemplate(
+      new Date("2026-08-20T08:30:00.000Z")
+    );
+    host.addFile(KNOWLEDGE_INITIALIZATION_GUIDE_PATH, priorGuide);
+    const initializer = new KnowledgeBaseInitializer(host);
+    await initializer.initialize();
+    await initializer.startPreview("recommended");
+    await initializer.confirm();
+    const completed = await waitForTerminal(initializer);
+    assert.equal(completed.status, "initialized");
+    assert.equal(host.read(KNOWLEDGE_INITIALIZATION_GUIDE_PATH), priorGuide);
+    assert.equal(host.openedGuide, KNOWLEDGE_INITIALIZATION_GUIDE_PATH);
   }, null);
 }
 
@@ -367,11 +421,18 @@ class MemoryKnowledgeInitializationHost implements KnowledgeInitializationHost {
 
   async createFolder(relativePath: string): Promise<void> {
     if (this.blockFolders) await new Promise<void>(() => {});
+    if (!relativePath || relativePath === "." || this.folders.has(relativePath)) {
+      throw new Error("Folder already exists.");
+    }
     this.folders.add(relativePath);
   }
 
   async createText(relativePath: string, content: string): Promise<void> {
     if (this.files.has(relativePath)) throw new Error("already_exists");
+    const parentFolder = knowledgeInitializationParentFolder(relativePath);
+    if (parentFolder && !await this.pathExists(parentFolder)) {
+      await this.createFolder(parentFolder);
+    }
     this.files.set(relativePath, content);
   }
 

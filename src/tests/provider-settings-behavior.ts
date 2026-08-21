@@ -1707,6 +1707,33 @@ async function assertOnboardingCoachmarkAccessibilityContract(): Promise<void> {
     assert.equal(anchor.hasClass("is-echoink-onboarding-target"), false);
   }
 
+  const detachedDocument = new ProviderModalTestDocument();
+  const detachedTab = new CodexSettingTab(plugin as never);
+  const detachedContainer = detachedDocument.createElement("div");
+  detachedDocument.body.appendChild(detachedContainer);
+  (detachedTab as unknown as { containerEl: ProviderModalTestElement }).containerEl =
+    detachedContainer;
+  const detachedAnchor = detachedContainer.createEl("button", {
+    attr: { "data-echoink-focus-key": "providers:add" }
+  });
+  const detachedMutable = detachedTab as unknown as {
+    renderOnboardingCoachmark(step: "provider" | "knowledge" | "personality"): void;
+    clearOnboardingCoachmark(restoreFocus: boolean): void;
+  };
+  detachedMutable.renderOnboardingCoachmark("provider");
+  const detachedCoachmark = detachedDocument.body.querySelector(
+    ".echoink-onboarding-coachmark.is-provider"
+  );
+  assert.ok(detachedCoachmark, "coachmark must render in the settings window document");
+  assert.equal(detachedCoachmark.ownerDocument, detachedDocument);
+  assert.equal(detachedAnchor.hasClass("is-echoink-onboarding-target"), true);
+  assert.equal(
+    providerModalTestDocument.body.querySelector(".echoink-onboarding-coachmark"),
+    null,
+    "detached settings coachmark must not leak into the main Vault document"
+  );
+  detachedMutable.clearOnboardingCoachmark(false);
+
   settings.setup.completedAt = 0;
   settings.setup.tutorialStep = "provider";
   for (const fixture of [
@@ -3148,7 +3175,18 @@ class ProviderModalTestMouseEvent {
 
 class ProviderModalTestDocument {
   activeElement: ProviderModalTestElement | null = null;
-  readonly defaultView = { MouseEvent: ProviderModalTestMouseEvent };
+  readonly defaultView = {
+    MouseEvent: ProviderModalTestMouseEvent,
+    ResizeObserver: ProviderModalTestResizeObserver,
+    innerWidth: 1200,
+    innerHeight: 900,
+    requestAnimationFrame: (callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    },
+    addEventListener: () => undefined,
+    removeEventListener: () => undefined
+  };
   readonly body = new ProviderModalTestElement("body", this);
   private readonly eventListeners = new Map<string, Array<(event: any) => void>>();
 

@@ -434,7 +434,8 @@ export class CodexSettingTab extends PluginSettingTab {
       await this.activateSettingsTab(requiredTab, true);
       return;
     }
-    window.requestAnimationFrame(() => {
+    const settingsWindow = this.containerEl.ownerDocument.defaultView ?? window;
+    settingsWindow.requestAnimationFrame(() => {
       if (
         generation !== this.onboardingRefreshGeneration
         || !this.settingsVisible
@@ -457,14 +458,16 @@ export class CodexSettingTab extends PluginSettingTab {
       this.clearOnboardingCoachmark(false);
       return;
     }
+    const settingsDocument = anchor.ownerDocument;
+    const settingsWindow = settingsDocument.defaultView ?? window;
     if (!this.onboardingRestoreFocusEl) {
-      const active = document.activeElement;
+      const active = settingsDocument.activeElement;
       this.onboardingRestoreFocusEl = active instanceof HTMLElement ? active : null;
     }
     this.clearOnboardingCoachmark(false);
     const zh = this.plugin.settings.settingsLanguage !== "en";
     const copy = onboardingCoachmarkCopy(step, zh);
-    const coachmark = document.body.createDiv({
+    const coachmark = settingsDocument.body.createDiv({
       cls: `echoink-onboarding-coachmark is-${step}`,
       attr: {
         role: "dialog",
@@ -514,20 +517,25 @@ export class CodexSettingTab extends PluginSettingTab {
       event.preventDefault();
       dismissOnboarding();
     };
-    const position = () => positionOnboardingCoachmark(coachmark, anchor);
-    const observer = typeof ResizeObserver === "undefined"
+    const position = () => positionOnboardingCoachmark(
+      coachmark,
+      anchor,
+      settingsWindow
+    );
+    const ResizeObserverCtor = settingsWindow.ResizeObserver;
+    const observer = typeof ResizeObserverCtor === "undefined"
       ? null
-      : new ResizeObserver(position);
+      : new ResizeObserverCtor(position);
     observer?.observe(anchor);
     observer?.observe(coachmark);
-    window.addEventListener("resize", position);
-    document.addEventListener("scroll", position, true);
-    document.addEventListener("keydown", onKeyDown, true);
+    settingsWindow.addEventListener("resize", position);
+    settingsDocument.addEventListener("scroll", position, true);
+    settingsDocument.addEventListener("keydown", onKeyDown, true);
     this.onboardingCoachmarkCleanup = () => {
       observer?.disconnect();
-      window.removeEventListener("resize", position);
-      document.removeEventListener("scroll", position, true);
-      document.removeEventListener("keydown", onKeyDown, true);
+      settingsWindow.removeEventListener("resize", position);
+      settingsDocument.removeEventListener("scroll", position, true);
+      settingsDocument.removeEventListener("keydown", onKeyDown, true);
       anchor.removeClass("is-echoink-onboarding-target");
       coachmark.remove();
     };
@@ -4286,12 +4294,13 @@ function onboardingCoachmarkCopy(
 
 function positionOnboardingCoachmark(
   coachmark: HTMLElement,
-  anchor: HTMLElement
+  anchor: HTMLElement,
+  settingsWindow: Window
 ): void {
   const anchorRect = anchor.getBoundingClientRect();
   const margin = 12;
-  const viewportWidth = window.innerWidth;
-  const viewportHeight = window.innerHeight;
+  const viewportWidth = settingsWindow.innerWidth;
+  const viewportHeight = settingsWindow.innerHeight;
   if (viewportWidth <= 640) {
     coachmark.setCssStyles({
       left: `${margin}px`,

@@ -500,7 +500,11 @@ export class KnowledgeBaseInitializer {
     const now = new Date(job.createdAt);
     const expectedGuide = buildKnowledgeInitializationGuideTemplate(now);
     const existingGuide = await this.host.readText(KNOWLEDGE_INITIALIZATION_GUIDE_PATH);
-    if (existingGuide !== null && existingGuide !== expectedGuide) {
+    if (
+      existingGuide !== null
+      && existingGuide !== expectedGuide
+      && !isReusableEchoInkKnowledgeGuide(existingGuide)
+    ) {
       await this.pause(job, "blocked_conflict", `指南目标已存在：${KNOWLEDGE_INITIALIZATION_GUIDE_PATH}`,
         "请保留并重命名现有文件，或移开冲突文件后再继续；EchoInk 不会覆盖它。");
       return;
@@ -522,7 +526,7 @@ export class KnowledgeBaseInitializer {
       this.host.readText(KNOWLEDGE_INITIALIZATION_INDEX_PATH)
     ]);
     if (
-      guide !== expectedGuide
+      (guide !== expectedGuide && (guide === null || !isReusableEchoInkKnowledgeGuide(guide)))
       || !index?.includes(INDEX_MARKER_START)
       || !index.includes(INDEX_MARKER_END)
     ) {
@@ -703,6 +707,32 @@ function normalizeRelativePath(value: string): string {
   return normalized;
 }
 
+export function knowledgeInitializationParentFolder(
+  relativePath: string
+): string | null {
+  const normalized = normalizeRelativePath(relativePath);
+  if (!normalized) throw new TypeError("knowledge_initialization_path_invalid");
+  const parent = path.posix.dirname(normalized);
+  return parent === "." ? null : parent;
+}
+
+export async function knowledgeInitializationPathExists(
+  vaultRootPath: string,
+  relativePath: string,
+  indexedExists: boolean
+): Promise<boolean> {
+  if (indexedExists) return true;
+  const normalized = normalizeRelativePath(relativePath);
+  if (!normalized) throw new TypeError("knowledge_initialization_path_invalid");
+  try {
+    await fsp.lstat(path.resolve(vaultRootPath, normalized));
+    return true;
+  } catch (error) {
+    if (nodeErrorCode(error) === "ENOENT") return false;
+    throw error;
+  }
+}
+
 function normalizedExtension(relativePath: string): string {
   return path.posix.extname(relativePath).toLocaleLowerCase();
 }
@@ -801,6 +831,16 @@ export function buildKnowledgeInitializationGuideTemplate(now: Date): string {
     "4. 新增资料后，在设置页点击“整理新增笔记”进行增量维护。", "",
     "> 非 Markdown 文件和附件保持原位；EchoInk 不会覆盖或删除你的既有笔记。", ""
   ].join("\n");
+}
+
+function isReusableEchoInkKnowledgeGuide(content: string): boolean {
+  const created = /^---\ncreated: (\d{4}-\d{2}-\d{2}T\d{2}:\d{2})\ntype: echoink-knowledge-guide\n---\n/u
+    .exec(content)?.[1];
+  if (!created) return false;
+  const createdAt = new Date(`${created}:00.000Z`);
+  return !Number.isNaN(createdAt.getTime())
+    && formatDateTime(createdAt) === created
+    && content === buildKnowledgeInitializationGuideTemplate(createdAt);
 }
 
 function buildWikiIndexMarkerBlock(now: Date): string {

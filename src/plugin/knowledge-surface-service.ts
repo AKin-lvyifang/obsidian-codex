@@ -17,6 +17,8 @@ import {
 } from "../settings/settings";
 import {
   KnowledgeBaseInitializer,
+  knowledgeInitializationParentFolder,
+  knowledgeInitializationPathExists,
   type KnowledgeInitializationHost,
   type KnowledgeInitializationJob,
   type KnowledgeInitializationMode,
@@ -179,12 +181,18 @@ function createKnowledgeInitializationHost(
     },
     readText,
     async pathExists(relativePath: string): Promise<boolean> {
-      return plugin.app.vault.getAbstractFileByPath(normalizePath(relativePath)) !== null;
+      const normalized = normalizePath(relativePath);
+      return await knowledgeInitializationPathExists(
+        vaultRootPath,
+        normalized,
+        plugin.app.vault.getAbstractFileByPath(normalized) !== null
+      );
     },
     createFolder: ensureFolder,
     async createText(relativePath: string, content: string): Promise<void> {
       const normalized = normalizePath(relativePath);
-      await ensureFolder(path.posix.dirname(normalized));
+      const parentFolder = knowledgeInitializationParentFolder(normalized);
+      if (parentFolder) await ensureFolder(parentFolder);
       if (plugin.app.vault.getAbstractFileByPath(normalized)) {
         throw new Error(`目标已存在：${normalized}`);
       }
@@ -207,7 +215,8 @@ function createKnowledgeInitializationHost(
       if (plugin.app.vault.getAbstractFileByPath(normalizePath(targetPath))) {
         throw new Error(`目标已存在：${targetPath}`);
       }
-      await ensureFolder(path.posix.dirname(targetPath));
+      const parentFolder = knowledgeInitializationParentFolder(targetPath);
+      if (parentFolder) await ensureFolder(parentFolder);
       await plugin.app.fileManager.renameFile(source, normalizePath(targetPath));
     },
     currentProvider() {
