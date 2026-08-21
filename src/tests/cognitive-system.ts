@@ -7,7 +7,7 @@
  */
 
 import assert from "node:assert/strict";
-import { readFile, readdir, writeFile } from "node:fs/promises";
+import { readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { withPersonalMemoryFixture, type PersonalMemoryFixture } from "./personal-memory-fixture";
 import { CognitiveSystem } from "../harness/memory/cognitive-system";
 import path from "node:path";
@@ -29,7 +29,7 @@ import {
 import {
   measureFinalInjectionTokens,
   PersonalMemoryRecallHarness,
-  serializeRecallInjection
+  serializeRecallBlocks
 } from "../harness/memory/personal-memory-recall-harness";
 import { estimatePiContextTokens } from "../harness/pi-native/pi-context-budget";
 import type { PersonalMemoryTurnCatalogCandidate } from "../harness/memory/personal-memory-repository";
@@ -38,10 +38,19 @@ import {
   applyTemplateToState,
   currentPersonalityScores,
   emptyPersonalityState,
+  personalityStateJson,
+  PersonalityStateStore,
   type DreamPersonalityInput,
   type PersonalityState
 } from "../harness/memory/personality-state";
-import { parseUserProfileState, USER_OBSERVED_MIN_SOURCES, type UserProfileState } from "../harness/memory/user-profile-state";
+import {
+  emptyUserProfileState,
+  parseUserProfileState,
+  profileKeyPromptCatalog,
+  PROFILE_KEY_PROMPT_CAP,
+  USER_OBSERVED_MIN_SOURCES,
+  type UserProfileState
+} from "../harness/memory/user-profile-state";
 import { renderUserMarkdown } from "../harness/memory/cognitive-projection";
 import {
   getPersonalityTemplate,
@@ -52,10 +61,23 @@ import {
   TRAIT_DIMENSION_META,
   traitBehaviorBand
 } from "../harness/memory/personality-templates";
-import { defaultUserProfile } from "../harness/memory/personal-memory-repository";
+import { defaultUserProfile, PersonalMemoryRepository } from "../harness/memory/personal-memory-repository";
 import { lexicalTokens } from "../harness/memory/search-index-v3";
-import type { PersonalMemoryRecord } from "../harness/memory/personal-memory-contracts";
-import type { AgentAvatarState } from "../harness/memory/agent-identity-state";
+import {
+  PERSONALITY_STATE_SCHEMA,
+  type PersonalMemoryRecord,
+  type SecondaryMatchView
+} from "../harness/memory/personal-memory-contracts";
+import {
+  AGENT_IDENTITY_STATE_SCHEMA,
+  AgentIdentityStateStore,
+  agentIdentityStateJson,
+  type AgentAvatarState
+} from "../harness/memory/agent-identity-state";
+import { DreamStateStore } from "../harness/memory/dream-state";
+import { SecondaryMemoryStore } from "../harness/memory/secondary-memory-store";
+import { migratePersonalityV1ToV2 } from "../harness/memory/cognitive-system";
+import { cognitivePathExists } from "../harness/memory/cognitive-file-utils";
 
 const DAY_MS = 86_400_000;
 
@@ -888,6 +910,10 @@ async function scenarioSecondaryRedreamReconcile(): Promise<void> {
         ]
       };
     }));
+    // Round 6 修复二后：reset 只在已有 templateId 时成立，先完成首次选择。
+    await system.selectPersonalityTemplate("executor", {
+      initialIdentity: { displayName: "小糖", avatar: { kind: "default" } }
+    });
     const memory = await createMemory(fixture, {
       title: "我对甜食过敏",
       content: "我对甜食过敏。",
@@ -1264,6 +1290,10 @@ async function scenarioRedreamNoAccumulation(): Promise<void> {
         }
       ]
     })));
+    // Round 6 修复二后：reset 只在已有 templateId 时成立，先完成首次选择。
+    await system.selectPersonalityTemplate("executor", {
+      initialIdentity: { displayName: "小复", avatar: { kind: "default" } }
+    });
     const memory = await createMemory(fixture, {
       title: "重复做梦测试记忆",
       content: "验证连续做梦不会累积重复事实。"
@@ -1883,19 +1913,34 @@ async function scenarioRecallBudgetFinalPayloadOnce(): Promise<void> {
     assert.equal(exact.recall?.injected, 2,
       "cumulative payload at the exact budget must admit both candidates");
 
-    // The shared serializer's final payload really fits the budget.
-    const secondaryFacts = [];
+    // The shared block serializer is the ONLY final-context entry: the budget
+    // must equal the real combined text token count, not an approximation.
+    const secondaryFacts: Array<{
+      parentId: string;
+      parentTitle: string;
+      fact: SecondaryMatchView;
+    }> = [];
     for (const candidate of exact.recall!.candidates) {
       for (const view of candidate.secondaryMatches ?? []) {
         secondaryFacts.push({ parentId: candidate.id, parentTitle: candidate.title, fact: view });
       }
     }
-    const payload = serializeRecallInjection({
+    const blocks = serializeRecallBlocks({
       candidates: exact.recall!.candidates,
-      secondaryFacts
+      secondaryFacts,
+      exhaustive: exact.recall!.exhaustive,
+      hasMore: exact.recall!.hasMore,
+      total: exact.recall!.total,
+      injected: exact.recall!.injected,
+      remaining: exact.recall!.remaining
     });
-    assert.ok(estimatePiContextTokens(payload).tokens <= exactBudget,
-      "serialized final payload must stay within the measured budget");
+    assert.equal(estimatePiContextTokens(blocks.combined).tokens, exactBudget,
+      "budget must equal the real final combined payload token count");
+
+    // One token less than the exact final payload must NOT admit both.
+    const tight = await harness.prepareTurnContext({ ...common, tokenBudget: exactBudget - 1 });
+    assert.ok((tight.recall?.injected ?? 0) < 2,
+      "one token below the exact final payload must drop at least one candidate");
   });
   console.log("PASS cognitive: recall budget measures the real final payload once");
 }
@@ -2188,20 +2233,31 @@ async function scenarioSecondaryDedupeTitleOrTerms(): Promise<void> {
     now: now + 1_000
   });
 
-  // 1) Same title, different terms, higher candidate confidence → replace.
-  let result = reconcile([makeExisting(0.75, "llm_inferred")], [candidate("手冲咖啡", ["手冲", "器具"])]);
-  assert.equal(result.records.filter((record) => record.status === "current").length, 1);
-  assert.equal(result.factsCreated, 1);
-  assert.equal(
-    result.records.filter((record) => record.disabledReason === "redream_replaced").length,
-    1
-  );
+  // 1) Same title, different terms, higher candidate confidence → in-place
+  //    update ON THE OLD RECORD: id / hitCount / lastHitAt survive, revision
+  //    +1. Retire+create is forbidden (Round 6 §9).
+  const oldFact = makeExisting(0.75, "llm_inferred");
+  let result = reconcile([oldFact], [candidate("手冲咖啡", ["手冲", "器具"])]);
+  let current = result.records.filter((record) => record.status === "current");
+  assert.equal(current.length, 1);
+  assert.equal(current[0].id, oldFact.id, "broad-key replace must keep the old id");
+  assert.equal(current[0].hitCount, oldFact.hitCount, "hitCount survives replacement");
+  assert.equal(current[0].lastHitAt, oldFact.lastHitAt, "lastHitAt survives replacement");
+  assert.equal(current[0].createdAt, oldFact.createdAt, "createdAt survives replacement");
+  assert.equal(current[0].revision, oldFact.revision + 1);
+  assert.equal(current[0].content, "新候选内容。", "content updated in place");
+  assert.deepEqual([...current[0].matchTerms], ["手冲", "器具"], "terms updated in place");
+  assert.equal(result.factsCreated, 0, "replacement must not create a new record");
+  assert.equal(result.factsReused, 1, "replacement counts as reuse");
+  assert.equal(result.factsRetired, 0, "replacement must not retire the old record");
+  assert.ok(!result.records.some((record) => record.disabledReason === "redream_replaced"),
+    "no retire+create residue");
 
   // 2) Same title, existing confidence higher → keep old record untouched.
   const boosted = applySecondaryHit(makeExisting(0.75, "llm_inferred"), now + 500);
   assert.ok(boosted.confidence >= 0.80);
   result = reconcile([boosted], [candidate("手冲咖啡", ["手冲", "器具"], "strong_inference")]);
-  let current = result.records.filter((record) => record.status === "current");
+  current = result.records.filter((record) => record.status === "current");
   assert.equal(current.length, 1);
   assert.equal(current[0].id, boosted.id, "kept record reuses the old id");
   assert.equal(current[0].hitCount, boosted.hitCount, "hitCount unchanged");
@@ -3001,6 +3057,784 @@ async function scenarioMigrationWithoutTemplateKeepsCustomAgent(): Promise<void>
   console.log("PASS cognitive: migration without template keeps custom AGENT.md");
 }
 
+// ---------------------------------------------------------------------------
+// R6. Round 6 集成回归（计划 §4–§11）
+// ---------------------------------------------------------------------------
+
+// R6-1（修复一）：二级事实在最终上下文中只注入一次，预算就是真实文本。
+async function scenarioRecallSingleInjectionBlocks(): Promise<void> {
+  const fact = Object.freeze({
+    id: "sec_sentinel_fact",
+    parentId: "mem_inject_a",
+    title: "哨兵事实",
+    content: "二级事实唯一注入哨兵 SENTINEL-SECONDARY-CONTENT",
+    recallWhen: "测试时",
+    matchTerms: ["哨兵"],
+    relation: "instance",
+    basis: "llm_inferred"
+  }) as SecondaryMatchView;
+  const makeCandidate = (id: string, title: string) => Object.freeze({
+    id,
+    kind: "fact",
+    status: "current",
+    title,
+    recallWhen: "相关话题出现时",
+    summary: `${title} 的摘要。`,
+    date: "2026-08-21",
+    basis: "explicit",
+    sourceSummary: "",
+    score: 0.9,
+    matchedSecondaryId: fact.id,
+    secondaryMatches: [fact],
+    // 索引内部字段：绝不能泄漏进任一注入区块。
+    routeTokens: ["route-token-leak"],
+    contentTokens: ["content-token-leak"]
+  }) as unknown as PersonalMemoryTurnCatalogCandidate;
+  const candidates = [makeCandidate("mem_inject_a", "候选甲"), makeCandidate("mem_inject_b", "候选乙")];
+  const secondaryFacts = candidates.map((candidate) => ({
+    parentId: candidate.id,
+    parentTitle: candidate.title,
+    fact
+  }));
+
+  const blocks = serializeRecallBlocks({
+    candidates,
+    secondaryFacts,
+    exhaustive: true,
+    hasMore: false,
+    total: 2,
+    injected: 2,
+    remaining: 0
+  });
+
+  // 1. 每条二级事实在最终 combined 中恰好出现一次。
+  const sentinelCount = blocks.combined.split("SENTINEL-SECONDARY-CONTENT").length - 1;
+  assert.equal(sentinelCount, 1, "each secondary fact must appear exactly once in the final context");
+  assert.ok(blocks.secondaryBlock, "secondary block must exist when facts exist");
+  assert.equal(blocks.secondaryBlock!.split("SENTINEL-SECONDARY-CONTENT").length - 1, 1,
+    "the single occurrence lives in the secondary block");
+  assert.ok(!blocks.recallBlock.includes("SENTINEL-SECONDARY-CONTENT"),
+    "recall block must not carry full secondary facts");
+
+  // 2. Recall JSON 不含 secondaryFacts；candidates 只保留 matchedSecondaryId。
+  assert.ok(!blocks.recallBlock.includes("secondaryFacts"), "recall JSON must not embed secondaryFacts");
+  assert.ok(!blocks.recallBlock.includes("secondaryMatches"), "candidates must drop secondaryMatches");
+  const recallBody = blocks.recallBlock.slice(
+    blocks.recallBlock.indexOf("\n") + 1,
+    blocks.recallBlock.lastIndexOf("\n")
+  );
+  const recallParsed = JSON.parse(recallBody) as {
+    candidates: Array<Record<string, unknown>>;
+    total: number;
+    injected: number;
+    remaining: number;
+  };
+  assert.equal(recallParsed.total, 2);
+  assert.equal(recallParsed.injected, 2);
+  assert.equal(recallParsed.remaining, 0);
+  for (const candidate of recallParsed.candidates) {
+    assert.ok(!("secondaryMatches" in candidate));
+    assert.equal(candidate.matchedSecondaryId, fact.id, "matchedSecondaryId must survive");
+  }
+
+  // 3. 索引字段不进入任一区块。
+  assert.ok(!blocks.combined.includes("routeTokens"));
+  assert.ok(!blocks.combined.includes("contentTokens"));
+  assert.ok(!blocks.combined.includes("route-token-leak"));
+  assert.ok(!blocks.combined.includes("content-token-leak"));
+
+  // 4. secondary block 结构与信任标签。
+  assert.ok(blocks.secondaryBlock!.startsWith("<echoink_memory_secondary trust=\"llm-inferred-reference\">"));
+  assert.ok(blocks.secondaryBlock!.includes("\"secondaryFacts\""));
+  assert.ok(blocks.recallBlock.startsWith("<echoink_memory_recall trust=\"user-owned-memory\""));
+
+  // 5. 没有二级事实时完全省略 secondary block。
+  const without = serializeRecallBlocks({
+    candidates: [],
+    secondaryFacts: [],
+    exhaustive: true,
+    hasMore: false,
+    total: 0,
+    injected: 0,
+    remaining: 0
+  });
+  assert.equal(without.secondaryBlock, null);
+  assert.equal(without.combined, without.recallBlock);
+
+  // 6. 预算函数测量的就是 combined 真实文本。
+  const measured = measureFinalInjectionTokens(candidates);
+  assert.equal(measured, estimatePiContextTokens(blocks.combined).tokens,
+    "budget must measure the exact combined final text");
+  console.log("PASS cognitive: recall context injects each secondary fact exactly once");
+}
+
+// R6-2（修复二）：首次选择只由 templateId 判断；命名只在身份 revision 0 时必需。
+async function scenarioInitialSelectionJudgedByTemplateIdOnly(): Promise<void> {
+  // Case A：人格 revision > 0 但 templateId 仍为空、身份 revision 0
+  // → 底层仍必须要求完成命名（旧实现误把人格 revision 当成「已初始化」）。
+  await withPersonalMemoryFixture(async (fixture) => {
+    const halfState: PersonalityState = Object.freeze({
+      ...emptyPersonalityState(fixture.now()),
+      revision: 3,
+      updatedAt: fixture.now()
+    });
+    await writeFile(fixture.repository.layout.personalityState, personalityStateJson(halfState));
+    const system = await createSystem(fixture, () => null);
+
+    await assert.rejects(
+      system.selectPersonalityTemplate("executor"),
+      /agent_identity_required/u,
+      "half-initialized personality must still require first naming"
+    );
+
+    const manifestBefore = await readJson(fixture.repository.layout.manifest) as { revision: number };
+    const result = await system.selectPersonalityTemplate("executor", {
+      initialIdentity: { displayName: "新芽", avatar: { kind: "default" } }
+    });
+    const manifestAfter = await readJson(fixture.repository.layout.manifest) as { revision: number };
+    assert.equal(manifestAfter.revision, manifestBefore.revision + 1,
+      "identity + template still commit in ONE transaction");
+    assert.equal(result.identity.displayName, "新芽");
+    assert.equal(result.identity.revision, 1);
+    assert.equal(result.state.templateId, "executor");
+    const identityOnDisk = await readJson(fixture.repository.layout.agentIdentity) as {
+      revision: number; displayName: string;
+    };
+    assert.equal(identityOnDisk.displayName, "新芽", "identity must be persisted");
+    const agent = await readFile(fixture.repository.layout.agent, "utf8");
+    assert.ok(agent.includes("新芽"), "AGENT.md must use the newly chosen name");
+  });
+
+  // Case B：身份已存在（revision > 0）但 templateId 为空
+  // → 首次选择保留现有身份，不再要求命名，且预模板清理/重排队仍然生效。
+  await withPersonalMemoryFixture(async (fixture) => {
+    await writeFile(fixture.repository.layout.agentIdentity, agentIdentityStateJson({
+      schema: AGENT_IDENTITY_STATE_SCHEMA,
+      revision: 2,
+      displayName: "已有身份",
+      avatar: Object.freeze({ kind: "default" as const }),
+      updatedAt: fixture.now()
+    }));
+    const halfState: PersonalityState = Object.freeze({
+      ...emptyPersonalityState(fixture.now()),
+      revision: 3,
+      updatedAt: fixture.now()
+    });
+    await writeFile(fixture.repository.layout.personalityState, personalityStateJson(halfState));
+    const system = await createSystem(fixture, () => null);
+    const memory = await createMemory(fixture, {
+      title: "半状态记忆",
+      content: "首次选择必须把这条记忆重新排队做梦。"
+    });
+
+    const result = await system.selectPersonalityTemplate("executor");
+    assert.equal(result.state.templateId, "executor");
+    assert.equal(result.identity.displayName, "已有身份", "existing identity must be kept");
+    assert.equal(result.identity.revision, 2, "kept identity must not gain a revision");
+    const identityOnDisk = await readJson(fixture.repository.layout.agentIdentity) as {
+      revision: number; displayName: string;
+    };
+    assert.equal(identityOnDisk.revision, 2);
+    assert.equal(identityOnDisk.displayName, "已有身份");
+    assert.ok(result.agent.includes("已有身份"));
+
+    const dreamState = await readJson(fixture.repository.layout.dreamState) as Record<string, any>;
+    assert.ok((dreamState.pendingMemoryIds as string[]).includes(memory.id),
+      "initial selection must requeue current memories even with existing identity");
+    assert.equal(dreamState.lastProcessedMemoryRevision, 0);
+  });
+
+  // Case C：reset 只在已有 templateId 时成立。
+  await withPersonalMemoryFixture(async (fixture) => {
+    await writeFile(fixture.repository.layout.agentIdentity, agentIdentityStateJson({
+      schema: AGENT_IDENTITY_STATE_SCHEMA,
+      revision: 1,
+      displayName: "小重置",
+      avatar: Object.freeze({ kind: "default" as const }),
+      updatedAt: fixture.now()
+    }));
+    const system = await createSystem(fixture, () => null);
+    await assert.rejects(
+      system.selectPersonalityTemplate("executor", { reset: true }),
+      /personality_reset_requires_template/u,
+      "reset must require an existing templateId"
+    );
+  });
+  console.log("PASS cognitive: pre-template revision still requires first naming");
+}
+
+// R6-3（修复二）：首次选择必须清理模板前证据并重排队，保留 learnedRequirements。
+async function scenarioInitialTemplateClearsPreTemplateEvidence(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    const system = await createSystem(fixture, () => fakeDreamLlm(() => JSON.stringify({
+      ...EMPTY_DREAM_OUTPUT,
+      personalitySignals: [{
+        dimension: "sharpness",
+        direction: "decrease",
+        strength: 0.8,
+        evidence: "模板前信号"
+      }],
+      agentRequirements: ["模板前要求必须保留"],
+      userProfileItems: [{ section: "preference", text: "模板前画像条目" }]
+    })));
+    const memories: PersonalMemoryRecord[] = [];
+    for (const title of ["模板前记忆甲", "模板前记忆乙", "模板前记忆丙"]) {
+      memories.push(await createMemory(fixture, { title, content: `${title}的内容。` }));
+    }
+    await system.settleDreamEnqueue();
+    const run1 = await system.forceDreamRun();
+    assert.ok(run1);
+    assert.equal(run1!.processedMemoryIds.length, 3);
+
+    const pre = await system.readPersonalityState();
+    assert.equal(pre.templateId, null);
+    assert.ok(pre.observed.sharpness, "pre-template observed trait must exist before cleanup");
+    assert.equal(pre.observed.sharpness!.sourceMemoryIds.length, 3);
+    assert.ok(pre.learnedRequirements.some(
+      (requirement) => requirement.status === "current" && requirement.text === "模板前要求必须保留"
+    ));
+    assert.ok(pre.processedSources.length >= 3);
+
+    const manifestBefore = await readJson(fixture.repository.layout.manifest) as { revision: number };
+    await system.selectPersonalityTemplate("executor", {
+      initialIdentity: { displayName: "新芽", avatar: { kind: "default" } }
+    });
+    const manifestAfter = await readJson(fixture.repository.layout.manifest) as { revision: number };
+    assert.equal(manifestAfter.revision, manifestBefore.revision + 1,
+      "cleanup + template + identity must commit in ONE transaction");
+
+    const post = await system.readPersonalityState();
+    const template = getPersonalityTemplate("executor")!;
+    assert.equal(post.templateId, "executor");
+    // 1. explicit 基线 = 模板分数。
+    for (const dimension of TRAIT_DIMENSIONS) {
+      assert.equal(post.explicit[dimension]!.score, template.scores[dimension]);
+    }
+    // 2. 模板前 observed 标记 superseded 并保留历史。
+    assert.equal(post.observed.sharpness, null, "pre-template observed must be superseded");
+    assert.ok(post.history.some(
+      (record) => record.dimension === "sharpness" && record.reason === "initial_template_selection"
+    ));
+    // 3. 候选与 processedSources 清空。
+    assert.equal(post.candidates.length, 0, "pre-template candidates must be cleared");
+    assert.equal(post.processedSources.length, 0, "processedSources must be cleared");
+    // 4. learnedRequirements 保留。
+    assert.ok(post.learnedRequirements.some(
+      (requirement) => requirement.status === "current" && requirement.text === "模板前要求必须保留"
+    ), "learnedRequirements must survive the initial selection");
+
+    // 5. 有效 Memory 全部重新入队；进度归零；运行时间保留。
+    const dreamState = await readJson(fixture.repository.layout.dreamState) as Record<string, any>;
+    for (const memory of memories) {
+      assert.ok((dreamState.pendingMemoryIds as string[]).includes(memory.id),
+        `${memory.id} must be requeued`);
+    }
+    assert.equal(dreamState.lastProcessedMemoryRevision, 0);
+    assert.equal(dreamState.backfillCursor, null);
+    assert.ok((dreamState.lastRunAt as number) > 0, "lastRunAt preserved");
+    assert.ok((dreamState.lastSuccessAt as number) > 0, "lastSuccessAt preserved");
+
+    // 6. 模板后重新做梦会重新处理这些 Memory。
+    const run2 = await system.forceDreamRun();
+    assert.ok(run2);
+    assert.ok(run2!.processedMemoryIds.length > 0);
+    const again = await system.readPersonalityState();
+    assert.ok(again.processedSources.length > 0, "memories reprocessed after template selection");
+  });
+  console.log("PASS cognitive: initial template clears pre-template trait evidence and requeues memory");
+}
+
+// R6-4（修复三）：v1 迁移失败 → fail-closed；未知 schema / 损坏 JSON → 拒绝构造。
+async function scenarioMigrationFailureBlocksCognitiveWriters(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    await seedLegacyPersonality(fixture);
+    const legacyText = await readFile(fixture.repository.layout.personalityState, "utf8");
+    const agentBefore = await readFile(fixture.repository.layout.agent, "utf8");
+
+    const { mkdirSync, rmSync } = await import("node:fs");
+    const FIXED_NOW = 1_800_000_000_000;
+    let repositoryCounter = 0;
+    const repository = new PersonalMemoryRepository({
+      vaultPath: fixture.vaultPath,
+      vaultId: fixture.vaultId,
+      now: () => FIXED_NOW,
+      idFactory: () => `mem_r6_migration_${++repositoryCounter}`
+    });
+    await repository.initialize();
+    const createAttempt = () => CognitiveSystem.create({
+      repository,
+      llm: () => null,
+      getDreamConfig: () => ({ enabled: true, runsPerDay: 3 }),
+      isForegroundBusy: () => false,
+      registerInterval: () => {},
+      now: () => FIXED_NOW
+    });
+
+    // 1. 确定性迁移失败（占用备份目标 → 事务真实失败并回滚）→ create()
+    //    fail-closed 抛稳定错误；v1/AGENT.md 原样保留、无任何残留。
+    const stamp = new Date(FIXED_NOW).toISOString().replace(/[:.]/g, "-");
+    const backupPath = path.join(
+      fixture.repository.layout.root, "agents", "echoink", "history",
+      `personality-state-v1-${stamp}.json`
+    );
+    mkdirSync(backupPath, { recursive: true });
+    await assert.rejects(createAttempt(), /personality_migration_blocked/u);
+    rmSync(backupPath, { recursive: true, force: true });
+    assert.equal(await readFile(fixture.repository.layout.personalityState, "utf8"), legacyText,
+      "failed migration must keep the v1 file untouched");
+    assert.equal(await readFile(fixture.repository.layout.agent, "utf8"), agentBefore,
+      "failed migration must keep AGENT.md untouched");
+    assert.equal((await listMigrationBackups(fixture)).length, 0, "no backup on failed migration");
+    assert.ok(!(await cognitivePathExists(fixture.repository.layout.dreamState)),
+      "no dream-state residue on failed migration");
+
+    // 2. 未知 schema → personality_state_invalid（不得降级成空状态继续写）。
+    await writeFile(fixture.repository.layout.personalityState,
+      JSON.stringify({ schema: "echoink.personality.v9", revision: 1 }, null, 2));
+    await assert.rejects(createAttempt(), /personality_state_invalid/u);
+    assert.equal((await readJson(fixture.repository.layout.personalityState) as { schema: string }).schema,
+      "echoink.personality.v9", "unknown schema file must stay untouched");
+
+    // 3. 损坏 JSON → personality_state_invalid。
+    await writeFile(fixture.repository.layout.personalityState, "{{{ 这不是 JSON");
+    await assert.rejects(createAttempt(), /personality_state_invalid/u);
+
+    // 4. 恢复 v1、解除故障后，重试必须成功（main.ts 不得缓存失败 flight）。
+    await writeFile(fixture.repository.layout.personalityState, legacyText);
+    const system = await createAttempt();
+    const migrated = await system.readPersonalityState();
+    assert.equal(migrated.schema, PERSONALITY_STATE_SCHEMA);
+    assert.equal(migrated.templateId, "advisor", "v1 templateId survives migration");
+    assert.equal((await listMigrationBackups(fixture)).length, 1, "retry writes the backup once");
+  });
+
+  // 5. 文件缺失仍是合法初始状态：create 成功且不落盘空人格文件。
+  await withPersonalMemoryFixture(async (fixture) => {
+    const system = await createSystem(fixture, () => null);
+    assert.ok(!(await cognitivePathExists(fixture.repository.layout.personalityState)),
+      "create must not write a personality file for a fresh vault");
+    const state = await system.readPersonalityState();
+    assert.equal(state.templateId, null);
+  });
+  console.log("PASS cognitive: migration failure blocks cognitive writers until retry succeeds");
+}
+
+// R6-5（修复四）：做梦中改名 → 本地冲突重试，Provider 只调用一次，新名称获胜。
+async function scenarioRenameDuringDreamKeepsNewName(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    let providerCalls = 0;
+    let systemRef: CognitiveSystem;
+    const llm: DreamLlmPort = {
+      call: async () => {
+        providerCalls += 1;
+        // 模型响应前用户在设置里改名：真实并发窗口。
+        await systemRef.updateAgentIdentity({
+          displayName: "梦中新名",
+          avatar: { kind: "default" }
+        });
+        return JSON.stringify(EMPTY_DREAM_OUTPUT);
+      }
+    };
+    const system = await createSystem(fixture, () => llm);
+    systemRef = system;
+    await system.selectPersonalityTemplate("executor", {
+      initialIdentity: { displayName: "小墨", avatar: { kind: "default" } }
+    });
+    await createMemory(fixture, {
+      title: "做梦改名记忆",
+      content: "做梦期间的改名不能丢失。"
+    });
+    await system.settleDreamEnqueue();
+    const run = await system.forceDreamRun();
+    assert.equal(providerCalls, 1, "provider must be called exactly once (no re-dream on retry)");
+    assert.ok(run);
+    assert.ok(run!.committed, "dream commit must succeed via local identity conflict retry");
+    const identity = await system.readAgentIdentity();
+    assert.equal(identity.displayName, "梦中新名");
+    assert.equal(identity.revision, 2);
+    const agent = await readFile(fixture.repository.layout.agent, "utf8");
+    assert.ok(agent.includes("梦中新名"), "final AGENT.md must use the new name");
+    assert.ok(!agent.includes("小墨"), "AGENT.md must not revert to the old name");
+  });
+  console.log("PASS cognitive: rename during dream keeps the new identity without a second provider call");
+}
+
+// R6-6（修复四）：两个身份编辑并发 → CAS 保证恰好一个成功，无静默覆盖。
+async function scenarioIdentityCasConcurrentEdits(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    const system = await createSystem(fixture, () => null);
+    await system.selectPersonalityTemplate("executor", {
+      initialIdentity: { displayName: "初始名", avatar: { kind: "default" } }
+    });
+    const results = await Promise.allSettled([
+      system.updateAgentIdentity({ displayName: "并发甲", avatar: { kind: "default" } }),
+      system.updateAgentIdentity({ displayName: "并发乙", avatar: { kind: "default" } })
+    ]);
+    const succeeded = results.filter((result) => result.status === "fulfilled");
+    const failed = results.filter((result) => result.status === "rejected");
+    assert.equal(succeeded.length, 1, "exactly one concurrent identity edit may win");
+    assert.equal(failed.length, 1);
+    const reason = (failed[0] as PromiseRejectedResult).reason;
+    assert.match(String(reason instanceof Error ? reason.message : reason), /identity_revision_conflict/u);
+    const onDisk = await readJson(fixture.repository.layout.agentIdentity) as {
+      revision: number; displayName: string;
+    };
+    assert.equal(onDisk.revision, 2, "identity revision must advance exactly once");
+    // 哪个并发编辑获胜由串行 lane 的入队顺序决定（微任务调度不确定）；
+    // 不变量是：落盘名称 = 获胜者提交的名称，失败者不留下任何痕迹。
+    const winner = (succeeded[0] as PromiseFulfilledResult<{
+      identity: Readonly<{ displayName: string }>;
+    }>).value;
+    assert.ok(winner.identity.displayName === "并发甲" || winner.identity.displayName === "并发乙");
+    assert.equal(onDisk.displayName, winner.identity.displayName,
+      "disk identity must match the winner, no silent overwrite by the loser");
+    const agent = await readFile(fixture.repository.layout.agent, "utf8");
+    assert.ok(agent.includes(onDisk.displayName), "AGENT.md must carry the winning name");
+  });
+  console.log("PASS cognitive: concurrent identity edits resolve via revision CAS");
+}
+
+// R6-7（修复四）：迁移与并发改名竞争 → 迁移干净失败，v1 原样保留。
+async function scenarioIdentityCasMigrationRace(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    await seedLegacyPersonality(fixture);
+    const legacyText = await readFile(fixture.repository.layout.personalityState, "utf8");
+    const root = fixture.repository.layout.root;
+    const identityStore = new AgentIdentityStateStore(root);
+    await identityStore.read(); // 尚无文件 → 缓存默认 revision 0
+
+    // 并发写路径抢先落盘 revision 5 的身份。
+    await writeFile(fixture.repository.layout.agentIdentity, agentIdentityStateJson({
+      schema: AGENT_IDENTITY_STATE_SCHEMA,
+      revision: 5,
+      displayName: "并发改名",
+      avatar: Object.freeze({ kind: "default" as const }),
+      updatedAt: fixture.now()
+    }));
+
+    await assert.rejects(migratePersonalityV1ToV2({
+      repository: fixture.repository,
+      personalityStore: new PersonalityStateStore(root),
+      dreamStateStore: new DreamStateStore(root),
+      agentIdentityStore: identityStore,
+      secondaryStore: new SecondaryMemoryStore(path.join(root, "shared-user", "memory")),
+      now: fixture.now()
+    }), /identity_revision_conflict/u);
+
+    assert.equal(await readFile(fixture.repository.layout.personalityState, "utf8"), legacyText,
+      "v1 must survive the lost race");
+    assert.equal((await listMigrationBackups(fixture)).length, 0);
+    assert.ok(!(await cognitivePathExists(fixture.repository.layout.dreamState)));
+  });
+  console.log("PASS cognitive: migration loses cleanly when identity changed mid-flight");
+}
+
+// R6-8（修复五）：同一 Memory 更高 revision 重新处理 → 先撤销旧派生，再应用新输出。
+async function scenarioReprocessedRevisionRevokesDerivedSources(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    const callsForA: number[] = [];
+    const outputRound1A = {
+      ...EMPTY_DREAM_OUTPUT,
+      personalitySignals: [
+        { dimension: "sharpness", direction: "decrease", strength: 0.9, evidence: "温和信号" },
+        { dimension: "boldness", direction: "increase", strength: 0.9, evidence: "果敢信号" }
+      ],
+      agentRequirements: ["回答要更温和"],
+      userProfileItems: [{ section: "preference", text: "用户偏好温和语气" }]
+    };
+    const outputRound2A = {
+      ...EMPTY_DREAM_OUTPUT,
+      personalitySignals: [
+        { dimension: "creativity", direction: "increase", strength: 0.9, evidence: "创意信号" }
+      ],
+      agentRequirements: ["回答要更犀利"],
+      userProfileItems: [{ section: "preference", text: "用户偏好犀利表达" }]
+    };
+    const outputOthers = {
+      ...EMPTY_DREAM_OUTPUT,
+      personalitySignals: [
+        { dimension: "sharpness", direction: "decrease", strength: 0.9, evidence: "温和信号" }
+      ]
+    };
+    const llm: DreamLlmPort = {
+      call: async (input) => {
+        const parsed = JSON.parse(input.userPrompt) as { memory: { title: string } };
+        if (parsed.memory.title === "修订记忆") {
+          callsForA.push(1);
+          return JSON.stringify(callsForA.length === 1 ? outputRound1A : outputRound2A);
+        }
+        return JSON.stringify(outputOthers);
+      }
+    };
+    const system = await createSystem(fixture, () => llm);
+    await system.selectPersonalityTemplate("executor", {
+      initialIdentity: { displayName: "小修", avatar: { kind: "default" } }
+    });
+    const memoryA = await createMemory(fixture, { title: "修订记忆", content: "第一版内容。" });
+    await createMemory(fixture, { title: "佐证记忆乙", content: "乙的内容。" });
+    await createMemory(fixture, { title: "佐证记忆丙", content: "丙的内容。" });
+    await system.settleDreamEnqueue();
+    const run1 = await system.forceDreamRun();
+    assert.ok(run1);
+    assert.equal(run1!.processedMemoryIds.length, 3);
+
+    const pre = await system.readPersonalityState();
+    assert.ok(pre.observed.sharpness, "observed established from three sources");
+    assert.ok(pre.candidates.some(
+      (candidate) => candidate.dimension === "boldness" && candidate.sourceMemoryId === memoryA.id
+    ), "pre-revision boldness candidate from A");
+    assert.ok(pre.learnedRequirements.some(
+      (requirement) => requirement.status === "current" && requirement.text === "回答要更温和"
+    ));
+    const preProfile = parseUserProfileState(
+      await readJson(fixture.repository.layout.userProfileState) as Record<string, unknown>
+    );
+    assert.ok(preProfile!.items.some(
+      (item) => item.status === "current" && item.text === "用户偏好温和语气"
+    ));
+    assert.ok((await readFile(fixture.repository.layout.user, "utf8")).includes("用户偏好温和语气"));
+
+    // 用户编辑 = forget + restore（同一 ID，更高 revision）。
+    await fixture.repository.write({
+      operation: "forget",
+      targetId: memoryA.id,
+      reason: "R6 修订测试",
+      explicitForget: true
+    }, fixture.runtime({ explicitlyAuthorized: true }));
+    await fixture.repository.restoreForgotten(memoryA.id);
+    await system.settleDreamEnqueue();
+
+    const run2 = await system.forceDreamRun();
+    assert.ok(run2);
+    assert.ok(run2!.processedMemoryIds.includes(memoryA.id), "restored memory must be reprocessed");
+
+    const post = await system.readPersonalityState();
+    // 旧 revision 的贡献全部退出：
+    assert.ok(!post.candidates.some((candidate) => candidate.sourceMemoryId === memoryA.id
+      && candidate.dimension === "boldness"),
+      "old boldness candidate from the old revision must be revoked");
+    const sharpness = post.observed.sharpness;
+    assert.ok(sharpness, "observed keeps the two untouched sources");
+    assert.ok(!sharpness!.sourceMemoryIds.includes(memoryA.id),
+      "old revision's id must leave observed sourceMemoryIds");
+    assert.ok(sharpness!.sourceMemoryIds.length === 2);
+    const mildRequirement = post.learnedRequirements.find(
+      (requirement) => requirement.text === "回答要更温和"
+    );
+    assert.ok(mildRequirement && mildRequirement.status === "superseded",
+      "requirement sourced only from A must be superseded");
+    // 新 revision 的输出随后应用：
+    assert.ok(post.candidates.some(
+      (candidate) => candidate.dimension === "creativity" && candidate.sourceMemoryId === memoryA.id
+    ), "new revision output applied after revocation");
+    assert.ok(post.learnedRequirements.some(
+      (requirement) => requirement.status === "current" && requirement.text === "回答要更犀利"
+    ));
+
+    const agent = await readFile(fixture.repository.layout.agent, "utf8");
+    assert.ok(agent.includes("回答要更犀利"), "new requirement reaches AGENT.md");
+    assert.ok(!agent.includes("回答要更温和"), "old requirement leaves AGENT.md");
+
+    const postProfile = parseUserProfileState(
+      await readJson(fixture.repository.layout.userProfileState) as Record<string, unknown>
+    );
+    const mildItem = postProfile!.items.find((item) => item.text === "用户偏好温和语气");
+    assert.ok(mildItem && mildItem.status === "superseded", "old profile item superseded");
+    assert.ok(postProfile!.items.some(
+      (item) => item.status === "current" && item.text === "用户偏好犀利表达"
+    ));
+    const userMd = await readFile(fixture.repository.layout.user, "utf8");
+    assert.ok(userMd.includes("用户偏好犀利表达"));
+    assert.ok(!userMd.includes("用户偏好温和语气"), "old profile text leaves USER.md");
+  });
+  console.log("PASS cognitive: reprocessed memory revision removes stale personality and profile sources");
+}
+
+// R6-9（修复六）：宽 key 重做梦保留旧 ID 与命中历史；保留旧事实后同轮不再产生重复。
+async function scenarioBroadKeyRedreamPreservesIdAndHitHistory(): Promise<void> {
+  const now = 1_800_000_000_000;
+  const makeOld = (confidence: number) => applySecondaryHit(createSecondaryRecord({
+    parentId: "mem_r6_broad",
+    title: "手冲咖啡",
+    content: "旧内容。",
+    recallWhen: "相关话题出现时",
+    matchTerms: ["咖啡豆"],
+    relation: "instance",
+    reason: "测试",
+    supportLevel: "strong_inference",
+    evidence: "旧证据",
+    basis: "llm_inferred",
+    confidence,
+    sourceMemoryRevision: 1,
+    now
+  }), now + 100);
+
+  // (a) 宽 key 替换 = 原地更新：旧 ID / hitCount / lastHitAt / createdAt 保留。
+  const old = makeOld(0.70);
+  const result = reconcileSecondaryForParent({
+    parentId: "mem_r6_broad",
+    parentBasis: "explicit",
+    parentRevision: 2,
+    existing: [old],
+    candidates: [Object.freeze({
+      title: "手冲咖啡",
+      content: "新内容。",
+      recallWhen: "相关话题出现时",
+      matchTerms: ["手冲", "滤纸"],
+      relation: "instance" as const,
+      supportLevel: "direct" as const,
+      reason: "测试",
+      evidence: "新证据"
+    })],
+    now: now + 200
+  });
+  const current = result.records.filter((record) => record.status === "current");
+  assert.equal(current.length, 1);
+  assert.equal(current[0].id, old.id, "broad-key replace keeps the old id");
+  assert.equal(current[0].hitCount, old.hitCount, "hitCount survives");
+  assert.equal(current[0].lastHitAt, old.lastHitAt, "lastHitAt survives");
+  assert.equal(current[0].createdAt, old.createdAt, "createdAt survives");
+  assert.equal(current[0].confidence, computeSecondaryConfidence("direct", "explicit", "instance"),
+    "confidence updated to the winning candidate");
+  assert.equal(current[0].content, "新内容。");
+  assert.equal(current[0].revision, old.revision + 1);
+  assert.equal(result.factsCreated, 0);
+  assert.equal(result.factsReused, 1);
+  assert.equal(result.factsRetired, 0);
+
+  // (b) 旧事实被保留后，其宽 key 必须进入 reserved：同轮后来者不得再建重复。
+  const kept = makeOld(0.80);
+  const dupRound = reconcileSecondaryForParent({
+    parentId: "mem_r6_broad",
+    parentBasis: "explicit",
+    parentRevision: 2,
+    existing: [kept],
+    candidates: [
+      Object.freeze({
+        title: "手冲咖啡",
+        content: "低置信候选。",
+        recallWhen: "相关话题出现时",
+        matchTerms: ["甲词"],
+        relation: "instance" as const,
+        supportLevel: "strong_inference" as const,
+        reason: "测试",
+        evidence: "证据甲"
+      }),
+      Object.freeze({
+        title: "手冲咖啡",
+        content: "高置信候选。",
+        recallWhen: "相关话题出现时",
+        matchTerms: ["乙词"],
+        relation: "instance" as const,
+        supportLevel: "direct" as const,
+        reason: "测试",
+        evidence: "证据乙"
+      })
+    ],
+    now: now + 300
+  });
+  const dupCurrent = dupRound.records.filter((record) => record.status === "current");
+  assert.equal(dupCurrent.length, 1, "no same-round duplicate after a kept old fact");
+  assert.equal(dupCurrent[0].id, kept.id, "the kept old fact owns the slot");
+  assert.equal(dupRound.factsCreated, 0, "later candidates must not create duplicates");
+  console.log("PASS cognitive: broad-key redream preserves secondary id and hit history");
+}
+
+// R6-10（修复七）：profileKey Prompt 目录有界（40）、带 section、稳定、含本轮新增。
+async function scenarioProfileKeyPromptCatalogBounded(): Promise<void> {
+  const base = emptyUserProfileState(1_800_000_000_000);
+  const items = [];
+  for (let index = 0; index < 45; index += 1) {
+    items.push(Object.freeze({
+      id: `p_${index}`,
+      section: (index % 2 === 0 ? "preference" : "identity") as "preference" | "identity",
+      profileKey: `主题${index}`,
+      text: `画像文本${index}`,
+      basis: "explicit_memory" as const,
+      status: "current" as const,
+      sourceMemoryIds: Object.freeze([`mem_${index}`]),
+      revision: index + 1
+    }));
+  }
+  const state: UserProfileState = Object.freeze({
+    ...base,
+    revision: 46,
+    items: Object.freeze(items)
+  });
+
+  assert.equal(PROFILE_KEY_PROMPT_CAP, 40);
+  const catalog = profileKeyPromptCatalog(state);
+  assert.equal(catalog.length, PROFILE_KEY_PROMPT_CAP, "catalog capped at 40 entries");
+  for (let index = 0; index < 5; index += 1) {
+    assert.ok(!catalog.some((entry) => entry.profileKey === `主题${index}`),
+      `oldest key 主题${index} must be dropped first`);
+  }
+  assert.ok(catalog.some((entry) => entry.profileKey === "主题44"), "newest keys survive the cap");
+  assert.ok(catalog.every((entry) => entry.section === "preference" || entry.section === "identity"),
+    "every entry carries its section");
+  // 稳定可复现顺序。
+  assert.deepEqual(profileKeyPromptCatalog(state), catalog);
+
+  // 去重：同 section+key 只出现一次。
+  const dupState: UserProfileState = Object.freeze({
+    ...base,
+    revision: 3,
+    items: Object.freeze([
+      Object.freeze({ ...items[0], id: "p_dup_a" }),
+      Object.freeze({ ...items[0], id: "p_dup_b", revision: 2 })
+    ])
+  });
+  const deduped = profileKeyPromptCatalog(dupState);
+  assert.equal(deduped.length, 1, "same section+key collapses to one entry");
+
+  // 本轮新增 key 计入上限。
+  const withExtra = profileKeyPromptCatalog(state, [
+    { section: "preference", profileKey: "本轮新键" }
+  ]);
+  assert.equal(withExtra.length, PROFILE_KEY_PROMPT_CAP);
+  assert.ok(withExtra.some((entry) => entry.profileKey === "本轮新键"),
+    "same-round keys enter the catalog under the cap");
+
+  // 端到端：已有 45 条 current 画像时，做梦 prompt 的 key 列表仍然有界。
+  await withPersonalMemoryFixture(async (fixture) => {
+    const { userProfileStateJson } = await import("../harness/memory/user-profile-state");
+    // 来源对账只保留有有效一级 Memory 的画像项：先造一个真实锚点记忆
+    // （createSystem 之前创建，不会被入队做梦），把 45 条画像都挂在它上面。
+    const anchor = await createMemory(fixture, {
+      title: "画像锚点记忆",
+      content: "45 条画像项的共同来源。"
+    });
+    const anchoredState: UserProfileState = Object.freeze({
+      ...state,
+      items: Object.freeze(items.map((item) => Object.freeze({
+        ...item,
+        sourceMemoryIds: Object.freeze([anchor.id])
+      })))
+    });
+    await writeFile(fixture.repository.layout.userProfileState, userProfileStateJson(anchoredState));
+    const prompts: string[] = [];
+    const llm: DreamLlmPort = {
+      call: async (input) => {
+        prompts.push(input.systemPrompt);
+        return JSON.stringify(EMPTY_DREAM_OUTPUT);
+      }
+    };
+    const system = await createSystem(fixture, () => llm);
+    await createMemory(fixture, { title: "目录上限记忆", content: "验证 prompt 的 profileKey 上限。" });
+    await system.settleDreamEnqueue();
+    await system.forceDreamRun();
+    // 锚点记忆可能被 backfill 一并处理；不变量是每条 prompt 的 key 列表都有界。
+    assert.ok(prompts.length >= 1);
+    for (const prompt of prompts) {
+      const keyCount = (prompt.match(/主题\d+/gu) ?? []).length;
+      assert.ok(keyCount <= PROFILE_KEY_PROMPT_CAP,
+        `dream prompt must carry at most ${PROFILE_KEY_PROMPT_CAP} profileKeys, got ${keyCount}`);
+      assert.ok(prompt.includes("已有 profileKey"), "catalog is offered for key reuse");
+    }
+  });
+  console.log("PASS cognitive: profile-key prompt catalog is bounded and section-aware");
+}
+
 export async function runCognitiveSystemScenarios(): Promise<void> {
   await scenarioTemplateSelectionPersistsWithoutProvider();
   await scenarioResetFlowSingleTransaction();
@@ -3051,4 +3885,15 @@ export async function runCognitiveSystemScenarios(): Promise<void> {
   await scenarioPersonalityV1ToV2Migration();
   await scenarioMigrationFailureKeepsV1();
   await scenarioMigrationWithoutTemplateKeepsCustomAgent();
+  // Round 6 integration regressions (先失败、后通过):
+  await scenarioRecallSingleInjectionBlocks();
+  await scenarioInitialSelectionJudgedByTemplateIdOnly();
+  await scenarioInitialTemplateClearsPreTemplateEvidence();
+  await scenarioMigrationFailureBlocksCognitiveWriters();
+  await scenarioRenameDuringDreamKeepsNewName();
+  await scenarioIdentityCasConcurrentEdits();
+  await scenarioIdentityCasMigrationRace();
+  await scenarioReprocessedRevisionRevokesDerivedSources();
+  await scenarioBroadKeyRedreamPreservesIdAndHitHistory();
+  await scenarioProfileKeyPromptCatalogBounded();
 }

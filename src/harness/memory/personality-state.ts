@@ -28,6 +28,7 @@ import {
 } from "./personality-templates";
 import {
   cognitiveJsonText,
+  cognitivePathExists,
   cognitiveReadJsonOrNull,
   newCognitiveId,
   normalizeTextForDedupe
@@ -180,6 +181,12 @@ export interface ApplyTemplateInput {
   readonly now: number;
   /** true 表示「重置人格」：supersede observed 与长期要求，并清空候选与已处理来源。 */
   readonly reset: boolean;
+  /**
+   * true 表示「首次选择模板」（此前 templateId 为空，Round 6 修复二）：
+   * 模板前产生的 observed 标记 superseded（reason=initial_template_selection），
+   * 清空候选与 processedSources，但保留 learnedRequirements。
+   */
+  readonly initialSelection?: boolean;
   readonly idFactory?: () => string;
 }
 
@@ -253,6 +260,27 @@ export function applyTemplateToState(
         : requirement
     );
     // 清空尚未成立的候选；把有效 Memory 重新标记为待做梦来源。
+    candidates = Object.freeze([]);
+    processedSources = Object.freeze([]);
+  }
+
+  if (input.initialSelection) {
+    // 首次选择模板（Round 6 修复二）：模板前做梦沉淀的 observed 不能作为模板
+    // 之后的观测事实继续生效，以 initial_template_selection 标记退出并保留历史；
+    // learnedRequirements（用户可见的长期要求）保留。
+    for (const dimension of TRAIT_DIMENSIONS) {
+      const old = observed[dimension];
+      if (old && old.status === "current") {
+        history.push({
+          ...old,
+          status: "superseded",
+          updatedAt: input.now,
+          revision,
+          reason: "initial_template_selection"
+        });
+        observed[dimension] = null;
+      }
+    }
     candidates = Object.freeze([]);
     processedSources = Object.freeze([]);
   }
@@ -446,6 +474,122 @@ export function applyDreamPersonalityUpdate(
     processedSources: Object.freeze([...processedMap.values()]
       .sort((left, right) => left.memoryId.localeCompare(right.memoryId))),
     updatedAt: input.now
+  });
+}
+
+/**
+ * Round 6 修复五：找出本轮以「更高 revision」重新处理的同一批 Memory。
+ * 判断标准只有一条：本轮 processedSources 条目的 memoryRevision 高于状态中
+ * 同一 memoryId 的历史条目。supersede 会生成新 ID，但 forget+restore 保持
+ * 同一 ID、revision 升高——那正是必须撤销旧派生的场景。
+ */
+export function computeReprocessedMemoryIds(
+  previous: PersonalityState,
+  incoming: readonly Readonly<{ memoryId: string; memoryRevision: number }>[]
+): ReadonlySet<string> {
+  const previousRevisionById = new Map<string, number>(
+    previous.processedSources.map((source) => [source.memoryId, source.memoryRevision])
+  );
+  const reprocessed = new Set<string>();
+  for (const source of incoming) {
+    const before = previousRevisionById.get(source.memoryId);
+    if (before !== undefined && source.memoryRevision > before) reprocessed.add(source.memoryId);
+  }
+  return reprocessed;
+}
+
+/**
+ * Round 6 修复五：在应用新一轮做梦输出之前，撤销旧 revision 产生的派生证据：
+ * - candidates：按 sourceMemoryId 整体移除（新轮输出会重新生成）；
+ * - learnedRequirements：从来源中移除该 Memory；来源清空则标记
+ *   superseded（reason=source_reprocessed）；
+ * - observed：从 sourceMemoryIds 移除该 Memory；仍有证据则保留记录，
+ *   证据清空则标记 superseded（reason=source_reprocessed）、槽位置空。
+ * 纯函数；无撤销对象时返回原引用。与新一轮输出在同一事务内提交，
+ * 因此「只有成功重新处理才撤销」天然成立。
+ */
+export function revokeReprocessedPersonalitySources(
+  previous: PersonalityState,
+  reprocessedIds: ReadonlySet<string>,
+  now: number
+): PersonalityState {
+  if (reprocessedIds.size === 0) return previous;
+  let changed = false;
+
+  // 1. Candidates sourced from the reprocessed memories leave entirely.
+  const candidates = previous.candidates.filter(
+    (candidate) => !reprocessedIds.has(candidate.sourceMemoryId)
+  );
+  if (candidates.length !== previous.candidates.length) changed = true;
+
+  // 2. Learned requirements: drop the reprocessed sources; retire when empty.
+  const revision = previous.revision + 1;
+  const learnedRequirements: AgentRequirementRecord[] = [];
+  for (const requirement of previous.learnedRequirements) {
+    if (requirement.status !== "current"
+      || !requirement.sourceMemoryIds.some((id) => reprocessedIds.has(id))) {
+      learnedRequirements.push(requirement);
+      continue;
+    }
+    changed = true;
+    const alive = requirement.sourceMemoryIds.filter((id) => !reprocessedIds.has(id));
+    if (alive.length === 0) {
+      learnedRequirements.push({
+        ...requirement,
+        status: "superseded",
+        sourceMemoryIds: Object.freeze([]),
+        revision,
+        reason: "source_reprocessed"
+      });
+    } else {
+      learnedRequirements.push({
+        ...requirement,
+        sourceMemoryIds: Object.freeze(alive),
+        revision
+      });
+    }
+  }
+
+  // 3. Observed traits: drop the reprocessed sources; retire when empty.
+  const history: PersonalityTraitRecord[] = [...previous.history];
+  const observed: Record<TraitDimension, PersonalityTraitRecord | null> = { ...previous.observed };
+  for (const dimension of TRAIT_DIMENSIONS) {
+    const record = observed[dimension];
+    if (!record || record.status !== "current") continue;
+    if (!record.sourceMemoryIds.some((id) => reprocessedIds.has(id))) continue;
+    changed = true;
+    const alive = record.sourceMemoryIds.filter((id) => !reprocessedIds.has(id));
+    if (alive.length > 0) {
+      observed[dimension] = Object.freeze({
+        ...record,
+        sourceMemoryIds: Object.freeze(alive),
+        updatedAt: now,
+        revision
+      });
+      continue;
+    }
+    history.push({
+      ...record,
+      status: "superseded",
+      updatedAt: now,
+      revision,
+      reason: "source_reprocessed"
+    });
+    observed[dimension] = null;
+  }
+
+  if (!changed) return previous;
+  return Object.freeze({
+    schema: PERSONALITY_STATE_SCHEMA,
+    revision,
+    templateId: previous.templateId,
+    explicit: previous.explicit,
+    observed: Object.freeze(observed),
+    history: Object.freeze(pruneHistory(history)),
+    candidates: Object.freeze(candidates),
+    learnedRequirements: Object.freeze(learnedRequirements),
+    processedSources: previous.processedSources,
+    updatedAt: now
   });
 }
 
@@ -842,4 +986,49 @@ export function buildPersonalityV2FromLegacy(
     processedSources: Object.freeze([]),
     updatedAt: input.now
   });
+}
+
+// ---------------------------------------------------------------------------
+// Round 6 修复三：启动时对落盘人格文件的严格体检（fail-closed 的依据）
+// ---------------------------------------------------------------------------
+
+export type PersonalityFileInspection =
+  | { readonly kind: "missing" }
+  | { readonly kind: "v2"; readonly state: PersonalityState }
+  | { readonly kind: "v1"; readonly legacy: LegacyPersonalityStateV1 }
+  | { readonly kind: "invalid"; readonly reason: string };
+
+/**
+ * 严格体检落盘人格状态文件（Round 6 修复三）：
+ * - 文件不存在 → `missing`（合法初始状态，调用方不得写空文件）；
+ * - v2 且可解析 → `v2`；
+ * - v1 且可解析 → `v1`（需要一次性本地迁移）；
+ * - 其余（损坏 JSON / 未知 schema / 字段解析失败）→ `invalid`，
+ *   调用方必须拒绝构造认知系统（fail-closed），不得降级成空状态继续写。
+ * 纯读取：不写任何文件。
+ */
+export async function inspectPersonalityFile(
+  filePath: string
+): Promise<PersonalityFileInspection> {
+  const raw = await cognitiveReadJsonOrNull<Record<string, unknown>>(filePath);
+  if (raw === null) {
+    const exists = await cognitivePathExists(filePath);
+    return exists
+      ? { kind: "invalid", reason: "unparseable_json" }
+      : { kind: "missing" };
+  }
+  const schema = detectPersonalityStateSchema(raw);
+  if (schema === "v2") {
+    const state = parsePersonalityStateV2(raw);
+    return state === null
+      ? { kind: "invalid", reason: "v2_field_parse_failed" }
+      : { kind: "v2", state };
+  }
+  if (schema === "v1") {
+    const legacy = parseLegacyPersonalityStateV1(raw);
+    return legacy === null
+      ? { kind: "invalid", reason: "v1_field_parse_failed" }
+      : { kind: "v1", legacy };
+  }
+  return { kind: "invalid", reason: "unknown_schema" };
 }

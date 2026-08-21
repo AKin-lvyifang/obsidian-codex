@@ -182,7 +182,7 @@ import {
 } from "../harness/memory/personal-memory-contracts";
 import {
   PersonalMemoryRecallHarness,
-  serializeRecallInjection,
+  serializeRecallBlocks,
   type PersonalMemoryPreparedTurnContext,
   type PersonalMemoryRecallSafeStats,
   type PersonalMemoryRecallStage
@@ -1011,32 +1011,24 @@ function buildPersonalMemoryContextMessage(fixed: Readonly<{
           ]),
       ...(fixed.recall === undefined || fixed.recall === null
         ? []
-        : [
-            `<echoink_memory_recall trust="user-owned-memory" exhaustive="${fixed.recall.exhaustive}" has_more="${fixed.recall.hasMore}">`,
-            // 二级事实只注入一次（Recall PRD §12）：candidates JSON 只保留
-            // matchedSecondaryId，完整事实只在 <echoink_memory_secondary> 区块。
-            // 序列化与预算计算共用 serializeRecallInjection，避免口径漂移。
-            (() => {
-              const parsed = JSON.parse(serializeRecallInjection({
-                candidates: fixed.recall.candidates,
-                secondaryFacts
-              })) as Record<string, unknown>;
-              return JSON.stringify({
-                ...parsed,
-                total: fixed.recall.total,
-                injected: fixed.recall.injected,
-                remaining: fixed.recall.remaining
-              });
-            })(),
-            "</echoink_memory_recall>",
-            ...(secondaryFacts.length === 0
-              ? []
-              : [
-                  "<echoink_memory_secondary trust=\"llm-inferred-reference\">",
-                  JSON.stringify({ secondaryFacts }),
-                  "</echoink_memory_secondary>"
-                ])
-          ])
+        : (() => {
+            // 二级事实只注入一次（Round 6 修复一）：唯一区块序列化入口
+            // serializeRecallBlocks 同时供给预算计算，recallBlock 与
+            // secondaryBlock 原样嵌入，不再二次序列化。
+            const blocks = serializeRecallBlocks({
+              candidates: fixed.recall.candidates,
+              secondaryFacts,
+              exhaustive: fixed.recall.exhaustive,
+              hasMore: fixed.recall.hasMore,
+              total: fixed.recall.total,
+              injected: fixed.recall.injected,
+              remaining: fixed.recall.remaining
+            });
+            return [
+              blocks.recallBlock,
+              ...(blocks.secondaryBlock === null ? [] : [blocks.secondaryBlock])
+            ];
+          })())
     ].join("\n\n"),
     display: false,
     details: Object.freeze({

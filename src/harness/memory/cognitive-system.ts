@@ -20,6 +20,7 @@ import {
   buildPersonalityV2FromLegacy,
   detectPersonalityStateSchema,
   emptyPersonalityState,
+  inspectPersonalityFile,
   parseLegacyPersonalityStateV1,
   personalityStateJson,
   type LegacyPersonalityStateV1,
@@ -104,6 +105,8 @@ class RepositoryDreamPort implements DreamRepositoryPort {
     secondaryRecords: readonly SecondaryMemoryRecord[];
     extraChanges: readonly Readonly<{ relativePath: string; content: string }>[];
     detail: string;
+    /** Round 6 修复四（身份 CAS）：决策时读到的身份 revision。 */
+    expectedAgentIdentityRevision?: number;
   }>): Promise<Readonly<{ revision: number }>> {
     return await this.repository.applyCognitiveUpdate(input);
   }
@@ -190,19 +193,33 @@ export class CognitiveSystem {
     // 让 peek/current 快照可以同步供给 UI；不调用 Provider。
     await agentIdentityStore.read();
 
-    // 人格状态 v1 → v2 一次性本地迁移（单事务、无 Provider）。
-    // 迁移失败不阻断启动：v1 文件原样保留，下次启动重试。
-    try {
-      await migratePersonalityV1ToV2({
-        repository: options.repository,
-        personalityStore,
-        dreamStateStore,
-        agentIdentityStore,
-        secondaryStore,
-        now: (options.now ?? Date.now)()
-      });
-    } catch (error) {
-      console.error("[EchoInk] personality v1→v2 migration failed; keeping v1", error);
+    // Round 6 修复三：严格体检落盘人格文件（missing | v2 | v1 | invalid）。
+    // - missing → 合法初始状态，不写任何文件；
+    // - v2 → 直接使用；
+    // - v1 → 一次性本地迁移（单事务、无 Provider）；
+    // - invalid（损坏 / 未知 schema / 字段解析失败）→ 拒绝构造，绝不降级成空状态。
+    // 迁移失败 = fail-closed：抛出稳定错误 personality_migration_blocked，
+    // v1 原样保留，调用方（main.ts 清 flight、设置页提示重试）负责重试。
+    const inspection = await inspectPersonalityFile(personalityStore.filePath);
+    if (inspection.kind === "invalid") {
+      throw new Error(`personality_state_invalid:${inspection.reason}`);
+    }
+    if (inspection.kind === "v1") {
+      try {
+        await migratePersonalityV1ToV2({
+          repository: options.repository,
+          personalityStore,
+          dreamStateStore,
+          agentIdentityStore,
+          secondaryStore,
+          now: (options.now ?? Date.now)()
+        });
+      } catch (error) {
+        const reason = error instanceof Error && /identity_revision_conflict/u.test(error.message)
+          ? "identity_revision_conflict"
+          : "transaction_failed";
+        throw new Error(`personality_migration_blocked:${reason}`);
+      }
     }
 
     const engine = new DreamEngine({
@@ -302,18 +319,21 @@ export class CognitiveSystem {
     const previous = (await this.personalityStore.read()) ?? emptyPersonalityShape(now);
     const currentIdentity = await this.agentIdentityStore.read();
 
-    // 首次选择 = 尚无模板且身份仍为默认 revision 0。此时必须携带
-    // initialIdentity，否则拒绝写入（UI 取消命名时根本不会调用到这里，
-    // 因此取消 = 零写入）。
-    const firstTime = previous.templateId === null
-      && previous.revision === 0
-      && currentIdentity.revision === 0;
-    if (firstTime && !options?.reset && !options?.initialIdentity) {
+    // Round 6 修复二：首次选择只由 templateId === null 判断（人格 revision
+    // 不再参与判断——半初始化状态 revision > 0 但 templateId 仍为空时，同样
+    // 是首次选择）。命名只在身份 revision === 0 时必需；身份已存在则原样保留。
+    // reset 只在已有 templateId 时成立。判定逻辑与设置页共用
+    // initialTemplateSelectionStatus，避免两处语义漂移。
+    const selection = initialTemplateSelectionStatus(previous, currentIdentity);
+    if (options?.reset && previous.templateId === null) {
+      throw new Error("personality_reset_requires_template");
+    }
+    if (selection.requiresFirstNaming && !options?.initialIdentity) {
       throw new Error("agent_identity_required");
     }
 
     let nextIdentity = currentIdentity;
-    if (firstTime && !options?.reset && options?.initialIdentity) {
+    if (selection.isInitialTemplateSelection && !options?.reset && options?.initialIdentity) {
       const displayName = normalizeAgentDisplayName(options.initialIdentity.displayName);
       if (!displayName) throw new Error("agent_identity_invalid_name");
       const avatar = normalizeAgentAvatar(options.initialIdentity.avatar)
@@ -326,12 +346,15 @@ export class CognitiveSystem {
         updatedAt: now
       });
     }
-    // reset 或非首次选择：身份原样保留，revision 不变。
+    // reset 或身份已存在的首次选择：身份原样保留，revision 不变。
 
     const next = applyTemplateToState(previous, {
       templateId: template.id,
       now,
-      reset: Boolean(options?.reset)
+      reset: Boolean(options?.reset),
+      // 首次选择必须清理模板前证据（observed 标记退出、候选与
+      // processedSources 清空、learnedRequirements 保留）。
+      initialSelection: selection.isInitialTemplateSelection && !options?.reset
     });
     const agentContent = renderAgentMarkdown(next, nextIdentity);
 
@@ -352,7 +375,7 @@ export class CognitiveSystem {
     // 历史版本（事务临时备份提交后会删除，不能冒充历史备份；草案 §12.2）。
     const controlState = await this.repository.readUserControlState();
     const fixedAgent = controlState.agent;
-    if (previous.revision === 0
+    if (selection.isInitialTemplateSelection
       && fixedAgent.trim().length > 0
       && fixedAgent !== defaultAgentProfile()) {
       const stamp = new Date(now).toISOString().replace(/[:.]/g, "-");
@@ -362,9 +385,11 @@ export class CognitiveSystem {
       });
     }
 
-    // 重置：把当前有效 Memory 重新标记为待做梦来源（同一事务）。
+    // 重置或首次选择：把当前有效 Memory 重新标记为待做梦来源（同一事务），
+    // lastProcessedMemoryRevision 归 0、backfillCursor 置 null，运行时间保留。
+    const requeueDream = Boolean(options?.reset) || selection.isInitialTemplateSelection;
     let resultRevision: number;
-    if (options?.reset) {
+    if (requeueDream) {
       const inspected = await this.repository.readUserControlState();
       const currentIds = inspected.records
         .filter((record) => record.status === "current")
@@ -386,7 +411,10 @@ export class CognitiveSystem {
         agentContent,
         secondaryRecords: await this.secondaryStore.loadAll(),
         extraChanges,
-        detail: `personality-reset-template:${template.id}`
+        expectedAgentIdentityRevision: currentIdentity.revision,
+        detail: options?.reset
+          ? `personality-reset-template:${template.id}`
+          : `personality-initial-template:${template.id}`
       });
       resultRevision = result.revision;
       this.dreamStateStore.updateCache(nextDream);
@@ -395,6 +423,7 @@ export class CognitiveSystem {
         agentContent,
         secondaryRecords: await this.secondaryStore.loadAll(),
         extraChanges,
+        expectedAgentIdentityRevision: currentIdentity.revision,
         detail: `personality-template:${template.id}`
       });
       resultRevision = result.revision;
@@ -480,6 +509,8 @@ export class CognitiveSystem {
         relativePath: AGENT_IDENTITY_RELATIVE_PATH,
         content: agentIdentityStateJson(nextIdentity)
       }],
+      // Round 6 修复四（身份 CAS）：用决策时读到的 revision 防并发覆盖。
+      expectedAgentIdentityRevision: current.revision,
       detail: `agent-identity:${nameChanged ? "rename" : "avatar"}`
     });
     this.agentIdentityStore.updateCache(nextIdentity);
@@ -647,6 +678,28 @@ function emptyPersonalityShape(now: number): PersonalityState {
   return emptyPersonalityState(now);
 }
 
+/**
+ * Round 6 修复二：底层与设置页共用的「首次选择模板」判定，避免两处语义漂移。
+ * - 首次选择只由 templateId === null 判断（人格 revision 不参与）；
+ * - 只有身份 revision === 0 时才必须完成命名；身份已存在则原样保留。
+ */
+export function initialTemplateSelectionStatus(
+  personality: Readonly<{ templateId: string | null }>,
+  identity: Readonly<{ revision: number }>
+): Readonly<{
+  isInitialTemplateSelection: boolean;
+  needsInitialIdentity: boolean;
+  requiresFirstNaming: boolean;
+}> {
+  const isInitialTemplateSelection = personality.templateId === null;
+  const needsInitialIdentity = isInitialTemplateSelection && identity.revision === 0;
+  return Object.freeze({
+    isInitialTemplateSelection,
+    needsInitialIdentity,
+    requiresFirstNaming: needsInitialIdentity
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Personality v1 → v2 migration (one local transaction, NO Provider)
 //
@@ -681,12 +734,12 @@ export async function migratePersonalityV1ToV2(
 
   const next = buildPersonalityV2FromLegacy(legacy, { now: input.now });
 
+  // 身份 revision 供 CAS 使用（Round 6 修复四）；并发写路径抢先落盘更高
+  // revision 的身份时，迁移事务会被 Repository 以 identity_revision_conflict
+  // 干净拒绝，v1 原样保留，绝不静默覆盖。
+  const identity = await agentIdentityStore.read();
   // 模板尚未选择时，不得因迁移覆盖现有自定义 AGENT.md。
-  let agentContent: string | undefined;
-  if (next.templateId) {
-    const identity = await agentIdentityStore.read();
-    agentContent = renderAgentMarkdown(next, identity);
-  }
+  const agentContent = next.templateId ? renderAgentMarkdown(next, identity) : undefined;
 
   const inspected = await repository.readUserControlState();
   const currentIds = inspected.records
@@ -721,6 +774,7 @@ export async function migratePersonalityV1ToV2(
         content: cognitiveJsonText(nextDream)
       }
     ],
+    expectedAgentIdentityRevision: identity.revision,
     detail: "personality-v1-v2-migration"
   });
   void result;

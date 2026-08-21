@@ -134,6 +134,7 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   await assertAvatarPresetCatalogBehavior();
   await assertAvatarProcessorContract();
   await assertPersonalityCardUsesNewBehaviorDimensions();
+  await assertHexagonCaptionSurvivesRepeatedAsyncRender();
 }
 
 async function assertMemoryCorrectionModalContract(): Promise<void> {
@@ -2839,6 +2840,74 @@ async function assertPersonalityCardUsesNewBehaviorDimensions(): Promise<void> {
   console.log("PASS settings: personality card uses new behavior dimensions and bands");
 }
 
+// Round 6 修复八：人格轮廓说明（caption）不得被异步六边形重渲染删除。
+// 连续刷新两次后 caption 仍只有一份、文案不变；SVG 被替换而不是累积。
+async function assertHexagonCaptionSurvivesRepeatedAsyncRender(): Promise<void> {
+  installProviderModalDomFixture();
+  const { plugin } = createIdentityTestPlugin(createIdentityFixtureState());
+  const executorState = applyTemplateToState(emptyPersonalityState(0), {
+    templateId: "executor",
+    now: 1,
+    reset: false
+  });
+  plugin.getCognitiveSystem = async () => ({
+    ...createCognitiveSystemStub(),
+    readPersonalityState: async () => executorState,
+    renderPersonalitySummary: async () => "summary",
+    readFixedFiles: async () => ({ agent: "# AGENT" })
+  });
+
+  const tab = new CodexSettingTab(plugin as never);
+  const mutable = tab as unknown as { personalMemoryState: Record<string, any> | null };
+  mutable.personalMemoryState = createIdentityFixtureState();
+  tab.display();
+  await settleMicrotasks();
+
+  const card = tab.containerEl.querySelector<ProviderModalTestElement>(
+    ".echoink-agent-profile-card"
+  );
+  assert.ok(card, "personality card renders");
+  const captionText = "人格轮廓表示六种行为特质的强弱组合，不代表 Agent 能力高低。";
+  const captions = () =>
+    card!.querySelectorAll<ProviderModalTestElement>(".echoink-trait-hexagon-caption");
+  const svgs = () =>
+    card!.querySelectorAll<ProviderModalTestElement>(".echoink-trait-hexagon");
+
+  // 1. 首次异步渲染完成后：caption 存在且只有一份，文案正确。
+  assert.equal(captions().length, 1, "caption exists after first async render");
+  assert.equal(captions()[0].textContent, captionText, "caption copy is intact");
+
+  // 3. SVG 渲染在独立挂载节点内，baseline/current 两层都在。
+  const mount = card!.querySelector<ProviderModalTestElement>(".echoink-trait-hexagon-mount");
+  assert.ok(mount, "dedicated SVG mount node exists");
+  assert.equal(svgs().length, 1, "hexagon SVG rendered");
+  assert.ok(mount!.contains(svgs()[0]), "SVG must live inside the mount node");
+  assert.ok(!mount!.contains(captions()[0]),
+    "caption must be a sibling of the mount, never inside it");
+  assert.equal(card!.querySelectorAll(".echoink-trait-hexagon-baseline").length, 1,
+    "baseline polygon present");
+  assert.equal(card!.querySelectorAll(".echoink-trait-hexagon-score").length, 1,
+    "current score polygon present");
+
+  // 2. 连续两次异步刷新（展开抽屉会重新 loadPersonalityIntoCard）：
+  //    caption 不重复、不被删除；SVG 被替换而不是累积。
+  const expandBtn = card!.querySelector<ProviderModalTestElement>(
+    ".echoink-agent-profile-expand-btn"
+  )!;
+  expandBtn.click(); // 展开 → 触发第二次异步渲染
+  await settleMicrotasks();
+  expandBtn.click(); // 收起
+  expandBtn.click(); // 再展开 → 触发第三次异步渲染
+  await settleMicrotasks();
+
+  assert.equal(captions().length, 1, "caption must not duplicate or vanish across re-renders");
+  assert.equal(captions()[0].textContent, captionText, "caption copy unchanged after re-renders");
+  assert.equal(svgs().length, 1, "SVG must be replaced, not accumulated");
+  assert.equal(card!.querySelectorAll(".echoink-trait-hexagon-baseline").length, 1);
+  assert.equal(card!.querySelectorAll(".echoink-trait-hexagon-score").length, 1);
+  console.log("PASS settings: personality profile caption survives repeated async renders");
+}
+
 function installProviderModalDomFixture(): void {
   if (providerModalTestDocument) return;
   providerModalTestDocument = new ProviderModalTestDocument();
@@ -2890,6 +2959,13 @@ class ProviderModalTestDocument {
 
   createElement(tagName: string): ProviderModalTestElement {
     return new ProviderModalTestElement(tagName, this);
+  }
+
+  createElementNS(namespaceURI: string, tagName: string): ProviderModalTestElement {
+    if (namespaceURI === "http://www.w3.org/2000/svg") {
+      return new ProviderModalTestSvgElement(this, tagName);
+    }
+    return new ProviderModalTestElement(tagName, this, namespaceURI);
   }
 
   importNode(node: ProviderModalTestElement): ProviderModalTestElement {
@@ -3253,8 +3329,8 @@ class ProviderModalTestElement {
 }
 
 class ProviderModalTestSvgElement extends ProviderModalTestElement {
-  constructor(ownerDocument: ProviderModalTestDocument) {
-    super("svg", ownerDocument, "http://www.w3.org/2000/svg");
+  constructor(ownerDocument: ProviderModalTestDocument, tagName = "svg") {
+    super(tagName, ownerDocument, "http://www.w3.org/2000/svg");
   }
 }
 

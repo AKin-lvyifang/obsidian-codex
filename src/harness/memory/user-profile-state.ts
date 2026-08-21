@@ -22,6 +22,68 @@ export type UserProfileItemBasis = "explicit_memory" | "observed_memory" | "lega
 
 export const PROFILE_KEY_MAX_CHARS = 40;
 
+/**
+ * 做梦 Prompt 携带的已有 profileKey 目录上限（Round 6 修复七）：
+ * Prompt 只给「section:key」目录供模型复用稳定主题，绝不允许无界增长。
+ */
+export const PROFILE_KEY_PROMPT_CAP = 40 as const;
+
+export interface ProfileKeyCatalogEntry {
+  readonly section: UserProfileSection;
+  readonly profileKey: string;
+}
+
+/**
+ * Round 6 修复七：生成做梦 Prompt 用的有界 profileKey 目录。
+ * - 只取 current 画像项，按 section + key 去重；
+ * - 总数不超过 PROFILE_KEY_PROMPT_CAP；需要裁剪时优先保留最近新增
+ *   （item.revision 更大者），同 revision 按 section、key 字典序，
+ *   输出顺序稳定可复现；
+ * - `sameRoundEntries`（本轮已经产生、尚未落盘的新 key）视为最新，
+ *   同样计入上限。
+ */
+export function profileKeyPromptCatalog(
+  state: UserProfileState,
+  sameRoundEntries: readonly Readonly<{ section: UserProfileSection; profileKey: string }>[] = []
+): readonly ProfileKeyCatalogEntry[] {
+  const revisionByKey = new Map<string, number>();
+  for (const item of state.items) {
+    if (item.status !== "current") continue;
+    const dedupeKey = `${item.section}\u0000${normalizeTextForDedupe(item.profileKey)}`;
+    const existing = revisionByKey.get(dedupeKey);
+    if (existing === undefined || item.revision > existing) {
+      revisionByKey.set(dedupeKey, item.revision);
+    }
+  }
+  const entries: Array<{ section: UserProfileSection; profileKey: string; revision: number }> = [];
+  for (const item of state.items) {
+    if (item.status !== "current") continue;
+    const dedupeKey = `${item.section}\u0000${normalizeTextForDedupe(item.profileKey)}`;
+    if (!revisionByKey.has(dedupeKey)) continue;
+    revisionByKey.delete(dedupeKey);
+    entries.push({ section: item.section, profileKey: item.profileKey, revision: item.revision });
+  }
+  for (const entry of sameRoundEntries) {
+    const profileKey = normalizeTextForDedupe(entry.profileKey).slice(0, PROFILE_KEY_MAX_CHARS);
+    if (!profileKey) continue;
+    const dedupeKey = `${entry.section}\u0000${profileKey}`;
+    if (entries.some((existing) =>
+      `${existing.section}\u0000${normalizeTextForDedupe(existing.profileKey)}` === dedupeKey
+    )) continue;
+    // 本轮新增 key 视为最新（revision = Infinity），裁剪时最后被丢弃。
+    entries.push({ section: entry.section, profileKey, revision: Number.POSITIVE_INFINITY });
+  }
+  entries.sort((left, right) =>
+    right.revision - left.revision
+    || left.section.localeCompare(right.section)
+    || left.profileKey.localeCompare(right.profileKey)
+  );
+  return Object.freeze(entries.slice(0, PROFILE_KEY_PROMPT_CAP).map((entry) => Object.freeze({
+    section: entry.section,
+    profileKey: entry.profileKey
+  })));
+}
+
 /** 兼容旧 state / 模型未给 key：从 text 生成有界 fallback key。 */
 export function fallbackProfileKey(text: string): string {
   const normalized = normalizeTextForDedupe(text);
@@ -237,6 +299,74 @@ export function reconcileProfileSources(
     revision,
     items: Object.freeze(items),
     processedSources: Object.freeze(processedSources),
+    legacyUserMigration: previous.legacyUserMigration,
+    lastProjectedUserHash: previous.lastProjectedUserHash,
+    updatedAt: now
+  });
+}
+
+/**
+ * Round 6 修复五：找出本轮以「更高 revision」重新处理的同一批 Memory
+ * （与人格侧 computeReprocessedMemoryIds 同一判断标准）。
+ */
+export function computeReprocessedProfileMemoryIds(
+  previous: UserProfileState,
+  incoming: readonly Readonly<{ memoryId: string; memoryRevision: number }>[]
+): ReadonlySet<string> {
+  const previousRevisionById = new Map<string, number>(
+    previous.processedSources.map((source) => [source.memoryId, source.memoryRevision])
+  );
+  const reprocessed = new Set<string>();
+  for (const source of incoming) {
+    const before = previousRevisionById.get(source.memoryId);
+    if (before !== undefined && source.memoryRevision > before) reprocessed.add(source.memoryId);
+  }
+  return reprocessed;
+}
+
+/**
+ * Round 6 修复五：在应用新一轮做梦输出之前，撤销旧 revision 画像项对该
+ * Memory 的来源引用；来源清空则标记 superseded。纯函数；无撤销对象时
+ * 返回原引用。与新一轮输出在同一事务内提交。
+ */
+export function revokeReprocessedProfileSources(
+  previous: UserProfileState,
+  reprocessedIds: ReadonlySet<string>,
+  now: number
+): UserProfileState {
+  if (reprocessedIds.size === 0) return previous;
+  let changed = false;
+  const revision = previous.revision + 1;
+  const items: UserProfileItem[] = [];
+  for (const item of previous.items) {
+    if (item.status !== "current"
+      || !item.sourceMemoryIds.some((id) => reprocessedIds.has(id))) {
+      items.push(item);
+      continue;
+    }
+    changed = true;
+    const alive = item.sourceMemoryIds.filter((id) => !reprocessedIds.has(id));
+    if (alive.length === 0) {
+      items.push(Object.freeze({
+        ...item,
+        status: "superseded" as const,
+        sourceMemoryIds: Object.freeze([]),
+        revision
+      }));
+    } else {
+      items.push(Object.freeze({
+        ...item,
+        sourceMemoryIds: Object.freeze(alive),
+        revision
+      }));
+    }
+  }
+  if (!changed) return previous;
+  return Object.freeze({
+    schema: USER_PROFILE_STATE_SCHEMA,
+    revision,
+    items: Object.freeze(items),
+    processedSources: previous.processedSources,
     legacyUserMigration: previous.legacyUserMigration,
     lastProjectedUserHash: previous.lastProjectedUserHash,
     updatedAt: now

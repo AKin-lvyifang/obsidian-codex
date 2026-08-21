@@ -146,36 +146,74 @@ export class PersonalMemoryRecallHarness {
   }
 }
 
-/** XML envelope overhead of the recall + secondary blocks (counted once). */
-const RECALL_ENVELOPE_OVERHEAD =
-  '<echoink_memory_recall trust="user-owned-memory" exhaustive="" has_more="">' +
-  "</echoink_memory_recall>" +
-  '<echoink_memory_secondary trust="llm-inferred-reference">' +
-  "</echoink_memory_secondary>";
-
 export interface PersonalMemorySecondaryInjectionFact {
   readonly parentId: string;
   readonly parentTitle: string;
   readonly fact: SecondaryMatchView;
 }
 
+export interface SerializedRecallBlocks {
+  /** `<echoink_memory_recall>` 区块：candidates 只带 matchedSecondaryId。 */
+  readonly recallBlock: string;
+  /** `<echoink_memory_secondary>` 区块；没有二级事实时为 null（完全省略）。 */
+  readonly secondaryBlock: string | null;
+  /** 最终注入文本 = recallBlock + 可选 secondaryBlock（与实际上下文逐字一致）。 */
+  readonly combined: string;
+}
+
 /**
- * 预算计算与实际注入（pi-production-runtime-composition）共用的纯序列化：
- * candidates 只保留 matchedSecondaryId（剥离 secondaryMatches），完整二级
- * 事实单独列出；routeTokens/contentTokens 等索引内部字段绝不进入 payload。
+ * 最终上下文区块的唯一序列化入口（Round 6 修复一）：
+ * - Recall JSON 不包含 secondaryFacts；candidates 只保留 matchedSecondaryId；
+ * - 完整二级事实只出现在 secondary block，且每条只出现一次；
+ * - routeTokens/contentTokens 等索引内部字段不进入任一区块；
+ * - 预算函数与生产注入（pi-production-runtime-composition）都必须走这里，
+ *   保证「预算函数测量的就是实际注入文本」。
  */
-export function serializeRecallInjection(input: Readonly<{
+export function serializeRecallBlocks(input: Readonly<{
   candidates: readonly Readonly<PersonalMemoryRecallCandidate>[];
   secondaryFacts: readonly PersonalMemorySecondaryInjectionFact[];
-}>): string {
-  const stripped = input.candidates.map((candidate) => {
-    const injected: Record<string, unknown> = { ...candidate };
+  exhaustive: boolean;
+  hasMore: boolean;
+  total: number;
+  injected: number;
+  remaining: number;
+}>): SerializedRecallBlocks {
+  const candidates = input.candidates.map((candidate) => {
+    // toRecallCandidate 已按白名单字段重建候选；再显式剥离 secondaryMatches，
+    // 只保留 matchedSecondaryId（完整事实只允许出现在 secondary block）。
+    const injected: Record<string, unknown> = { ...toRecallCandidate(candidate) };
     delete injected.secondaryMatches;
     return injected;
   });
-  return JSON.stringify({
-    candidates: stripped,
-    secondaryFacts: input.secondaryFacts
+  const recallBlock = [
+    `<echoink_memory_recall trust="user-owned-memory" exhaustive="${input.exhaustive}" has_more="${input.hasMore}">`,
+    JSON.stringify({
+      candidates,
+      total: input.total,
+      injected: input.injected,
+      remaining: input.remaining
+    }),
+    "</echoink_memory_recall>"
+  ].join("\n");
+  // 每条二级事实在最终上下文中只允许出现一次：按 fact.id 防御性去重，
+  // 即使调用方传入重复引用（多个候选命中同一事实）。
+  const seenFactIds = new Set<string>();
+  const uniqueSecondaryFacts = input.secondaryFacts.filter((entry) => {
+    if (seenFactIds.has(entry.fact.id)) return false;
+    seenFactIds.add(entry.fact.id);
+    return true;
+  });
+  const secondaryBlock = uniqueSecondaryFacts.length === 0
+    ? null
+    : [
+        "<echoink_memory_secondary trust=\"llm-inferred-reference\">",
+        JSON.stringify({ secondaryFacts: uniqueSecondaryFacts }),
+        "</echoink_memory_secondary>"
+      ].join("\n");
+  return Object.freeze({
+    recallBlock,
+    secondaryBlock,
+    combined: secondaryBlock === null ? recallBlock : `${recallBlock}\n\n${secondaryBlock}`
   });
 }
 
@@ -195,18 +233,29 @@ function secondaryFactsFor(
 }
 
 /**
- * Token 预算必须按照最终真实注入内容计算（做梦/Recall PRD §12）：按
- * 「当前已选候选 + 新候选」累计构造完整最终 payload 后测量，包装开销
- * 只计算一次。先完成最终 payload，再根据预算选择候选。
+ * Token 预算必须按照最终真实注入内容计算（Round 6 修复一）：
+ * 直接测量 serializeRecallBlocks().combined —— 即实际注入的区块文本，
+ * 不再维护近似包装常量。`rankedTotal` 为完整排序候选数；缺省等于 items
+ * 长度（最终注入测量）。候选预算阶段传入全量候选数，即可得到与最终
+ * payload 完全一致的口径：total = 全量候选数，injected = 已选数，
+ * remaining = total - injected，exhaustive = injected === total。
  */
 export function measureFinalInjectionTokens(
-  items: readonly Readonly<PersonalMemoryTurnCatalogCandidate>[]
+  items: readonly Readonly<PersonalMemoryTurnCatalogCandidate>[],
+  rankedTotal?: number
 ): number {
-  const payload = serializeRecallInjection({
-    candidates: items.map((item) => toRecallCandidate(item)),
-    secondaryFacts: secondaryFactsFor(items)
+  const total = rankedTotal ?? items.length;
+  const injected = items.length;
+  const blocks = serializeRecallBlocks({
+    candidates: items,
+    secondaryFacts: secondaryFactsFor(items),
+    total,
+    injected,
+    remaining: Math.max(0, total - injected),
+    exhaustive: injected === total,
+    hasMore: injected !== total
   });
-  return estimatePiContextTokens(payload + RECALL_ENVELOPE_OVERHEAD).tokens;
+  return estimatePiContextTokens(blocks.combined).tokens;
 }
 
 function selectRecallCandidateIds(
@@ -217,8 +266,8 @@ function selectRecallCandidateIds(
   for (const item of candidates) {
     const withCandidate = [...selected, item];
     // 与预算口径共用同一个测量函数：按「已选 + 新候选」的累计最终
-    // payload 一次性测量（包装开销只算一次），避免口径漂移。
-    if (measureFinalInjectionTokens(withCandidate) > tokenBudget) continue;
+    // 区块文本测量（total = 全量候选数），避免口径漂移。
+    if (measureFinalInjectionTokens(withCandidate, candidates.length) > tokenBudget) continue;
     selected.push(item);
   }
   return Object.freeze(selected.map((item) => item.id));

@@ -482,6 +482,10 @@ export function reconcileSecondaryForParent(
   const deduped: typeof scored = [];
   const keptTitleKeys = new Set<string>();
   const keptTermKeys = new Set<string>();
+  // Round 6 修复六（问题 2）：宽 key 命中且候选 confidence 更高时，记录
+  // 「候选 → 被替换旧记录」，第 4 步做原地更新（保留旧 ID 与命中历史），
+  // 不再走 retire+新建。
+  const wideKeyReplacement = new Map<typeof scored[number], SecondaryMemoryRecord>();
   for (const entry of scored.sort((left, right) => right.confidence - left.confidence)) {
     const titleKey = normalizeTitleKey(entry.candidate.title);
     const termKey = normalizeTermSetKey(entry.candidate.matchTerms);
@@ -499,11 +503,18 @@ export function reconcileSecondaryForParent(
         keptOldIds.add(oldMatch.id);
         oldLlmByTitleKey.delete(titleKey);
         if (termKey) oldLlmByTermKey.delete(termKey);
+        // Round 6 修复六（问题 1）：被保留旧事实自己的标题/匹配词宽 key
+        // 必须进入 reserved，否则同轮后来者会再次匹配不到旧记录而新建重复。
+        const keptTitleKey = normalizeTitleKey(oldMatch.title);
+        if (keptTitleKey) keptTitleKeys.add(keptTitleKey);
+        const keptTermKey = normalizeTermSetKey(oldMatch.matchTerms);
+        if (keptTermKey) keptTermKeys.add(keptTermKey);
         continue;
       }
-      // 候选 confidence 更高：替换既有记录（旧记录走 retire，候选继续参与）。
+      // 候选 confidence 更高：原地替换既有记录（第 4 步保留旧 ID/命中历史）。
       oldLlmByTitleKey.delete(titleKey);
       if (termKey) oldLlmByTermKey.delete(termKey);
+      wideKeyReplacement.set(entry, oldMatch);
     }
     keptTitleKeys.add(titleKey);
     if (termKey) keptTermKeys.add(termKey);
@@ -575,6 +586,36 @@ export function reconcileSecondaryForParent(
       reusedIds.add(previous.id);
       finalRecords.push(reused);
       fileChanges.push({ relativePath: reused.file, content: serializeSecondaryRecord(reused) });
+      factsReused += 1;
+      continue;
+    }
+    // Round 6 修复六（问题 2）：宽 key（标题或匹配词相同、指纹不同）替换
+    // 必须原地更新——保留旧 ID / hitCount / lastHitAt / createdAt，只更新
+    // 内容与 confidence，绝不 retire+新建（新建会丢失全部命中历史）。
+    const replaced = wideKeyReplacement.get(entry);
+    if (replaced) {
+      const updated: SecondaryMemoryRecord = Object.freeze({
+        ...replaced,
+        title: entry.candidate.title.trim().slice(0, 200),
+        content: entry.candidate.content.trim().slice(0, 2_000),
+        recallWhen: (entry.candidate.recallWhen.trim() || entry.candidate.title.trim()).slice(0, 500),
+        matchTerms: Object.freeze(entry.candidate.matchTerms
+          .map((term) => normalizeMatchTerm(term))
+          .filter((term): term is string => term !== null)
+          .slice(0, SECONDARY_MAX_MATCH_TERMS)),
+        relation: entry.candidate.relation,
+        reason: entry.candidate.reason.trim().slice(0, 500),
+        supportLevel: entry.candidate.supportLevel,
+        evidence: entry.candidate.evidence.trim().slice(0, 800),
+        // 宽 key 替换更新 confidence 到获胜候选；命中历史原样保留。
+        confidence: entry.confidence,
+        sourceMemoryRevision: input.parentRevision,
+        updatedAt: input.now,
+        revision: replaced.revision + 1
+      });
+      reusedIds.add(replaced.id);
+      finalRecords.push(updated);
+      fileChanges.push({ relativePath: updated.file, content: serializeSecondaryRecord(updated) });
       factsReused += 1;
       continue;
     }

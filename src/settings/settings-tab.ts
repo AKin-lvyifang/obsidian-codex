@@ -10,6 +10,7 @@ import {
   templateBaselineScores,
   type PersonalityState
 } from "../harness/memory/personality-state";
+import { initialTemplateSelectionStatus } from "../harness/memory/cognitive-system";
 import {
   PERSONALITY_TEMPLATES,
   TRAIT_DIMENSIONS,
@@ -115,6 +116,8 @@ type KnowledgeMaintenancePreferenceControlState = Awaited<
 
 interface AgentProfileCardRefs {
   readonly hexSide: HTMLElement;
+  /** SVG 挂载点：重渲染只清空它，说明文案是兄弟节点不被波及。 */
+  readonly hexChartMount: HTMLElement;
   readonly barFgs: HTMLElement[];
   readonly pctSpans: HTMLElement[];
   readonly barDescs: HTMLElement[];
@@ -722,6 +725,9 @@ export class CodexSettingTab extends PluginSettingTab {
     // --- Body: left hexagon + right trait bars ---
     const body = card.createDiv({ cls: "echoink-agent-profile-card-body" });
     const hexSide = body.createDiv({ cls: "echoink-agent-profile-hex-side" });
+    // Round 6 修复八：六边形 SVG 挂在独立子节点上；重渲染只清空这个节点，
+    // 轮廓说明文案是它的兄弟节点，不会被 empty() 误删。
+    const hexChartMount = hexSide.createDiv({ cls: "echoink-trait-hexagon-mount" });
     const textSide = body.createDiv({ cls: "echoink-agent-profile-text-side" });
     // 图表、文字、模板和 Prompt 共享同一份维度常量（TRAIT_DIMENSION_META）。
     // 单向语义：数值越高 = 该特质表现越多；文案全部来自行为档 Meta。
@@ -805,10 +811,16 @@ export class CodexSettingTab extends PluginSettingTab {
     };
 
     const refs: AgentProfileCardRefs = {
-      hexSide, barFgs, pctSpans, barDescs, dimLabels, footerStatus, templateBtn, pickerPanel, summaryText, rawPre
+      hexSide, hexChartMount, barFgs, pctSpans, barDescs, dimLabels, footerStatus, templateBtn, pickerPanel, summaryText, rawPre
     };
 
     templateBtn.onclick = () => {
+      // Round 6 修复三：fail-closed 状态下此按钮只是重试入口，
+      // 禁止打开会覆盖现有数据的模板选择器。
+      if (templateBtn.dataset.failClosed === "true") {
+        void this.loadPersonalityIntoCard(refs, zh);
+        return;
+      }
       if (templateBtn.dataset.hasTemplate === "true") {
         // 重置人格（人格草案 §10.3）：每次都确认；确认后只打开模板列表，
         // 不修改任何文件；取消零写入，原人格继续生效。
@@ -837,11 +849,20 @@ export class CodexSettingTab extends PluginSettingTab {
     try {
       const system = await this.plugin.getCognitiveSystem();
       const state = await system.readPersonalityState();
+      // 读取成功：退出 fail-closed 态，按钮恢复模板选择/重置语义。
+      refs.templateBtn.dataset.failClosed = "false";
       this.applyPersonalityToCard(refs, state, null, zh);
       refs.summaryText.setText(await system.renderPersonalitySummary(zh ? "zh" : "en"));
     } catch (error) {
+      // Round 6 修复三：fail-closed（迁移失败/文件损坏/未知 schema）时显示
+      // 明确错误与重试入口；不得显示「尚未选择初始风格」诱导用户覆盖现有数据。
       console.error("EchoInk personality state load failed", error);
-      refs.footerStatus.setText(zh ? "人格状态读取失败" : "Failed to load personality state");
+      const reason = error instanceof Error ? error.message : String(error);
+      refs.templateBtn.dataset.failClosed = "true";
+      refs.templateBtn.setText(zh ? "重试读取人格" : "Retry loading personality");
+      refs.footerStatus.setText(zh
+        ? `人格数据暂不可用（${reason}），修复后点此重试`
+        : `Personality data unavailable (${reason}). Retry after fixing.`);
     }
   }
 
@@ -862,8 +883,9 @@ export class CodexSettingTab extends PluginSettingTab {
       : (zh ? "尚未选择初始风格" : "No style selected yet"));
     const baseline = templateBaselineScores(state);
     void import("../ui/trait-hexagon").then(({ renderTraitHexagon }) => {
-      refs.hexSide.empty();
-      renderTraitHexagon(refs.hexSide, scores as Record<string, number> as never, {
+      // 只清空 SVG 挂载点；轮廓说明文案是兄弟节点，重渲染后仍然存在。
+      refs.hexChartMount.empty();
+      renderTraitHexagon(refs.hexChartMount, scores as Record<string, number> as never, {
         size: 170,
         rings: 4,
         // 同时显示模板基线与当前 observed 值。
@@ -922,13 +944,13 @@ export class CodexSettingTab extends PluginSettingTab {
             const system = await this.plugin.getCognitiveSystem();
             const personality = await system.readPersonalityState();
             const identity = await system.readAgentIdentity();
-            // 首次选择模板 = 尚无模板且身份仍是默认 revision 0：
-            // 此时必须先经过命名弹窗；取消时根本不会调用
-            // selectPersonalityTemplate，因此取消 = 零写入。
-            const firstTime = !reset
-              && personality.templateId === null
-              && personality.revision === 0
-              && identity.revision === 0;
+            // Round 6 修复二：首次选择判定与底层共用同一语义
+            // （initialTemplateSelectionStatus），不再叠加 personality.revision
+            // 条件。尚无模板且尚无身份时才要求命名弹窗；取消时根本不会调用
+            // selectPersonalityTemplate，因此取消 = 零写入。身份已存在但尚无
+            // 模板时直接落模板，保留现有身份。
+            const selection = initialTemplateSelectionStatus(personality, identity);
+            const firstTime = !reset && selection.requiresFirstNaming;
             if (firstTime) {
               row.removeAttribute("disabled");
               this.openAgentIdentityModal({

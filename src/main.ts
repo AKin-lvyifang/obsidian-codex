@@ -822,7 +822,7 @@ export default class CodexForObsidianPlugin extends Plugin {
   async getCognitiveSystem(): Promise<CognitiveSystem> {
     if (this.cognitiveSystem) return this.cognitiveSystem;
     if (!this.cognitiveSystemFlight) {
-      this.cognitiveSystemFlight = (async () => {
+      const flight = (async () => {
         const localData = await this.ensurePiLocalData();
         const system = await CognitiveSystem.create({
           repository: localData.personalMemory,
@@ -845,6 +845,14 @@ export default class CodexForObsidianPlugin extends Plugin {
         this.cognitiveSystem = system;
         return system;
       })();
+      // Round 6 修复三：失败 flight 不得永久缓存——迁移失败 / 人格文件损坏
+      // 等 fail-closed 错误必须在修复后可重试（设置页重试或下次进入）。
+      let tracked: Promise<CognitiveSystem>;
+      tracked = flight.catch((error) => {
+        if (this.cognitiveSystemFlight === tracked) this.cognitiveSystemFlight = null;
+        throw error;
+      });
+      this.cognitiveSystemFlight = tracked;
     }
     return await this.cognitiveSystemFlight;
   }

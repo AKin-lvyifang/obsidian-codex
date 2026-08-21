@@ -926,10 +926,26 @@ export class PersonalMemoryRepository {
     /** content === undefined deletes the file inside the transaction. */
     extraChanges: readonly Readonly<{ relativePath: string; content?: string }>[];
     detail: string;
+    /**
+     * Round 6 修复四（身份 CAS）：写入方必须携带它决策时读到的身份 revision。
+     * 事务在生成任何变更前、在串行 mutation lane 内用磁盘真实 revision 比对：
+     * 不一致 → 以稳定的 identity_revision_conflict 拒绝，绝不用旧名称/旧头像
+     * 静默覆盖并发写入。文件缺失按 revision 0；文件损坏拒绝写入。
+     */
+    expectedAgentIdentityRevision?: number;
   }>): Promise<Readonly<{ revision: number }>> {
     await this.initialize();
     return await this.withMutation(async () => {
       await this.assertManagedTreeSafe();
+      if (input.expectedAgentIdentityRevision !== undefined) {
+        const diskRevision = await this.readAgentIdentityRevisionFromDisk();
+        if (diskRevision !== input.expectedAgentIdentityRevision) {
+          throw new PersonalMemoryAccessError(
+            "revision_conflict",
+            `identity_revision_conflict: expected ${input.expectedAgentIdentityRevision}, disk ${diskRevision}`
+          );
+        }
+      }
       const manifest = await this.readManifest();
       await this.assertFixedFilesMatchManifest(manifest);
       const records = await this.readAllRecords(manifest);
@@ -965,6 +981,33 @@ export class PersonalMemoryRepository {
       this.commitSecondaryCache(input.secondaryRecords);
       return Object.freeze({ revision: targetRevision });
     });
+  }
+
+  /**
+   * Round 6 修复四：直接从磁盘读取身份 revision（CAS 基准，绝不读缓存）。
+   * - 文件缺失 → revision 0（默认运行状态）；
+   * - 文件损坏或 revision 不是安全整数 → 拒绝写入（不能让 CAS 放行脏状态）。
+   */
+  private async readAgentIdentityRevisionFromDisk(): Promise<number> {
+    if (!(await pathExists(this.layout.agentIdentity))) return 0;
+    const text = await readFile(this.layout.agentIdentity, "utf8");
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      throw new PersonalMemoryAccessError(
+        "revision_conflict",
+        "identity_revision_conflict: identity file unparseable"
+      );
+    }
+    const revision = parsed.revision;
+    if (typeof revision !== "number" || !Number.isSafeInteger(revision)) {
+      throw new PersonalMemoryAccessError(
+        "revision_conflict",
+        "identity_revision_conflict: identity revision invalid"
+      );
+    }
+    return revision;
   }
 
   /**

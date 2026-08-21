@@ -38,18 +38,24 @@ import {
 } from "./personal-memory-contracts";
 import {
   applyDreamPersonalityUpdate,
+  computeReprocessedMemoryIds,
   emptyPersonalityState,
   reconcilePersonalitySources,
+  revokeReprocessedPersonalitySources,
   type DreamPersonalityInput,
   type PersonalityState
 } from "./personality-state";
 import {
   applyDreamProfileUpdate,
+  computeReprocessedProfileMemoryIds,
   reconcileProfileSources,
+  revokeReprocessedProfileSources,
   fallbackProfileKey,
   isProfileItemRenderable,
+  profileKeyPromptCatalog,
   PROFILE_KEY_MAX_CHARS,
   type DreamProfileInput,
+  type ProfileKeyCatalogEntry,
   type UserProfileSection,
   type UserProfileState
 } from "./user-profile-state";
@@ -62,7 +68,8 @@ import {
   type SecondaryMemoryStore
 } from "./secondary-memory-store";
 import {
-  cognitiveJsonText
+  cognitiveJsonText,
+  normalizeTextForDedupe
 } from "./cognitive-file-utils";
 import {
   AgentIdentityStateStore,
@@ -106,6 +113,8 @@ export interface DreamRepositoryPort {
     secondaryRecords: readonly SecondaryMemoryRecord[];
     extraChanges: readonly Readonly<{ relativePath: string; content: string }>[];
     detail: string;
+    /** Round 6 修复四（身份 CAS）：决策时读到的身份 revision。 */
+    expectedAgentIdentityRevision?: number;
   }>): Promise<Readonly<{ revision: number }>>;
   writeSystemMemory(input: Readonly<{
     kind: PersonalMemoryRecord["kind"];
@@ -304,13 +313,17 @@ export class DreamEngine {
     const candidatesByParent = new Map<string, SecondaryFactCandidate[]>();
     let tokensUsed = 0;
 
-    // 同一轮内前面 Memory 新产生的 profileKey 也要供后续 Memory 复用。
-    const knownProfileKeys: string[] = workingProfile.items
-      .filter((item) => item.status === "current")
-      .map((item) => item.profileKey);
+    // 同一轮内前面 Memory 新产生的 profileKey 也要供后续 Memory 复用；
+    // Prompt 携带的 key 目录有界（Round 6 修复七：PROFILE_KEY_PROMPT_CAP），
+    // 持久 current 项 + 本轮新增项一起去重、稳定排序后截断。
+    const sameRoundKeys: ProfileKeyCatalogEntry[] = [];
     for (const record of processable) {
       if (!llm) break;
-      const promptInput = buildDreamPrompts(record, this.config.maxInputChars, knownProfileKeys);
+      const promptInput = buildDreamPrompts(
+        record,
+        this.config.maxInputChars,
+        profileKeyPromptCatalog(workingProfile, sameRoundKeys)
+      );
       const estimated = estimateTokens(promptInput.systemPrompt) + estimateTokens(promptInput.userPrompt);
       if (tokensUsed + estimated > this.config.tokenBudget && processedMemoryIds.length > 0) {
         failedMemoryIds.push(record.id);
@@ -369,8 +382,15 @@ export class DreamEngine {
               basis: record.basis === "explicit" ? "explicit_memory" : "observed_memory",
               sourceMemoryId: record.id
             });
-            if (!knownProfileKeys.includes(item.profileKey)) {
-              knownProfileKeys.push(item.profileKey);
+            // 与 applyDreamProfileUpdate 同口径生成有效 key（缺省 fallback），
+            // 供本轮后续 Memory 复用；目录有界在 profileKeyPromptCatalog 内截断。
+            const effectiveKey = (item.profileKey && item.profileKey.trim())
+              ? normalizeTextForDedupe(item.profileKey).slice(0, PROFILE_KEY_MAX_CHARS)
+              : fallbackProfileKey(item.text);
+            if (!sameRoundKeys.some((existing) =>
+              existing.section === item.section && existing.profileKey === effectiveKey
+            )) {
+              sameRoundKeys.push({ section: item.section, profileKey: effectiveKey });
             }
           }
         }
@@ -405,18 +425,31 @@ export class DreamEngine {
     }
 
     // --- 7. Apply personality / profile updates ------------------------------
-    let nextPersonality = workingPersonality;
+    // Round 6 修复五：同一 Memory 以更高 revision 重新处理时，先撤销旧
+    // revision 产生的派生证据（候选 / 长期要求 / observed / 画像项），
+    // 再应用本轮新输出。撤销与新输出在同一事务提交，因此「只有成功重新
+    // 处理才撤销」天然成立。
+    const reprocessedPersonalityIds = computeReprocessedMemoryIds(workingPersonality, processedSources);
+    const personalityBase = reprocessedPersonalityIds.size > 0
+      ? revokeReprocessedPersonalitySources(workingPersonality, reprocessedPersonalityIds, this.now())
+      : workingPersonality;
+    const reprocessedProfileIds = computeReprocessedProfileMemoryIds(workingProfile, processedSources);
+    const profileBase = reprocessedProfileIds.size > 0
+      ? revokeReprocessedProfileSources(workingProfile, reprocessedProfileIds, this.now())
+      : workingProfile;
+
+    let nextPersonality = personalityBase;
     if (signals.length > 0 || requirements.length > 0 || processedSources.length > 0) {
-      nextPersonality = applyDreamPersonalityUpdate(workingPersonality, {
+      nextPersonality = applyDreamPersonalityUpdate(personalityBase, {
         signals,
         requirements,
         processedSources,
         now: this.now()
       });
     }
-    let nextProfile = workingProfile;
+    let nextProfile = profileBase;
     if (profileItems.length > 0 || processedSources.length > 0) {
-      nextProfile = applyDreamProfileUpdate(workingProfile, {
+      nextProfile = applyDreamProfileUpdate(profileBase, {
         items: profileItems,
         processedSources,
         now: this.now()
@@ -539,15 +572,45 @@ export class DreamEngine {
       }
     ];
 
-    try {
-      await repository.applyCognitiveUpdate({
-        ...(agentContent ? { agentContent } : {}),
-        ...(userContent ? { userContent } : {}),
-        secondaryRecords: decayedSecondary,
-        extraChanges,
-        detail: `dream: processed=${processedMemoryIds.length} facts=+${factsCreated}/~${factsReused}/-${factsRetired} decayed=${decayed}${migrationError ? ` migration_error=${migrationError}` : ""}`
-      });
-    } catch (error) {
+    // Round 6 修复四（身份 CAS）：做梦期间用户可能在设置页改名/换头像。
+    // 提交携带本轮开始时读到的身份 revision；冲突时本地重试一次——重新读
+    // 身份、用新身份重渲染 AGENT.md 后再提交——绝不第二次调用 Provider。
+    let expectedIdentityRevision = agentIdentity.revision;
+    let committed = false;
+    let commitError: unknown = null;
+    for (let attempt = 0; attempt < 2 && !committed; attempt += 1) {
+      try {
+        await repository.applyCognitiveUpdate({
+          ...(agentContent ? { agentContent } : {}),
+          ...(userContent ? { userContent } : {}),
+          secondaryRecords: decayedSecondary,
+          extraChanges,
+          expectedAgentIdentityRevision: expectedIdentityRevision,
+          detail: `dream: processed=${processedMemoryIds.length} facts=+${factsCreated}/~${factsReused}/-${factsRetired} decayed=${decayed}${migrationError ? ` migration_error=${migrationError}` : ""}`
+        });
+        committed = true;
+      } catch (error) {
+        commitError = error;
+        if (!isIdentityRevisionConflict(error)) break;
+        if (attempt >= 1) break; // 只允许一次本地重试
+        if (this.deps.agentIdentityStore) this.deps.agentIdentityStore.invalidate();
+        const freshIdentity = this.deps.agentIdentityStore
+          ? await this.deps.agentIdentityStore.read()
+          : defaultAgentIdentityState();
+        expectedIdentityRevision = freshIdentity.revision;
+        if (nextPersonality.templateId) {
+          const rendered = renderAgentMarkdown(nextPersonality, freshIdentity);
+          if (rendered !== fixedFiles.agent) {
+            agentContent = rendered;
+            agentUpdated = true;
+          } else {
+            agentContent = undefined;
+            agentUpdated = false;
+          }
+        }
+      }
+    }
+    if (!committed) {
       // Transaction failed → nothing persisted; still record the attempt so we
       // do not re-pay every heartbeat, but never advance success semantics.
       await this.recordAttemptOnly(dreamState);
@@ -564,7 +627,7 @@ export class DreamEngine {
         userUpdated: false,
         providerUnavailable,
         committed: false,
-        error: errorMessage(error)
+        error: errorMessage(commitError)
       });
     }
 
@@ -720,7 +783,7 @@ function isProfileEligible(record: PersonalMemoryRecord): boolean {
 export function buildDreamPrompts(
   record: PersonalMemoryRecord,
   maxInputChars: number,
-  knownProfileKeys: readonly string[] = []
+  knownProfileKeys: readonly Readonly<{ section: string; profileKey: string }>[] = []
 ): { systemPrompt: string; userPrompt: string } {
   const dimensionLines = TRAIT_DIMENSIONS.map((dimension) => {
     const meta = TRAIT_DIMENSION_META[dimension];
@@ -739,7 +802,7 @@ export function buildDreamPrompts(
     "5.2 不得从以下内容推断人格：用户自己说话毒舌或说脏话；当前任务内容；用户的职业、爱好或身份；Provider 或模型选择；reasoning 强度；用户临时要求「这次详细一点」这类单次指令；引用、代码、Tool 输出和 Knowledge；单次情绪。",
     "5.3 区分「人格信号」和「长期行为要求」：回答长度、举例数量、固定格式、称呼、语言习惯（如「以后回答先给结论」「以后详细解释」「每次最多三段」「多举例」「少用表格」「使用中文」「称呼我为方哥」「每次附验收步骤」）只进入 agentRequirements，不产生 personalitySignals；只有直接改变性格或工作方式稳定强度的表达才形成 trait signal，例如「以后说话毒舌一点」→sharpness increase、「以后你来替我收敛方案」→dominance increase、「不要能跑就算完成」→rigor increase、「输出习惯按第一、第二、第三」→structure increase、「低风险步骤别总问我」→boldness increase、「多给非传统方案」→creativity increase；这类表达可以同时进入 agentRequirements。「思考深一点」不属于任何人格维度。",
     "6. agentRequirements：仅当记忆是用户对 Agent 的明确长期要求（如\"以后回复简短\"）时给出 0-2 条短语；否则空数组。",
-    `7. userProfileItems：仅当记忆包含稳定、当前有效的用户画像（身份、长期偏好、合作方式）时给出 0-2 条 {"section":"identity|preference|collaboration", "profileKey":≤${PROFILE_KEY_MAX_CHARS}字的稳定主题词（如"清晨散步"，同义表述必须复用同一 key）, "text":≤120字}；一次性任务、临时指令、引用、假设不得进入。${knownProfileKeys.length > 0 ? `已有 profileKey（主题相同必须复用，不要新造近义 key）：${knownProfileKeys.join("、")}` : ""}`,
+    `7. userProfileItems：仅当记忆包含稳定、当前有效的用户画像（身份、长期偏好、合作方式）时给出 0-2 条 {"section":"identity|preference|collaboration", "profileKey":≤${PROFILE_KEY_MAX_CHARS}字的稳定主题词（如"清晨散步"，同义表述必须复用同一 key）, "text":≤120字}；一次性任务、临时指令、引用、假设不得进入。${knownProfileKeys.length > 0 ? `已有 profileKey（格式 section:key，主题相同必须复用，不要新造近义 key）：${knownProfileKeys.map((entry) => `${entry.section}:${entry.profileKey}`).join("、")}` : ""}`,
     "8. 不得声称用户亲口说过记忆之外的话；语言与记忆保持一致。"
   ].join("\n");
   const content = record.content.slice(0, maxInputChars);
@@ -893,6 +956,11 @@ function sha256Text(text: string): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Round 6 修复四：识别 Repository 身份 CAS 冲突（稳定标记）。 */
+export function isIdentityRevisionConflict(error: unknown): boolean {
+  return /identity_revision_conflict/u.test(errorMessage(error));
 }
 
 function personalityJson(state: PersonalityState): string {
