@@ -143,6 +143,11 @@ export interface KnowledgeInitializationHost {
   openGuide(relativePath: string): Promise<void>;
   markInitialized(job: Readonly<KnowledgeInitializationJob>): Promise<void>;
   onStateChanged?(): void;
+  /**
+   * 仅用于失败注入回归：在持久化对应阶段返回非 null 错误即令该次写入失败。
+   * 生产 host 不实现此方法（可选）。
+   */
+  faultInjectPersist?(stage: "plan" | "job"): Error | null;
 }
 
 const PRIVATE_JOB_DIR = "knowledge/initialization/onboarding-v1";
@@ -275,11 +280,14 @@ export class KnowledgeBaseInitializer {
   }
 
   /**
-   * 批量分配笔记目标目录。事务语义：
+   * 批量分配笔记目标目录。clone-on-write 语义：
    * 1. 先验证所有 sourcePath 与 role，任一非法则整批不产生任何修改；
    * 2. 同一 sourcePath 只处理一次（重复时以最后一次为准）；
-   * 3. 全部变更在内存中完成后，只调用一次 refreshFrozenPlan，
-   *    只持久化一次 job/plan。
+   * 3. 读取当前 job 后立即 structuredClone 出 nextJob；验证与 pathExists
+   *    期间不修改当前 job，所有角色/目标/状态/Provider/digest 变更只写
+   *    nextJob；
+   * 4. nextJob 持久化成功后才替换 this.job 并触发一次 onStateChanged；
+   *    持久化失败时公开缓存与磁盘都保持旧状态，绝不回传半成功结果。
    */
   async assignMany(assignments: readonly KnowledgeInitializationAssignment[]):
   Promise<Readonly<KnowledgeInitializationJob>> {
@@ -297,6 +305,7 @@ export class KnowledgeBaseInitializer {
       }
       planned.set(normalizedSource, assignment.role);
     }
+    // pathExists 只读：期间不得触碰当前 job。
     const conflictByPath = new Map<string, boolean>();
     for (const [sourcePath, role] of planned) {
       if (role === "keep") continue;
@@ -305,8 +314,9 @@ export class KnowledgeBaseInitializer {
         await this.host.pathExists(importedTarget(role, sourcePath))
       );
     }
+    const nextJob = structuredClone(job);
     for (const [sourcePath, role] of planned) {
-      const item = itemByPath.get(sourcePath);
+      const item = nextJob.items.find((candidate) => candidate.sourcePath === sourcePath);
       if (!item) continue;
       item.role = role;
       item.targetPath = role === "keep" ? null : importedTarget(role, item.sourcePath);
@@ -317,11 +327,14 @@ export class KnowledgeBaseInitializer {
         ? "用户选择保持原位"
         : item.state === "conflict" ? `目标已存在：${item.targetPath}` : `用户分配到 ${role}`;
     }
-    job.provider = this.host.currentProvider();
-    job.confirmedDigest = null;
-    refreshFrozenPlan(job, existingRawSources(job), job.counts.ignored);
-    await this.persistJob(job, true);
-    return cloneJob(job);
+    nextJob.provider = this.host.currentProvider();
+    nextJob.confirmedDigest = null;
+    refreshFrozenPlan(nextJob, existingRawSources(nextJob), nextJob.counts.ignored);
+    // notify=false：持久化期间不通知；缓存真正替换后才触发一次 onStateChanged。
+    await this.persistJob(nextJob, true, false);
+    this.job = nextJob;
+    this.host.onStateChanged?.();
+    return cloneJob(nextJob);
   }
 
   async confirm(): Promise<Readonly<KnowledgeInitializationJob>> {
@@ -670,16 +683,59 @@ export class KnowledgeBaseInitializer {
     }
   }
 
-  private async persistJob(job: KnowledgeInitializationJob, persistPlan = false): Promise<void> {
+  /**
+   * 持久化 job（必要时连同冻结计划）。
+   *
+   * 双文件提交顺序：先写 plan 文件、后写 job 文件。job 是读取入口，
+   * 后写 job 保证任何时刻读到的 job 都有完整对应的 plan：
+   * - plan 失败：job 未动，磁盘与缓存都是完整旧状态；
+   * - plan 成功但 job 失败：把 plan 回滚为写入前的内容，仍然是完整旧状态。
+   * 因此 API 抛错后重新读取，只能得到完整旧状态或完整新状态，
+   * 不会得到 job 与 plan 互相矛盾的半状态。
+   *
+   * `notify=false` 用于 clone-on-write 提交：调用方在缓存真正替换成功
+   * 之后才自行触发一次 onStateChanged；持久化失败保持静默。
+   */
+  private async persistJob(
+    job: KnowledgeInitializationJob,
+    persistPlan = false,
+    notify = true
+  ): Promise<void> {
     job.updatedAt = this.host.now();
     const directory = path.dirname(this.jobFilePath());
     await fsp.mkdir(directory, { recursive: true, mode: 0o700 });
-    await atomicWriteJson(this.jobFilePath(), job);
+    let planPath = "";
+    let previousPlan: string | null = null;
     if (persistPlan) {
+      planPath = path.join(directory, PLAN_DIR, `${job.jobId}.json`);
+      try {
+        previousPlan = await fsp.readFile(planPath, "utf8");
+      } catch (error) {
+        if (nodeErrorCode(error) !== "ENOENT") throw error;
+        previousPlan = null;
+      }
       await fsp.mkdir(path.join(directory, PLAN_DIR), { recursive: true, mode: 0o700 });
-      await atomicWriteJson(path.join(directory, PLAN_DIR, `${job.jobId}.json`), frozenPlanDocument(job));
+      const planFault = this.host.faultInjectPersist?.("plan");
+      if (planFault) throw planFault;
+      await atomicWriteJson(planPath, frozenPlanDocument(job));
     }
-    this.host.onStateChanged?.();
+    try {
+      const jobFault = this.host.faultInjectPersist?.("job");
+      if (jobFault) throw jobFault;
+      await atomicWriteJson(this.jobFilePath(), job);
+    } catch (error) {
+      if (persistPlan) {
+        // job 未写成功：把已写的新 plan 回滚到写入前的内容（没有旧文件则删除）。
+        if (previousPlan !== null) {
+          await fsp.writeFile(planPath, previousPlan, { encoding: "utf8", mode: 0o600 })
+            .catch(() => {});
+        } else {
+          await fsp.rm(planPath, { force: true }).catch(() => {});
+        }
+      }
+      throw error;
+    }
+    if (notify) this.host.onStateChanged?.();
   }
 
   private jobFilePath(): string {

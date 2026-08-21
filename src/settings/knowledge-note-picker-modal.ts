@@ -17,19 +17,33 @@ export interface KnowledgeNotePickerOptions {
   /** 当前 preview 中全部可分配笔记（keep 等遗留状态由调用方过滤）。 */
   readonly notes: readonly KnowledgeNotePickerNote[];
   readonly roleLabel: (role: KnowledgeInitializationRole) => string;
-  /** 确认后回传变更集合；未变化时不会调用。 */
+  /**
+   * 确认后回传变更集合；未变化时不会调用。
+   * 抛错 = 保存失败：Modal 保持打开、不锁死、显示内联错误，允许再次提交。
+   */
   readonly onConfirm: (
     assignments: readonly KnowledgeInitializationAssignment[]
   ) => void | Promise<void>;
-  /** 触发该 Modal 的「添加笔记」按钮；关闭后把焦点还给它。 */
+  /** 触发该 Modal 的「添加笔记」按钮；仅在未提供 restoreFocus 时使用。 */
   readonly triggerEl?: HTMLElement | null;
+  /**
+   * 稳定的焦点恢复回调。目录列表提交后会被重建，旧 triggerEl 可能脱离 DOM；
+   * 调用方应在这里按 role 重新找到重建后的按钮，并只在 isConnected 时 focus。
+   * 取消、Escape、提交成功、提交失败后取消四条路径都会走这里。
+   */
+  readonly restoreFocus?: () => void;
 }
 
 /**
  * 知识库初始化的多选笔记 Modal：
  * - 真实 checkbox 多选，整行 label 与 checkbox 同一点击区域；
  * - 勾选过程只在内存中更新，确认（选好了）才一次性回传；
- * - 取消或 Escape 零写入；关闭后焦点恢复到触发按钮。
+ * - 取消或 Escape 零写入；关闭后焦点恢复到触发按钮；
+ * - 提交期间防重复提交；onConfirm 抛错时保持打开并显示内联错误。
+ *
+ * targetRole === "raw" 时语义为「把其他目录的笔记移回 Raw」：
+ * 已在 Raw 的笔记显示为不可编辑的「已在 Raw」，不允许取消勾选后
+ * 确认时再静默分配回 Raw。
  */
 export class KnowledgeNotePickerModal extends Modal {
   private readonly checked = new Set<string>();
@@ -37,7 +51,10 @@ export class KnowledgeNotePickerModal extends Modal {
   private searchEl: HTMLInputElement | null = null;
   private listEl: HTMLElement | null = null;
   private confirmEl: HTMLButtonElement | null = null;
+  private cancelEl: HTMLButtonElement | null = null;
+  private errorEl: HTMLElement | null = null;
   private confirmed = false;
+  private submitting = false;
   private keydownHandler: ((event: KeyboardEvent) => void) | null = null;
 
   constructor(
@@ -45,8 +62,11 @@ export class KnowledgeNotePickerModal extends Modal {
     private readonly options: KnowledgeNotePickerOptions
   ) {
     super(app);
-    for (const note of options.notes) {
-      if (note.role === options.targetRole) this.checked.add(note.sourcePath);
+    // Raw 目标是「移回 Raw」：没有预勾选；其他目录预勾选当前已在该目录的笔记。
+    if (options.targetRole !== "raw") {
+      for (const note of options.notes) {
+        if (note.role === options.targetRole) this.checked.add(note.sourcePath);
+      }
     }
   }
 
@@ -54,11 +74,22 @@ export class KnowledgeNotePickerModal extends Modal {
     return this.checked.size;
   }
 
+  /** 测试与调用方可读取：onConfirm 成功后才为 true。 */
+  get wasConfirmed(): boolean {
+    return this.confirmed;
+  }
+
+  get isSubmitting(): boolean {
+    return this.submitting;
+  }
+
   onOpen(): void {
-    const { zh, targetLabel } = this.options;
+    const { zh, targetLabel, targetRole } = this.options;
     this.modalEl.addClass("echoink-knowledge-note-picker");
     this.titleEl.setText(
-      zh ? `添加笔记到 ${targetLabel}` : `Add notes to ${targetLabel}`
+      targetRole === "raw"
+        ? (zh ? "移回 Raw" : "Move notes back to Raw")
+        : (zh ? `添加笔记到 ${targetLabel}` : `Add notes to ${targetLabel}`)
     );
     const body = this.contentEl.createDiv({ cls: "echoink-knowledge-note-picker-body" });
     this.searchEl = body.createEl("input", {
@@ -79,12 +110,16 @@ export class KnowledgeNotePickerModal extends Modal {
     });
     this.renderList();
     const footer = this.contentEl.createDiv({ cls: "echoink-knowledge-note-picker-footer" });
-    const cancel = footer.createEl("button", {
+    this.errorEl = footer.createDiv({
+      cls: "echoink-knowledge-note-picker-error",
+      attr: { role: "alert", "aria-live": "assertive" }
+    });
+    this.cancelEl = footer.createEl("button", {
       cls: "echoink-knowledge-note-picker-cancel",
       text: zh ? "取消" : "Cancel",
       attr: { type: "button" }
     });
-    cancel.onclick = () => this.close();
+    this.cancelEl.onclick = () => this.close();
     this.confirmEl = footer.createEl("button", {
       cls: "mod-cta echoink-knowledge-note-picker-confirm",
       text: this.confirmLabel(),
@@ -101,16 +136,25 @@ export class KnowledgeNotePickerModal extends Modal {
       this.modalEl.removeEventListener("keydown", this.keydownHandler as EventListener);
       this.keydownHandler = null;
     }
-    if (!this.confirmed) {
-      // 取消 / Escape：零写入，只恢复焦点。
-      this.options.triggerEl?.focus();
+    // 取消 / Escape / 提交成功 / 提交失败后再取消：统一走稳定的焦点恢复。
+    this.restoreTriggerFocus();
+  }
+
+  private restoreTriggerFocus(): void {
+    if (this.options.restoreFocus) {
+      this.options.restoreFocus();
       return;
     }
-    this.options.triggerEl?.focus();
+    const trigger = this.options.triggerEl;
+    if (trigger && trigger.isConnected) trigger.focus();
   }
 
   private confirmLabel(): string {
-    return this.options.zh
+    const { zh, targetRole } = this.options;
+    if (targetRole === "raw") {
+      return zh ? `移回 Raw（${this.checked.size}）` : `Move to Raw (${this.checked.size})`;
+    }
+    return zh
       ? `选好了（${this.checked.size}）`
       : `Done (${this.checked.size})`;
   }
@@ -119,6 +163,7 @@ export class KnowledgeNotePickerModal extends Modal {
     const list = this.listEl;
     if (!list) return;
     const { zh, notes, targetRole, targetLabel, roleLabel } = this.options;
+    const rawTarget = targetRole === "raw";
     list.empty();
     const query = this.query.trim().toLocaleLowerCase();
     const visible = notes.filter((note) =>
@@ -132,6 +177,24 @@ export class KnowledgeNotePickerModal extends Modal {
       return;
     }
     for (const note of visible) {
+      // Raw 目标：已在 Raw 的笔记只读展示，不参与勾选，避免「取消勾选后
+      // 确认时又静默分配回 Raw」的无效交互。
+      if (rawTarget && note.role === "raw") {
+        const readonlyRow = list.createDiv({
+          cls: "echoink-knowledge-note-picker-row is-readonly"
+        });
+        const readonlyCopy = readonlyRow.createDiv({ cls: "echoink-knowledge-note-picker-copy" });
+        readonlyCopy.createDiv({
+          cls: "echoink-knowledge-note-picker-path",
+          text: note.sourcePath,
+          attr: { title: note.sourcePath }
+        });
+        readonlyCopy.createDiv({
+          cls: "echoink-knowledge-note-picker-badge",
+          text: zh ? "已在 Raw" : "Already in Raw"
+        });
+        continue;
+      }
       const row = list.createEl("label", { cls: "echoink-knowledge-note-picker-row" });
       const checkbox = row.createEl("input", {
         cls: "echoink-knowledge-note-picker-checkbox",
@@ -147,6 +210,12 @@ export class KnowledgeNotePickerModal extends Modal {
       const badge = copy.createDiv({ cls: "echoink-knowledge-note-picker-badge" });
       const renderBadge = (): void => {
         const isChecked = this.checked.has(note.sourcePath);
+        if (rawTarget) {
+          badge.setText(isChecked
+            ? (zh ? "将移回 Raw" : "Moves back to Raw")
+            : (zh ? `当前：${roleLabel(note.role)}` : `Now: ${roleLabel(note.role)}`));
+          return;
+        }
         badge.setText(isChecked
           ? (note.role !== targetRole
               ? (zh ? `将移动到 ${targetLabel}` : `Moves to ${targetLabel}`)
@@ -160,17 +229,23 @@ export class KnowledgeNotePickerModal extends Modal {
         if (checkbox.checked) this.checked.add(note.sourcePath);
         else this.checked.delete(note.sourcePath);
         renderBadge();
-        if (this.confirmEl) this.confirmEl.setText(this.confirmLabel());
+        if (this.confirmEl && !this.submitting) this.confirmEl.setText(this.confirmLabel());
       };
     }
   }
 
-  private async confirm(): Promise<void> {
-    if (this.confirmed) return;
+  private collectAssignments(): KnowledgeInitializationAssignment[] {
     const { targetRole, notes } = this.options;
     const assignments: KnowledgeInitializationAssignment[] = [];
     for (const note of notes) {
       const isChecked = this.checked.has(note.sourcePath);
+      if (targetRole === "raw") {
+        // 移回 Raw：只有被勾选且当前不在 Raw 的笔记产生写入。
+        if (isChecked && note.role !== "raw") {
+          assignments.push({ sourcePath: note.sourcePath, role: "raw" });
+        }
+        continue;
+      }
       if (isChecked && note.role !== targetRole) {
         assignments.push({ sourcePath: note.sourcePath, role: targetRole });
       } else if (!isChecked && note.role === targetRole) {
@@ -178,15 +253,57 @@ export class KnowledgeNotePickerModal extends Modal {
         assignments.push({ sourcePath: note.sourcePath, role: "raw" });
       }
     }
-    this.confirmed = true;
-    if (assignments.length > 0) await this.options.onConfirm(Object.freeze(assignments));
-    this.close();
+    return assignments;
+  }
+
+  private setSubmitting(submitting: boolean): void {
+    this.submitting = submitting;
+    if (this.confirmEl) {
+      this.confirmEl.disabled = submitting;
+      this.confirmEl.setText(
+        submitting
+          ? (this.options.zh ? "正在保存…" : "Saving…")
+          : this.confirmLabel()
+      );
+    }
+    if (this.cancelEl) this.cancelEl.disabled = submitting;
+  }
+
+  private showError(message: string): void {
+    if (!this.errorEl) return;
+    this.errorEl.setText(message);
+  }
+
+  private clearError(): void {
+    this.errorEl?.setText("");
+  }
+
+  private async confirm(): Promise<void> {
+    if (this.confirmed || this.submitting) return;
+    const assignments = this.collectAssignments();
+    this.setSubmitting(true);
+    this.clearError();
+    try {
+      if (assignments.length > 0) await this.options.onConfirm(Object.freeze(assignments));
+      // 只有 onConfirm 成功后才允许关闭；失败时 confirmed 保持 false。
+      this.confirmed = true;
+      this.close();
+    } catch (error) {
+      // 保持 Modal 打开、恢复按钮、显示内联错误，允许再次点击。
+      this.setSubmitting(false);
+      this.showError(
+        this.options.zh
+          ? `保存失败：${error instanceof Error ? error.message : String(error)}`
+          : `Save failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
   }
 
   /** Tab 在 Modal 内循环，Escape 关闭（零写入）。 */
   private handleKeydown(event: KeyboardEvent): void {
     if (event.key === "Escape") {
       event.preventDefault();
+      if (this.submitting) return;
       this.close();
       return;
     }

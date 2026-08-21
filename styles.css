@@ -12647,8 +12647,10 @@ body.theme-dark .codex-session-picker {
   margin-top: 4px;
 }
 
+/* Agent 画像：整个区域只保留这一个主要外层卡片边界；内部不再嵌套
+   带边框圆角的子卡片。全部颜色来自 Obsidian 主题变量，浅色/深色通用。 */
 .echoink-agent-profile-card {
-  border-radius: 16px;
+  border-radius: var(--echoink-settings-radius, 12px);
   background: var(--background-secondary);
   border: 1px solid var(--background-modifier-border);
   overflow: hidden;
@@ -12670,7 +12672,7 @@ body.theme-dark .codex-session-picker {
 }
 
 .echoink-agent-profile-card-label {
-  font-size: 13px;
+  font-size: var(--font-ui-medium);
   font-weight: 600;
   color: var(--text-normal);
 }
@@ -12680,118 +12682,69 @@ body.theme-dark .codex-session-picker {
   align-items: center;
   padding: 1px 7px;
   border-radius: 999px;
-  font-size: 10px;
+  font-size: var(--font-ui-smaller);
   font-family: var(--font-monospace);
-  background: var(--interactive-accent);
-  color: var(--text-on-accent);
-  opacity: 0.85;
+  background: var(--background-modifier-border);
+  color: var(--text-muted);
 }
 
-/* Expand button — top-right, slide-arrow animation (amicro btn-1 style)
-   Default: [profile-icon] [text]
-   Hover:   [text] [arrow→]  (icon slides out left, arrow slides in right)
-   Open:    [text] [chevron↓] (arrow rotated 90° to indicate collapse)
-   Spring-like feel via cubic-bezier(0.34, 1.56, 0.64, 1) ≈ stiffness 600 damping 25 */
+/* 「查看完整画像」：稳定的次级按钮。无 morph 图标动画、无缩放跳动；
+   只用 chevron 旋转表达开合。 */
 .echoink-agent-profile-expand-btn {
   margin-left: auto;
-  position: relative;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  height: 32px;
-  padding: 0 14px;
-  border-radius: 40px;
-  font-size: 12px;
+  gap: 6px;
+  min-height: 32px;
+  padding: 4px 12px;
+  border-radius: var(--echoink-settings-radius-sm, 8px);
+  font-size: var(--font-ui-small);
   font-weight: 500;
-  letter-spacing: -0.01em;
   cursor: pointer;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
   color: var(--text-muted);
   white-space: nowrap;
-  transition: background 0.15s ease, border-color 0.15s ease,
-              transform 0.15s ease, color 0.15s ease;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 
 .echoink-agent-profile-expand-btn:hover {
-  background: rgba(255, 255, 255, 0.07);
-  border-color: rgba(255, 255, 255, 0.1);
+  background: var(--background-modifier-hover);
   color: var(--text-normal);
-  transform: scale(1.02);
-}
-
-.echoink-agent-profile-expand-btn:active {
-  transform: scale(0.96);
 }
 
 .echoink-agent-profile-expand-btn.is-open {
-  border-color: var(--interactive-accent);
-  color: var(--interactive-accent);
-  background: rgba(124, 92, 191, 0.08);
+  border-color: var(--background-modifier-border-hover, var(--background-modifier-border));
+  color: var(--text-normal);
 }
 
-/* Morph icon container — User → UserCheck scale morph (amicro btn-23 style)
-   Default: User icon at scale(1)
-   Hover:   User scales down to 0 + fades, UserCheck scales up from 0 + fades in
-   Spring-like feel via cubic-bezier(0.34, 1.56, 0.64, 1) ≈ stiffness 600 damping 25 */
-.echoink-morph-icon-wrap {
-  position: relative;
-  width: 14px;
-  height: 14px;
+.echoink-agent-profile-expand-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  margin-right: 7px;
+  transition: transform 0.15s ease;
 }
 
-/* Default icon (User) — visible, scales out on hover */
-.echoink-morph-icon-default {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  opacity: 1;
-  transform: scale(1);
-  transition: opacity 0.25s cubic-bezier(0.34, 1.56, 0.64, 1),
-              transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+.echoink-agent-profile-expand-icon svg {
+  width: 14px;
+  height: 14px;
 }
 
-.echoink-agent-profile-expand-btn:hover .echoink-morph-icon-default,
-.echoink-agent-profile-expand-btn.is-open .echoink-morph-icon-default {
-  opacity: 0;
-  transform: scale(0.5);
+.echoink-agent-profile-expand-btn.is-open .echoink-agent-profile-expand-icon {
+  transform: rotate(180deg);
 }
 
-/* Hover icon (UserCheck) — hidden, scales in on hover */
-.echoink-morph-icon-hover {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  opacity: 0;
-  transform: scale(0.5);
-  transition: opacity 0.25s cubic-bezier(0.34, 1.56, 0.64, 1),
-              transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
-}
-
-.echoink-agent-profile-expand-btn:hover .echoink-morph-icon-hover,
-.echoink-agent-profile-expand-btn.is-open .echoink-morph-icon-hover {
-  opacity: 1;
-  transform: scale(1);
-}
-
-/* Label text */
-.echoink-morph-btn-label {
-  transition: opacity 0.15s ease;
+.echoink-agent-profile-expand-label {
+  overflow-wrap: anywhere;
 }
 
 .echoink-agent-profile-card-desc {
-  font-size: 12px;
+  font-size: var(--font-ui-small);
   color: var(--text-muted);
   flex-basis: 100%;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 /* --- Body: left hexagon + right trait bars --- */
@@ -12885,27 +12838,56 @@ body.theme-dark .codex-session-picker {
 
 /* --- Footer --- */
 .echoink-agent-profile-card-footer {
-  padding: 8px 16px;
+  padding: 10px 16px;
   border-top: 1px solid var(--background-modifier-border);
-  font-size: 11px;
+  font-size: var(--font-ui-small);
   color: var(--text-muted);
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
 }
 
 .echoink-agent-profile-reselect {
-  padding: 0;
+  padding: 4px 10px;
+  min-height: 28px;
   color: var(--interactive-accent);
   background: none;
   border: 0;
+  border-radius: var(--echoink-settings-radius-sm, 8px);
   text-decoration: none;
   cursor: pointer;
-  font-size: 11px;
+  font-size: var(--font-ui-small);
+  overflow-wrap: anywhere;
 }
 
 .echoink-agent-profile-reselect:hover {
   text-decoration: underline;
+}
+
+/* 未选择模板：「初始风格选择」是明确的主要行动。 */
+.echoink-agent-profile-reselect.is-primary {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  font-weight: 600;
+}
+
+.echoink-agent-profile-reselect.is-primary:hover {
+  text-decoration: none;
+  background: var(--interactive-accent-hover, var(--interactive-accent));
+}
+
+/* 已有模板：「重置人格」是低强调、带风险语义的文字按钮。 */
+.echoink-agent-profile-reselect.is-danger {
+  color: var(--text-error);
+  font-size: var(--font-ui-smaller);
+}
+
+.echoink-agent-profile-reselect:focus-visible,
+.echoink-agent-profile-expand-btn:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
 }
 
 /* --- Drawer (slides down) --- */
@@ -12926,34 +12908,36 @@ body.theme-dark .codex-session-picker {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  min-width: 0;
 }
 
-/* Summary card inside drawer */
-.echoink-agent-profile-summary-card {
-  background: var(--background-primary);
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 12px;
-  padding: 16px;
+/* 人格总结：普通内容分组（标题 + 正文），不再套带边框圆角的子卡片，
+   与下方「画像文本」之间靠间距和标题层级区分。 */
+.echoink-agent-profile-summary-group {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
+  padding-bottom: 4px;
+  min-width: 0;
 }
 
 .echoink-agent-profile-summary-title {
-  font-size: 13px;
+  font-size: var(--font-ui-small);
   font-weight: 600;
-  color: var(--interactive-accent);
+  color: var(--text-muted);
 }
 
 .echoink-agent-profile-summary-text {
-  font-size: 13px;
+  font-size: var(--font-ui-medium);
   line-height: 1.7;
   color: var(--text-normal);
+  overflow-wrap: anywhere;
 }
 
-/* Raw AGENT.md text inside drawer */
+/* Raw AGENT.md text inside drawer（画像文本是内容区，不算嵌套卡片边界：
+   仅用浅色底与细分隔线保证可读，不承担主要卡片语义）。 */
 .echoink-agent-profile-raw-title {
-  font-size: 12px;
+  font-size: var(--font-ui-small);
   font-weight: 600;
   color: var(--text-muted);
 }
@@ -12961,7 +12945,7 @@ body.theme-dark .codex-session-picker {
 .echoink-agent-profile-raw-text {
   margin: 0;
   padding: 12px;
-  font-size: 12px;
+  font-size: var(--font-ui-small);
   line-height: 1.7;
   font-family: var(--font-monospace);
   color: var(--text-muted);
@@ -12971,7 +12955,7 @@ body.theme-dark .codex-session-picker {
   overflow-y: auto;
   background: var(--background-primary);
   border: 1px solid var(--background-modifier-border);
-  border-radius: 8px;
+  border-radius: var(--echoink-settings-radius-sm, 8px);
 }
 
 .echoink-agent-profile-collapse-btn {
@@ -13640,6 +13624,25 @@ body.theme-dark .codex-session-picker {
   font-size: var(--font-ui-smaller);
 }
 
+/* 用户动作失败的可见提示：主文案 + 可折叠技术详情，支持重试。 */
+.echoink-knowledge-init-action-error {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 68ch;
+  padding: 10px 12px;
+  border: 1px solid var(--background-modifier-error, var(--text-error));
+  border-radius: var(--echoink-settings-radius-sm, 8px);
+  background: color-mix(in srgb, var(--text-error) 6%, transparent);
+}
+
+.echoink-knowledge-init-action-error-text {
+  color: var(--text-error);
+  font-size: var(--font-ui-small);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 .echoink-knowledge-init-warning {
   display: flex;
   align-items: flex-start;
@@ -13791,8 +13794,9 @@ body.theme-dark .codex-session-picker {
   overflow-wrap: anywhere;
 }
 
-/* 多选笔记 Modal。 */
-.echoink-knowledge-note-picker .modal {
+/* 多选笔记 Modal。类直接加在 modalEl 上，因此选择器必须匹配同一元素：
+   .modal.echoink-knowledge-note-picker，而不是后代表达式。 */
+.modal.echoink-knowledge-note-picker {
   width: min(680px, calc(100vw - 32px));
   max-height: min(72vh, 720px);
 }
@@ -13870,11 +13874,31 @@ body.theme-dark .codex-session-picker {
   font-size: var(--font-ui-small);
 }
 
+/* Raw 目标里「已在 Raw」的只读行：无 checkbox，不可勾选。 */
+.echoink-knowledge-note-picker-row.is-readonly {
+  cursor: default;
+  opacity: 0.75;
+}
+
 .echoink-knowledge-note-picker-footer {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   justify-content: flex-end;
   gap: 10px;
+}
+
+.echoink-knowledge-note-picker-error {
+  margin-right: auto;
+  min-width: 0;
+  color: var(--text-error);
+  font-size: var(--font-ui-small);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.echoink-knowledge-note-picker-error:empty {
+  display: none;
 }
 
 .echoink-knowledge-note-picker-cancel,

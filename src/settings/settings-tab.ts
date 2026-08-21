@@ -873,17 +873,21 @@ export class CodexSettingTab extends PluginSettingTab {
       cls: "echoink-agent-profile-card-badge",
       text: zh ? "自动生成" : "Auto-generated"
     });
+    // 稳定的次级按钮：单一 chevron 图标 + 文案，aria-expanded 表达开合；
+    // 不再使用 User→UserCheck 的 morph 动画或缩放跳动。
     const expandBtn = header.createEl("button", {
       cls: "echoink-agent-profile-expand-btn",
-      attr: { type: "button" }
+      attr: {
+        type: "button",
+        "aria-expanded": "false",
+        "aria-controls": "echoink-agent-profile-drawer"
+      }
     });
-    const iconWrap = expandBtn.createSpan({ cls: "echoink-morph-icon-wrap" });
-    const iconDefault = iconWrap.createSpan({ cls: "echoink-morph-icon-default" });
-    iconDefault.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`;
-    const iconHover = iconWrap.createSpan({ cls: "echoink-morph-icon-hover" });
-    iconHover.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><polyline points="16 11 18 13 22 9"/></svg>`;
+    const expandIcon = expandBtn.createSpan({ cls: "echoink-agent-profile-expand-icon" });
+    setIcon(expandIcon, "chevron-down");
+    expandIcon.setAttr("aria-hidden", "true");
     const btnLabel = expandBtn.createSpan({
-      cls: "echoink-morph-btn-label",
+      cls: "echoink-agent-profile-expand-label",
       text: zh ? "查看完整画像" : "Full profile"
     });
     header.createDiv({
@@ -947,11 +951,14 @@ export class CodexSettingTab extends PluginSettingTab {
     const pickerPanel = card.createDiv({ cls: "echoink-template-picker" });
 
     // --- Drawer (toggled by expand button) ---
+    // 人格总结不再是嵌套卡片：普通内容分组，用标题 + 细分隔线区分，
+    // 整个 Agent 画像只保留外层一个主要卡片边界。
     const drawer = card.createDiv({ cls: "echoink-agent-profile-drawer" });
+    drawer.setAttr("id", "echoink-agent-profile-drawer");
     const drawerInner = drawer.createDiv({ cls: "echoink-agent-profile-drawer-inner" });
-    const summaryCard = drawerInner.createDiv({ cls: "echoink-agent-profile-summary-card" });
-    summaryCard.createDiv({ cls: "echoink-agent-profile-summary-title", text: zh ? "人格总结" : "Personality Summary" });
-    const summaryText = summaryCard.createDiv({ cls: "echoink-agent-profile-summary-text" });
+    const summaryGroup = drawerInner.createDiv({ cls: "echoink-agent-profile-summary-group" });
+    summaryGroup.createDiv({ cls: "echoink-agent-profile-summary-title", text: zh ? "人格总结" : "Personality Summary" });
+    const summaryText = summaryGroup.createDiv({ cls: "echoink-agent-profile-summary-text" });
     summaryText.setText(zh ? "正在读取…" : "Loading…");
     drawerInner.createDiv({ cls: "echoink-agent-profile-raw-title", text: zh ? "画像文本" : "Profile text" });
     const rawPre = drawerInner.createEl("pre", {
@@ -968,6 +975,7 @@ export class CodexSettingTab extends PluginSettingTab {
         ? (zh ? "收起画像" : "Collapse profile")
         : (zh ? "查看完整画像" : "Full profile"));
       expandBtn.classList.toggle("is-open", isOpen);
+      expandBtn.setAttr("aria-expanded", String(isOpen));
       if (isOpen) {
         // 做梦可能在后台更新了人格状态和 AGENT.md；展开时重新读取。
         void (async () => {
@@ -1049,6 +1057,10 @@ export class CodexSettingTab extends PluginSettingTab {
     refs.templateBtn.setText(template
       ? (zh ? "重置人格" : "Reset personality")
       : (zh ? "初始风格选择" : "Choose initial style"));
+    // 视觉层级：未选模板时「初始风格选择」是明确的主要行动；已有模板时
+    // 「重置人格」降级为带风险语义的低强调文字按钮（确认弹窗不变）。
+    refs.templateBtn.classList.toggle("is-primary", !template);
+    refs.templateBtn.classList.toggle("is-danger", Boolean(template));
     refs.footerStatus.setText(template
       ? (zh ? `基于「${template.labelZh}」模板` : `Template: ${template.labelEn}`)
       : (zh ? "尚未选择初始风格" : "No style selected yet"));
