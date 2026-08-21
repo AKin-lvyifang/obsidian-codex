@@ -957,6 +957,13 @@ function maintenanceScopeProviderPrompt(
       "不得读取 Tracker 或扩展到其他 Raw。"
     ].join("\n");
   }
+  if (scope.mode === "batch") {
+    return [
+      `本轮范围是 batch，只读取并维护以下 ${scope.sourcePaths.length} 篇 Raw：${JSON.stringify(scope.sourcePaths)}`,
+      `调用 knowledge_maintain 时 sourcePaths 必须按原顺序精确等于 ${JSON.stringify(scope.sourcePaths)}。`,
+      "不得读取 Tracker、扩展到其他 Raw，或把批次拆成多个 Tool 调用。"
+    ].join("\n");
+  }
   return [
     `本轮范围是 query。只在下列本地候选中判断用户点名的是哪一篇 Raw：${JSON.stringify(scope.candidatePaths)}`,
     "先比较用户尾随名称与候选，再选择唯一精确路径；无法可靠选择时不要调用 knowledge_maintain，也不得回退 global。",

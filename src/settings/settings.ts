@@ -150,6 +150,7 @@ export interface SetupSettings {
   completedAt: number;
   lastCheckedAt: number;
   dismissedVersion: string;
+  tutorialStep: "provider" | "knowledge" | "personality";
 }
 
 export interface EchoInkMemorySettings {
@@ -314,7 +315,7 @@ export const DEFAULT_REVIEW_OUTPUT_DIR = "outputs";
 
 export const DEFAULT_SETTINGS: CodexForObsidianSettings = {
   productGeneration: "pi-agent-product-v1",
-  settingsVersion: 49,
+  settingsVersion: 50,
   settingsLanguage: "zh-CN",
   settingsTab: "providers",
   proxyEnabled: false,
@@ -336,7 +337,8 @@ export const DEFAULT_SETTINGS: CodexForObsidianSettings = {
   setup: {
     completedAt: 0,
     lastCheckedAt: 0,
-    dismissedVersion: ""
+    dismissedVersion: "",
+    tutorialStep: "provider"
   },
   memory: {
     enabled: true,
@@ -1044,7 +1046,10 @@ function normalizeSetupSettings(input: unknown): SetupSettings {
   return {
     completedAt: normalizeNonNegativeNumber(value?.completedAt),
     lastCheckedAt: normalizeNonNegativeNumber(value?.lastCheckedAt),
-    dismissedVersion: normalizeOptionalText(value?.dismissedVersion)
+    dismissedVersion: normalizeOptionalText(value?.dismissedVersion),
+    tutorialStep: value?.tutorialStep === "knowledge" || value?.tutorialStep === "personality"
+      ? value.tutorialStep
+      : "provider"
   };
 }
 
@@ -1723,7 +1728,7 @@ function normalizeApiProviderMaxOutputTokens(input: Readonly<{
 
 function createDefaultApiProvider(): ApiProviderConfig {
   const preset = getApiProviderPreset("deepseek");
-  const modelPreset = preset.models[0]!;
+  const modelPreset = preset.models[0];
   return {
     id: "provider-default",
     providerId: preset.id,

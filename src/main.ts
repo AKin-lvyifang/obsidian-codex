@@ -24,6 +24,7 @@ import {
   EchoInkSettingsStore,
   restoreApiProviderSettings,
   snapshotApiProviderSettings,
+  type SettingsLoadResult,
   type SettingsSaveOptions
 } from "./plugin/settings-store";
 import { EchoInkViewService } from "./plugin/view-service";
@@ -33,6 +34,10 @@ import {
   type EchoInkMcpServerDraft
 } from "./plugin/mcp-settings-service";
 import { EchoInkKnowledgeSurfaceService } from "./plugin/knowledge-surface-service";
+import type {
+  KnowledgeInitializationMode,
+  KnowledgeInitializationRole
+} from "./knowledge-base/initializer";
 import type {
   ExperienceSourceRef,
   PiBranchNavigationResult,
@@ -91,6 +96,15 @@ import {
 import { resolveAgentAvatarUrl } from "./ui/agent-avatar-presets";
 import type { AgentIdentityView } from "./ui/codex-view/message-list";
 import type { DreamLlmPort } from "./harness/memory/dream-engine";
+import {
+  advanceEchoInkOnboardingTutorial,
+  dismissEchoInkOnboardingTutorial,
+  echoInkOnboardingTab,
+  ECHOINK_ONBOARDING_VERSION,
+  resumeEchoInkOnboardingTutorial,
+  shouldAutoStartEchoInkOnboarding,
+  type EchoInkOnboardingStep
+} from "./settings/onboarding";
 
 interface PiConversationActivationTask {
   readonly generation: number;
@@ -134,8 +148,13 @@ export default class CodexForObsidianPlugin extends Plugin {
   private editorTranslation: EditorTranslationService | null = null;
   private personalMemoryCorrection: PersonalMemoryCorrectionService | null = null;
   private readonly productActivity = new ProductActivityGate();
+  private onboardingRequested = false;
   async onload(): Promise<void> {
-    await this.loadSettings();
+    const settingsLoad = await this.loadSettings();
+    this.onboardingRequested = shouldAutoStartEchoInkOnboarding(
+      settingsLoad.emptyData,
+      this.settings.setup
+    );
     await this.initializePiLocalData();
     // Cognitive main-chain (personality / dreaming / secondary facts): start the
     // scheduler as soon as local data is ready; failures never block the plugin.
@@ -168,6 +187,41 @@ export default class CodexForObsidianPlugin extends Plugin {
   async activateHomeAndSidebar(): Promise<void> { return this.getViewService().activateHomeAndSidebar(); }
   async activateHomeView(options: { keepRightSidebar?: boolean } = {}): Promise<void> { return this.getViewService().activateHomeView(options); }
   async activateView(): Promise<void> { return this.getViewService().activateView(); }
+  async openEchoInkOnboarding(): Promise<void> {
+    this.onboardingRequested = true;
+    if (this.settings.setup.dismissedVersion === ECHOINK_ONBOARDING_VERSION) {
+      resumeEchoInkOnboardingTutorial(this.settings.setup);
+      await this.saveSettings(true);
+    }
+    await this.getViewService().openEchoInkSettings(
+      echoInkOnboardingTab(this.settings.setup.tutorialStep)
+    );
+  }
+  isEchoInkOnboardingRequested(): boolean { return this.onboardingRequested; }
+  shouldAutoOpenEchoInkOnboarding(): boolean { return this.onboardingRequested; }
+  async dismissEchoInkOnboarding(): Promise<void> {
+    this.onboardingRequested = false;
+    dismissEchoInkOnboardingTutorial(this.settings.setup);
+    await this.saveSettings(true);
+  }
+  getEchoInkOnboardingStep(): EchoInkOnboardingStep {
+    return this.settings.setup.tutorialStep;
+  }
+  async advanceEchoInkOnboarding(
+    expectedStep: EchoInkOnboardingStep
+  ): Promise<EchoInkOnboardingStep | null> {
+    if (!this.onboardingRequested) return null;
+    const result = advanceEchoInkOnboardingTutorial(
+      this.settings.setup,
+      expectedStep,
+      Date.now()
+    );
+    if (result.completed) this.onboardingRequested = false;
+    if (result.changed) {
+      await this.saveSettings(true);
+    }
+    return result.nextStep;
+  }
   applyComposerDefaultsToView(): void { this.getViewService().applyComposerDefaultsToView(); }
   getCodexView(): CodexView | null { return this.getViewService().getCodexView(); }
   refreshKnowledgeBaseSurfaces(): void { this.getViewService().refreshKnowledgeBaseSurfaces(); }
@@ -731,7 +785,7 @@ export default class CodexForObsidianPlugin extends Plugin {
   }
   getVaultPath(): string { const adapter = this.app.vault.adapter as { basePath?: string; path?: string }; return adapter.basePath || adapter.path || ""; }
   getPluginDataDirName(): string { const dir = (this.manifest as { dir?: unknown }).dir; return typeof dir === "string" && dir.trim() ? dir : this.manifest.id; }
-  async loadSettings(): Promise<void> { return this.getSettingsStore().loadSettings(); }
+  async loadSettings(): Promise<Readonly<SettingsLoadResult>> { return this.getSettingsStore().loadSettings(); }
   async saveSettings(force = false, options: SettingsSaveOptions = {}): Promise<void> { return this.getSettingsStore().saveSettings(force, options); }
   async persistPiNativeSettings(): Promise<void> {
     await this.getSettingsStore().saveSettings(true, {
@@ -744,7 +798,34 @@ export default class CodexForObsidianPlugin extends Plugin {
   async saveEchoInkResourceMutation(previous: CodexForObsidianSettings["resources"]): Promise<void> { await this.getSettingsStore().saveResourceMutation(previous); }
   async externalizeMessageText(message: ChatMessage, fullText: string): Promise<void> { return this.getSettingsStore().externalizeMessageText(message, fullText); }
   async readRawMessageText(rawRef: string): Promise<string> { return this.getSettingsStore().readRawMessageText(rawRef); }
-  getKnowledgeSurfaceService(): EchoInkKnowledgeSurfaceService | null { return this.knowledgeBase; } getReviewManager(): ReviewManager | null { return this.review; }
+  getKnowledgeSurfaceService(): EchoInkKnowledgeSurfaceService | null { return this.knowledgeBase; }
+  async getEchoInkKnowledgeInitializationState() {
+    return await this.requireKnowledgeSurfaceService().getInitializationState();
+  }
+  async startEchoInkKnowledgeInitialization(mode: KnowledgeInitializationMode) {
+    return await this.requireKnowledgeSurfaceService().startInitialization(mode);
+  }
+  async assignEchoInkKnowledgeInitializationNote(
+    sourcePath: string,
+    role: KnowledgeInitializationRole
+  ) {
+    return await this.requireKnowledgeSurfaceService()
+      .assignInitializationNote(sourcePath, role);
+  }
+  async confirmEchoInkKnowledgeInitialization() {
+    return await this.requireKnowledgeSurfaceService().confirmInitialization();
+  }
+  async continueEchoInkKnowledgeInitialization() {
+    return await this.requireKnowledgeSurfaceService().continueInitialization();
+  }
+  async cancelEchoInkKnowledgeInitialization() {
+    return await this.requireKnowledgeSurfaceService().cancelInitialization();
+  }
+  getReviewManager(): ReviewManager | null { return this.review; }
+  private requireKnowledgeSurfaceService(): EchoInkKnowledgeSurfaceService {
+    if (!this.knowledgeBase) throw new Error("知识库服务尚未就绪。");
+    return this.knowledgeBase;
+  }
   private getMcpBrokerService(): EchoInkMcpBrokerService {
     if (!this.mcpBrokerService) {
       this.mcpBrokerService = new EchoInkMcpBrokerService(this);

@@ -323,6 +323,7 @@ export interface PiChatSubmitRequest {
 export type PiKnowledgeMaintenanceScope = Readonly<
   | { mode: "global" }
   | { mode: "exact"; sourcePaths: readonly [string] }
+  | { mode: "batch"; sourcePaths: readonly string[] }
   | { mode: "query"; candidatePaths: readonly string[] }
 >;
 

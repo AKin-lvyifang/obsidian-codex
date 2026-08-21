@@ -252,7 +252,7 @@ export function createPiKnowledgeMaintenanceToolDefinition(
     description: [
       "执行当前普通 Conversation 已绑定的知识维护动作。",
       echoInkKnowledgeMaintenanceProtocolPrompt(),
-      "exact 范围只可使用已绑定 Raw；query 范围必须从候选中选择唯一 sourcePaths；global 范围不得提供 sourcePaths。",
+      "exact 范围只可使用已绑定单篇 Raw；batch 范围只可使用已绑定的 1-20 篇 Raw；query 范围必须从候选中选择唯一 sourcePaths；global 范围不得提供 sourcePaths。",
       "有明确 Raw 时只读取这些 Raw；只有 global 范围才读取 outputs/.ingest-tracker.md，",
       "再读取 Tracker 标记 changed 的 Raw。candidateActions 只可包含 wiki/** 或 projects/** 的 Markdown 候选；",
       "每个候选必须携带 expectedTarget。更新已有目标前先 note_read，并原样使用其 contentRevision；确认目标不存在时使用 kind=missing。",
@@ -262,7 +262,7 @@ export function createPiKnowledgeMaintenanceToolDefinition(
     parameters: Type.Object({
       sourcePaths: Type.Optional(Type.Array(Type.String({ minLength: 1 }), {
         minItems: 1,
-        maxItems: 1
+        maxItems: 20
       })),
       candidateActions: Type.Optional(Type.Array(Type.Object({
         targetPath: Type.String({ minLength: 1 }),
@@ -399,6 +399,18 @@ function normalizeMaintenanceSourcePaths(
     }
     return Object.freeze([expected]);
   }
+  if (scope.mode === "batch") {
+    const expected = scope.sourcePaths;
+    if (value === undefined) return Object.freeze([...expected]);
+    if (!Array.isArray(value) || value.length !== expected.length) {
+      throw new TypeError("knowledge_maintenance_source_scope_invalid");
+    }
+    const selected = value.map(normalizeMaintenanceRawPath);
+    if (!isDeepStrictEqual(selected, expected)) {
+      throw new TypeError("knowledge_maintenance_source_scope_invalid");
+    }
+    return Object.freeze(selected);
+  }
   if (!Array.isArray(value) || value.length !== 1) {
     throw new TypeError("knowledge_maintenance_source_scope_invalid");
   }
@@ -471,7 +483,18 @@ function freezeCommand(
   const scope = value.scope;
   if (
     !scope
-    || !["global", "exact", "query"].includes(scope.mode)
+    || !["global", "exact", "batch", "query"].includes(scope.mode)
+  ) {
+    throw new TypeError("knowledge_maintenance_command_invalid");
+  }
+  if (
+    scope.mode === "batch"
+    && (
+      scope.sourcePaths.length === 0
+      || scope.sourcePaths.length > 20
+      || new Set(scope.sourcePaths.map(normalizeMaintenanceRawPath)).size
+        !== scope.sourcePaths.length
+    )
   ) {
     throw new TypeError("knowledge_maintenance_command_invalid");
   }
@@ -499,7 +522,14 @@ function freezeCommand(
               normalizeMaintenanceRawPath(scope.sourcePaths[0])
             ])
           })
-        : Object.freeze({
+        : scope.mode === "batch"
+          ? Object.freeze({
+              mode: "batch" as const,
+              sourcePaths: Object.freeze(scope.sourcePaths.map(
+                normalizeMaintenanceRawPath
+              ))
+            })
+          : Object.freeze({
             mode: "query" as const,
             candidatePaths: Object.freeze(scope.candidatePaths.map(
               normalizeMaintenanceRawPath

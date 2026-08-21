@@ -3992,6 +3992,31 @@ function normalizePiKnowledgeMaintenanceScope(
       ])
     });
   }
+  if (value.mode === "batch") {
+    if (
+      request.trim()
+      || value.sourcePaths.length === 0
+      || value.sourcePaths.length > 20
+    ) {
+      throw new PiNativeConversationRuntimeError(
+        "agent_session_invalid",
+        "Knowledge maintenance batch scope is invalid"
+      );
+    }
+    const sourcePaths = value.sourcePaths.map(
+      normalizePiKnowledgeMaintenanceRawPath
+    );
+    if (new Set(sourcePaths).size !== sourcePaths.length) {
+      throw new PiNativeConversationRuntimeError(
+        "agent_session_invalid",
+        "Knowledge maintenance batch scope contains duplicate Raw paths"
+      );
+    }
+    return Object.freeze({
+      mode: "batch" as const,
+      sourcePaths: Object.freeze(sourcePaths)
+    });
+  }
   if (
     value.mode !== "query"
     || !request.trim()
