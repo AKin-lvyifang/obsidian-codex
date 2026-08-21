@@ -69,11 +69,7 @@ import { CODEX_MEMORY_LITE_URL } from "../knowledge-base/constants";
 import {
   ECHOINK_KNOWLEDGE_MAINTENANCE_PROTOCOL_STEPS
 } from "../knowledge-base/knowledge-maintenance-protocol";
-import type {
-  KnowledgeInitializationJob,
-  KnowledgeInitializationMode,
-  KnowledgeInitializationRole
-} from "../knowledge-base/initializer";
+import { KnowledgeInitializationSection } from "./knowledge-initialization-section";
 import {
   confirmModal,
   memoryCorrectionModal,
@@ -155,13 +151,7 @@ export class CodexSettingTab extends PluginSettingTab {
     Readonly<KnowledgeMaintenancePreferenceEditorState> | null = null;
   private knowledgePreferenceLoading = false;
   private knowledgePreferenceLoadError: string | null = null;
-  private knowledgeInitializationState: Readonly<KnowledgeInitializationJob> | null = null;
-  private knowledgeInitializationLoaded = false;
-  private knowledgeInitializationLoading = false;
-  private knowledgeInitializationError = "";
-  private knowledgeInitializationBusy = false;
-  private knowledgeInitializationSearch = "";
-  private knowledgeInitializationPollTimer: number | null = null;
+  private knowledgeInitSection: KnowledgeInitializationSection | null = null;
   private knowledgePreferenceClosePromptRunning = false;
   private displayFrame: number | null = null;
   private settingsTitleEl: HTMLElement | null = null;
@@ -219,10 +209,7 @@ export class CodexSettingTab extends PluginSettingTab {
       && !this.knowledgePreferenceClosePromptRunning;
     this.settingsVisible = false;
     this.clearOnboardingCoachmark(true);
-    if (this.knowledgeInitializationPollTimer !== null) {
-      window.clearTimeout(this.knowledgeInitializationPollTimer);
-      this.knowledgeInitializationPollTimer = null;
-    }
+    this.knowledgeInitSection?.dispose();
     this.disconnectSettingsTabsResizeObserver();
     if (this.displayFrame !== null) {
       window.cancelAnimationFrame(this.displayFrame);
@@ -1313,284 +1300,15 @@ export class CodexSettingTab extends PluginSettingTab {
     pre.setAttr("tabindex", "0");
   }
 
-  private async loadKnowledgeInitializationState(): Promise<void> {
-    this.knowledgeInitializationLoading = true;
-    this.knowledgeInitializationError = "";
-    try {
-      this.knowledgeInitializationState =
-        await this.plugin.getEchoInkKnowledgeInitializationState();
-      this.knowledgeInitializationLoaded = true;
-    } catch (error) {
-      this.knowledgeInitializationError = error instanceof Error
-        ? error.message
-        : String(error);
-    } finally {
-      this.knowledgeInitializationLoaded = true;
-      this.knowledgeInitializationLoading = false;
-      this.scheduleDisplay();
-    }
-  }
-
-  private async runKnowledgeInitializationAction(
-    action: () => Promise<Readonly<KnowledgeInitializationJob> | null>
-  ): Promise<void> {
-    if (this.knowledgeInitializationBusy) return;
-    this.knowledgeInitializationBusy = true;
-    this.knowledgeInitializationError = "";
-    try {
-      this.knowledgeInitializationState = await action();
-      this.knowledgeInitializationLoaded = true;
-    } catch (error) {
-      this.knowledgeInitializationError = error instanceof Error
-        ? error.message
-        : String(error);
-    } finally {
-      this.knowledgeInitializationBusy = false;
-      this.scheduleDisplay();
-    }
-  }
-
-  private renderKnowledgeInitializationCard(page: HTMLElement, zh: boolean): void {
-    const section = createSettingsSection(page, {
-      title: zh ? "知识库使用" : "Knowledge setup",
-      surface: "flat"
-    });
-    const job = this.knowledgeInitializationState;
-    const initialized = this.plugin.settings.knowledgeBase.initialization.status === "initialized"
-      || job?.status === "initialized";
-    const card = createSettingsFeatureCard(
-      section,
-      initialized
-        ? (zh ? "知识库已就绪" : "Knowledge is ready")
-        : job?.status === "active"
-          ? (zh ? "正在初始化知识库" : "Initializing Knowledge")
-          : (zh ? "初始化知识库" : "Initialize Knowledge"),
-      initialized
-        ? (zh
-            ? "指南、Wiki 索引与通用 Vault Profile 已完成回读；可以开始 /ask 或整理新增笔记。"
-            : "The guide, Wiki index, and generic Vault Profile passed readback. You can use /ask or maintain new notes.")
-        : (zh
-            ? "先冻结预览，再安全移动 Markdown，并按 1–20 篇串行提炼；不会移动附件或覆盖已有文件。"
-            : "Freeze a preview first, then safely move Markdown and refine serial 1-20-note batches. Attachments and existing files are preserved.")
-    );
-    card.addClass("echoink-knowledge-init-card");
-    if (this.knowledgeInitializationLoading && !this.knowledgeInitializationLoaded) {
-      card.createDiv({ cls: "echoink-settings-feature-meta", text: zh ? "正在读取初始化状态…" : "Loading initialization state…" });
-      return;
-    }
-    if (this.knowledgeInitializationError) {
-      createSettingsState(card, this.knowledgeInitializationError, "error", {
-        label: zh ? "重试" : "Retry",
-        onActivate: () => void this.loadKnowledgeInitializationState()
-      });
-    }
-    if (initialized) {
-      const actions = card.createDiv({ cls: "echoink-settings-feature-actions" });
-      const open = actions.createEl("button", {
-        text: zh ? "打开 Wiki 首页" : "Open Wiki home",
-        attr: { type: "button" }
-      });
-      open.onclick = () => void this.openKnowledgeInitializationFile("wiki/index.md");
-      const maintain = actions.createEl("button", {
-        text: zh ? "整理新增笔记" : "Maintain new notes",
-        attr: { type: "button" }
-      });
-      maintain.onclick = () => void this.runKnowledgeInitializationAction(
-        () => this.plugin.startEchoInkKnowledgeInitialization("recommended")
-      );
-      return;
-    }
-    if (!job) {
-      card.createDiv({
-        cls: "echoink-settings-feature-meta",
-        text: zh
-          ? "推荐模式只移动体系外的 .md/.markdown 到 raw/imported；自定义模式可逐篇选择固定角色或保持原位。"
-          : "Recommended mode moves only external .md/.markdown into raw/imported. Custom mode assigns a fixed role or keeps each note in place."
-      });
-      const actions = card.createDiv({ cls: "echoink-settings-feature-actions" });
-      const recommended = actions.createEl("button", {
-        cls: "mod-cta",
-        text: zh ? "推荐方式初始化" : "Use recommended setup",
-        attr: {
-          type: "button",
-          "data-echoink-focus-key": "knowledge:initialize"
-        }
-      });
-      recommended.disabled = this.knowledgeInitializationBusy;
-      recommended.onclick = () => void this.startKnowledgeInitialization("recommended");
-      const custom = actions.createEl("button", {
-        text: zh ? "自定义分配" : "Customize assignments",
-        attr: { type: "button" }
-      });
-      custom.disabled = this.knowledgeInitializationBusy;
-      custom.onclick = () => void this.startKnowledgeInitialization("custom");
-      return;
-    }
-
-    const progress = card.createDiv({
-      cls: "echoink-knowledge-init-progress",
-      attr: job.status === "active"
-        ? { role: "status", "aria-live": "polite", tabindex: "0", "data-echoink-focus-key": "knowledge:initialize" }
-        : { role: "status", "aria-live": "polite" }
-    });
-    progress.createDiv({
-      cls: "echoink-settings-feature-meta",
-      text: knowledgeInitializationStatusText(job, zh)
-    });
-    progress.createDiv({
-      cls: "echoink-knowledge-init-counts",
-      text: zh
-        ? `移动 ${job.counts.move} · 保持 ${job.counts.keep} · 冲突 ${job.counts.conflict} · 忽略 ${job.counts.ignored} · 待提炼 ${job.counts.extraction}`
-        : `Move ${job.counts.move} · Keep ${job.counts.keep} · Conflicts ${job.counts.conflict} · Ignored ${job.counts.ignored} · Refine ${job.counts.extraction}`
-    });
-    const conflicts = job.items.filter((item) => item.state === "conflict");
-    if (conflicts.length > 0) {
-      const conflictList = progress.createDiv({
-        cls: "echoink-knowledge-init-conflicts",
-        attr: { "aria-label": zh ? "冲突文件" : "Conflicting files" }
-      });
-      for (const item of conflicts) {
-        conflictList.createDiv({
-          cls: "echoink-knowledge-init-conflict",
-          text: `${item.sourcePath} → ${item.reason}`
-        });
-      }
-    }
-    if (job.provider) {
-      progress.createDiv({
-        cls: "echoink-knowledge-init-provider",
-        text: `${job.provider.providerId} · ${job.provider.model} · ${job.expectedBatches} ${zh ? "批" : "batches"}`
-      });
-    }
-    if (job.lastError) {
-      createSettingsState(progress, [job.lastError, job.recoveryAction].filter(Boolean).join(" "), "error");
-    }
-
-    if (job.status === "preview") {
-      progress.createDiv({
-        cls: "echoink-knowledge-init-confirmation",
-        text: zh
-          ? `确认会绑定此计划、Provider 与模型。预计连续请求 ${job.expectedBatches} 次；Token 成本会随笔记内容变化。Digest：${shortDigest(job.planDigest)}`
-          : `Confirmation binds this plan, Provider, and model. Estimated sequential requests: ${job.expectedBatches}; token cost varies with note content. Digest: ${shortDigest(job.planDigest)}`
-      });
-      if (job.mode === "custom") this.renderKnowledgeInitializationAssignments(card, job, zh);
-      const actions = card.createDiv({ cls: "echoink-settings-feature-actions" });
-      const confirm = actions.createEl("button", {
-        cls: "mod-cta",
-        text: zh ? "确认并开始" : "Confirm and start",
-        attr: { type: "button", "data-echoink-focus-key": "knowledge:initialize" }
-      });
-      confirm.disabled = this.knowledgeInitializationBusy || job.counts.conflict > 0
-        || (job.extractionQueue.length > 0 && !job.provider);
-      confirm.onclick = () => void this.runKnowledgeInitializationAction(
-        () => this.plugin.confirmEchoInkKnowledgeInitialization()
-      );
-      const rescan = actions.createEl("button", {
-        text: zh ? "重新扫描" : "Rescan",
-        attr: { type: "button" }
-      });
-      rescan.onclick = () => void this.startKnowledgeInitialization(job.mode);
-      return;
-    }
-
-    const actions = card.createDiv({ cls: "echoink-settings-feature-actions" });
-    if (job.status === "active") {
-      const cancel = actions.createEl("button", {
-        text: zh ? "取消后续任务" : "Cancel remaining work",
-        attr: { type: "button" }
-      });
-      cancel.onclick = () => void this.runKnowledgeInitializationAction(
-        () => this.plugin.cancelEchoInkKnowledgeInitialization()
-      );
-      this.scheduleKnowledgeInitializationPoll();
-      return;
-    }
-    if (["paused", "failed_recoverable", "write_uncertain", "cancelled"].includes(job.status)) {
-      const resume = actions.createEl("button", {
-        cls: "mod-cta",
-        text: zh ? "检查后继续" : "Review and continue",
-        attr: { type: "button", "data-echoink-focus-key": "knowledge:initialize" }
-      });
-      resume.onclick = () => void this.runKnowledgeInitializationAction(
-        () => this.plugin.continueEchoInkKnowledgeInitialization()
+  /** 知识库初始化体验的唯一挂载点；渲染与状态都在 KnowledgeInitializationSection 内。 */
+  private mountKnowledgeInitializationSection(page: HTMLElement, zh: boolean): void {
+    if (!this.knowledgeInitSection) {
+      this.knowledgeInitSection = new KnowledgeInitializationSection(
+        this.plugin,
+        () => this.scheduleDisplay()
       );
     }
-    const rescan = actions.createEl("button", {
-      text: zh ? "重新预览" : "Create a new preview",
-      attr: { type: "button" }
-    });
-    rescan.onclick = () => void this.startKnowledgeInitialization(job.mode);
-  }
-
-  private renderKnowledgeInitializationAssignments(
-    card: HTMLElement,
-    job: Readonly<KnowledgeInitializationJob>,
-    zh: boolean
-  ): void {
-    const editor = card.createDiv({ cls: "echoink-knowledge-init-assignments" });
-    const search = editor.createEl("input", {
-      type: "search",
-      value: this.knowledgeInitializationSearch,
-      placeholder: zh ? "搜索待分配笔记" : "Search notes to assign",
-      attr: { "aria-label": zh ? "搜索待分配笔记" : "Search notes to assign" }
-    });
-    search.oninput = () => {
-      this.knowledgeInitializationSearch = search.value;
-      this.scheduleDisplay();
-    };
-    const query = this.knowledgeInitializationSearch.trim().toLocaleLowerCase();
-    const items = job.items.filter((item) =>
-      !query || item.sourcePath.toLocaleLowerCase().includes(query)
-    );
-    const list = editor.createDiv({ cls: "echoink-knowledge-init-assignment-list" });
-    for (const item of items) {
-      const row = list.createDiv({ cls: `echoink-knowledge-init-assignment is-${item.state}` });
-      row.createDiv({ cls: "echoink-knowledge-init-assignment-path", text: item.sourcePath });
-      const select = row.createEl("select", {
-        attr: { "aria-label": `${item.sourcePath} ${zh ? "目标" : "target"}` }
-      });
-      for (const role of KNOWLEDGE_INITIALIZATION_ROLES) {
-        select.createEl("option", {
-          value: role,
-          text: knowledgeInitializationRoleLabel(role, zh)
-        });
-      }
-      select.value = item.role;
-      select.disabled = this.knowledgeInitializationBusy;
-      select.onchange = () => void this.runKnowledgeInitializationAction(
-        () => this.plugin.assignEchoInkKnowledgeInitializationNote(
-          item.sourcePath,
-          select.value as KnowledgeInitializationRole
-        )
-      );
-    }
-  }
-
-  private async startKnowledgeInitialization(mode: KnowledgeInitializationMode): Promise<void> {
-    this.knowledgeInitializationSearch = "";
-    await this.runKnowledgeInitializationAction(
-      () => this.plugin.startEchoInkKnowledgeInitialization(mode)
-    );
-  }
-
-  private scheduleKnowledgeInitializationPoll(): void {
-    if (this.knowledgeInitializationPollTimer !== null) return;
-    this.knowledgeInitializationPollTimer = window.setTimeout(() => {
-      this.knowledgeInitializationPollTimer = null;
-      if (!this.settingsVisible || this.plugin.settings.settingsTab !== "knowledgeBase") return;
-      void this.loadKnowledgeInitializationState();
-    }, 750);
-  }
-
-  private async openKnowledgeInitializationFile(relativePath: string): Promise<void> {
-    const file = this.app.vault.getFileByPath(relativePath);
-    if (!file) {
-      new Notice(this.plugin.settings.settingsLanguage === "en"
-        ? "The Knowledge file is unavailable."
-        : "知识库文件暂不可用。");
-      return;
-    }
-    await this.app.workspace.getLeaf("tab").openFile(file);
+    this.knowledgeInitSection.render(page, zh);
   }
 
   private renderKnowledgeBaseSettings(container: HTMLElement): void {
@@ -1619,10 +1337,6 @@ export class CodexSettingTab extends PluginSettingTab {
       && !this.knowledgePreferenceLoading
       && !this.knowledgePreferenceLoadError
     ) void this.loadKnowledgePreferenceState();
-    if (
-      !this.knowledgeInitializationLoaded
-      && !this.knowledgeInitializationLoading
-    ) void this.loadKnowledgeInitializationState();
 
     const page = createSettingsPage(container, {
       title: copy.knowledge.title,
@@ -1633,7 +1347,7 @@ export class CodexSettingTab extends PluginSettingTab {
     page.addClass("codex-knowledge-settings");
     this.renderSettingsActionError(page, "knowledge");
 
-    this.renderKnowledgeInitializationCard(page, zh);
+    this.mountKnowledgeInitializationSection(page, zh);
 
     const runSection = createSettingsSection(page, {
       title: zh ? "模型" : "Model",
@@ -4331,57 +4045,6 @@ function positionOnboardingCoachmark(
     width: `${width}px`
   });
   coachmark.dataset.placement = top === below ? "below" : "above";
-}
-
-const KNOWLEDGE_INITIALIZATION_ROLES: readonly KnowledgeInitializationRole[] =
-  Object.freeze([
-    "raw", "wiki", "projects", "outputs", "inbox", "journal", "work", "keep"
-  ]);
-
-function knowledgeInitializationRoleLabel(
-  role: KnowledgeInitializationRole,
-  zh: boolean
-): string {
-  if (role === "keep") return zh ? "保持原位" : "Keep in place";
-  const label = role[0]?.toLocaleUpperCase() + role.slice(1);
-  return label;
-}
-
-function knowledgeInitializationStatusText(
-  job: Readonly<KnowledgeInitializationJob>,
-  zh: boolean
-): string {
-  if (job.status === "preview") return zh ? "预览已冻结，尚未写入 Vault" : "Preview frozen; the Vault is unchanged";
-  if (job.status === "initialized") return zh ? "已完成并通过 Readback" : "Completed with readback";
-  if (job.status === "active") {
-    const moved = Math.min(job.moveCursor, job.items.length);
-    const extracted = Math.min(job.extractionCursor, job.extractionQueue.length);
-    return zh
-      ? `${knowledgeInitializationPhaseLabel(job.phase, true)} · 已检查移动 ${moved}/${job.items.length} · 已提炼 ${extracted}/${job.extractionQueue.length}`
-      : `${knowledgeInitializationPhaseLabel(job.phase, false)} · Moves ${moved}/${job.items.length} · Refined ${extracted}/${job.extractionQueue.length}`;
-  }
-  return `${knowledgeInitializationPhaseLabel(job.phase, zh)} · ${job.status}`;
-}
-
-function knowledgeInitializationPhaseLabel(
-  phase: KnowledgeInitializationJob["phase"],
-  zh: boolean
-): string {
-  const labels: Record<KnowledgeInitializationJob["phase"], [string, string]> = {
-    scan: ["扫描", "Scanning"],
-    preview: ["预览", "Preview"],
-    confirmed: ["已确认", "Confirmed"],
-    create_directories: ["创建固定目录", "Creating fixed folders"],
-    move_notes: ["安全移动笔记", "Moving notes safely"],
-    batch_extraction: ["连续提炼", "Refining batches"],
-    generate_guide: ["生成并回读指南", "Generating and reading back guide"],
-    complete: ["完成", "Complete"]
-  };
-  return labels[phase][zh ? 0 : 1];
-}
-
-function shortDigest(value: string): string {
-  return value.startsWith("sha256:") ? value.slice(7, 19) : value.slice(0, 12);
 }
 
 const RESOURCE_TABS: Array<{ id: ResourceManagementTab; icon: string }> = [

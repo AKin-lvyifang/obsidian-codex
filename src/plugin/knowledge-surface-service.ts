@@ -19,6 +19,7 @@ import {
   KnowledgeBaseInitializer,
   knowledgeInitializationParentFolder,
   knowledgeInitializationPathExists,
+  type KnowledgeInitializationAssignment,
   type KnowledgeInitializationHost,
   type KnowledgeInitializationJob,
   type KnowledgeInitializationMode,
@@ -107,6 +108,13 @@ export class EchoInkKnowledgeSurfaceService {
   ): Promise<Readonly<KnowledgeInitializationJob>> {
     await this.initializerReady;
     return await this.initializer.assign(sourcePath, role);
+  }
+
+  async assignManyInitializationNotes(
+    assignments: readonly KnowledgeInitializationAssignment[]
+  ): Promise<Readonly<KnowledgeInitializationJob>> {
+    await this.initializerReady;
+    return await this.initializer.assignMany(assignments);
   }
 
   async confirmInitialization(): Promise<Readonly<KnowledgeInitializationJob>> {

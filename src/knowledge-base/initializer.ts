@@ -15,7 +15,28 @@ export const KNOWLEDGE_INITIALIZATION_ROOTS = Object.freeze([
 export type KnowledgeInitializationMode = "recommended" | "custom";
 export type KnowledgeInitializationRole =
   | "raw" | "wiki" | "projects" | "outputs" | "inbox" | "journal"
-  | "work" | "keep";
+  | "work" | "archive" | "templates" | "keep";
+
+/**
+ * 新 UI 可分配的 Markdown 目标目录（assets 是附件目录，不作为 Markdown
+ * 角色；keep 只保留给旧内部状态与兼容逻辑，不再是主 UI 选项）。
+ */
+export const KNOWLEDGE_INITIALIZATION_MARKDOWN_ROLES:
+  readonly Exclude<KnowledgeInitializationRole, "keep">[] = Object.freeze([
+    "raw", "wiki", "projects", "outputs", "inbox", "journal",
+    "work", "archive", "templates"
+  ]);
+
+export interface KnowledgeInitializationAssignment {
+  readonly sourcePath: string;
+  readonly role: KnowledgeInitializationRole;
+}
+
+export function isKnowledgeInitializationRole(value: unknown): value is KnowledgeInitializationRole {
+  if (typeof value !== "string") return false;
+  if (value === "keep") return true;
+  return (KNOWLEDGE_INITIALIZATION_MARKDOWN_ROLES as readonly string[]).includes(value);
+}
 export type KnowledgeInitializationPhase =
   | "scan" | "preview" | "confirmed" | "create_directories"
   | "move_notes" | "batch_extraction" | "generate_guide" | "complete";
@@ -250,19 +271,52 @@ export class KnowledgeBaseInitializer {
 
   async assign(sourcePath: string, role: KnowledgeInitializationRole):
   Promise<Readonly<KnowledgeInitializationJob>> {
+    return await this.assignMany([{ sourcePath, role }]);
+  }
+
+  /**
+   * 批量分配笔记目标目录。事务语义：
+   * 1. 先验证所有 sourcePath 与 role，任一非法则整批不产生任何修改；
+   * 2. 同一 sourcePath 只处理一次（重复时以最后一次为准）；
+   * 3. 全部变更在内存中完成后，只调用一次 refreshFrozenPlan，
+   *    只持久化一次 job/plan。
+   */
+  async assignMany(assignments: readonly KnowledgeInitializationAssignment[]):
+  Promise<Readonly<KnowledgeInitializationJob>> {
     const job = this.requirePreview();
     if (job.mode !== "custom") throw new Error("推荐模式不支持逐篇分配。");
-    const normalizedSource = normalizeRelativePath(sourcePath);
-    const item = job.items.find((candidate) => candidate.sourcePath === normalizedSource);
-    if (!item) throw new Error("找不到待分配的笔记。");
-    item.role = role;
-    item.targetPath = role === "keep" ? null : importedTarget(role, item.sourcePath);
-    item.state = role === "keep"
-      ? "kept"
-      : await this.host.pathExists(item.targetPath as string) ? "conflict" : "pending";
-    item.reason = role === "keep"
-      ? "用户选择保持原位"
-      : item.state === "conflict" ? `目标已存在：${item.targetPath}` : `用户分配到 ${role}`;
+    const itemByPath = new Map(job.items.map((item) => [item.sourcePath, item] as const));
+    const planned = new Map<string, KnowledgeInitializationRole>();
+    for (const assignment of assignments) {
+      if (!isKnowledgeInitializationRole(assignment.role)) {
+        throw new Error("无效的知识库目录角色。");
+      }
+      const normalizedSource = normalizeRelativePath(assignment.sourcePath);
+      if (!normalizedSource || !itemByPath.has(normalizedSource)) {
+        throw new Error("找不到待分配的笔记。");
+      }
+      planned.set(normalizedSource, assignment.role);
+    }
+    const conflictByPath = new Map<string, boolean>();
+    for (const [sourcePath, role] of planned) {
+      if (role === "keep") continue;
+      conflictByPath.set(
+        sourcePath,
+        await this.host.pathExists(importedTarget(role, sourcePath))
+      );
+    }
+    for (const [sourcePath, role] of planned) {
+      const item = itemByPath.get(sourcePath);
+      if (!item) continue;
+      item.role = role;
+      item.targetPath = role === "keep" ? null : importedTarget(role, item.sourcePath);
+      item.state = role === "keep"
+        ? "kept"
+        : conflictByPath.get(sourcePath) ? "conflict" : "pending";
+      item.reason = role === "keep"
+        ? "用户选择保持原位"
+        : item.state === "conflict" ? `目标已存在：${item.targetPath}` : `用户分配到 ${role}`;
+    }
     job.provider = this.host.currentProvider();
     job.confirmedDigest = null;
     refreshFrozenPlan(job, existingRawSources(job), job.counts.ignored);
