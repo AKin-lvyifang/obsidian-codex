@@ -1,6 +1,7 @@
 import { Notice } from "obsidian";
 import type CodexForObsidianPlugin from "../main";
 import type { ResourceManagementTab } from "../settings/settings";
+import type { SettingsTab } from "../settings/settings";
 import { EchoInkHomeView, VIEW_TYPE_ECHOINK_HOME } from "../home/home-view";
 import { isReviewHtmlPath } from "../review/schedule";
 import { ReviewPreviewView, VIEW_TYPE_REVIEW_PREVIEW } from "../review/preview-view";
@@ -65,6 +66,20 @@ export class EchoInkViewService {
     const setting = (this.plugin.app as { setting?: { open?: () => void; openTabById?: (id: string) => void } }).setting;
     if (!setting?.open || !setting?.openTabById) {
       new Notice("无法打开插件设置页");
+      return;
+    }
+    setting.open();
+    setting.openTabById(this.plugin.manifest.id);
+  }
+
+  async openEchoInkSettings(tab: SettingsTab): Promise<void> {
+    this.plugin.settings.settingsTab = tab;
+    await this.plugin.saveSettings(true);
+    const setting = (this.plugin.app as {
+      setting?: { open?: () => void; openTabById?: (id: string) => void };
+    }).setting;
+    if (!setting?.open || !setting?.openTabById) {
+      new Notice("无法打开 EchoInk 设置页");
       return;
     }
     setting.open();

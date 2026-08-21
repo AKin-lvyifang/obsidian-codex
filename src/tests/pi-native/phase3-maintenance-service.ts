@@ -92,6 +92,7 @@ async function assertMaintenanceScopeSecurityIsFailClosed(): Promise<void> {
     scope: Readonly<
       | { mode: "global" }
       | { mode: "exact"; sourcePaths: readonly [string] }
+      | { mode: "batch"; sourcePaths: readonly string[] }
       | { mode: "query"; candidatePaths: readonly string[] }
     >;
     arguments: Readonly<Record<string, unknown>>;
@@ -140,6 +141,56 @@ async function assertMaintenanceScopeSecurityIsFailClosed(): Promise<void> {
     request: "",
     scope: { mode: "global" },
     arguments: { candidateActions: [], sourcePaths: ["raw/a.md"] }
+  })).blocked, { block: true, reason: "tool_policy_blocked" });
+
+  const batchPaths = ["raw/a.md", "raw/b.markdown"];
+  const batch = await authorize({
+    name: "batch",
+    request: "",
+    scope: { mode: "batch", sourcePaths: batchPaths },
+    arguments: { candidateActions: [], sourcePaths: batchPaths }
+  });
+  assert.equal(batch.blocked, undefined);
+  assert.deepEqual(
+    batch.security.consume(batch.toolCallId, {
+      candidateActions: [],
+      sourcePaths: batchPaths
+    }).sourcePaths,
+    batchPaths
+  );
+  assert.deepEqual((await authorize({
+    name: "batch-reordered",
+    request: "",
+    scope: { mode: "batch", sourcePaths: batchPaths },
+    arguments: { candidateActions: [], sourcePaths: [...batchPaths].reverse() }
+  })).blocked, { block: true, reason: "tool_policy_blocked" });
+  assert.deepEqual((await authorize({
+    name: "batch-outside",
+    request: "",
+    scope: { mode: "batch", sourcePaths: batchPaths },
+    arguments: { candidateActions: [], sourcePaths: ["raw/a.md", "raw/c.md"] }
+  })).blocked, { block: true, reason: "tool_policy_blocked" });
+  assert.deepEqual((await authorize({
+    name: "batch-empty",
+    request: "",
+    scope: { mode: "batch", sourcePaths: [] },
+    arguments: { candidateActions: [], sourcePaths: [] }
+  })).blocked, { block: true, reason: "tool_policy_blocked" });
+  assert.deepEqual((await authorize({
+    name: "batch-duplicate",
+    request: "",
+    scope: { mode: "batch", sourcePaths: ["raw/a.md", "raw/a.md"] },
+    arguments: { candidateActions: [], sourcePaths: ["raw/a.md", "raw/a.md"] }
+  })).blocked, { block: true, reason: "tool_policy_blocked" });
+  const oversizedBatch = Array.from(
+    { length: 21 },
+    (_, index) => `raw/oversized-${index}.md`
+  );
+  assert.deepEqual((await authorize({
+    name: "batch-oversized",
+    request: "",
+    scope: { mode: "batch", sourcePaths: oversizedBatch },
+    arguments: { candidateActions: [], sourcePaths: oversizedBatch }
   })).blocked, { block: true, reason: "tool_policy_blocked" });
   assert.deepEqual((await authorize({
     name: "global-empty-source-field",

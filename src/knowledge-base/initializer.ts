@@ -1,381 +1,834 @@
-import * as fsp from "fs/promises";
-import * as path from "path";
-import { emptyArrayOnMissingPathOrWarn } from "../core/error-handling";
-import { AGENTS_RULES_FILE, DEFAULT_KNOWLEDGE_BASE_RULES_FILE, LEGACY_CLAUDE_RULES_FILE } from "./constants";
-import { exists, normalizeSlashes, walkFiles } from "./utils";
+import { createHash, randomUUID } from "node:crypto";
+import * as fsp from "node:fs/promises";
+import * as path from "node:path";
 import { buildVaultProfileTemplate } from "../workflows/knowledge/profile/profile-parser";
 
-export const KNOWLEDGE_BASE_TEMPLATE_VERSION = "v0.7";
+export const KNOWLEDGE_BASE_TEMPLATE_VERSION = "onboarding-v1";
+export const KNOWLEDGE_INITIALIZATION_GUIDE_PATH = "wiki/开始使用 EchoInk 知识库.md";
+export const KNOWLEDGE_INITIALIZATION_INDEX_PATH = "wiki/index.md";
+export const KNOWLEDGE_INITIALIZATION_TRACKER_PATH = "outputs/.ingest-tracker.md";
+export const KNOWLEDGE_INITIALIZATION_ROOTS = Object.freeze([
+  "raw", "wiki", "projects", "outputs", "inbox", "journal", "work",
+  "archive", "templates", "assets"
+] as const);
 
-export type KnowledgeBaseInitializationStatus = "not-started" | "preview-ready" | "initialized" | "failed";
-export type KnowledgeBaseInitializationTarget = "raw/articles" | "raw/attachments" | "inbox" | "projects" | "outputs" | "journal" | "wiki-review" | "ignore";
+export type KnowledgeInitializationMode = "recommended" | "custom";
+export type KnowledgeInitializationRole =
+  | "raw" | "wiki" | "projects" | "outputs" | "inbox" | "journal"
+  | "work" | "keep";
+export type KnowledgeInitializationPhase =
+  | "scan" | "preview" | "confirmed" | "create_directories"
+  | "move_notes" | "batch_extraction" | "generate_guide" | "complete";
+export type KnowledgeInitializationJobStatus =
+  | "preview" | "active" | "paused" | "failed_recoverable"
+  | "blocked_conflict" | "write_uncertain" | "cancelled" | "initialized";
+export type KnowledgeInitializationItemState =
+  | "pending" | "moved" | "kept" | "ignored" | "conflict";
 
-export interface KnowledgeBaseInitializationSuggestion {
-  path: string;
-  target: KnowledgeBaseInitializationTarget;
+export interface KnowledgeInitializationVaultFile {
+  readonly path: string;
+  readonly size: number;
+  readonly mtime: number;
+  readonly extension: string;
+  readonly symbolicLink: boolean;
+}
+
+export interface KnowledgeInitializationProviderSnapshot {
+  readonly providerId: string;
+  readonly model: string;
+}
+
+export interface KnowledgeInitializationItem {
+  readonly sourcePath: string;
+  targetPath: string | null;
+  role: KnowledgeInitializationRole;
+  readonly sourceRevision: string;
+  readonly contentHash: string;
+  readonly size: number;
+  readonly mtime: number;
+  state: KnowledgeInitializationItemState;
   reason: string;
 }
 
-export interface KnowledgeBaseInitializationPreview {
-  status: "preview-ready";
-  templateVersion: string;
-  rulesFilePath: string;
-  directories: string[];
-  indexFiles: string[];
-  suggestions: KnowledgeBaseInitializationSuggestion[];
-  skipped: string[];
-  summary: string;
+export interface KnowledgeInitializationSourceSnapshot {
+  readonly path: string;
+  readonly sourceRevision: string;
+  readonly contentHash: string;
 }
 
-export interface KnowledgeBaseInitializationResult {
-  status: "initialized";
-  templateVersion: string;
-  rulesFilePath: string;
+export interface KnowledgeInitializationCounts {
+  readonly move: number;
+  readonly keep: number;
+  readonly conflict: number;
+  readonly ignored: number;
+  readonly extraction: number;
+}
+
+export interface KnowledgeInitializationJob {
+  readonly schemaVersion: 1;
+  readonly jobId: string;
+  readonly templateVersion: typeof KNOWLEDGE_BASE_TEMPLATE_VERSION;
+  mode: KnowledgeInitializationMode;
+  phase: KnowledgeInitializationPhase;
+  status: KnowledgeInitializationJobStatus;
+  readonly createdAt: number;
+  updatedAt: number;
+  provider: KnowledgeInitializationProviderSnapshot | null;
+  planDigest: string;
+  confirmedDigest: string | null;
+  items: KnowledgeInitializationItem[];
+  extractionSources: KnowledgeInitializationSourceSnapshot[];
+  extractionQueue: string[];
+  extractionCursor: number;
+  expectedBatches: number;
+  moveCursor: number;
   createdDirectories: string[];
-  createdFiles: string[];
-  skippedFiles: string[];
-  summary: string;
+  conversationId: string | null;
+  productRunIds: string[];
+  counts: KnowledgeInitializationCounts;
+  guidePath: string;
+  lastError: string;
+  recoveryAction: string;
 }
 
-interface WikiDomainTemplate {
-  id: string;
-  title: string;
-  description: string;
+export interface KnowledgeInitializationBatchResult {
+  readonly status: "completed" | "failed" | "cancelled" | "write_uncertain";
+  readonly productRunId?: string;
+  readonly processedSourcePaths?: readonly string[];
+  readonly message?: string;
 }
 
-const WIKI_DOMAINS: WikiDomainTemplate[] = [
-  { id: "ai-intelligence", title: "AI 与智能体", description: "大模型、Agent、Prompt、AI 工具" },
-  { id: "product-method", title: "产品方法", description: "产品思维、方法论、需求分析" },
-  { id: "business-industry", title: "商业与行业", description: "商业模式、行业分析、市场调研" },
-  { id: "content-creation", title: "内容创作", description: "写作、视频、社交媒体、公开表达" },
-  { id: "knowledge-workflow", title: "知识管理与工作流", description: "Obsidian、AI 协作、效率工具" },
-  { id: "personal", title: "个人系统", description: "个人档案、目标、生活管理、长期复盘" }
-];
-
-const TEMPLATE_DIRECTORIES = [
-  "raw",
-  "raw/articles",
-  "raw/articles/github-trending",
-  "raw/articles/openai-docs",
-  "raw/articles/wechat-official-accounts",
-  "raw/articles/feishu-docs",
-  "raw/articles/investment",
-  "raw/clippings",
-  "raw/clippings/articles",
-  "raw/attachments",
-  "wiki",
-  ...WIKI_DOMAINS.map((domain) => `wiki/${domain.id}`),
-  "projects",
-  "outputs",
-  "outputs/maintenance",
-  "outputs/reviews",
-  "outputs/publishing/xiaohongshu",
-  "outputs/instructions",
-  "outputs/migrations",
-  "inbox",
-  "inbox/ideas",
-  "inbox/research",
-  "inbox/clippings",
-  "journal",
-  "journal/daily",
-  "journal/weekly",
-  "journal/monthly",
-  "journal/quarterly",
-  "journal/yearly",
-  "templates",
-  "assets",
-  "archive"
-];
-
-const TEMPLATE_INDEX_FILES = [
-  "wiki/index.md",
-  "raw/index.md",
-  "outputs/.ingest-tracker.md",
-  ...WIKI_DOMAINS.map((domain) => `wiki/${domain.id}/00-索引.md`)
-];
-
-const KNOWN_TOP_LEVEL_DIRS = new Set([
-  ".obsidian",
-  ".git",
-  ".codex",
-  ".codex-memory",
-  ".claude",
-  ".claudian",
-  ".opencode",
-  ".omx",
-  ".agents",
-  "node_modules",
-  "raw",
-  "wiki",
-  "projects",
-  "outputs",
-  "inbox",
-  "journal",
-  "templates",
-  "assets",
-  "archive",
-  "testing"
-]);
-
-export async function buildKnowledgeBaseInitializationPreview(vaultPath: string): Promise<KnowledgeBaseInitializationPreview> {
-  const rulesFilePath = chooseRulesFilePath();
-  const suggestions = await scanInitializationSuggestions(vaultPath);
-  const skipped = suggestions.filter((item) => item.target === "ignore").map((item) => item.path);
-  const actionableSuggestions = suggestions.filter((item) => item.target !== "ignore");
-  const preview: Omit<KnowledgeBaseInitializationPreview, "summary"> = {
-    status: "preview-ready",
-    templateVersion: KNOWLEDGE_BASE_TEMPLATE_VERSION,
-    rulesFilePath,
-    directories: TEMPLATE_DIRECTORIES,
-    indexFiles: TEMPLATE_INDEX_FILES,
-    suggestions: actionableSuggestions,
-    skipped
-  };
-  return {
-    ...preview,
-    summary: formatKnowledgeBaseInitializationPreview(preview)
-  };
+export interface KnowledgeInitializationHost {
+  readonly vaultRootPath: string;
+  readonly privateRootPath: string;
+  now(): number;
+  listVaultFiles(): Promise<readonly KnowledgeInitializationVaultFile[]>;
+  readText(relativePath: string): Promise<string | null>;
+  pathExists(relativePath: string): Promise<boolean>;
+  createFolder(relativePath: string): Promise<void>;
+  createText(relativePath: string, content: string): Promise<void>;
+  updateText(relativePath: string, expectedContentHash: string, content: string): Promise<void>;
+  moveMarkdown(sourcePath: string, targetPath: string, expectedContentHash: string): Promise<void>;
+  currentProvider(): KnowledgeInitializationProviderSnapshot | null;
+  processedRawPaths(): ReadonlySet<string>;
+  ensureInitializationConversation(existingConversationId: string | null): Promise<string>;
+  runMaintenanceBatch(input: Readonly<{
+    conversationId: string;
+    sourcePaths: readonly string[];
+    batchIndex: number;
+    expectedBatches: number;
+    signal: AbortSignal;
+  }>): Promise<Readonly<KnowledgeInitializationBatchResult>>;
+  openGuide(relativePath: string): Promise<void>;
+  markInitialized(job: Readonly<KnowledgeInitializationJob>): Promise<void>;
+  onStateChanged?(): void;
 }
 
-export async function executeKnowledgeBaseInitialization(
-  vaultPath: string,
-  preview: KnowledgeBaseInitializationPreview,
-  now = new Date()
-): Promise<KnowledgeBaseInitializationResult> {
-  assertAllowedRulesFilePath(preview.rulesFilePath);
-  const createdDirectories: string[] = [];
-  const createdFiles: string[] = [];
-  const skippedFiles: string[] = [];
+const PRIVATE_JOB_DIR = "knowledge/initialization/onboarding-v1";
+const JOB_FILE = "job.json";
+const PLAN_DIR = "plans";
+const INDEX_MARKER_START = "<!-- echoink-onboarding-kb-init:start -->";
+const INDEX_MARKER_END = "<!-- echoink-onboarding-kb-init:end -->";
+const EXTRACTION_BATCH_SIZE = 20;
+const MAX_PROVIDER_ATTEMPTS = 2;
+const FIXED_ROOTS = new Set<string>(KNOWLEDGE_INITIALIZATION_ROOTS);
+const EXCLUDED_FILENAMES = new Set(["llm-wiki.md", "agents.md"]);
 
-  for (const dir of preview.directories) {
-    const absolute = path.join(vaultPath, dir);
-    const existed = await exists(absolute);
-    await fsp.mkdir(absolute, { recursive: true });
-    if (!existed) createdDirectories.push(dir);
-  }
+export class KnowledgeBaseInitializer {
+  private job: KnowledgeInitializationJob | null = null;
+  private runFlight: Promise<void> | null = null;
+  private abortController: AbortController | null = null;
 
-  await writeFileIfMissing(vaultPath, preview.rulesFilePath, buildKnowledgeBaseRulesTemplate(now), createdFiles, skippedFiles);
-  await writeFileIfMissing(vaultPath, "wiki/index.md", buildWikiIndexTemplate(now), createdFiles, skippedFiles);
-  await writeFileIfMissing(vaultPath, "raw/index.md", buildRawIndexTemplate(now), createdFiles, skippedFiles);
-  await writeFileIfMissing(vaultPath, "outputs/.ingest-tracker.md", buildTrackerTemplate(now), createdFiles, skippedFiles);
-  for (const domain of WIKI_DOMAINS) {
-    await writeFileIfMissing(vaultPath, `wiki/${domain.id}/00-索引.md`, buildDomainIndexTemplate(domain, now), createdFiles, skippedFiles);
-  }
+  constructor(private readonly host: KnowledgeInitializationHost) {}
 
-  const result: Omit<KnowledgeBaseInitializationResult, "summary"> = {
-    status: "initialized",
-    templateVersion: KNOWLEDGE_BASE_TEMPLATE_VERSION,
-    rulesFilePath: preview.rulesFilePath,
-    createdDirectories,
-    createdFiles,
-    skippedFiles
-  };
-  return {
-    ...result,
-    summary: formatKnowledgeBaseInitializationResult(result)
-  };
-}
-
-export function formatKnowledgeBaseInitializationPreview(input: Omit<KnowledgeBaseInitializationPreview, "summary">): string {
-  return [
-    "## LLM Wiki 初始化预览",
-    "",
-    `一眼结论：将按通用 LLM Wiki 模板初始化当前 vault，预览阶段不会写入文件。`,
-    "",
-    `- 模板版本：${input.templateVersion}`,
-    `- 将生成规则文件：${input.rulesFilePath}`,
-    `- 将创建目录：${input.directories.length} 个`,
-    `- 将创建索引/记录文件：${input.indexFiles.length} 个`,
-    `- 已有笔记建议：${input.suggestions.length} 条，仅建议，不会移动`,
-    "",
-    "## 安全边界",
-    "- 不删除文件。",
-    "- 不覆盖已有文件。",
-    "- 不移动已有笔记。",
-    "- 不修改 raw/ 原始资料整文件。",
-    "",
-    "## 确认执行",
-    "在 Knowledge 设置页确认后才会创建目录和规则文件。"
-  ].join("\n");
-}
-
-function formatKnowledgeBaseInitializationResult(input: Omit<KnowledgeBaseInitializationResult, "summary">): string {
-  return [
-    "## LLM Wiki 初始化完成",
-    "",
-    `一眼结论：已创建标准目录和规则文件；已有文件未覆盖，已有笔记未移动。`,
-    "",
-    `- 规则文件：${input.rulesFilePath}`,
-    `- 新建目录：${input.createdDirectories.length} 个`,
-    `- 新建文件：${input.createdFiles.length} 个`,
-    `- 已存在未覆盖：${input.skippedFiles.length} 个`,
-    "",
-    "下一步建议：在当前 Pi Conversation 显式使用 `/maintain 初始化后检查当前 Vault。`，一次完成提炼、安全写入和回读验证。"
-  ].join("\n");
-}
-
-function chooseRulesFilePath(): string {
-  return DEFAULT_KNOWLEDGE_BASE_RULES_FILE;
-}
-
-async function scanInitializationSuggestions(vaultPath: string): Promise<KnowledgeBaseInitializationSuggestion[]> {
-  const files = await walkVaultFiles(vaultPath, 220).catch(emptyArrayOnMissingPathOrWarn("walk vault files for knowledge base initialization"));
-  const suggestions: KnowledgeBaseInitializationSuggestion[] = [];
-  for (const filePath of files) {
-    const relativePath = normalizeSlashes(path.relative(vaultPath, filePath));
-    const firstPart = relativePath.split("/")[0];
-    if (!relativePath || KNOWN_TOP_LEVEL_DIRS.has(firstPart)) continue;
-    suggestions.push(await classifyExistingFile(filePath, relativePath));
-  }
-  return suggestions.slice(0, 80);
-}
-
-async function classifyExistingFile(filePath: string, relativePath: string): Promise<KnowledgeBaseInitializationSuggestion> {
-  const lower = relativePath.toLowerCase();
-  const ext = path.extname(lower);
-  const sample = ext === ".md" || ext === ".markdown" || ext === ".txt"
-    ? await fsp.readFile(filePath, "utf8").then((text) => text.slice(0, 4000), () => "")
-    : "";
-  const haystack = `${lower}\n${sample}`;
-  if (/\.(png|jpe?g|webp|gif|pdf|docx)$/.test(lower)) return { path: relativePath, target: "raw/attachments", reason: "附件或文档资料应先进入 raw/attachments" };
-  if (/日记|周记|月记|复盘|journal|daily|weekly|monthly/.test(haystack)) return { path: relativePath, target: "journal", reason: "时间线内容建议进入 journal" };
-  if (/prd|项目|需求|会议|roadmap|spec|design doc|project/.test(haystack)) return { path: relativePath, target: "projects", reason: "项目资料建议进入 projects" };
-  if (/输出|发布|文章草稿|小红书|公众号|周报|报告|draft|output|post/.test(haystack)) return { path: relativePath, target: "outputs", reason: "协作产出建议进入 outputs" };
-  if (/https?:\/\/|剪藏|转载|原文|source|article|clip/.test(haystack)) return { path: relativePath, target: "raw/articles", reason: "外部来源建议进入 raw/articles" };
-  if (ext === ".md" || ext === ".markdown" || ext === ".txt") return { path: relativePath, target: "inbox", reason: "未明确归属的文本先进入 inbox 等待分流" };
-  return { path: relativePath, target: "ignore", reason: "暂不处理的系统或未知文件" };
-}
-
-async function walkVaultFiles(root: string, maxFiles: number): Promise<string[]> {
-  return walkFiles(root, {
-    maxFiles,
-    shouldSkipEntry: (entry, full) => {
-      if (entry.name.startsWith(".") && entry.name !== ".ingest-tracker.md") return true;
-      if (!entry.isDirectory()) return false;
-      const relative = normalizeSlashes(path.relative(root, full));
-      const firstPart = relative.split("/")[0];
-      return KNOWN_TOP_LEVEL_DIRS.has(firstPart);
+  async initialize(): Promise<void> {
+    this.job = await this.readPersistedJob();
+    if (this.job?.status === "active") {
+      this.job.status = "paused";
+      this.job.lastError = "EchoInk 在知识库初始化期间重新启动。";
+      this.job.recoveryAction = "请检查冻结计划后点击继续；不会自动重跑 Provider。";
+      await this.persistJob(this.job);
     }
-  });
+  }
+
+  snapshot(): Readonly<KnowledgeInitializationJob> | null {
+    return this.job ? cloneJob(this.job) : null;
+  }
+
+  get isRunning(): boolean {
+    return this.job?.status === "active" && this.runFlight !== null;
+  }
+
+  async startPreview(mode: KnowledgeInitializationMode = "recommended"):
+  Promise<Readonly<KnowledgeInitializationJob>> {
+    if (this.runFlight) throw new Error("知识库初始化正在运行。");
+    const now = this.host.now();
+    const files = await this.host.listVaultFiles();
+    const items: KnowledgeInitializationItem[] = [];
+    const existingRaw: KnowledgeInitializationSourceSnapshot[] = [];
+    let ignored = 0;
+    for (const file of files) {
+      const relativePath = normalizeRelativePath(file.path);
+      if (!relativePath || shouldExcludeFile(relativePath, file)) {
+        ignored += 1;
+        continue;
+      }
+      const extension = normalizedExtension(relativePath);
+      if (extension !== ".md" && extension !== ".markdown") {
+        ignored += 1;
+        continue;
+      }
+      const content = await this.host.readText(relativePath);
+      if (content === null) {
+        ignored += 1;
+        continue;
+      }
+      const contentHash = sha256(content);
+      const topLevel = relativePath.split("/")[0]?.toLocaleLowerCase() ?? "";
+      if (FIXED_ROOTS.has(topLevel)) {
+        if (
+          topLevel === "raw"
+          && relativePath.toLocaleLowerCase() !== "raw/index.md"
+          && !this.host.processedRawPaths().has(relativePath)
+        ) {
+          existingRaw.push({
+            path: relativePath,
+            sourceRevision: fileRevision(file, contentHash),
+            contentHash
+          });
+        }
+        ignored += 1;
+        continue;
+      }
+      const targetPath = importedTarget("raw", relativePath);
+      const conflict = await this.host.pathExists(targetPath);
+      items.push({
+        sourcePath: relativePath,
+        targetPath,
+        role: "raw",
+        sourceRevision: fileRevision(file, contentHash),
+        contentHash,
+        size: file.size,
+        mtime: file.mtime,
+        state: conflict ? "conflict" : "pending",
+        reason: conflict
+          ? `目标已存在：${targetPath}`
+          : "体系外 Markdown 将保留原相对层级移动到 raw/imported"
+      });
+    }
+    const job: KnowledgeInitializationJob = {
+      schemaVersion: 1,
+      jobId: randomUUID(),
+      templateVersion: KNOWLEDGE_BASE_TEMPLATE_VERSION,
+      mode,
+      phase: "preview",
+      status: "preview",
+      createdAt: now,
+      updatedAt: now,
+      provider: this.host.currentProvider(),
+      planDigest: "",
+      confirmedDigest: null,
+      items,
+      extractionSources: [],
+      extractionQueue: [],
+      extractionCursor: 0,
+      expectedBatches: 0,
+      moveCursor: 0,
+      createdDirectories: [],
+      conversationId: null,
+      productRunIds: [],
+      counts: emptyCounts(),
+      guidePath: KNOWLEDGE_INITIALIZATION_GUIDE_PATH,
+      lastError: "",
+      recoveryAction: "确认前不会移动笔记或调用 Provider。"
+    };
+    refreshFrozenPlan(job, existingRaw, ignored);
+    this.job = job;
+    await this.persistJob(job, true);
+    return cloneJob(job);
+  }
+
+  async assign(sourcePath: string, role: KnowledgeInitializationRole):
+  Promise<Readonly<KnowledgeInitializationJob>> {
+    const job = this.requirePreview();
+    if (job.mode !== "custom") throw new Error("推荐模式不支持逐篇分配。");
+    const normalizedSource = normalizeRelativePath(sourcePath);
+    const item = job.items.find((candidate) => candidate.sourcePath === normalizedSource);
+    if (!item) throw new Error("找不到待分配的笔记。");
+    item.role = role;
+    item.targetPath = role === "keep" ? null : importedTarget(role, item.sourcePath);
+    item.state = role === "keep"
+      ? "kept"
+      : await this.host.pathExists(item.targetPath as string) ? "conflict" : "pending";
+    item.reason = role === "keep"
+      ? "用户选择保持原位"
+      : item.state === "conflict" ? `目标已存在：${item.targetPath}` : `用户分配到 ${role}`;
+    job.provider = this.host.currentProvider();
+    job.confirmedDigest = null;
+    refreshFrozenPlan(job, existingRawSources(job), job.counts.ignored);
+    await this.persistJob(job, true);
+    return cloneJob(job);
+  }
+
+  async confirm(): Promise<Readonly<KnowledgeInitializationJob>> {
+    const job = this.requirePreview();
+    if (job.items.some((item) => item.state === "conflict")) {
+      return await this.pause(job, "blocked_conflict", "冻结计划中存在目标冲突。",
+        "修改冲突文件或选择保持原位，然后重新预览。");
+    }
+    const currentProvider = this.host.currentProvider();
+    if (stableJson(currentProvider) !== stableJson(job.provider)) {
+      return await this.pause(job, "paused", "Provider 或模型已变化，原确认不再有效。",
+        "重新生成预览并确认新的 digest、Provider 与模型。");
+    }
+    if (job.extractionQueue.length > 0 && !currentProvider) {
+      return await this.pause(job, "failed_recoverable", "待提炼队列非空，但当前没有可用 Provider。",
+        "先完成 Provider 设置，再重新预览并确认。");
+    }
+    job.confirmedDigest = job.planDigest;
+    job.phase = "confirmed";
+    job.status = "active";
+    job.lastError = "";
+    job.recoveryAction = "";
+    await this.persistJob(job);
+    this.startRun(job);
+    return cloneJob(job);
+  }
+
+  async continueJob(): Promise<Readonly<KnowledgeInitializationJob>> {
+    const job = this.requireJob();
+    if (!["paused", "failed_recoverable", "write_uncertain", "cancelled"].includes(job.status)) {
+      throw new Error("当前初始化作业不需要继续。");
+    }
+    if (job.confirmedDigest !== job.planDigest) {
+      return await this.pause(job, "paused", "冻结计划 digest 已变化。", "重新生成预览并确认。");
+    }
+    if (stableJson(this.host.currentProvider()) !== stableJson(job.provider)) {
+      return await this.pause(job, "paused", "Provider 或模型已变化。", "重新生成预览并确认。");
+    }
+    job.status = "active";
+    job.lastError = "";
+    job.recoveryAction = "";
+    await this.persistJob(job);
+    this.startRun(job);
+    return cloneJob(job);
+  }
+
+  async cancel(): Promise<Readonly<KnowledgeInitializationJob> | null> {
+    if (!this.job) return null;
+    this.abortController?.abort();
+    this.job.status = "cancelled";
+    this.job.lastError = "初始化已取消；已完成的移动与 Wiki 写入不会回滚。";
+    this.job.recoveryAction = "如需继续，请检查当前状态后点击继续。";
+    await this.persistJob(this.job);
+    return cloneJob(this.job);
+  }
+
+  private startRun(job: KnowledgeInitializationJob): void {
+    if (this.runFlight) return;
+    const controller = new AbortController();
+    this.abortController = controller;
+    this.runFlight = this.run(job, controller.signal)
+      .catch(async (error) => {
+        if (job.status === "cancelled") return;
+        job.status = "failed_recoverable";
+        job.lastError = errorMessage(error);
+        job.recoveryAction = "检查错误详情后点击继续；不会回滚已完成的项目。";
+        await this.persistJob(job);
+      })
+      .finally(() => {
+        if (this.abortController === controller) this.abortController = null;
+        this.runFlight = null;
+        this.host.onStateChanged?.();
+      });
+  }
+
+  private async run(job: KnowledgeInitializationJob, signal: AbortSignal): Promise<void> {
+    await this.createDirectories(job, signal);
+    if (job.status !== "active") return;
+    await this.moveNotes(job, signal);
+    if (job.status !== "active") return;
+    await this.runExtractionBatches(job, signal);
+    if (job.status !== "active") return;
+    await this.generateGuide(job, signal);
+  }
+
+  private async createDirectories(job: KnowledgeInitializationJob, signal: AbortSignal): Promise<void> {
+    job.phase = "create_directories";
+    await this.persistJob(job);
+    for (const root of KNOWLEDGE_INITIALIZATION_ROOTS) {
+      assertNotCancelled(signal);
+      if (!await this.host.pathExists(root)) await this.host.createFolder(root);
+      if (!await this.host.pathExists(root)) throw new Error(`目录创建后回读失败：${root}`);
+      if (!job.createdDirectories.includes(root)) {
+        job.createdDirectories.push(root);
+        await this.persistJob(job);
+      }
+    }
+  }
+
+  private async moveNotes(job: KnowledgeInitializationJob, signal: AbortSignal): Promise<void> {
+    job.phase = "move_notes";
+    await this.persistJob(job);
+    for (let index = job.moveCursor; index < job.items.length; index += 1) {
+      assertNotCancelled(signal);
+      const item = job.items[index];
+      if (!item || item.state === "kept" || item.state === "ignored") {
+        job.moveCursor = index + 1;
+        await this.persistJob(job);
+        continue;
+      }
+      if (!item.targetPath) {
+        item.state = "kept";
+        job.moveCursor = index + 1;
+        await this.persistJob(job);
+        continue;
+      }
+      const before = await this.readMoveState(item);
+      if (before === "already_moved") {
+        item.state = "moved";
+        job.moveCursor = index + 1;
+        await this.persistJob(job);
+        continue;
+      }
+      if (before !== "ready") {
+        job.status = before === "conflict" ? "blocked_conflict" : "failed_recoverable";
+        job.lastError = `无法安全移动 ${item.sourcePath}：${before}`;
+        job.recoveryAction = before === "source_changed"
+          ? "源笔记已修改，请重新预览并确认。"
+          : "检查源与目标的真实状态后再继续；不会覆盖或删除任何文件。";
+        await this.persistJob(job);
+        return;
+      }
+      try {
+        await this.host.moveMarkdown(item.sourcePath, item.targetPath, item.contentHash);
+      } catch (error) {
+        const afterError = await this.readMoveState(item);
+        if (afterError !== "already_moved") {
+          job.status = afterError === "ambiguous" ? "write_uncertain" : "failed_recoverable";
+          job.lastError = `移动结果未确认：${item.sourcePath} → ${item.targetPath}；${errorMessage(error)}`;
+          job.recoveryAction = "先回读源与目标的真实状态，再点击继续；禁止盲目重跑。";
+          await this.persistJob(job);
+          return;
+        }
+      }
+      if (await this.readMoveState(item) !== "already_moved") {
+        job.status = "write_uncertain";
+        job.lastError = `移动后验证失败：${item.sourcePath} → ${item.targetPath}`;
+        job.recoveryAction = "检查源是否消失且目标 hash 是否一致，再点击继续。";
+        await this.persistJob(job);
+        return;
+      }
+      item.state = "moved";
+      job.moveCursor = index + 1;
+      await this.persistJob(job);
+    }
+  }
+
+  private async runExtractionBatches(job: KnowledgeInitializationJob, signal: AbortSignal): Promise<void> {
+    job.phase = "batch_extraction";
+    await this.persistJob(job);
+    if (job.extractionQueue.length === 0) return;
+    if (!job.conversationId) {
+      job.conversationId = await this.host.ensureInitializationConversation(null);
+      await this.persistJob(job);
+    }
+    while (job.extractionCursor < job.extractionQueue.length) {
+      assertNotCancelled(signal);
+      if (stableJson(this.host.currentProvider()) !== stableJson(job.provider)) {
+        await this.pause(job, "paused", "Provider 或模型在批次间发生变化。", "重新预览并确认后再继续。");
+        return;
+      }
+      const batch = job.extractionQueue.slice(job.extractionCursor, job.extractionCursor + EXTRACTION_BATCH_SIZE);
+      const sourceSnapshotByPath = new Map(
+        job.extractionSources.map((source) => [source.path, source] as const)
+      );
+      for (const sourcePath of batch) {
+        const snapshot = sourceSnapshotByPath.get(sourcePath);
+        const current = await this.host.readText(sourcePath);
+        if (!snapshot || current === null || sha256(current) !== snapshot.contentHash) {
+          await this.pause(job, "failed_recoverable", `待提炼来源已变化：${sourcePath}`,
+            "重新生成预览并确认新的来源 revision、digest、Provider 与模型。");
+          return;
+        }
+      }
+      let completed: Readonly<KnowledgeInitializationBatchResult> | null = null;
+      for (let attempt = 1; attempt <= MAX_PROVIDER_ATTEMPTS; attempt += 1) {
+        const result = await this.host.runMaintenanceBatch({
+          conversationId: job.conversationId,
+          sourcePaths: Object.freeze([...batch]),
+          batchIndex: Math.floor(job.extractionCursor / EXTRACTION_BATCH_SIZE),
+          expectedBatches: job.expectedBatches,
+          signal
+        });
+        if (result.productRunId && !job.productRunIds.includes(result.productRunId)) {
+          job.productRunIds.push(result.productRunId);
+        }
+        if (result.status === "completed") {
+          completed = result;
+          break;
+        }
+        if (result.status === "cancelled") {
+          await this.pause(job, "cancelled", result.message ?? "Provider 批次已取消。", "检查当前进度后点击继续。");
+          return;
+        }
+        if (result.status === "write_uncertain") {
+          await this.pause(job, "write_uncertain", result.message ?? "维护写入结果不确定。",
+            "先使用 Phase 3 Readback 恢复结果，再点击继续；禁止盲跑。");
+          return;
+        }
+        if (attempt === MAX_PROVIDER_ATTEMPTS) {
+          await this.pause(job, "failed_recoverable", result.message ?? "Provider 批次失败。",
+            "修复 Provider 后点击继续；已完成批次不会重跑。");
+          return;
+        }
+      }
+      const processed = completed?.processedSourcePaths ?? [];
+      if (!completed || stableJson(processed) !== stableJson(batch)) {
+        await this.pause(job, "paused", "维护批次完成但队列没有可靠下降。", "检查该 ProductRun 后点击继续。");
+        return;
+      }
+      job.extractionCursor += batch.length;
+      await this.persistJob(job);
+    }
+  }
+
+  private async generateGuide(job: KnowledgeInitializationJob, signal: AbortSignal): Promise<void> {
+    assertNotCancelled(signal);
+    job.phase = "generate_guide";
+    await this.persistJob(job);
+    const now = new Date(job.createdAt);
+    const expectedGuide = buildKnowledgeInitializationGuideTemplate(now);
+    const existingGuide = await this.host.readText(KNOWLEDGE_INITIALIZATION_GUIDE_PATH);
+    if (existingGuide !== null && existingGuide !== expectedGuide) {
+      await this.pause(job, "blocked_conflict", `指南目标已存在：${KNOWLEDGE_INITIALIZATION_GUIDE_PATH}`,
+        "请保留并重命名现有文件，或移开冲突文件后再继续；EchoInk 不会覆盖它。");
+      return;
+    }
+    if (existingGuide === null) {
+      await this.host.createText(KNOWLEDGE_INITIALIZATION_GUIDE_PATH, expectedGuide);
+    }
+    assertJobActive(job, signal);
+    await this.ensureIndexMarker(now);
+    assertJobActive(job, signal);
+    await this.createTextIfMissing("raw/index.md", buildRawIndexTemplate(now));
+    assertJobActive(job, signal);
+    await this.createTextIfMissing(KNOWLEDGE_INITIALIZATION_TRACKER_PATH, buildTrackerTemplate(now));
+    assertJobActive(job, signal);
+    await this.createTextIfMissing("LLM-WIKI.md", buildKnowledgeBaseRulesTemplate(now));
+    assertJobActive(job, signal);
+    const [guide, index] = await Promise.all([
+      this.host.readText(KNOWLEDGE_INITIALIZATION_GUIDE_PATH),
+      this.host.readText(KNOWLEDGE_INITIALIZATION_INDEX_PATH)
+    ]);
+    if (
+      guide !== expectedGuide
+      || !index?.includes(INDEX_MARKER_START)
+      || !index.includes(INDEX_MARKER_END)
+    ) {
+      await this.pause(job, "write_uncertain", "指南或 Wiki 索引写入后 Readback 未确认。",
+        "检查指南与 marker block 后再点击继续。");
+      return;
+    }
+    assertJobActive(job, signal);
+    await this.host.openGuide(KNOWLEDGE_INITIALIZATION_GUIDE_PATH);
+    assertJobActive(job, signal);
+    job.phase = "complete";
+    job.status = "initialized";
+    job.lastError = "";
+    job.recoveryAction = "";
+    await this.persistJob(job);
+    assertNotCancelled(signal);
+    if (job.status !== "initialized") {
+      throw new DOMException("初始化已停止", "AbortError");
+    }
+    await this.host.markInitialized(cloneJob(job));
+  }
+
+  private async createTextIfMissing(relativePath: string, content: string): Promise<void> {
+    if (await this.host.pathExists(relativePath)) return;
+    await this.host.createText(relativePath, content);
+  }
+
+  private async ensureIndexMarker(now: Date): Promise<void> {
+    const block = buildWikiIndexMarkerBlock(now);
+    const current = await this.host.readText(KNOWLEDGE_INITIALIZATION_INDEX_PATH);
+    if (current === null) {
+      await this.host.createText(KNOWLEDGE_INITIALIZATION_INDEX_PATH, `# Wiki 知识索引\n\n${block}\n`);
+      return;
+    }
+    if (current.includes(INDEX_MARKER_START)) return;
+    await this.host.updateText(
+      KNOWLEDGE_INITIALIZATION_INDEX_PATH,
+      sha256(current),
+      `${current.replace(/\s*$/u, "")}\n\n${block}\n`
+    );
+  }
+
+  private async readMoveState(item: Readonly<KnowledgeInitializationItem>):
+  Promise<"ready" | "already_moved" | "source_changed" | "conflict" | "missing" | "ambiguous"> {
+    if (!item.targetPath) return "missing";
+    const [source, target] = await Promise.all([
+      this.host.readText(item.sourcePath), this.host.readText(item.targetPath)
+    ]);
+    if (source === null && target !== null && sha256(target) === item.contentHash) return "already_moved";
+    if (source !== null && target === null) return sha256(source) === item.contentHash ? "ready" : "source_changed";
+    if (source !== null && target !== null) return "conflict";
+    if (source === null && target === null) return "missing";
+    return "ambiguous";
+  }
+
+  private requirePreview(): KnowledgeInitializationJob {
+    const job = this.requireJob();
+    if (job.phase !== "preview" || job.status !== "preview") throw new Error("当前没有可确认的初始化预览。");
+    return job;
+  }
+
+  private requireJob(): KnowledgeInitializationJob {
+    if (!this.job) throw new Error("尚未创建知识库初始化作业。");
+    return this.job;
+  }
+
+  private async pause(
+    job: KnowledgeInitializationJob,
+    status: Extract<KnowledgeInitializationJobStatus,
+      "paused" | "failed_recoverable" | "blocked_conflict" | "write_uncertain" | "cancelled">,
+    error: string,
+    recoveryAction: string
+  ): Promise<Readonly<KnowledgeInitializationJob>> {
+    job.status = status;
+    job.lastError = error;
+    job.recoveryAction = recoveryAction;
+    await this.persistJob(job);
+    return cloneJob(job);
+  }
+
+  private async readPersistedJob(): Promise<KnowledgeInitializationJob | null> {
+    try {
+      return normalizePersistedJob(JSON.parse(await fsp.readFile(this.jobFilePath(), "utf8")) as unknown);
+    } catch (error) {
+      if (nodeErrorCode(error) === "ENOENT") return null;
+      throw error;
+    }
+  }
+
+  private async persistJob(job: KnowledgeInitializationJob, persistPlan = false): Promise<void> {
+    job.updatedAt = this.host.now();
+    const directory = path.dirname(this.jobFilePath());
+    await fsp.mkdir(directory, { recursive: true, mode: 0o700 });
+    await atomicWriteJson(this.jobFilePath(), job);
+    if (persistPlan) {
+      await fsp.mkdir(path.join(directory, PLAN_DIR), { recursive: true, mode: 0o700 });
+      await atomicWriteJson(path.join(directory, PLAN_DIR, `${job.jobId}.json`), frozenPlanDocument(job));
+    }
+    this.host.onStateChanged?.();
+  }
+
+  private jobFilePath(): string {
+    return path.join(this.host.privateRootPath, PRIVATE_JOB_DIR, JOB_FILE);
+  }
 }
 
-async function writeFileIfMissing(vaultPath: string, relativePath: string, content: string, createdFiles: string[], skippedFiles: string[]): Promise<void> {
-  const absolute = path.join(vaultPath, relativePath);
-  await fsp.mkdir(path.dirname(absolute), { recursive: true });
-  if (await exists(absolute)) {
-    skippedFiles.push(relativePath);
-    return;
+function refreshFrozenPlan(
+  job: KnowledgeInitializationJob,
+  existingRaw: readonly KnowledgeInitializationSourceSnapshot[],
+  ignored: number
+): void {
+  const movableRaw = job.items
+    .filter((item) => item.role === "raw" && item.targetPath && item.state !== "conflict")
+    .map((item) => ({
+      path: item.targetPath as string,
+      sourceRevision: item.sourceRevision,
+      contentHash: item.contentHash
+    }));
+  job.extractionSources = uniqueSources([...existingRaw, ...movableRaw]);
+  job.extractionQueue = job.extractionSources.map((source) => source.path);
+  job.expectedBatches = Math.ceil(job.extractionQueue.length / EXTRACTION_BATCH_SIZE);
+  job.counts = Object.freeze({
+    move: job.items.filter((item) => item.state === "pending").length,
+    keep: job.items.filter((item) => item.state === "kept").length,
+    conflict: job.items.filter((item) => item.state === "conflict").length,
+    ignored,
+    extraction: job.extractionQueue.length
+  });
+  job.planDigest = sha256(stableJson(frozenPlanDocument(job)));
+}
+
+function frozenPlanDocument(job: Readonly<KnowledgeInitializationJob>): object {
+  return {
+    schemaVersion: job.schemaVersion,
+    jobId: job.jobId,
+    templateVersion: job.templateVersion,
+    mode: job.mode,
+    provider: job.provider,
+    items: job.items.map((item) => ({
+      sourcePath: item.sourcePath,
+      targetPath: item.targetPath,
+      role: item.role,
+      sourceRevision: item.sourceRevision,
+      contentHash: item.contentHash,
+      targetMustBeMissing: item.targetPath !== null
+    })),
+    extractionSources: job.extractionSources,
+    extractionQueue: job.extractionQueue,
+    expectedBatches: job.expectedBatches,
+    counts: job.counts,
+    roots: KNOWLEDGE_INITIALIZATION_ROOTS
+  };
+}
+
+function existingRawSources(
+  job: Readonly<KnowledgeInitializationJob>
+): KnowledgeInitializationSourceSnapshot[] {
+  const generatedRawTargets = new Set(job.items.map((item) =>
+    importedTarget("raw", item.sourcePath)
+  ));
+  return job.extractionSources.filter((item) => !generatedRawTargets.has(item.path));
+}
+
+function shouldExcludeFile(relativePath: string, file: Readonly<KnowledgeInitializationVaultFile>): boolean {
+  const segments = relativePath.split("/");
+  if (file.symbolicLink || segments.some((segment) => segment.startsWith("."))) return true;
+  if (segments[0]?.toLocaleLowerCase() === "node_modules") return true;
+  return EXCLUDED_FILENAMES.has(segments.at(-1)?.toLocaleLowerCase() ?? "");
+}
+
+function importedTarget(role: Exclude<KnowledgeInitializationRole, "keep">, sourcePath: string): string {
+  return normalizeRelativePath(`${role}/imported/${sourcePath}`);
+}
+
+function normalizeRelativePath(value: string): string {
+  const normalized = value.trim().replaceAll("\\", "/").replace(/^\/+|\/+$/gu, "");
+  if (!normalized || normalized.split("/").some((segment) => !segment || segment === "." || segment === "..")) return "";
+  return normalized;
+}
+
+function normalizedExtension(relativePath: string): string {
+  return path.posix.extname(relativePath).toLocaleLowerCase();
+}
+
+function fileRevision(file: Readonly<KnowledgeInitializationVaultFile>, contentHash: string): string {
+  return sha256(`${file.path}\0${file.size}\0${file.mtime}\0${contentHash}`);
+}
+
+function emptyCounts(): KnowledgeInitializationCounts {
+  return Object.freeze({ move: 0, keep: 0, conflict: 0, ignored: 0, extraction: 0 });
+}
+
+function uniqueSources(
+  values: readonly KnowledgeInitializationSourceSnapshot[]
+): KnowledgeInitializationSourceSnapshot[] {
+  const sources = new Map<string, KnowledgeInitializationSourceSnapshot>();
+  for (const value of values) sources.set(value.path, value);
+  return [...sources.values()].sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function cloneJob(job: Readonly<KnowledgeInitializationJob>): KnowledgeInitializationJob {
+  return structuredClone(job);
+}
+
+function normalizePersistedJob(value: unknown): KnowledgeInitializationJob {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("知识库初始化作业格式无效。");
+  const job = value as KnowledgeInitializationJob;
+  if (job.schemaVersion !== 1 || typeof job.jobId !== "string"
+    || job.templateVersion !== KNOWLEDGE_BASE_TEMPLATE_VERSION
+    || !Array.isArray(job.items) || !Array.isArray(job.extractionSources)
+    || !Array.isArray(job.extractionQueue)) {
+    throw new Error("知识库初始化作业版本无效。");
   }
-  await fsp.writeFile(absolute, content, "utf8");
-  createdFiles.push(relativePath);
+  return structuredClone(job);
+}
+
+async function atomicWriteJson(filePath: string, value: unknown): Promise<void> {
+  const temporary = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  await fsp.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, {
+    encoding: "utf8", mode: 0o600, flag: "wx"
+  });
+  await fsp.rename(temporary, filePath);
+}
+
+function assertNotCancelled(signal: AbortSignal): void {
+  if (signal.aborted) throw new DOMException("初始化已取消", "AbortError");
+}
+
+function assertJobActive(
+  job: Readonly<KnowledgeInitializationJob>,
+  signal: AbortSignal
+): void {
+  assertNotCancelled(signal);
+  if (job.status !== "active") throw new DOMException("初始化已停止", "AbortError");
+}
+
+function nodeErrorCode(error: unknown): string {
+  if (typeof error !== "object" || error === null || !("code" in error)) return "";
+  const code = error.code;
+  return typeof code === "string" || typeof code === "number"
+    ? String(code)
+    : "";
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).filter((key) => record[key] !== undefined).sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function sha256(value: string): string {
+  return `sha256:${createHash("sha256").update(value, "utf8").digest("hex")}`;
 }
 
 export function buildKnowledgeBaseRulesTemplate(now: Date): string {
   return buildVaultProfileTemplate(now);
 }
 
-function buildWikiIndexTemplate(now: Date): string {
+export function buildKnowledgeInitializationGuideTemplate(now: Date): string {
   return [
-    "---",
-    `created: ${formatDateTime(now)}`,
-    `updated: ${formatDateTime(now)}`,
-    "type: index",
-    "---",
-    "",
-    "# Wiki 知识索引",
-    "",
-    "> AI 维护的结构化知识库。每个领域至少包含一个领域索引页。",
-    "",
-    "## 领域",
-    "",
-    ...WIKI_DOMAINS.map((domain) => `- [[${domain.id}/00-索引|${domain.title}]] — ${domain.description}`),
-    ""
+    "---", `created: ${formatDateTime(now)}`, "type: echoink-knowledge-guide", "---", "",
+    "# 开始使用 EchoInk 知识库", "",
+    "EchoInk 使用十个固定顶层目录：`raw`、`wiki`、`projects`、`outputs`、`inbox`、`journal`、`work`、`archive`、`templates`、`assets`。",
+    "", "## 核心流程", "",
+    "1. 把未经提炼的 Markdown 放在 `raw/`。",
+    "2. 在普通 EchoInk 会话中使用 `/maintain`，让 Agent 提炼并安全写入 `wiki/` 或 `projects/`。",
+    "3. 使用 `/ask` 从 Wiki、Projects 与 Raw 中检索和回答。",
+    "4. 新增资料后，在设置页点击“整理新增笔记”进行增量维护。", "",
+    "> 非 Markdown 文件和附件保持原位；EchoInk 不会覆盖或删除你的既有笔记。", ""
+  ].join("\n");
+}
+
+function buildWikiIndexMarkerBlock(now: Date): string {
+  return [
+    INDEX_MARKER_START,
+    `## EchoInk 知识库入口（${formatDateTime(now)}）`, "",
+    `- [[${KNOWLEDGE_INITIALIZATION_GUIDE_PATH.replace(/\.md$/u, "")}|开始使用 EchoInk 知识库]]`,
+    "- 原始资料：[[raw/index|Raw 索引]]",
+    INDEX_MARKER_END
   ].join("\n");
 }
 
 function buildRawIndexTemplate(now: Date): string {
   return [
-    "---",
-    `created: ${formatDateTime(now)}`,
-    `updated: ${formatDateTime(now)}`,
-    "type: index",
-    "---",
-    "",
-    "# 原始资料索引",
-    "",
-    "> 原始资料层。知识库维护时正文、标题、路径、附件只读，插件可写托管元属性，不自动移动；从这里提炼后必须进入 Wiki / Projects 正文并保留来源证据。普通 Agent 对话可按用户明确指令整理 raw 文件。",
-    "",
-    "## articles/",
-    "",
-    "文章、网页、博客、公众号、README 等文本资料。",
-    "",
-    "- `github-trending/`：GitHub Trending 简报。",
-    "- `openai-docs/`：OpenAI 官方文档。",
-    "- `wechat-official-accounts/`：微信公众号全文归档。",
-    "- `feishu-docs/`：飞书文档摘录。",
-    "- `investment/`：投资和策略原始资料。",
-    "",
-    "## clippings/",
-    "",
-    "剪藏、摘录、标注；文章剪藏优先进入 `clippings/articles/`。",
-    "",
-    "## attachments/",
-    "",
-    "PDF、图片、DOCX 等附件资料。",
-    ""
+    "---", `created: ${formatDateTime(now)}`, "type: index", "---", "",
+    "# Raw 索引", "",
+    "> Raw 保存未经提炼的原始 Markdown；使用 `/maintain` 后，结构化结果进入 Wiki 或 Projects。", ""
   ].join("\n");
 }
 
 function buildTrackerTemplate(now: Date): string {
   return [
-    "---",
-    `created: ${formatDateTime(now)}`,
-    "source: codex-echoink",
-    "---",
-    "",
-    "# Ingest Tracker",
-    "",
-    "<!-- codex-echoink-kb:start -->",
-    "",
-    `## EchoInk Agent 处理记录（${formatDateTime(now)}）`,
-    "",
-    "- 暂无",
-    "",
-    "<!-- codex-echoink-kb:end -->",
-    ""
-  ].join("\n");
-}
-
-function buildDomainIndexTemplate(domain: WikiDomainTemplate, now: Date): string {
-  return [
-    "---",
-    `created: ${formatDate(now)}`,
-    `updated: ${formatDateTime(now)}`,
-    "type: index",
-    "---",
-    "",
-    `# ${domain.title} — 索引`,
-    "",
-    `> ${domain.description}`,
-    "",
-    "## 概念",
-    "",
-    "## 指南",
-    "",
-    "## 参考",
-    ""
+    "---", `created: ${formatDateTime(now)}`, "source: codex-echoink", "---", "",
+    "# Ingest Tracker", "", "<!-- codex-echoink-kb:start -->", "",
+    "- 暂无新增维护记录", "", "<!-- codex-echoink-kb:end -->", ""
   ].join("\n");
 }
 
 function formatDateTime(date: Date): string {
   return date.toISOString().slice(0, 16);
-}
-
-function formatDate(date: Date): string {
-  return date.toISOString().slice(0, 10);
-}
-
-function assertAllowedRulesFilePath(relativePath: string): void {
-  if (relativePath === DEFAULT_KNOWLEDGE_BASE_RULES_FILE || relativePath === AGENTS_RULES_FILE || relativePath === LEGACY_CLAUDE_RULES_FILE || relativePath === "CLAUDE.kb-template.md") return;
-  throw new Error("初始化规则文件路径不合法。");
 }

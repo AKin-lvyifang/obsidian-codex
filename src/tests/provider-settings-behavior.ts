@@ -94,9 +94,20 @@ import {
   type PersonalityTemplate
 } from "../harness/memory/personality-templates";
 import { getDimensionShortLabel } from "../ui/trait-hexagon";
+import {
+  advanceEchoInkOnboardingTutorial,
+  deriveEchoInkOnboardingTruth,
+  dismissEchoInkOnboardingTutorial,
+  echoInkOnboardingTab,
+  isEmptyEchoInkPluginData,
+  resumeEchoInkOnboardingTutorial,
+  shouldAutoStartEchoInkOnboarding
+} from "../settings/onboarding";
 
 export async function runProviderSettingsBehaviorTests(): Promise<void> {
-  assertSettingsV49MigrationContract();
+  assertSettingsV50MigrationContract();
+  assertOnboardingTruthContract();
+  await assertOnboardingCoachmarkAccessibilityContract();
   await assertRetiredSettingsRewritePersistence();
   assertProviderScopedRollbackPreservesConcurrentSettings();
   await assertPersistedProviderRollbackPreservesQueuedSettingsSave();
@@ -503,7 +514,7 @@ async function assertResourceScanErrorsClearAcrossTabs(): Promise<void> {
       return [];
     }
   };
-  const tab = new CodexSettingTab(plugin as never);
+  const tab = new CodexSettingTab(withSettingsTabDefaults(plugin) as never);
   const mutableTab = tab as unknown as {
     resourceLoadErrors: Partial<Record<"plugins" | "mcp" | "skills", string>>;
     loadWorkspaceResources(force: boolean, tab: "plugins" | "mcp" | "skills"): Promise<void>;
@@ -564,7 +575,7 @@ async function assertSkillToggleNotCommittedRestoresAuthoritativeUi(): Promise<v
     await store.saveResourceMutation(previous);
   });
 
-  const tab = new CodexSettingTab(plugin as never);
+  const tab = new CodexSettingTab(withSettingsTabDefaults(plugin) as never);
   (tab as unknown as { runtimeEchoInkResources: typeof skill[] })
     .runtimeEchoInkResources = [structuredClone(skill)];
   tab.display();
@@ -742,7 +753,7 @@ async function assertProviderApiKeyPersistenceLifecycle(): Promise<void> {
       apply: (candidate: typeof editingSettings) => void
     ) => apply(editingSettings)
   };
-  const tab = new CodexSettingTab(tabPlugin as never) as unknown as {
+  const tab = new CodexSettingTab(withSettingsTabDefaults(tabPlugin) as never) as unknown as {
     saveAndActivateProviderModel(
       draft: typeof editingProvider,
       apiKey: string,
@@ -1053,7 +1064,7 @@ function assertSettingsAccessibleNamesAndOverflow(): void {
     setPiConversationStatus: async () => undefined,
     getCodexView: () => null
   };
-  const tab = new CodexSettingTab(plugin as never);
+  const tab = new CodexSettingTab(withSettingsTabDefaults(plugin) as never);
   tab.display();
   const tabs = tab.containerEl.querySelector<ProviderModalTestElement>(
     ".codex-settings-tabs"
@@ -1310,7 +1321,7 @@ async function assertProviderModalModelAccessibleNameIncludesValue(): Promise<vo
   modal.close();
 }
 
-function assertSettingsV49MigrationContract(): void {
+function assertSettingsV50MigrationContract(): void {
   const failures: Error[] = [];
   const check = (label: string, assertion: () => void): void => {
     try {
@@ -1321,7 +1332,7 @@ function assertSettingsV49MigrationContract(): void {
   };
 
   check("fresh install does not select a Provider without a usable API Key", () => {
-    assert.equal(DEFAULT_SETTINGS.settingsVersion, 49);
+    assert.equal(DEFAULT_SETTINGS.settingsVersion, 50);
     assert.equal(DEFAULT_SETTINGS.activeApiProviderId, "");
     assert.equal(DEFAULT_SETTINGS.memory.useLongTermMemory, true);
     assert.equal(
@@ -1567,8 +1578,181 @@ function assertSettingsV49MigrationContract(): void {
   });
 
   if (failures.length > 0) {
-    throw new AggregateError(failures, "Settings v49 migration contract failed");
+    throw new AggregateError(failures, "Settings v50 migration contract failed");
   }
+}
+
+function assertOnboardingTruthContract(): void {
+  assert.equal(isEmptyEchoInkPluginData(undefined), true);
+  assert.equal(isEmptyEchoInkPluginData(null), true);
+  assert.equal(isEmptyEchoInkPluginData({}), true);
+  assert.equal(isEmptyEchoInkPluginData({ settingsVersion: 49 }), false);
+
+  const settings = structuredClone(DEFAULT_SETTINGS);
+  assert.equal(shouldAutoStartEchoInkOnboarding(true, settings.setup), true);
+  assert.equal(shouldAutoStartEchoInkOnboarding(false, settings.setup), false);
+  settings.setup.completedAt = 1;
+  assert.equal(shouldAutoStartEchoInkOnboarding(true, settings.setup), false);
+  settings.setup.completedAt = 0;
+  assert.equal(settings.setup.tutorialStep, "provider");
+  let truth = deriveEchoInkOnboardingTruth(settings, null);
+  assert.equal(truth.providerComplete, false);
+  assert.equal(truth.knowledgeComplete, false);
+  assert.equal(truth.personalityComplete, false);
+
+  const provider = createApiProviderConfig("deepseek", "onboarding-provider");
+  provider.apiKey = "configured-key";
+  settings.apiProviders = [provider];
+  settings.activeApiProviderId = provider.id;
+  settings.knowledgeBase.initialization.status = "initialized";
+  truth = deriveEchoInkOnboardingTruth(settings, "template-balanced");
+  assert.deepEqual(truth, {
+    providerComplete: true,
+    knowledgeComplete: true,
+    personalityComplete: true
+  });
+  assert.equal(settings.setup.tutorialStep, "provider");
+
+  const first = advanceEchoInkOnboardingTutorial(settings.setup, "provider", 101);
+  assert.deepEqual(first, { changed: true, completed: false, nextStep: "knowledge" });
+  assert.equal(settings.setup.completedAt, 0);
+  const stale = advanceEchoInkOnboardingTutorial(settings.setup, "provider", 102);
+  assert.deepEqual(stale, { changed: false, completed: false, nextStep: "knowledge" });
+  const second = advanceEchoInkOnboardingTutorial(settings.setup, "knowledge", 103);
+  assert.deepEqual(second, { changed: true, completed: false, nextStep: "personality" });
+  const finish = advanceEchoInkOnboardingTutorial(settings.setup, "personality", 104);
+  assert.deepEqual(finish, { changed: true, completed: true, nextStep: null });
+  assert.equal(settings.setup.completedAt, 104);
+  assert.equal(settings.setup.lastCheckedAt, 104);
+  assert.equal(settings.setup.tutorialStep, "provider");
+
+  const resumed = normalizeSettingsData({
+    ...structuredClone(DEFAULT_SETTINGS),
+    setup: {
+      completedAt: 0,
+      lastCheckedAt: 0,
+      dismissedVersion: "onboarding-v1",
+      tutorialStep: "knowledge"
+    }
+  }).settings;
+  assert.equal(resumed.setup.tutorialStep, "knowledge");
+  assert.equal(resumed.setup.dismissedVersion, "onboarding-v1");
+  assert.equal(shouldAutoStartEchoInkOnboarding(true, resumed.setup), false);
+  dismissEchoInkOnboardingTutorial(resumed.setup);
+  assert.equal(resumed.setup.tutorialStep, "knowledge");
+  assert.equal(resumeEchoInkOnboardingTutorial(resumed.setup), "knowledge");
+  assert.equal(resumed.setup.dismissedVersion, "");
+  assert.equal(echoInkOnboardingTab(resumed.setup.tutorialStep), "knowledgeBase");
+  assert.equal(normalizeSettingsData({
+    ...structuredClone(DEFAULT_SETTINGS),
+    setup: { tutorialStep: "invalid" }
+  }).settings.setup.tutorialStep, "provider");
+  assert.equal(settings.memory.dreamEnabled, false);
+}
+
+async function assertOnboardingCoachmarkAccessibilityContract(): Promise<void> {
+  installProviderModalDomFixture();
+  const settings = structuredClone(DEFAULT_SETTINGS);
+  settings.settingsLanguage = "zh-CN";
+  let dismissCalls = 0;
+  let now = 200;
+  const advanceCalls: string[] = [];
+  const plugin = withSettingsTabDefaults({
+    app: new App(),
+    manifest: { id: "codex-echoink" },
+    settings,
+    saveSettings: async () => undefined,
+    dismissEchoInkOnboarding: async () => { dismissCalls += 1; },
+    advanceEchoInkOnboarding: async (step: "provider" | "knowledge" | "personality") => {
+      advanceCalls.push(step);
+      return advanceEchoInkOnboardingTutorial(settings.setup, step, ++now).nextStep;
+    }
+  });
+  const tab = new CodexSettingTab(plugin as never);
+  const mutable = tab as unknown as {
+    renderOnboardingCoachmark(step: "provider" | "knowledge" | "personality"): void;
+    clearOnboardingCoachmark(restoreFocus: boolean): void;
+  };
+  const restoreFocus = providerModalTestDocument.createElement("button");
+  providerModalTestDocument.body.appendChild(restoreFocus);
+
+  for (const fixture of [
+    { step: "provider" as const, key: "providers:add", label: "添加可用模型", action: "下一步" },
+    { step: "knowledge" as const, key: "knowledge:initialize", label: "初始化知识库", action: "下一步" },
+    { step: "personality" as const, key: "general:personality-template", label: "选择初始风格", action: "完成" }
+  ]) {
+    tab.containerEl.empty();
+    const anchor = tab.containerEl.createEl("button", {
+      attr: { "data-echoink-focus-key": fixture.key }
+    });
+    restoreFocus.focus();
+    mutable.renderOnboardingCoachmark(fixture.step);
+    const coachmark = providerModalTestDocument.body.querySelector(
+      `.echoink-onboarding-coachmark.is-${fixture.step}`
+    );
+    assert.ok(coachmark);
+    assert.equal(coachmark.getAttribute("role"), "dialog");
+    assert.equal(coachmark.getAttribute("aria-modal"), "false");
+    assert.equal(coachmark.getAttribute("aria-label"), fixture.label);
+    assert.equal(coachmark.getAttribute("tabindex"), "-1");
+    assert.equal(
+      coachmark.querySelector("button.mod-cta")?.textContent,
+      fixture.action
+    );
+    assert.equal(providerModalTestDocument.activeElement, coachmark);
+    assert.equal(anchor.hasClass("is-echoink-onboarding-target"), true);
+    assert.equal(anchor.scrollIntoViewCalls, 1);
+    mutable.clearOnboardingCoachmark(true);
+    assert.equal(providerModalTestDocument.activeElement, restoreFocus);
+    assert.equal(anchor.hasClass("is-echoink-onboarding-target"), false);
+  }
+
+  settings.setup.completedAt = 0;
+  settings.setup.tutorialStep = "provider";
+  for (const fixture of [
+    { step: "provider" as const, key: "providers:add", tab: "providers" as const, nextTab: "knowledgeBase" as const },
+    { step: "knowledge" as const, key: "knowledge:initialize", tab: "knowledgeBase" as const, nextTab: "general" as const },
+    { step: "personality" as const, key: "general:personality-template", tab: "general" as const, nextTab: null }
+  ]) {
+    settings.settingsTab = fixture.tab;
+    tab.containerEl.empty();
+    tab.containerEl.createEl("button", {
+      attr: { "data-echoink-focus-key": fixture.key }
+    });
+    mutable.renderOnboardingCoachmark(fixture.step);
+    const next = providerModalTestDocument.body
+      .querySelector<ProviderModalTestElement>(".echoink-onboarding-coachmark")
+      ?.querySelector<ProviderModalTestElement>("button.mod-cta");
+    assert.ok(next);
+    next.click();
+    await flushProviderModalTasks();
+    if (fixture.nextTab) assert.equal(settings.settingsTab, fixture.nextTab);
+  }
+  assert.deepEqual(advanceCalls, ["provider", "knowledge", "personality"]);
+  assert.equal(settings.setup.completedAt, 203);
+  assert.equal(settings.setup.tutorialStep, "provider");
+  assert.equal(
+    providerModalTestDocument.body.querySelector(".echoink-onboarding-coachmark"),
+    null
+  );
+
+  tab.containerEl.empty();
+  tab.containerEl.createEl("button", {
+    attr: { "data-echoink-focus-key": "providers:add" }
+  });
+  restoreFocus.focus();
+  mutable.renderOnboardingCoachmark("provider");
+  providerModalTestDocument.fireEvent("keydown", { key: "Escape" });
+  await flushProviderModalTasks();
+  assert.equal(dismissCalls, 1);
+  assert.equal(
+    providerModalTestDocument.body.querySelector(".echoink-onboarding-coachmark"),
+    null
+  );
+  assert.equal(providerModalTestDocument.activeElement, restoreFocus);
+
+  const css = readFileSync("styles.css", "utf8");
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.echoink-onboarding-coachmark\s*\{[\s\S]*?animation:\s*none/u);
 }
 
 async function assertRetiredSettingsRewritePersistence(): Promise<void> {
@@ -1756,9 +1940,15 @@ function assertKnowledgeSettingsDetailRetiresLegacyControls(): void {
     saveSettings: async () => undefined,
     getCognitiveSystem: async () => createCognitiveSystemStub(),
     getEchoInkKnowledgeMaintenancePreferenceState: async () => preference,
-    saveEchoInkKnowledgeMaintenancePreferences: async () => preference
+    saveEchoInkKnowledgeMaintenancePreferences: async () => preference,
+    getEchoInkKnowledgeInitializationState: async () => null,
+    isEchoInkOnboardingRequested: () => false,
+    getEchoInkOnboardingStep: () => "provider" as const,
+    advanceEchoInkOnboarding: async () => null,
+    dismissEchoInkOnboarding: async () => undefined,
+    openEchoInkOnboarding: async () => undefined
   };
-  const tab = new CodexSettingTab(plugin as never);
+  const tab = new CodexSettingTab(withSettingsTabDefaults(plugin) as never);
   const mutableTab = tab as unknown as {
     knowledgePreferenceState: typeof preference;
     knowledgePreferenceEditor: ReturnType<
@@ -1770,9 +1960,10 @@ function assertKnowledgeSettingsDetailRetiresLegacyControls(): void {
     createKnowledgeMaintenancePreferenceEditor(preference);
 
   tab.display();
-  assert.match(tab.containerEl.textContent, /Knowledge Agent/u);
-  assert.match(tab.containerEl.textContent, /空知识库或没有命中时仍由 Pi Agent 正常回答/u);
-  assert.match(tab.containerEl.textContent, /显式 \/maintain 会直接完成提炼、安全写入和回读验证/u);
+  assert.match(tab.containerEl.textContent, /知识库使用/u);
+  assert.match(tab.containerEl.textContent, /初始化知识库/u);
+  assert.match(tab.containerEl.textContent, /\/ask 始终只读/u);
+  assert.match(tab.containerEl.textContent, /显式 \/maintain 会在一轮内安全写入并回读验证/u);
   assert.match(tab.containerEl.textContent, /知识提炼偏好/u);
   assert.doesNotMatch(tab.containerEl.textContent, /等待确认|维护预览/u);
   assertLegacyKnowledgeControlsAbsent(tab.containerEl.textContent);
@@ -2357,7 +2548,7 @@ function createIdentityTestPlugin(fixtureState: Record<string, any>): {
 async function assertAgentIdentityCardPlacementAndCopy(): Promise<void> {
   installProviderModalDomFixture();
   const { plugin } = createIdentityTestPlugin(createIdentityFixtureState());
-  const tab = new CodexSettingTab(plugin as never);
+  const tab = new CodexSettingTab(withSettingsTabDefaults(plugin) as never);
   const mutable = tab as unknown as { personalMemoryState: Record<string, any> | null };
   mutable.personalMemoryState = createIdentityFixtureState();
   tab.display();
@@ -2412,7 +2603,7 @@ async function assertIdentityEditSaveRefreshesSettingsAndPersonalization(): Prom
     }
   });
 
-  const tab = new CodexSettingTab(plugin as never);
+  const tab = new CodexSettingTab(withSettingsTabDefaults(plugin) as never);
   const mutable = tab as unknown as {
     personalMemoryState: Record<string, any> | null;
     loadPersonalMemoryState(force?: boolean): Promise<void>;
@@ -2490,7 +2681,7 @@ async function assertFirstNamingModalZeroWriteOnCancel(): Promise<void> {
     }
   });
 
-  const tab = new CodexSettingTab(plugin as never);
+  const tab = new CodexSettingTab(withSettingsTabDefaults(plugin) as never);
   const mutable = tab as unknown as { personalMemoryState: Record<string, any> | null };
   mutable.personalMemoryState = structuredClone(fixtureState);
   tab.display();
@@ -2499,6 +2690,8 @@ async function assertFirstNamingModalZeroWriteOnCancel(): Promise<void> {
     ".echoink-agent-profile-reselect"
   );
   assert.ok(templateBtn, "template button must exist when no template is chosen");
+  assert.equal(templateBtn.tagName, "BUTTON");
+  assert.equal(templateBtn.type, "button");
   templateBtn.click();
 
   const row = tab.containerEl.querySelector<ProviderModalTestElement>(".echoink-picker-row");
@@ -2759,7 +2952,7 @@ async function assertPersonalityCardUsesNewBehaviorDimensions(): Promise<void> {
     renderPersonalitySummary: async () => "summary"
   });
 
-  const tab = new CodexSettingTab(plugin as never);
+  const tab = new CodexSettingTab(withSettingsTabDefaults(plugin) as never);
   const mutable = tab as unknown as { personalMemoryState: Record<string, any> | null };
   mutable.personalMemoryState = createIdentityFixtureState();
   tab.display();
@@ -2857,7 +3050,7 @@ async function assertHexagonCaptionSurvivesRepeatedAsyncRender(): Promise<void> 
     readFixedFiles: async () => ({ agent: "# AGENT" })
   });
 
-  const tab = new CodexSettingTab(plugin as never);
+  const tab = new CodexSettingTab(withSettingsTabDefaults(plugin) as never);
   const mutable = tab as unknown as { personalMemoryState: Record<string, any> | null };
   mutable.personalMemoryState = createIdentityFixtureState();
   tab.display();
@@ -2956,6 +3149,8 @@ class ProviderModalTestMouseEvent {
 class ProviderModalTestDocument {
   activeElement: ProviderModalTestElement | null = null;
   readonly defaultView = { MouseEvent: ProviderModalTestMouseEvent };
+  readonly body = new ProviderModalTestElement("body", this);
+  private readonly eventListeners = new Map<string, Array<(event: any) => void>>();
 
   createElement(tagName: string): ProviderModalTestElement {
     return new ProviderModalTestElement(tagName, this);
@@ -2973,6 +3168,30 @@ class ProviderModalTestDocument {
       return new ProviderModalTestSvgElement(this);
     }
     return new ProviderModalTestElement(node.localName, this);
+  }
+
+  addEventListener(type: string, handler: ((event: any) => void) | null): void {
+    if (!handler) return;
+    const listeners = this.eventListeners.get(type) ?? [];
+    listeners.push(handler);
+    this.eventListeners.set(type, listeners);
+  }
+
+  removeEventListener(type: string, handler: ((event: any) => void) | null): void {
+    if (!handler) return;
+    const listeners = this.eventListeners.get(type);
+    if (!listeners) return;
+    const index = listeners.indexOf(handler);
+    if (index >= 0) listeners.splice(index, 1);
+  }
+
+  fireEvent(type: string, event: Record<string, unknown> = {}): void {
+    const synthetic = {
+      preventDefault: () => undefined,
+      stopPropagation: () => undefined,
+      ...event
+    };
+    for (const listener of this.eventListeners.get(type) ?? []) listener(synthetic);
   }
 }
 
@@ -3042,6 +3261,7 @@ class ProviderModalTestElement {
   clientWidth = 0;
   scrollWidth = 0;
   scrollLeft = 0;
+  scrollIntoViewCalls = 0;
   title = "";
   href = "";
   onclick: ((event: any) => void) | null = null;
@@ -3189,6 +3409,14 @@ class ProviderModalTestElement {
     this.textContent = value;
   }
 
+  setCssStyles(styles: Partial<CSSStyleDeclaration>): void {
+    for (const [name, value] of Object.entries(styles)) {
+      if (value !== undefined && value !== null) {
+        this.style.setProperty(name, String(value));
+      }
+    }
+  }
+
   addClass(...classes: string[]): void {
     const current = new Set(this.className.split(/\s+/u).filter(Boolean));
     for (const className of classes) current.add(className);
@@ -3312,7 +3540,9 @@ class ProviderModalTestElement {
     return { top: 100, bottom: 132, left: 0, right: 240, width: 240, height: 32 };
   }
 
-  scrollIntoView(): void {}
+  scrollIntoView(): void {
+    this.scrollIntoViewCalls += 1;
+  }
 
   private disconnectChildren(): void {
     for (const child of this.children) {
@@ -3373,6 +3603,18 @@ function dataAttributeKey(name: string): string {
   return name
     .slice(5)
     .replace(/-([a-z])/gu, (_match, letter: string) => letter.toUpperCase());
+}
+
+function withSettingsTabDefaults<T extends object>(plugin: T) {
+  return {
+    getEchoInkKnowledgeInitializationState: async () => null,
+    isEchoInkOnboardingRequested: () => false,
+    getEchoInkOnboardingStep: () => "provider" as const,
+    advanceEchoInkOnboarding: async () => null,
+    dismissEchoInkOnboarding: async () => undefined,
+    openEchoInkOnboarding: async () => undefined,
+    ...plugin
+  };
 }
 
 await runProviderSettingsBehaviorTests();

@@ -16,12 +16,17 @@ import {
 } from "../settings/settings";
 import { readKnowledgeBaseReportExcerpt, recoveredLintReportSummary, shouldRecoverKnowledgeBaseLintFailure } from "../knowledge-base/report";
 import { ResourceMutationError } from "./resource-mutation-authority";
+import { isEmptyEchoInkPluginData } from "../settings/onboarding";
 export { ResourceMutationError, resourceMutationRollbackIsSafe } from "./resource-mutation-authority";
 
 export interface SettingsSaveOptions {
   flushConversationStore?: boolean;
   strictConversationStore?: boolean;
   flushRawWrites?: boolean;
+}
+
+export interface SettingsLoadResult {
+  readonly emptyData: boolean;
 }
 
 export type ApiProviderSettingsSnapshot = Pick<
@@ -82,11 +87,9 @@ export class EchoInkSettingsStore {
 
   constructor(private readonly plugin: CodexForObsidianPlugin) {}
 
-  async loadSettings(): Promise<void> {
+  async loadSettings(): Promise<Readonly<SettingsLoadResult>> {
     const data: unknown = await this.plugin.loadData();
-    const dataRecord = typeof data === "object" && data !== null
-      ? data as Record<string, unknown>
-      : {};
+    const emptyData = isEmptyEchoInkPluginData(data);
     const normalized = normalizeSettingsData(data);
     this.plugin.settings = normalized.settings;
     this.settingsPersistenceRecoveryError = null;
@@ -97,6 +100,7 @@ export class EchoInkSettingsStore {
         flushConversationStore: false
       });
     }
+    return Object.freeze({ emptyData });
   }
 
   async saveSettings(force = false, options: SettingsSaveOptions = {}): Promise<void> {

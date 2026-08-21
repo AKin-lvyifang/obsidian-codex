@@ -18,11 +18,13 @@ await esbuild.build({
       'import { runKnowledgeMaintenancePreferenceTests } from "./src/tests/knowledge-maintenance-preferences";',
       'import { runPiKnowledgeReadToolTests } from "./src/tests/pi-native/knowledge-read-tools";',
       'import { runPhase3KnowledgeMaintenanceServiceTests } from "./src/tests/pi-native/phase3-maintenance-service";',
+      'import { runKnowledgeInitializationTests } from "./src/tests/knowledge-initialization";',
       "await runKnowledgeAgentIndexTests();",
       "await runKnowledgeMaintenancePreferenceTests();",
       "await runPiKnowledgeReadToolTests();",
       "await runPhase3KnowledgeRetrieverTests();",
       "await runPhase3KnowledgeMaintenanceServiceTests();",
+      "await runKnowledgeInitializationTests();",
       'console.log("Current Knowledge query and maintenance acceptance: PASS");'
     ].join("\n"),
     resolveDir: rootDir,
