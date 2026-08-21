@@ -121,7 +121,8 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   assertProviderTooltipBehavior();
   assertSavedModelLifecycle();
   assertNewProductGenerationKeepsConfigurationButDropsLegacyHistory();
-  assertKnowledgeSettingsDetailRetiresLegacyControls();
+  await assertKnowledgeSettingsDetailRetiresLegacyControls();
+  await assertKnowledgeInitializationExperienceContract();
   assertSettingsAccessibleNamesAndOverflow();
   await assertMemoryCorrectionModalContract();
   assertMemoryComposerVisualCssContract();
@@ -1955,7 +1956,7 @@ function mcpResourceFixture(id: string, enabled: boolean) {
   };
 }
 
-function assertKnowledgeSettingsDetailRetiresLegacyControls(): void {
+async function assertKnowledgeSettingsDetailRetiresLegacyControls(): Promise<void> {
   installProviderModalDomFixture();
   const settings = structuredClone(DEFAULT_SETTINGS);
   settings.settingsLanguage = "zh-CN";
@@ -1993,7 +1994,11 @@ function assertKnowledgeSettingsDetailRetiresLegacyControls(): void {
     createKnowledgeMaintenancePreferenceEditor(preference);
 
   tab.display();
-  assert.match(tab.containerEl.textContent, /知识库使用/u);
+  await flushProviderModalTasks();
+  // 初始化区块异步加载后消费了一次调度帧；再渲染一次，既拿到加载后的
+  // 文案，也让后续点击能正常触发 scheduleDisplay。
+  tab.display();
+  assert.match(tab.containerEl.textContent, /知识库管理/u);
   assert.match(tab.containerEl.textContent, /初始化知识库/u);
   assert.match(tab.containerEl.textContent, /\/ask 始终只读/u);
   assert.match(tab.containerEl.textContent, /显式 \/maintain 会在一轮内安全写入并回读验证/u);
@@ -2063,6 +2068,605 @@ function assertLegacyKnowledgeControlsAbsent(text: string): void {
   ]) {
     assert.doesNotMatch(text, new RegExp(retired, "u"), retired);
   }
+}
+
+// ---------------------------------------------------------------------------
+// 知识库初始化体验：默认/自定义 Tab、一键开始、目录分配、多选 Modal、
+// 真实进度、暂停/错误映射与完成态。
+// ---------------------------------------------------------------------------
+
+function makeKnowledgeInitItemFixture(
+  sourcePath: string,
+  role: string,
+  overrides: Record<string, unknown> = {}
+): Record<string, any> {
+  return {
+    sourcePath,
+    targetPath: role === "keep" ? null : `${role}/imported/${sourcePath}`,
+    role,
+    sourceRevision: `sha256:rev-${sourcePath}`,
+    contentHash: `sha256:hash-${sourcePath}`,
+    size: 10,
+    mtime: 100,
+    state: "pending",
+    reason: "",
+    ...overrides
+  };
+}
+
+function makeKnowledgeInitJobFixture(
+  overrides: Record<string, unknown> = {}
+): Record<string, any> {
+  return {
+    schemaVersion: 1,
+    jobId: "knowledge-init-fixture",
+    templateVersion: "onboarding-v1",
+    mode: "custom",
+    phase: "preview",
+    status: "preview",
+    createdAt: 1,
+    updatedAt: 2,
+    provider: { providerId: "provider-ready", model: "model-ready" },
+    planDigest: "sha256:plan-digest-fixture",
+    confirmedDigest: null,
+    items: [
+      makeKnowledgeInitItemFixture("notes/alpha.md", "wiki"),
+      makeKnowledgeInitItemFixture("notes/beta.md", "raw"),
+      makeKnowledgeInitItemFixture("notes/gamma.md", "raw"),
+      makeKnowledgeInitItemFixture("notes/delta.md", "projects")
+    ],
+    extractionSources: [],
+    extractionQueue: [],
+    extractionCursor: 0,
+    expectedBatches: 0,
+    moveCursor: 0,
+    createdDirectories: [],
+    conversationId: null,
+    productRunIds: [],
+    counts: { move: 4, keep: 0, conflict: 0, ignored: 0, extraction: 0 },
+    guidePath: "wiki/开始使用 EchoInk 知识库.md",
+    lastError: "",
+    recoveryAction: "",
+    ...overrides
+  };
+}
+
+function createKnowledgeInitPluginFixture(state: { job: Record<string, any> | null }) {
+  const calls: Array<{ method: string; args?: unknown }> = [];
+  const settings = structuredClone(DEFAULT_SETTINGS);
+  settings.settingsLanguage = "zh-CN";
+  settings.settingsTab = "knowledgeBase";
+  const plugin = {
+    app: new App(),
+    manifest: { id: "codex-echoink" },
+    settings,
+    saveSettings: async () => undefined,
+    getCognitiveSystem: async () => createCognitiveSystemStub(),
+    getEchoInkKnowledgeMaintenancePreferenceState: async () => null,
+    getEchoInkKnowledgeInitializationState: async () => state.job,
+    startEchoInkKnowledgeInitialization: async (mode: string) => {
+      calls.push({ method: `start:${mode}` });
+      state.job = makeKnowledgeInitJobFixture({ mode });
+      return state.job;
+    },
+    confirmEchoInkKnowledgeInitialization: async () => {
+      calls.push({ method: "confirm" });
+      state.job = {
+        ...state.job,
+        status: "active",
+        phase: "create_directories",
+        confirmedDigest: state.job?.planDigest ?? null
+      };
+      return state.job;
+    },
+    continueEchoInkKnowledgeInitialization: async () => {
+      calls.push({ method: "continue" });
+      state.job = { ...state.job, status: "active", lastError: "", recoveryAction: "" };
+      return state.job;
+    },
+    cancelEchoInkKnowledgeInitialization: async () => {
+      calls.push({ method: "cancel" });
+      state.job = { ...state.job, status: "cancelled" };
+      return state.job;
+    },
+    assignManyEchoInkKnowledgeInitializationNotes: async (
+      assignments: ReadonlyArray<{ sourcePath: string; role: string }>
+    ) => {
+      calls.push({ method: "assignMany", args: assignments });
+      for (const assignment of assignments) {
+        const item = state.job?.items.find(
+          (candidate: Record<string, any>) => candidate.sourcePath === assignment.sourcePath
+        );
+        if (item) {
+          item.role = assignment.role;
+          item.targetPath = `${assignment.role}/imported/${item.sourcePath}`;
+        }
+      }
+      return state.job;
+    }
+  };
+  return { plugin, calls, settings };
+}
+
+async function renderKnowledgeInitTab(plugin: Record<string, any>) {
+  const tab = new CodexSettingTab(withSettingsTabDefaults(plugin) as never);
+  const preference = Object.freeze({
+    profileVersion: ECHOINK_KNOWLEDGE_PREFERENCE_PROFILE_VERSION,
+    state: "default" as const,
+    revision: `sha256:${"b".repeat(64)}`,
+    content: ""
+  });
+  const mutableTab = tab as unknown as {
+    knowledgePreferenceState: typeof preference;
+    knowledgePreferenceEditor: ReturnType<
+      typeof createKnowledgeMaintenancePreferenceEditor
+    >;
+  };
+  mutableTab.knowledgePreferenceState = preference;
+  mutableTab.knowledgePreferenceEditor =
+    createKnowledgeMaintenancePreferenceEditor(preference);
+  tab.display();
+  await settleKnowledgeInitTab(tab);
+  return tab;
+}
+
+/**
+ * 测试 DOM 的 requestAnimationFrame 是同步的：一次 scheduleDisplay 之后
+ * displayFrame 会停在非空值。这里先冲刷微任务，再用 display() 做一次干净
+ * 的重渲染并复位 displayFrame，模拟真实环境里的下一帧。
+ */
+async function settleKnowledgeInitTab(tab: CodexSettingTab): Promise<void> {
+  await flushProviderModalTasks();
+  tab.display();
+}
+
+function knowledgeInitPanel(tab: CodexSettingTab) {
+  const panel = tab.containerEl.querySelector(".echoink-knowledge-init-panel");
+  assert.ok(panel, "expected the single knowledge initialization panel");
+  return panel;
+}
+
+function knowledgeInitButtons(panel: ReturnType<typeof knowledgeInitPanel>) {
+  return Array.from(panel.querySelectorAll("button"));
+}
+
+async function assertKnowledgeInitializationExperienceContract(): Promise<void> {
+  await assertKnowledgeInitDefaultTabAndOneClickStart();
+  await assertKnowledgeInitCustomTabDirectoriesAndAssignments();
+  await assertKnowledgeInitPausedMappingsAndTechnicalDetails();
+  await assertKnowledgeInitProgressAndCompletion();
+  await assertKnowledgeInitNotePickerModalContract();
+  assertKnowledgeInitNarrowLayoutCssContract();
+}
+
+async function assertKnowledgeInitDefaultTabAndOneClickStart(): Promise<void> {
+  installProviderModalDomFixture();
+  const state = { job: null as Record<string, any> | null };
+  const { plugin, calls } = createKnowledgeInitPluginFixture(state);
+  const tab = await renderKnowledgeInitTab(plugin);
+  const panel = knowledgeInitPanel(tab);
+
+  // 1. 默认 Tab 为初始选中，roving tabindex。
+  const tabs = panel.querySelectorAll('[role="tab"]');
+  assert.equal(tabs.length, 2);
+  const defaultTab = tabs[0];
+  const customTab = tabs[1];
+  assert.equal(defaultTab.textContent, "默认方案");
+  assert.equal(customTab.textContent, "自定义方案");
+  assert.equal(defaultTab.getAttribute("aria-selected"), "true");
+  assert.equal(defaultTab.getAttribute("tabindex"), "0");
+  assert.equal(customTab.getAttribute("aria-selected"), "false");
+  assert.equal(customTab.getAttribute("tabindex"), "-1");
+  const tabpanel = panel.querySelector('[role="tabpanel"]');
+  assert.ok(tabpanel);
+  assert.equal(tabpanel.getAttribute("aria-labelledby"), defaultTab.getAttribute("id"));
+
+  // 默认方案内容：一句说明 + 可展开方案说明 + 单个主 CTA。
+  assert.match(panel.textContent, /方案说明/u);
+  assert.match(panel.textContent, /卡帕西式/u);
+  assert.equal(panel.querySelectorAll(".mod-cta").length, 1);
+  assert.equal(panel.querySelector(".mod-cta")?.textContent, "开始初始化");
+  assert.ok(panel.querySelector('[data-echoink-focus-key="knowledge:initialize"]'));
+  assert.equal(panel.querySelector("select"), null);
+
+  // 21. 方向键切换 Tab（自动激活 + roving tabindex）。
+  defaultTab.fireEvent("keydown", { key: "ArrowRight" });
+  assert.equal(customTab.getAttribute("aria-selected"), "true");
+  assert.equal(customTab.getAttribute("tabindex"), "0");
+  assert.equal(defaultTab.getAttribute("tabindex"), "-1");
+  assert.equal(providerModalTestDocument.activeElement, customTab);
+  customTab.fireEvent("keydown", { key: "ArrowLeft" });
+  assert.equal(defaultTab.getAttribute("aria-selected"), "true");
+  assert.equal(providerModalTestDocument.activeElement, defaultTab);
+
+  // 2. 首次切到自定义：只生成并持久化本地 preview（允许），不 confirm、
+  // 不分配、不暂停。
+  customTab.click();
+  await settleKnowledgeInitTab(tab);
+  assert.deepEqual(calls.map((call) => call.method), ["start:custom"]);
+  const regeneratedPanel = knowledgeInitPanel(tab);
+  assert.equal(
+    regeneratedPanel.querySelectorAll(".echoink-knowledge-init-dir-row").length,
+    10
+  );
+
+  // 2. preview 已存在后，来回切换只替换同一 tabpanel 的主体，且不再产生调用。
+  const regeneratedTabs = regeneratedPanel.querySelectorAll('[role="tab"]');
+  const stableTabpanel = regeneratedPanel.querySelector('[role="tabpanel"]');
+  const callsBeforeSwitching = calls.length;
+  regeneratedTabs[0].click();
+  assert.equal(regeneratedPanel.querySelector('[role="tabpanel"]'), stableTabpanel);
+  assert.equal(regeneratedPanel.querySelectorAll(".echoink-knowledge-init-dir-row").length, 0);
+  regeneratedTabs[1].click();
+  assert.equal(regeneratedPanel.querySelector('[role="tabpanel"]'), stableTabpanel);
+  assert.equal(
+    regeneratedPanel.querySelectorAll(".echoink-knowledge-init-dir-row").length,
+    10
+  );
+  assert.equal(calls.length, callsBeforeSwitching);
+
+  // 4. 默认方案点击一次：顺序执行 preview + confirm。
+  regeneratedTabs[0].click();
+  const cta = regeneratedPanel.querySelector(".echoink-knowledge-init-cta");
+  assert.equal(cta?.textContent, "开始初始化");
+  cta.click();
+  await settleKnowledgeInitTab(tab);
+  assert.deepEqual(
+    calls.map((call) => call.method),
+    ["start:custom", "start:recommended", "confirm"]
+  );
+  // 3/18. 进入 active 后显示「暂停初始化」，主界面没有内部术语。
+  const activePanel = knowledgeInitPanel(tab);
+  assert.match(activePanel.textContent, /暂停初始化/u);
+  assert.doesNotMatch(activePanel.textContent, /确认并开始|冻结预览|重新预览|Digest/u);
+  assert.equal(activePanel.querySelector("select"), null);
+  // 收尾：hide 会清理进度轮询定时器，避免挂住测试进程。
+  tab.hide();
+}
+
+async function assertKnowledgeInitCustomTabDirectoriesAndAssignments(): Promise<void> {
+  installProviderModalDomFixture();
+  const state = { job: makeKnowledgeInitJobFixture() };
+  const { plugin, calls } = createKnowledgeInitPluginFixture(state);
+  const tab = await renderKnowledgeInitTab(plugin);
+  const panel = knowledgeInitPanel(tab);
+
+  // 5. 页面重载后恢复自定义 Tab 与已有分配，且没有触发任何新调用。
+  const tabs = panel.querySelectorAll('[role="tab"]');
+  assert.equal(tabs[1].getAttribute("aria-selected"), "true");
+  assert.equal(tabs[0].getAttribute("tabindex"), "-1");
+  assert.deepEqual(calls, []);
+
+  // 6. 十个目录全部展示；assets 标注附件目录且无「添加笔记」。
+  const rows = panel.querySelectorAll(".echoink-knowledge-init-dir-row");
+  assert.equal(rows.length, 10);
+  const expectedDirs = [
+    "Raw", "Wiki", "Projects", "Outputs", "Inbox",
+    "Journal", "Work", "Archive", "Templates"
+  ];
+  expectedDirs.forEach((label, index) => {
+    assert.equal(
+      rows[index].querySelector(".echoink-knowledge-init-dir-name")?.textContent,
+      label
+    );
+    assert.ok(rows[index].querySelector(".echoink-knowledge-init-dir-add"));
+    assert.equal(
+      rows[index].querySelector(".echoink-knowledge-init-dir-toggle")
+        ?.getAttribute("aria-expanded"),
+      "false"
+    );
+  });
+  const assetsRow = rows[9];
+  assert.ok(assetsRow.hasClass("is-assets"));
+  assert.equal(assetsRow.querySelector(".echoink-knowledge-init-dir-name")?.textContent, "assets");
+  assert.match(assetsRow.textContent, /附件目录/u);
+  assert.equal(assetsRow.querySelector(".echoink-knowledge-init-dir-add"), null);
+  assert.equal(assetsRow.querySelector(".echoink-knowledge-init-dir-toggle"), null);
+
+  // 8. 未指定笔记默认属于 raw：raw 行计数为 2。
+  assert.equal(
+    rows[0].querySelector(".echoink-knowledge-init-dir-count")?.textContent,
+    "2"
+  );
+
+  // 展开为缩进列表行；非 raw 笔记可移回 Raw。
+  const wikiToggle = rows[1].querySelector(".echoink-knowledge-init-dir-toggle");
+  wikiToggle.click();
+  // renderDirectoryList 会重建行 DOM，重新取引用再断言展开态。
+  const expandedRows = panel.querySelectorAll(".echoink-knowledge-init-dir-row");
+  const expandedToggle = expandedRows[1].querySelector(".echoink-knowledge-init-dir-toggle");
+  assert.equal(expandedToggle.getAttribute("aria-expanded"), "true");
+  const notePaths = panel.querySelectorAll(".echoink-knowledge-init-note-path");
+  assert.equal(notePaths.length, 1);
+  assert.equal(notePaths[0].textContent, "notes/alpha.md");
+  const remove = panel.querySelector(".echoink-knowledge-init-note-remove");
+  assert.ok(remove);
+  remove.click();
+  await flushProviderModalTasks();
+  const assignCall = calls.find((call) => call.method === "assignMany");
+  assert.deepEqual(assignCall?.args, [
+    { sourcePath: "notes/alpha.md", role: "raw" }
+  ]);
+
+  // 9. 同一笔记只有一个目标目录：alpha 移回 raw 后 wiki 计数为 0、raw 为 3。
+  const refreshedRows = panel.querySelectorAll(".echoink-knowledge-init-dir-row");
+  assert.equal(
+    refreshedRows[1].querySelector(".echoink-knowledge-init-dir-count")?.textContent,
+    "0"
+  );
+  assert.equal(
+    refreshedRows[0].querySelector(".echoink-knowledge-init-dir-count")?.textContent,
+    "3"
+  );
+}
+
+async function assertKnowledgeInitPausedMappingsAndTechnicalDetails(): Promise<void> {
+  installProviderModalDomFixture();
+  // 3/19. 内部状态只出现在「查看技术详情」折叠区。
+  const state = {
+    job: makeKnowledgeInitJobFixture({
+      status: "failed_recoverable",
+      phase: "move_notes",
+      lastError: "File already exists: raw/imported/notes/alpha.md",
+      recoveryAction: "检查源与目标的真实状态后再继续；不会覆盖或删除任何文件。"
+    })
+  };
+  const { plugin, calls } = createKnowledgeInitPluginFixture(state);
+  const tab = await renderKnowledgeInitTab(plugin);
+  const panel = knowledgeInitPanel(tab);
+  assert.match(panel.textContent, /初始化暂停了/u);
+  assert.match(panel.textContent, /已经完成的内容会保留/u);
+  assert.ok(panel.querySelector(".echoink-knowledge-init-pause-icon"));
+  const resume = panel.querySelector(".echoink-knowledge-init-cta");
+  assert.equal(resume?.textContent, "继续初始化");
+  assert.ok(
+    knowledgeInitButtons(panel).some((button) => button.textContent === "重新选择方案")
+  );
+
+  const tech = panel.querySelector(".echoink-knowledge-init-tech");
+  assert.ok(tech);
+  assert.match(tech.textContent, /查看技术详情/u);
+  assert.match(tech.textContent, /failed_recoverable/u);
+  assert.match(tech.textContent, /File already exists/u);
+  assert.match(tech.textContent, /provider-ready/u);
+  assert.match(tech.textContent, /plan-digest-fixture/u);
+  const mainText = panel.textContent.replace(tech.textContent, "");
+  for (const internal of [
+    "failed_recoverable",
+    "blocked_conflict",
+    "write_uncertain",
+    "File already exists",
+    "plan-digest-fixture",
+    "provider-ready",
+    "Digest"
+  ]) {
+    assert.ok(!mainText.includes(internal), `main UI must not expose ${internal}`);
+  }
+  assert.doesNotMatch(mainText, /确认并开始|冻结预览/u);
+  assert.equal(panel.querySelector("select"), null);
+
+  // 18. paused 显示「继续初始化」；点击后恢复运行。
+  resume.click();
+  await settleKnowledgeInitTab(tab);
+  assert.deepEqual(calls.map((call) => call.method), ["continue"]);
+  assert.match(knowledgeInitPanel(tab).textContent, /暂停初始化/u);
+  tab.hide();
+
+  // 「重新选择方案」回到 Tab 选择界面。
+  const rerunState = { job: makeKnowledgeInitJobFixture({ status: "cancelled" }) };
+  const rerun = createKnowledgeInitPluginFixture(rerunState);
+  const rerunTab = await renderKnowledgeInitTab(rerun.plugin);
+  const rerunPanel = knowledgeInitPanel(rerunTab);
+  assert.match(rerunPanel.textContent, /初始化暂停了/u);
+  const rerunReselect = knowledgeInitButtons(rerunPanel)
+    .find((button) => button.textContent === "重新选择方案");
+  rerunReselect?.click();
+  await settleKnowledgeInitTab(rerunTab);
+  assert.equal(knowledgeInitPanel(rerunTab).querySelectorAll('[role="tab"]').length, 2);
+  // 原作业是 custom 且已取消：重新选择后回到自定义 Tab，会重建本地预览
+  // （只扫描目录生成 preview，不调用 Provider、不移动文件）。
+  assert.deepEqual(rerun.calls.map((call) => call.method), ["start:custom"]);
+
+  // Provider 缺失时使用人话说明。
+  const providerlessState = {
+    job: makeKnowledgeInitJobFixture({
+      status: "failed_recoverable",
+      extractionQueue: ["raw/imported/notes/beta.md"],
+      provider: null
+    })
+  };
+  const providerless = createKnowledgeInitPluginFixture(providerlessState);
+  const providerlessTab = await renderKnowledgeInitTab(providerless.plugin);
+  assert.match(
+    knowledgeInitPanel(providerlessTab).textContent,
+    /需要先设置可用模型/u
+  );
+}
+
+async function assertKnowledgeInitProgressAndCompletion(): Promise<void> {
+  installProviderModalDomFixture();
+  // 14/15/18. active 运行态：真实进度、稳定 live region、暂停按钮。
+  const items = Array.from({ length: 40 }, (_unused, index) =>
+    makeKnowledgeInitItemFixture(`notes/n${String(index).padStart(2, "0")}.md`, "raw")
+  );
+  const state = {
+    job: makeKnowledgeInitJobFixture({
+      mode: "recommended",
+      status: "active",
+      phase: "move_notes",
+      moveCursor: 12,
+      items,
+      counts: { move: 40, keep: 0, conflict: 0, ignored: 0, extraction: 0 }
+    })
+  };
+  const { plugin } = createKnowledgeInitPluginFixture(state);
+  const tab = await renderKnowledgeInitTab(plugin);
+  const panel = knowledgeInitPanel(tab);
+  const bar = panel.querySelector("progress");
+  assert.ok(bar);
+  assert.equal(bar.getAttribute("max"), "100");
+  assert.equal(bar.getAttribute("value"), "28");
+  assert.equal(panel.querySelector(".echoink-knowledge-init-percent")?.textContent, "28%");
+  assert.equal(panel.querySelector(".echoink-knowledge-init-step")?.textContent, "正在移动笔记");
+  assert.equal(panel.querySelector(".echoink-knowledge-init-count")?.textContent, "12 / 40");
+  const status = panel.querySelector(".echoink-knowledge-init-status");
+  assert.equal(status.getAttribute("role"), "status");
+  assert.equal(status.getAttribute("aria-live"), "polite");
+  assert.equal(status.getAttribute("tabindex"), null);
+  assert.match(status.textContent, /正在移动笔记 · 12 \/ 40 · 28%/u);
+  assert.match(panel.textContent, /暂停初始化/u);
+  tab.hide();
+
+  // 暂停按钮调用现有 cancel API。
+  const pause = knowledgeInitButtons(panel)
+    .find((button) => button.textContent === "暂停初始化");
+  assert.ok(pause);
+
+  // 20. 完成态只显示「打开 Wiki 首页」与「整理新增笔记」。
+  const doneState = {
+    job: makeKnowledgeInitJobFixture({ status: "initialized", phase: "complete" })
+  };
+  const done = createKnowledgeInitPluginFixture(doneState);
+  done.settings.knowledgeBase.initialization.status = "initialized";
+  const doneTab = await renderKnowledgeInitTab(done.plugin);
+  const donePanel = knowledgeInitPanel(doneTab);
+  assert.match(donePanel.textContent, /知识库已就绪/u);
+  assert.deepEqual(
+    knowledgeInitButtons(donePanel).map((button) => button.textContent),
+    ["打开 Wiki 首页", "整理新增笔记"]
+  );
+  assert.doesNotMatch(donePanel.textContent, /Digest|provider-ready|移动 4/u);
+}
+
+async function assertKnowledgeInitNotePickerModalContract(): Promise<void> {
+  installProviderModalDomFixture();
+  const state = { job: makeKnowledgeInitJobFixture() };
+  const { plugin, calls } = createKnowledgeInitPluginFixture(state);
+  const tab = await renderKnowledgeInitTab(plugin);
+  let panel = knowledgeInitPanel(tab);
+  let wikiRow = panel.querySelectorAll(".echoink-knowledge-init-dir-row")[1];
+  const add = wikiRow.querySelector<HTMLButtonElement>(".echoink-knowledge-init-dir-add");
+  add.focus();
+  add.click();
+  const modal = openTestModals.at(-1);
+  assert.ok(modal, "note picker modal opens");
+
+  // 13. 打开后焦点在搜索框；当前目录笔记默认勾选；其他目录显示当前归属。
+  const search = modal.contentEl.querySelector<HTMLInputElement>(
+    ".echoink-knowledge-note-picker-search"
+  );
+  assert.ok(search);
+  assert.equal(providerModalTestDocument.activeElement, search);
+  assert.equal(
+    modal.contentEl.querySelectorAll(".echoink-knowledge-note-picker-row").length,
+    4
+  );
+  const checkboxes = modal.contentEl.querySelectorAll<HTMLInputElement>(
+    ".echoink-knowledge-note-picker-checkbox"
+  );
+  assert.deepEqual(
+    checkboxes.map((checkbox) => checkbox.checked),
+    [true, false, false, false]
+  );
+  assert.match(modal.contentEl.textContent, /当前：Projects/u);
+  assert.equal(
+    modal.contentEl.querySelector(".echoink-knowledge-note-picker-confirm")?.textContent,
+    "选好了（1）"
+  );
+
+  // 13. 搜索过滤但保留勾选状态。
+  search.value = "gamma";
+  search.fireEvent("input");
+  assert.equal(
+    modal.contentEl.querySelectorAll(".echoink-knowledge-note-picker-row").length,
+    1
+  );
+  search.value = "";
+  search.fireEvent("input");
+  const checkboxesAfterFilter = modal.contentEl.querySelectorAll<HTMLInputElement>(
+    ".echoink-knowledge-note-picker-checkbox"
+  );
+  assert.equal(checkboxesAfterFilter.length, 4);
+  assert.equal(checkboxesAfterFilter[0].checked, true);
+
+  // 整行 label 与 checkbox 同一点击区域。
+  assert.equal(checkboxesAfterFilter[1].parentElement?.tagName.toLowerCase(), "label");
+
+  // 勾选 beta 与 delta → 计数更新。
+  checkboxesAfterFilter[1].checked = true;
+  checkboxesAfterFilter[1].fireEvent("change");
+  checkboxesAfterFilter[3].checked = true;
+  checkboxesAfterFilter[3].fireEvent("change");
+  assert.equal(
+    modal.contentEl.querySelector(".echoink-knowledge-note-picker-confirm")?.textContent,
+    "选好了（3）"
+  );
+
+  // 13/21. 焦点约束：Shift+Tab 从搜索框循环到确认按钮。
+  modal.modalEl.fireEvent("keydown", { key: "Tab", shiftKey: true });
+  assert.equal(
+    providerModalTestDocument.activeElement,
+    modal.contentEl.querySelector(".echoink-knowledge-note-picker-confirm")
+  );
+
+  // 确认后一次性批量写入，焦点恢复到触发按钮。
+  modal.contentEl.querySelector(".echoink-knowledge-note-picker-confirm")?.click();
+  await flushProviderModalTasks();
+  const assignCall = calls.find((call) => call.method === "assignMany");
+  assert.deepEqual(assignCall?.args, [
+    { sourcePath: "notes/beta.md", role: "wiki" },
+    { sourcePath: "notes/delta.md", role: "wiki" }
+  ]);
+  assert.equal(openTestModals.length, 0);
+  // 确认后目录列表原地重建，焦点回到重建后的 Wiki「添加笔记」按钮。
+  const rebuiltWikiAdd = panel.querySelectorAll(".echoink-knowledge-init-dir-row")[1]
+    .querySelector(".echoink-knowledge-init-dir-add");
+  assert.equal(providerModalTestDocument.activeElement, rebuiltWikiAdd);
+
+  // 12. Escape 取消零写入，焦点同样恢复。
+  panel = knowledgeInitPanel(tab);
+  wikiRow = panel.querySelectorAll(".echoink-knowledge-init-dir-row")[1];
+  const addAgain = wikiRow.querySelector<HTMLButtonElement>(".echoink-knowledge-init-dir-add");
+  addAgain.focus();
+  addAgain.click();
+  const cancelModal = openTestModals.at(-1);
+  assert.ok(cancelModal);
+  const cancelCheckboxes = cancelModal.contentEl.querySelectorAll<HTMLInputElement>(
+    ".echoink-knowledge-note-picker-checkbox"
+  );
+  cancelCheckboxes[1].checked = true;
+  cancelCheckboxes[1].fireEvent("change");
+  cancelModal.modalEl.fireEvent("keydown", { key: "Escape" });
+  await flushProviderModalTasks();
+  assert.equal(openTestModals.length, 0);
+  assert.equal(
+    calls.filter((call) => call.method === "assignMany").length,
+    1,
+    "Escape must not write assignments"
+  );
+  assert.equal(providerModalTestDocument.activeElement, addAgain);
+}
+
+function assertKnowledgeInitNarrowLayoutCssContract(): void {
+  // 22. 窄设置窗口不依赖固定双列宽度；长路径可换行。
+  const css = readFileSync("styles.css", "utf8");
+  const dirRow = css.match(/\.echoink-knowledge-init-dir-row\s*\{[^}]*\}/u)?.[0] ?? "";
+  assert.match(dirRow, /minmax\(0,\s*1fr\)/u);
+  assert.doesNotMatch(dirRow, /grid-template-columns:\s*1fr\s+1fr/u);
+  assert.match(
+    css,
+    /\.echoink-knowledge-note-picker \.modal\s*\{[^}]*width:\s*min\(/u
+  );
+  assert.match(
+    css,
+    /\.echoink-knowledge-note-picker-path\s*\{[^}]*overflow-wrap:\s*anywhere/u
+  );
+  assert.match(
+    css,
+    /\.echoink-knowledge-init-note-path\s*\{[^}]*overflow-wrap:\s*anywhere/u
+  );
+  assert.match(css, /\.echoink-knowledge-init-tabpanel\s*\{[^}]*min-width:\s*0/u);
+  assert.match(css, /prefers-reduced-motion/u);
 }
 
 function assertNewProductGenerationKeepsConfigurationButDropsLegacyHistory(): void {

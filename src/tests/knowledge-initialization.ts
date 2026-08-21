@@ -5,8 +5,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
   buildKnowledgeInitializationGuideTemplate,
+  isKnowledgeInitializationRole,
   KnowledgeBaseInitializer,
   KNOWLEDGE_INITIALIZATION_GUIDE_PATH,
+  KNOWLEDGE_INITIALIZATION_MARKDOWN_ROLES,
   knowledgeInitializationParentFolder,
   knowledgeInitializationPathExists,
   type KnowledgeInitializationBatchResult,
@@ -15,11 +17,15 @@ import {
   type KnowledgeInitializationProviderSnapshot,
   type KnowledgeInitializationVaultFile
 } from "../knowledge-base/initializer";
+import { buildKnowledgeInitializationProgress } from "../knowledge-base/initialization-progress";
 
 export async function runKnowledgeInitializationTests(): Promise<void> {
   assertRootLevelInitializationFileHasNoFolderCreation();
   await assertHiddenInitializationFileExistsOutsideVaultIndex();
   await assertRecommendedAndCustomPreview();
+  await assertArchiveAndTemplatesRoles();
+  await assertAssignManyBatchSemantics();
+  assertKnowledgeInitializationProgressContract();
   await assertProviderOrModelChangeRequiresNewPreview();
   await assertZeroQueuePreservesUserFilesAndSkipsProvider();
   await assertSerialBatchSizes();
@@ -128,6 +134,221 @@ async function assertRecommendedAndCustomPreview(): Promise<void> {
     assert.equal(assigned.extractionQueue.includes("raw/imported/outside/note.md"), false);
     assert.equal(custom.mode, "custom");
   });
+}
+
+async function assertArchiveAndTemplatesRoles(): Promise<void> {
+  // archive/templates 是新 UI 的合法 Markdown 目标；assets 不是角色；
+  // keep 仅保留给旧状态兼容。
+  assert.deepEqual(KNOWLEDGE_INITIALIZATION_MARKDOWN_ROLES, [
+    "raw", "wiki", "projects", "outputs", "inbox", "journal",
+    "work", "archive", "templates"
+  ]);
+  assert.equal(isKnowledgeInitializationRole("archive"), true);
+  assert.equal(isKnowledgeInitializationRole("templates"), true);
+  assert.equal(isKnowledgeInitializationRole("keep"), true);
+  assert.equal(isKnowledgeInitializationRole("assets"), false);
+  assert.equal(isKnowledgeInitializationRole("unknown"), false);
+  await withHost(async (host) => {
+    host.addFile("outside/a.md", "alpha");
+    host.addFile("outside/b.md", "beta");
+    const initializer = new KnowledgeBaseInitializer(host);
+    await initializer.initialize();
+    await initializer.startPreview("custom");
+    const assigned = await initializer.assignMany([
+      { sourcePath: "outside/a.md", role: "archive" },
+      { sourcePath: "outside/b.md", role: "templates" }
+    ]);
+    assert.equal(
+      assigned.items.find((item) => item.sourcePath === "outside/a.md")?.targetPath,
+      "archive/imported/outside/a.md"
+    );
+    assert.equal(
+      assigned.items.find((item) => item.sourcePath === "outside/b.md")?.targetPath,
+      "templates/imported/outside/b.md"
+    );
+    // archive/templates 与 wiki 一样只做安全移动，不进入提炼队列；
+    // 只有分配到 raw 的笔记才参与 /maintain 提炼。
+    assert.deepEqual(assigned.extractionQueue, []);
+    assert.equal(assigned.expectedBatches, 0);
+    assert.equal(assigned.counts.move, 2);
+  });
+}
+
+async function assertAssignManyBatchSemantics(): Promise<void> {
+  await withHost(async (host) => {
+    host.addFile("outside/a.md", "alpha");
+    host.addFile("outside/b.md", "beta");
+    host.addFile("outside/c.md", "gamma");
+    const initializer = new KnowledgeBaseInitializer(host);
+    await initializer.initialize();
+    await initializer.startPreview("custom");
+
+    // 10. 批量分配：同一 sourcePath 只处理一次，整批只刷新一次冻结计划、
+    // 只持久化一次（onStateChanged 恰好一次）。
+    const stateChangesBefore = host.stateChangedCalls;
+    const batched = await initializer.assignMany([
+      { sourcePath: "outside/a.md", role: "wiki" },
+      { sourcePath: "outside/b.md", role: "projects" },
+      { sourcePath: "outside/a.md", role: "archive" }
+    ]);
+    assert.equal(host.stateChangedCalls, stateChangesBefore + 1);
+    const byPath = new Map(batched.items.map((item) => [item.sourcePath, item]));
+    assert.equal(byPath.get("outside/a.md")?.role, "archive");
+    assert.equal(byPath.get("outside/a.md")?.targetPath, "archive/imported/outside/a.md");
+    assert.equal(byPath.get("outside/b.md")?.role, "projects");
+    assert.equal(byPath.get("outside/c.md")?.role, "raw");
+    // 只有 raw 目标的笔记进入提炼队列；archive/projects 只移动不提炼。
+    assert.deepEqual(batched.extractionQueue, ["raw/imported/outside/c.md"]);
+    assert.notEqual(batched.planDigest, "");
+
+    // 11. 非法输入（未知路径）：整批零部分修改。
+    const digestBefore = batched.planDigest;
+    const stateBeforeInvalid = host.stateChangedCalls;
+    await assert.rejects(
+      initializer.assignMany([
+        { sourcePath: "outside/c.md", role: "wiki" },
+        { sourcePath: "outside/missing.md", role: "wiki" }
+      ]),
+      /找不到待分配的笔记/u
+    );
+    const afterInvalid = initializer.snapshot();
+    assert.equal(afterInvalid?.planDigest, digestBefore);
+    assert.equal(
+      afterInvalid?.items.find((item) => item.sourcePath === "outside/c.md")?.role,
+      "raw"
+    );
+    assert.equal(host.stateChangedCalls, stateBeforeInvalid);
+
+    // 11. 非法输入（未知角色）：同样整批拒绝。
+    await assert.rejects(
+      initializer.assignMany([
+        { sourcePath: "outside/c.md", role: "assets" as never }
+      ]),
+      /无效的知识库目录角色/u
+    );
+    assert.equal(
+      initializer.snapshot()?.items.find((item) => item.sourcePath === "outside/c.md")?.role,
+      "raw"
+    );
+
+    // 7/9. 单条 assign 委托批量接口：把同一笔记从 archive 移到 wiki 后，
+    // 它只属于 wiki 一个目录；archive 目标不再出现在任何计划字段里。
+    const moved = await initializer.assign("outside/a.md", "wiki");
+    const movedItem = moved.items.find((item) => item.sourcePath === "outside/a.md");
+    assert.equal(movedItem?.role, "wiki");
+    assert.equal(movedItem?.targetPath, "wiki/imported/outside/a.md");
+    assert.equal(moved.extractionQueue.includes("archive/imported/outside/a.md"), false);
+    assert.equal(moved.extractionQueue.includes("wiki/imported/outside/a.md"), false);
+    assert.deepEqual(moved.extractionQueue, ["raw/imported/outside/c.md"]);
+  });
+}
+
+function assertKnowledgeInitializationProgressContract(): void {
+  const baseJob = makeProgressJobFixture();
+
+  // 无 job / 各阶段权重。
+  assert.deepEqual(buildKnowledgeInitializationProgress(null, false), {
+    stage: "idle", percent: 0, completed: 0, total: 0
+  });
+  assert.deepEqual(
+    buildKnowledgeInitializationProgress({ ...baseJob, phase: "preview" }, false),
+    { stage: "plan", percent: 5, completed: 0, total: 0 }
+  );
+  assert.deepEqual(
+    buildKnowledgeInitializationProgress({
+      ...baseJob, phase: "create_directories", createdDirectories: ["raw", "wiki", "projects", "outputs"]
+    }, false),
+    { stage: "directories", percent: 11, completed: 4, total: 10 }
+  );
+  assert.deepEqual(
+    buildKnowledgeInitializationProgress({
+      ...baseJob, phase: "move_notes", moveCursor: 4, items: makeProgressItems(10)
+    }, false),
+    { stage: "moving", percent: 30, completed: 4, total: 10 }
+  );
+  assert.deepEqual(
+    buildKnowledgeInitializationProgress({
+      ...baseJob, phase: "batch_extraction",
+      extractionQueue: makeProgressItems(20), extractionCursor: 8
+    }, false),
+    { stage: "extracting", percent: 63, completed: 8, total: 20 }
+  );
+  assert.deepEqual(
+    buildKnowledgeInitializationProgress({ ...baseJob, phase: "generate_guide" }, false),
+    { stage: "guide", percent: 95, completed: 0, total: 0 }
+  );
+
+  // 16/17. job.status 已 initialized 但 settings 未标记时最多 99%；
+  // settings 真正 initialized 后才 100%。
+  assert.deepEqual(
+    buildKnowledgeInitializationProgress(
+      { ...baseJob, phase: "complete", status: "initialized" },
+      false
+    ),
+    { stage: "done", percent: 99, completed: 0, total: 0 }
+  );
+  assert.deepEqual(
+    buildKnowledgeInitializationProgress(
+      { ...baseJob, phase: "complete", status: "initialized" },
+      true
+    ),
+    { stage: "done", percent: 100, completed: 0, total: 0 }
+  );
+
+  // 15. 空目录 / 0 篇移动 / 0 篇提炼不产生 NaN，按区间完成处理。
+  const emptyDirs = buildKnowledgeInitializationProgress(
+    { ...baseJob, phase: "create_directories", createdDirectories: [] },
+    false
+  );
+  assert.equal(emptyDirs.percent, 5);
+  const emptyMoves = buildKnowledgeInitializationProgress(
+    { ...baseJob, phase: "move_notes", items: [], moveCursor: 0 },
+    false
+  );
+  assert.equal(emptyMoves.percent, 45);
+  const emptyExtractions = buildKnowledgeInitializationProgress(
+    { ...baseJob, phase: "batch_extraction", extractionQueue: [], extractionCursor: 0 },
+    false
+  );
+  assert.equal(emptyExtractions.percent, 90);
+  for (const progress of [emptyDirs, emptyMoves, emptyExtractions]) {
+    assert.equal(Number.isFinite(progress.percent), true);
+    assert.equal(Number.isNaN(progress.percent), false);
+    assert.ok(progress.percent >= 0 && progress.percent <= 100);
+  }
+}
+
+function makeProgressItems(count: number): string[] {
+  return Array.from({ length: count }, (_unused, index) => `raw/imported/note-${index}.md`);
+}
+
+function makeProgressJobFixture(): KnowledgeInitializationJob {
+  return {
+    schemaVersion: 1,
+    jobId: "progress-fixture",
+    templateVersion: "onboarding-v1",
+    mode: "recommended",
+    phase: "move_notes",
+    status: "active",
+    createdAt: 1,
+    updatedAt: 2,
+    provider: { providerId: "provider-ready", model: "model-ready" },
+    planDigest: "sha256:progress-fixture",
+    confirmedDigest: null,
+    items: [],
+    extractionSources: [],
+    extractionQueue: [],
+    extractionCursor: 0,
+    expectedBatches: 0,
+    moveCursor: 0,
+    createdDirectories: [],
+    conversationId: null,
+    productRunIds: [],
+    counts: { move: 0, keep: 0, conflict: 0, ignored: 0, extraction: 0 },
+    guidePath: KNOWLEDGE_INITIALIZATION_GUIDE_PATH,
+    lastError: "",
+    recoveryAction: ""
+  };
 }
 
 async function assertFrozenExtractionSourcesAndNoProgress(): Promise<void> {
@@ -383,6 +604,7 @@ class MemoryKnowledgeInitializationHost implements KnowledgeInitializationHost {
   batchOutcome: "completed" | "failed" | "write_uncertain" = "completed";
   blockBatchUntilAbort = false;
   blockFolders = false;
+  stateChangedCalls = 0;
   private clock = 1_700_000_000_000;
 
   constructor(
@@ -391,6 +613,10 @@ class MemoryKnowledgeInitializationHost implements KnowledgeInitializationHost {
   ) {}
 
   now = (): number => ++this.clock;
+
+  onStateChanged = (): void => {
+    this.stateChangedCalls += 1;
+  };
 
   addFile(relativePath: string, content: string): void {
     this.files.set(relativePath, content);

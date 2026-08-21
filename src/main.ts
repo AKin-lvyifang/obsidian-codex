@@ -35,6 +35,7 @@ import {
 } from "./plugin/mcp-settings-service";
 import { EchoInkKnowledgeSurfaceService } from "./plugin/knowledge-surface-service";
 import type {
+  KnowledgeInitializationAssignment,
   KnowledgeInitializationMode,
   KnowledgeInitializationRole
 } from "./knowledge-base/initializer";
@@ -811,6 +812,12 @@ export default class CodexForObsidianPlugin extends Plugin {
   ) {
     return await this.requireKnowledgeSurfaceService()
       .assignInitializationNote(sourcePath, role);
+  }
+  async assignManyEchoInkKnowledgeInitializationNotes(
+    assignments: readonly KnowledgeInitializationAssignment[]
+  ) {
+    return await this.requireKnowledgeSurfaceService()
+      .assignManyInitializationNotes(assignments);
   }
   async confirmEchoInkKnowledgeInitialization() {
     return await this.requireKnowledgeSurfaceService().confirmInitialization();
