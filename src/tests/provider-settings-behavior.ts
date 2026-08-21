@@ -141,6 +141,12 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   await assertAgentIdentityCardPlacementAndCopy();
   await assertIdentityEditSaveRefreshesSettingsAndPersonalization();
   await assertFirstNamingModalZeroWriteOnCancel();
+  await assertIdentityEntryWithoutTemplateOpensPicker();
+  await assertIdentityEntryFirstRunKeepsSingleTransaction();
+  await assertIdentityEntryWithTemplateOpensEditModal();
+  await assertTemplatePickerTableStructure();
+  await assertPersonalityResetStillRequiresConfirm();
+  await assertIdentityEntryRespectsFailClosedRetry();
   await assertIdentityModalNameValidation();
   await assertAvatarPresetCatalogBehavior();
   await assertAvatarProcessorContract();
@@ -2757,6 +2763,398 @@ async function assertFirstNamingModalZeroWriteOnCancel(): Promise<void> {
     avatar: { kind: "default" }
   });
   console.log("PASS settings: first naming modal keeps zero writes on cancel");
+}
+
+/** 未选择人格模板（冷启动）时的身份卡片固定装置。 */
+function createNoTemplateIdentityFixtureState(): Record<string, any> {
+  return createIdentityFixtureState({
+    agentIdentity: null,
+    personalityState: {
+      schema: "echoink.personality.v1",
+      revision: 0,
+      templateId: null,
+      explicit: { sharpness: null, dominance: null, rigor: null, structure: null, boldness: null, creativity: null },
+      observed: { sharpness: null, dominance: null, rigor: null, structure: null, boldness: null, creativity: null },
+      history: [], candidates: [], learnedRequirements: [], processedSources: [],
+      updatedAt: 0
+    }
+  });
+}
+
+async function assertIdentityEntryWithoutTemplateOpensPicker(): Promise<void> {
+  installProviderModalDomFixture();
+  const fixtureState = createNoTemplateIdentityFixtureState();
+  const { plugin } = createIdentityTestPlugin(fixtureState);
+  const tab = new CodexSettingTab(withSettingsTabDefaults(plugin) as never);
+  const mutable = tab as unknown as { personalMemoryState: Record<string, any> | null };
+  mutable.personalMemoryState = structuredClone(fixtureState);
+  tab.display();
+
+  const editButton = tab.containerEl.querySelector<ProviderModalTestElement>(
+    ".echoink-agent-identity-edit"
+  );
+  assert.ok(editButton, "identity button must exist when no template is chosen");
+  assert.equal(editButton.disabled, false, "identity button must NOT be disabled without a template");
+  assert.match(editButton.textContent, /选择风格并设置身份/u, "button copy guides into the main chain");
+
+  // Card copy must tell the user to pick a starting style first (not a dead end).
+  const identityCard = tab.containerEl.querySelector<ProviderModalTestElement>(
+    ".echoink-agent-identity-card"
+  );
+  assert.ok(identityCard);
+  assert.match(identityCard.textContent, /先选择一个初始风格/u, "card copy explains the next step");
+
+  // Clicking opens the template picker with all eight rows.
+  editButton.click();
+  const picker = tab.containerEl.querySelector<ProviderModalTestElement>(
+    ".echoink-template-picker.is-visible"
+  );
+  assert.ok(picker, "clicking the identity entry opens the template picker");
+  const rows = tab.containerEl.querySelectorAll<ProviderModalTestElement>(".echoink-picker-row");
+  assert.equal(rows.length, PERSONALITY_TEMPLATES.length, "all eight template rows render");
+  console.log("PASS settings: identity entry without template opens the picker");
+}
+
+async function assertIdentityEntryFirstRunKeepsSingleTransaction(): Promise<void> {
+  installProviderModalDomFixture();
+  const fixtureState = createIdentityFixtureState({
+    agentIdentity: {
+      schema: "echoink.agent-identity.v1",
+      revision: 0,
+      displayName: "EchoInk",
+      avatar: { kind: "default" },
+      updatedAt: 0
+    },
+    personalityState: {
+      schema: "echoink.personality.v1",
+      revision: 0,
+      templateId: null,
+      explicit: { sharpness: null, dominance: null, rigor: null, structure: null, boldness: null, creativity: null },
+      observed: { sharpness: null, dominance: null, rigor: null, structure: null, boldness: null, creativity: null },
+      history: [], candidates: [], learnedRequirements: [], processedSources: [],
+      updatedAt: 0
+    }
+  });
+  const { plugin } = createIdentityTestPlugin(fixtureState);
+  let templateCalls = 0;
+  let updateCalls = 0;
+  let lastInitialIdentity: unknown = null;
+  plugin.getCognitiveSystem = async () => ({
+    ...createCognitiveSystemStub(),
+    readPersonalityState: async () => fixtureState.personalityState,
+    readAgentIdentity: async () => fixtureState.agentIdentity,
+    renderPersonalitySummary: async () => "summary",
+    selectPersonalityTemplate: async (
+      templateId: string,
+      options?: { initialIdentity?: unknown }
+    ) => {
+      templateCalls += 1;
+      lastInitialIdentity = options?.initialIdentity ?? null;
+      return {
+        revision: 1,
+        state: { ...fixtureState.personalityState, templateId },
+        agent: "# Agent",
+        identity: fixtureState.agentIdentity
+      };
+    },
+    updateAgentIdentity: async () => { updateCalls += 1; }
+  });
+
+  const tab = new CodexSettingTab(withSettingsTabDefaults(plugin) as never);
+  const mutable = tab as unknown as { personalMemoryState: Record<string, any> | null };
+  mutable.personalMemoryState = structuredClone(fixtureState);
+  tab.display();
+
+  // Enter the first-run flow through the identity entry (not the profile footer).
+  const editButton = tab.containerEl.querySelector<ProviderModalTestElement>(
+    ".echoink-agent-identity-edit"
+  );
+  assert.ok(editButton);
+  editButton.click();
+  const row = tab.containerEl.querySelector<ProviderModalTestElement>(".echoink-picker-row");
+  assert.ok(row, "picker rows render from the identity entry");
+  row.click();
+  await settleMicrotasks();
+
+  // First-time: naming modal opened, nothing written yet.
+  assert.equal(templateCalls, 0, "selecting a template must not write before naming");
+  const nameInput = findLatestModalElement<ProviderModalTestElement>("name-input");
+  assert.ok(nameInput, "first-run naming modal opens from the identity entry");
+
+  // Cancel = zero writes.
+  const cancel = findLatestModalElement<ProviderModalTestElement>(".echoink-agent-identity-cancel");
+  assert.ok(cancel);
+  cancel.click();
+  await settleMicrotasks();
+  assert.equal(templateCalls, 0, "cancel keeps zero writes");
+  assert.equal(updateCalls, 0, "cancel must not call updateAgentIdentity");
+
+  // Complete the main chain: exactly one transaction carrying initialIdentity,
+  // and NO second write through updateAgentIdentity.
+  const rowAgain = tab.containerEl.querySelector<ProviderModalTestElement>(".echoink-picker-row");
+  assert.ok(rowAgain, "picker stays open after cancelling the naming modal");
+  rowAgain!.click();
+  await settleMicrotasks();
+  const nameInput2 = findLatestModalElement<ProviderModalTestElement>("name-input");
+  assert.ok(nameInput2);
+  (nameInput2 as unknown as { value: string }).value = "小墨";
+  nameInput2!.fireEvent("input");
+  const confirm2 = findLatestModalElement<ProviderModalTestElement>(".echoink-agent-identity-confirm");
+  assert.ok(confirm2);
+  assert.equal((confirm2 as unknown as { disabled: boolean }).disabled, false);
+  confirm2!.click();
+  await settleMicrotasks();
+
+  assert.equal(templateCalls, 1, "完成设置 commits template + identity exactly once");
+  assert.deepEqual(lastInitialIdentity, {
+    displayName: "小墨",
+    avatar: { kind: "default" }
+  });
+  assert.equal(updateCalls, 0, "first-run must not double-write via updateAgentIdentity");
+  console.log("PASS settings: identity-entry first-run keeps a single transaction");
+}
+
+async function assertIdentityEntryWithTemplateOpensEditModal(): Promise<void> {
+  installProviderModalDomFixture();
+  const fixtureState = createIdentityFixtureState();
+  const { plugin, refreshCalls } = createIdentityTestPlugin(fixtureState);
+  let updated: { displayName: string; avatar: { kind: string } } | null = null;
+  plugin.getCognitiveSystem = async () => ({
+    ...createCognitiveSystemStub(),
+    readPersonalityState: async () => fixtureState.personalityState,
+    renderPersonalitySummary: async () => "summary",
+    updateAgentIdentity: async (draft: { displayName: string; avatar: { kind: string } }) => {
+      updated = draft;
+      return { revision: 4, identity: { ...fixtureState.agentIdentity, ...draft }, agent: "# Agent" };
+    }
+  });
+
+  const tab = new CodexSettingTab(withSettingsTabDefaults(plugin) as never);
+  const mutable = tab as unknown as { personalMemoryState: Record<string, any> | null };
+  mutable.personalMemoryState = structuredClone(fixtureState);
+  tab.display();
+
+  const editButton = tab.containerEl.querySelector<ProviderModalTestElement>(
+    ".echoink-agent-identity-edit"
+  );
+  assert.ok(editButton);
+  assert.equal(editButton.disabled, false, "edit identity stays clickable with a template");
+  assert.match(editButton.textContent, /编辑身份/u, "button copy is 编辑身份 once a template exists");
+
+  editButton.click();
+  // Edit-mode modal opens prefilled; the template picker must NOT open.
+  const nameInput = findLatestModalElement<ProviderModalTestElement>("name-input");
+  assert.ok(nameInput, "edit identity modal opens");
+  assert.equal((nameInput as unknown as { value: string }).value, "小墨");
+  assert.equal(
+    tab.containerEl.querySelector(".echoink-template-picker.is-visible"),
+    null,
+    "editing identity must not open the template picker"
+  );
+
+  (nameInput as unknown as { value: string }).value = "阿澈";
+  nameInput.fireEvent("input");
+  const confirm = findLatestModalElement<ProviderModalTestElement>(".echoink-agent-identity-confirm");
+  assert.ok(confirm);
+  confirm.click();
+  await settleMicrotasks();
+
+  assert.ok(updated, "updateAgentIdentity must be called on save");
+  assert.equal(updated!.displayName, "阿澈");
+  assert.equal(refreshCalls() >= 1, true, "save refreshes settings + message headers");
+  console.log("PASS settings: identity entry with template opens the edit modal only");
+}
+
+async function assertTemplatePickerTableStructure(): Promise<void> {
+  installProviderModalDomFixture();
+  const fixtureState = createNoTemplateIdentityFixtureState();
+  const { plugin } = createIdentityTestPlugin(fixtureState);
+  let templateCalls = 0;
+  plugin.getCognitiveSystem = async () => ({
+    ...createCognitiveSystemStub(),
+    readPersonalityState: async () => fixtureState.personalityState,
+    readAgentIdentity: async () => ({
+      schema: "echoink.agent-identity.v1",
+      revision: 0,
+      displayName: "EchoInk",
+      avatar: { kind: "default" },
+      updatedAt: 0
+    }),
+    renderPersonalitySummary: async () => "summary",
+    selectPersonalityTemplate: async () => {
+      templateCalls += 1;
+      throw new Error("structure test must not write");
+    }
+  });
+
+  const tab = new CodexSettingTab(withSettingsTabDefaults(plugin) as never);
+  const mutable = tab as unknown as { personalMemoryState: Record<string, any> | null };
+  mutable.personalMemoryState = structuredClone(fixtureState);
+  tab.display();
+
+  const editButton = tab.containerEl.querySelector<ProviderModalTestElement>(
+    ".echoink-agent-identity-edit"
+  );
+  editButton!.click();
+  const picker = tab.containerEl.querySelector<ProviderModalTestElement>(
+    ".echoink-template-picker.is-visible"
+  );
+  assert.ok(picker, "picker opens");
+
+  // Two-column header: 风格 / 行为表现.
+  const header = tab.containerEl.querySelector<ProviderModalTestElement>(
+    ".echoink-picker-columns-header"
+  );
+  assert.ok(header, "picker renders a column header row");
+  assert.match(header!.querySelector(".echoink-picker-column-name")!.textContent, /风格/u);
+  assert.match(header!.querySelector(".echoink-picker-column-desc")!.textContent, /行为表现/u);
+
+  // Each template is exactly one whole-row button carrying name + description.
+  const rows = tab.containerEl.querySelectorAll<ProviderModalTestElement>(".echoink-picker-row");
+  assert.equal(rows.length, PERSONALITY_TEMPLATES.length, "eight template rows");
+  PERSONALITY_TEMPLATES.forEach((template, index) => {
+    const row = rows[index];
+    assert.equal(row.tagName, "BUTTON", `row ${template.id} is a single clickable button`);
+    assert.equal(row.querySelectorAll("button").length, 0, `row ${template.id} has no nested buttons`);
+    const name = row.querySelector(".echoink-picker-column-name");
+    const desc = row.querySelector(".echoink-picker-column-desc");
+    assert.ok(name && desc, `row ${template.id} carries name and description nodes`);
+    assert.equal(name!.textContent, template.labelZh, `row order follows PERSONALITY_TEMPLATES (${template.id})`);
+    assert.equal(desc!.textContent, template.richDescZh, `description for ${template.id} comes from the template constant`);
+  });
+
+  // Cancel closes the list with zero writes.
+  const cancelBtn = tab.containerEl.querySelector<ProviderModalTestElement>(".echoink-picker-cancel-btn");
+  assert.ok(cancelBtn, "cancel button renders");
+  cancelBtn!.click();
+  const closedPicker = tab.containerEl.querySelector<ProviderModalTestElement>(".echoink-template-picker");
+  assert.ok(closedPicker && !closedPicker.hasClass("is-visible"), "cancel closes the picker");
+  assert.equal(tab.containerEl.querySelectorAll(".echoink-picker-row").length, 0, "rows removed on cancel");
+  assert.equal(templateCalls, 0, "cancel keeps zero writes");
+  console.log("PASS settings: template picker renders as a left-aligned two-column table");
+}
+
+async function assertPersonalityResetStillRequiresConfirm(): Promise<void> {
+  installProviderModalDomFixture();
+  const fixtureState = createIdentityFixtureState();
+  const { plugin } = createIdentityTestPlugin(fixtureState);
+  let templateCalls = 0;
+  plugin.getCognitiveSystem = async () => ({
+    ...createCognitiveSystemStub(),
+    readPersonalityState: async () => fixtureState.personalityState,
+    renderPersonalitySummary: async () => "summary",
+    selectPersonalityTemplate: async () => {
+      templateCalls += 1;
+      throw new Error("reset test must not write");
+    }
+  });
+
+  const tab = new CodexSettingTab(withSettingsTabDefaults(plugin) as never);
+  const mutable = tab as unknown as { personalMemoryState: Record<string, any> | null };
+  mutable.personalMemoryState = structuredClone(fixtureState);
+  tab.display();
+  await settleMicrotasks();
+
+  const reselect = tab.containerEl.querySelector<ProviderModalTestElement>(
+    ".echoink-agent-profile-reselect"
+  );
+  assert.ok(reselect, "reset entry exists when a template is set");
+  assert.equal(reselect.dataset.hasTemplate, "true", "personality load marks the template present");
+
+  // Clicking must open the confirmation modal, NOT the picker directly.
+  reselect!.click();
+  await settleMicrotasks();
+  assert.equal(
+    tab.containerEl.querySelector(".echoink-template-picker.is-visible"),
+    null,
+    "reset must stay gated behind the confirmation modal"
+  );
+  const confirmDialog = openTestModals[openTestModals.length - 1];
+  assert.ok(confirmDialog, "confirmation modal opens for personality reset");
+  const dialogButtons = (confirmDialog.contentEl as unknown as ProviderModalTestElement)
+    .querySelectorAll<ProviderModalTestElement>("button");
+  const decline = dialogButtons.find((button) => button.textContent === "取消");
+  assert.ok(decline, "confirm dialog offers cancel");
+  decline!.click();
+  await settleMicrotasks();
+  assert.equal(
+    tab.containerEl.querySelector(".echoink-template-picker.is-visible"),
+    null,
+    "declining keeps the picker closed"
+  );
+  assert.equal(templateCalls, 0, "declining writes nothing");
+
+  // Accepting opens the template list (still no write until a row is chosen).
+  reselect!.click();
+  await settleMicrotasks();
+  const confirmDialog2 = openTestModals[openTestModals.length - 1];
+  const accept = (confirmDialog2.contentEl as unknown as ProviderModalTestElement)
+    .querySelectorAll<ProviderModalTestElement>("button")
+    .find((button) => button.hasClass("mod-cta"));
+  assert.ok(accept, "confirm dialog offers an accept action");
+  accept!.click();
+  await settleMicrotasks();
+  assert.ok(
+    tab.containerEl.querySelector(".echoink-template-picker.is-visible"),
+    "accepting opens the template list"
+  );
+  assert.equal(templateCalls, 0, "opening the reset list writes nothing");
+  console.log("PASS settings: personality reset still requires the confirmation modal");
+}
+
+async function assertIdentityEntryRespectsFailClosedRetry(): Promise<void> {
+  installProviderModalDomFixture();
+  const fixtureState = createNoTemplateIdentityFixtureState();
+  const { plugin } = createIdentityTestPlugin(fixtureState);
+  let templateCalls = 0;
+  let updateCalls = 0;
+  plugin.getCognitiveSystem = async () => ({
+    ...createCognitiveSystemStub(),
+    readPersonalityState: async () => {
+      throw new Error("personality-state-corrupt");
+    },
+    readAgentIdentity: async () => null,
+    renderPersonalitySummary: async () => "summary",
+    selectPersonalityTemplate: async () => { templateCalls += 1; },
+    updateAgentIdentity: async () => { updateCalls += 1; }
+  });
+
+  const tab = new CodexSettingTab(withSettingsTabDefaults(plugin) as never);
+  const mutable = tab as unknown as { personalMemoryState: Record<string, any> | null };
+  mutable.personalMemoryState = structuredClone(fixtureState);
+  tab.display();
+  await settleMicrotasks();
+
+  // The profile card entered fail-closed mode (retry entry, not template picker).
+  const reselect = tab.containerEl.querySelector<ProviderModalTestElement>(
+    ".echoink-agent-profile-reselect"
+  );
+  assert.ok(reselect);
+  assert.equal(reselect.dataset.failClosed, "true", "profile card enters fail-closed on read failure");
+
+  // Identity entry stays clickable but must route into the retry gate,
+  // never into identity creation under an unknown personality state.
+  const editButton = tab.containerEl.querySelector<ProviderModalTestElement>(
+    ".echoink-agent-identity-edit"
+  );
+  assert.ok(editButton, "identity entry exists in fail-closed mode");
+  assert.equal(editButton.disabled, false, "identity entry stays clickable in fail-closed mode");
+  editButton!.click();
+  await settleMicrotasks();
+
+  assert.equal(
+    tab.containerEl.querySelector(".echoink-template-picker.is-visible"),
+    null,
+    "fail-closed: identity entry must not open the picker"
+  );
+  assert.equal(
+    findLatestModalElement<ProviderModalTestElement>("name-input"),
+    null,
+    "fail-closed: identity entry must not open an identity modal"
+  );
+  assert.equal(templateCalls, 0, "fail-closed: no template write");
+  assert.equal(updateCalls, 0, "fail-closed: no identity write");
+  console.log("PASS settings: identity entry respects the fail-closed retry gate");
 }
 
 async function assertIdentityModalNameValidation(): Promise<void> {
