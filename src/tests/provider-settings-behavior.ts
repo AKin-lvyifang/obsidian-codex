@@ -2236,6 +2236,8 @@ async function assertKnowledgeInitializationExperienceContract(): Promise<void> 
   await assertKnowledgeInitPausedMappingsAndTechnicalDetails();
   await assertKnowledgeInitProgressAndCompletion();
   await assertKnowledgeInitNotePickerModalContract();
+  await assertKnowledgeInitRecoveryAndActionErrorRendering();
+  await assertKnowledgeInitRawPickerSemantics();
   assertKnowledgeInitNarrowLayoutCssContract();
 }
 
@@ -2403,15 +2405,24 @@ async function assertKnowledgeInitCustomTabDirectoriesAndAssignments(): Promise<
 async function assertKnowledgeInitPausedMappingsAndTechnicalDetails(): Promise<void> {
   installProviderModalDomFixture();
   // 3/19. 内部状态只出现在「查看技术详情」折叠区。
+  // 夹具 digest 一致、Provider 与当前设置一致 → 派生为 continue 分支。
   const state = {
     job: makeKnowledgeInitJobFixture({
       status: "failed_recoverable",
       phase: "move_notes",
+      confirmedDigest: "sha256:plan-digest-fixture",
       lastError: "File already exists: raw/imported/notes/alpha.md",
       recoveryAction: "检查源与目标的真实状态后再继续；不会覆盖或删除任何文件。"
     })
   };
-  const { plugin, calls } = createKnowledgeInitPluginFixture(state);
+  const { plugin, calls, settings } = createKnowledgeInitPluginFixture(state);
+  // continue 分支要求当前设置里存在与 job 快照一致的可用 Provider：
+  // 快照比对用 providerId + model（id 即 provider-ready）。
+  const readyProvider = createApiProviderConfig("deepseek", "provider-ready");
+  readyProvider.apiKey = "knowledge-init-test-key";
+  readyProvider.model = "model-ready";
+  settings.apiProviders = [readyProvider];
+  activateApiProvider(settings, readyProvider);
   const tab = await renderKnowledgeInitTab(plugin);
   const panel = knowledgeInitPanel(tab);
   assert.match(panel.textContent, /初始化暂停了/u);
@@ -2647,6 +2658,295 @@ async function assertKnowledgeInitNotePickerModalContract(): Promise<void> {
   assert.equal(providerModalTestDocument.activeElement, addAgain);
 }
 
+/**
+ * 修复1/2/3 回归：
+ * - 渲染优先级：settings 已 initialized 也不能遮住新的未完成作业；
+ *   无 job + initialized → 完成态。
+ * - 恢复动作按结构化字段派生：blocked_conflict 不出现「继续初始化」；
+ *   Provider 缺失 / digest 不一致 → 「重新检查并继续」。
+ * - 用户动作失败必须可见可重试（actionError + 技术详情）。
+ */
+async function assertKnowledgeInitRecoveryAndActionErrorRendering(): Promise<void> {
+  installProviderModalDomFixture();
+
+  // 1. settings 已 initialized + 新的 paused 作业（digest 与 Provider 一致）：
+  //    必须显示恢复界面，而不是「知识库已就绪」。
+  const maskedState = {
+    job: makeKnowledgeInitJobFixture({
+      status: "paused",
+      phase: "move_notes",
+      confirmedDigest: "sha256:plan-digest-fixture"
+    })
+  };
+  const masked = createKnowledgeInitPluginFixture(maskedState);
+  const readyProvider = createApiProviderConfig("deepseek", "provider-ready");
+  readyProvider.apiKey = "knowledge-init-test-key";
+  readyProvider.model = "model-ready";
+  masked.settings.apiProviders = [readyProvider];
+  activateApiProvider(masked.settings, readyProvider);
+  masked.settings.knowledgeBase.initialization.status = "initialized";
+  const maskedTab = await renderKnowledgeInitTab(masked.plugin);
+  const maskedPanel = knowledgeInitPanel(maskedTab);
+  assert.doesNotMatch(maskedPanel.textContent, /知识库已就绪/u,
+    "a pending job must never be masked by the done panel");
+  assert.match(maskedPanel.textContent, /初始化暂停了/u);
+  assert.equal(maskedPanel.querySelector(".echoink-knowledge-init-cta")?.textContent, "继续初始化");
+  maskedTab.hide();
+
+  // 2. 无 job + settings initialized → 完成态（历史标记兜底）。
+  const doneState = { job: null as Record<string, any> | null };
+  const done = createKnowledgeInitPluginFixture(doneState);
+  done.settings.knowledgeBase.initialization.status = "initialized";
+  const doneTab = await renderKnowledgeInitTab(done.plugin);
+  assert.match(knowledgeInitPanel(doneTab).textContent, /知识库已就绪/u);
+  doneTab.hide();
+
+  // 3. blocked_conflict：只有「重新检查冲突」+「重新选择方案」，
+  //    禁止出现必然失败的「继续初始化」。
+  const conflictState = {
+    job: makeKnowledgeInitJobFixture({
+      mode: "recommended",
+      status: "blocked_conflict",
+      phase: "confirmed",
+      confirmedDigest: "sha256:plan-digest-fixture"
+    })
+  };
+  const conflict = createKnowledgeInitPluginFixture(conflictState);
+  const conflictTab = await renderKnowledgeInitTab(conflict.plugin);
+  const conflictPanel = knowledgeInitPanel(conflictTab);
+  assert.match(conflictPanel.textContent, /初始化遇到冲突/u);
+  assert.equal(conflictPanel.querySelector(".echoink-knowledge-init-cta")?.textContent, "重新检查冲突");
+  assert.ok(
+    !knowledgeInitButtons(conflictPanel).some((button) => button.textContent === "继续初始化"),
+    "blocked_conflict must not offer a doomed continue"
+  );
+  // 推荐模式重新检查 = 重新扫描后立即确认。
+  conflictPanel.querySelector<HTMLButtonElement>(".echoink-knowledge-init-cta")?.click();
+  await settleKnowledgeInitTab(conflictTab);
+  assert.deepEqual(conflict.calls.map((call) => call.method), ["start:recommended", "confirm"]);
+  conflictTab.hide();
+
+  // 3b. 自定义冲突点「修改分配」时，重新扫描后必须一次性恢复仍然合法的
+  // 旧目录选择；兼容的 keep 也必须保留，不能静默退回 Raw。
+  const customConflictState = {
+    job: makeKnowledgeInitJobFixture({
+      mode: "custom",
+      status: "blocked_conflict",
+      phase: "confirmed",
+      confirmedDigest: "sha256:plan-digest-fixture",
+      items: [
+        makeKnowledgeInitItemFixture("notes/alpha.md", "wiki"),
+        makeKnowledgeInitItemFixture("notes/beta.md", "keep", {
+          targetPath: null,
+          state: "kept"
+        }),
+        makeKnowledgeInitItemFixture("notes/gamma.md", "raw"),
+        makeKnowledgeInitItemFixture("notes/delta.md", "projects"),
+      ]
+    })
+  };
+  const customConflict = createKnowledgeInitPluginFixture(customConflictState);
+  const customConflictTab = await renderKnowledgeInitTab(customConflict.plugin);
+  const customConflictPanel = knowledgeInitPanel(customConflictTab);
+  const editAssignments = knowledgeInitButtons(customConflictPanel).find(
+    (button) => button.textContent === "修改分配"
+  );
+  assert.ok(editAssignments, "custom conflict must offer an edit-assignments action");
+  editAssignments.click();
+  await settleKnowledgeInitTab(customConflictTab);
+  assert.deepEqual(
+    customConflict.calls.map((call) => call.method),
+    ["start:custom", "assignMany"],
+    "editing a custom conflict must rescan once and restore assignments once"
+  );
+  assert.deepEqual(
+    customConflict.calls.find((call) => call.method === "assignMany")?.args,
+    [
+      { sourcePath: "notes/alpha.md", role: "wiki" },
+      { sourcePath: "notes/beta.md", role: "keep" },
+      { sourcePath: "notes/delta.md", role: "projects" },
+    ],
+    "custom recovery must preserve every still-valid non-Raw assignment"
+  );
+  assert.ok(
+    knowledgeInitPanel(customConflictTab).querySelector('[role="tabpanel"]'),
+    "custom recovery must stop at the editable preview instead of confirming"
+  );
+  customConflictTab.hide();
+
+  // 4a. Provider 缺失（当前设置没有可用 Provider）→ 重新检查并继续 + 人话提示。
+  const providerlessState = {
+    job: makeKnowledgeInitJobFixture({
+      status: "paused",
+      phase: "move_notes",
+      confirmedDigest: "sha256:plan-digest-fixture"
+    })
+  };
+  const providerless = createKnowledgeInitPluginFixture(providerlessState);
+  const providerlessTab = await renderKnowledgeInitTab(providerless.plugin);
+  const providerlessPanel = knowledgeInitPanel(providerlessTab);
+  assert.equal(providerlessPanel.querySelector(".echoink-knowledge-init-cta")?.textContent, "重新检查并继续");
+  assert.match(providerlessPanel.textContent, /需要先设置可用模型/u);
+  providerlessTab.hide();
+
+  // 4b. digest 不一致（从未确认）→ 重新检查并继续，提示「计划已变化」。
+  const staleDigestState = {
+    job: makeKnowledgeInitJobFixture({ status: "paused", phase: "preview" })
+  };
+  const staleDigest = createKnowledgeInitPluginFixture(staleDigestState);
+  const staleProvider = createApiProviderConfig("deepseek", "provider-ready");
+  staleProvider.apiKey = "knowledge-init-test-key";
+  staleProvider.model = "model-ready";
+  staleDigest.settings.apiProviders = [staleProvider];
+  activateApiProvider(staleDigest.settings, staleProvider);
+  const staleTab = await renderKnowledgeInitTab(staleDigest.plugin);
+  const stalePanel = knowledgeInitPanel(staleTab);
+  assert.equal(stalePanel.querySelector(".echoink-knowledge-init-cta")?.textContent, "重新检查并继续");
+  assert.match(stalePanel.textContent, /模型或计划已经变化/u);
+  staleTab.hide();
+
+  // 5. 用户动作失败可见可重试：开始初始化抛错 → 内联错误 + 技术详情；
+  //    再次点击成功 → 错误消失并进入进度界面。
+  //    用闭包标志切换「抛错 / 成功」，避免渲染后替换方法被快照绕过。
+  const errorState = { job: null as Record<string, any> | null };
+  const { plugin } = createKnowledgeInitPluginFixture(errorState);
+  const originalStart = plugin.startEchoInkKnowledgeInitialization;
+  let startShouldThrow = true;
+  plugin.startEchoInkKnowledgeInitialization = async () => {
+    if (startShouldThrow) throw new Error("injected-start-failure");
+    return originalStart("recommended");
+  };
+  const errorTab = await renderKnowledgeInitTab(plugin);
+  let errorPanel = knowledgeInitPanel(errorTab);
+  errorPanel.querySelector<HTMLButtonElement>(".echoink-knowledge-init-cta")?.click();
+  await settleKnowledgeInitTab(errorTab);
+  errorPanel = knowledgeInitPanel(errorTab);
+  const errorBoxPresent = errorPanel.querySelector(".echoink-knowledge-init-action-error") !== null;
+  assert.equal(errorBoxPresent, true, "failed user action must surface a visible error");
+  assert.match(errorPanel.textContent, /操作没有完成，可以再试一次/u);
+  assert.match(errorPanel.textContent, /injected-start-failure/u);
+  // 重试成功：切到成功分支，错误提示消失，进入运行态。
+  startShouldThrow = false;
+  errorPanel.querySelector<HTMLButtonElement>(".echoink-knowledge-init-cta")?.click();
+  await settleKnowledgeInitTab(errorTab);
+  const recoveredPanel = knowledgeInitPanel(errorTab);
+  const recoveredHasError = recoveredPanel.querySelector(".echoink-knowledge-init-action-error") !== null;
+  assert.equal(recoveredHasError, false, "a successful retry must clear the action error");
+  assert.match(recoveredPanel.textContent, /暂停初始化/u);
+  errorTab.hide();
+}
+
+/**
+ * 修复5/3 回归：Raw 目录选择器是「移回 Raw」语义——
+ * 已在 Raw 的笔记只读展示、无预勾选；提交失败时 Modal 保持打开、
+ * 显示内联错误且可以再次提交。
+ */
+async function assertKnowledgeInitRawPickerSemantics(): Promise<void> {
+  installProviderModalDomFixture();
+  const state = { job: makeKnowledgeInitJobFixture() };
+  const { plugin, calls } = createKnowledgeInitPluginFixture(state);
+  // 失败注入必须在渲染前接好：renderKnowledgeInitTab 会把 plugin 展开成快照，
+  // 渲染之后再替换方法不会生效。这里用闭包标志切换「下一次 assignMany 抛错」。
+  const originalAssign = plugin.assignManyEchoInkKnowledgeInitializationNotes;
+  let failNextAssign = false;
+  plugin.assignManyEchoInkKnowledgeInitializationNotes = async (
+    assignments: ReadonlyArray<{ sourcePath: string; role: string }>
+  ) => {
+    if (failNextAssign) {
+      failNextAssign = false;
+      throw new Error("injected-assign-failure");
+    }
+    return originalAssign(assignments);
+  };
+  const tab = await renderKnowledgeInitTab(plugin);
+  let panel = knowledgeInitPanel(tab);
+
+  // Raw 行（第 0 行）按钮文案是「移回 Raw」而不是「添加笔记」。
+  const rawRow = panel.querySelectorAll(".echoink-knowledge-init-dir-row")[0];
+  const rawAdd = rawRow.querySelector<HTMLButtonElement>(".echoink-knowledge-init-dir-add");
+  assert.equal(rawAdd.textContent, "移回 Raw");
+  assert.equal(rawAdd.getAttribute("aria-label"), "把其他目录的笔记移回 Raw");
+  rawAdd.focus();
+  rawAdd.click();
+  const modal = openTestModals.at(-1);
+  assert.ok(modal, "raw picker modal opens");
+  assert.match(modal.titleEl.textContent, /移回 Raw/u);
+
+  // 已在 Raw 的笔记（beta/gamma）只读；其他笔记（alpha/delta）可勾选，无预勾选。
+  assert.match(modal.contentEl.textContent, /已在 Raw/u);
+  const readonlyRows = modal.contentEl.querySelectorAll(".echoink-knowledge-note-picker-row.is-readonly");
+  assert.equal(readonlyRows.length, 2);
+  const checkboxes = modal.contentEl.querySelectorAll<HTMLInputElement>(
+    ".echoink-knowledge-note-picker-checkbox"
+  );
+  assert.equal(checkboxes.length, 2);
+  assert.deepEqual(checkboxes.map((checkbox) => checkbox.checked), [false, false]);
+  assert.equal(
+    modal.contentEl.querySelector(".echoink-knowledge-note-picker-confirm")?.textContent,
+    "移回 Raw（0）"
+  );
+
+  // 勾选 alpha → 计数与 badge 更新，确认后只写 raw 分配。
+  checkboxes[0].checked = true;
+  checkboxes[0].fireEvent("change");
+  assert.equal(
+    modal.contentEl.querySelector(".echoink-knowledge-note-picker-confirm")?.textContent,
+    "移回 Raw（1）"
+  );
+  modal.contentEl.querySelector(".echoink-knowledge-note-picker-confirm")?.click();
+  await flushProviderModalTasks();
+  assert.deepEqual(calls.filter((call) => call.method === "assignMany")[0]?.args, [
+    { sourcePath: "notes/alpha.md", role: "raw" }
+  ]);
+  assert.equal(openTestModals.length, 0);
+  // 焦点恢复到重建后的 Raw「移回 Raw」按钮。
+  panel = knowledgeInitPanel(tab);
+  const rebuiltRawAdd = panel.querySelectorAll(".echoink-knowledge-init-dir-row")[0]
+    .querySelector(".echoink-knowledge-init-dir-add");
+  assert.equal(providerModalTestDocument.activeElement, rebuiltRawAdd);
+
+  // 提交失败：Modal 保持打开、内联错误、按钮可再次点击；重试成功后关闭。
+  failNextAssign = true;
+  rebuiltRawAdd.click();
+  const failModal = openTestModals.at(-1);
+  assert.ok(failModal, "raw picker reopens for the failure scenario");
+  const failCheckboxes = failModal.contentEl.querySelectorAll<HTMLInputElement>(
+    ".echoink-knowledge-note-picker-checkbox"
+  );
+  // alpha 已经在 Raw（只读）；剩下 delta 一个可勾选。
+  assert.equal(failCheckboxes.length, 1);
+  failCheckboxes[0].checked = true;
+  failCheckboxes[0].fireEvent("change");
+  const failConfirm = failModal.contentEl.querySelector<HTMLButtonElement>(
+    ".echoink-knowledge-note-picker-confirm"
+  );
+  failConfirm.click();
+  await flushProviderModalTasks();
+  assert.equal(openTestModals.length, 1, "failed save must keep the modal open");
+  const inlineError = failModal.contentEl.querySelector(".echoink-knowledge-note-picker-error");
+  assert.ok(inlineError, "failed save must render an inline error");
+  assert.match(inlineError.textContent, /保存失败：injected-assign-failure/u);
+  assert.equal(failConfirm.disabled, false, "confirm button must be re-enabled after failure");
+  assert.ok(
+    knowledgeInitPanel(tab).querySelector(".echoink-knowledge-init-action-error"),
+    "the parent panel must also surface the failed assignment"
+  );
+  // 再次提交：成功并关闭。
+  failConfirm.click();
+  await flushProviderModalTasks();
+  assert.equal(openTestModals.length, 0);
+  assert.deepEqual(
+    calls.filter((call) => call.method === "assignMany").at(-1)?.args,
+    [{ sourcePath: "notes/delta.md", role: "raw" }]
+  );
+  assert.equal(
+    knowledgeInitPanel(tab).querySelector(".echoink-knowledge-init-action-error"),
+    null,
+    "a successful retry must remove the stale parent error banner immediately"
+  );
+  tab.hide();
+}
+
 function assertKnowledgeInitNarrowLayoutCssContract(): void {
   // 22. 窄设置窗口不依赖固定双列宽度；长路径可换行。
   const css = readFileSync("styles.css", "utf8");
@@ -2655,7 +2955,8 @@ function assertKnowledgeInitNarrowLayoutCssContract(): void {
   assert.doesNotMatch(dirRow, /grid-template-columns:\s*1fr\s+1fr/u);
   assert.match(
     css,
-    /\.echoink-knowledge-note-picker \.modal\s*\{[^}]*width:\s*min\(/u
+    /\.modal\.echoink-knowledge-note-picker\s*\{[^}]*width:\s*min\(/u,
+    "note picker selector must match the modal element itself (.modal.echoink-knowledge-note-picker)"
   );
   assert.match(
     css,

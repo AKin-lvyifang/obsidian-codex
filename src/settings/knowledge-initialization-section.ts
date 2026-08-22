@@ -1,15 +1,21 @@
 import { Notice, setIcon } from "obsidian";
 import type CodexForObsidianPlugin from "../main";
-import type {
-  KnowledgeInitializationAssignment,
-  KnowledgeInitializationJob,
-  KnowledgeInitializationMode,
-  KnowledgeInitializationRole
+import {
+  isKnowledgeInitializationRole,
+  type KnowledgeInitializationAssignment,
+  type KnowledgeInitializationJob,
+  type KnowledgeInitializationMode,
+  type KnowledgeInitializationProviderSnapshot,
+  type KnowledgeInitializationRole
 } from "../knowledge-base/initializer";
 import {
   buildKnowledgeInitializationProgress,
   type KnowledgeInitializationProgressStage
 } from "../knowledge-base/initialization-progress";
+import {
+  deriveKnowledgeInitializationRecovery,
+  type KnowledgeInitializationRecovery
+} from "./knowledge-initialization-recovery";
 import {
   apiProviderHasUsableApiKey,
   getActiveApiProvider,
@@ -73,6 +79,10 @@ interface KnowledgeInitProgressRefs {
  *
  * 普通主界面不暴露 revision/hash、冻结计划、Provider/model 快照、WAL、CAS、
  * Readback 等内部概念；它们保留在后台 job 中，仅出现在「查看技术详情」折叠区。
+ *
+ * 渲染优先级：当前作业优先，历史完成标记兜底。settings 里的 initialized
+ * 历史事实不会被清除，但只要存在未完成作业（preview/active/可恢复态），
+ * 就显示作业界面，不会被「知识库已就绪」遮住。
  */
 export class KnowledgeInitializationSection {
   private job: Readonly<KnowledgeInitializationJob> | null = null;
@@ -87,6 +97,9 @@ export class KnowledgeInitializationSection {
   private pollTimer: number | null = null;
   private pageEl: HTMLElement | null = null;
   private zh = true;
+  private actionError = "";
+  private actionErrorDetail = "";
+  private actionErrorEl: HTMLElement | null = null;
   private tabButtonEls: Record<KnowledgeInitializationMode, HTMLElement | null> = {
     recommended: null,
     custom: null
@@ -108,12 +121,14 @@ export class KnowledgeInitializationSection {
     }
     this.pageEl = null;
     this.progressRefs = null;
+    this.actionErrorEl = null;
   }
 
   render(page: HTMLElement, zh: boolean): void {
     this.pageEl = page;
     this.zh = zh;
     this.progressRefs = null;
+    this.actionErrorEl = null;
     const section = createSettingsSection(page, {
       title: zh ? "知识库管理" : "Knowledge management",
       surface: "flat"
@@ -139,19 +154,38 @@ export class KnowledgeInitializationSection {
       });
       return;
     }
-    if (settingsInitialized || job?.status === "initialized") {
-      this.renderDonePanel(panel);
-      return;
-    }
-    if (!job || this.reselecting || job.status === "preview") {
-      this.renderTabsPanel(panel);
-      return;
-    }
-    if (job.status === "active") {
+    // 用户动作失败提示：所有面板共用，成功或重新执行时清除。
+    this.renderActionError(panel);
+    // 当前作业优先：运行中 > 重新选择方案 > 预览 > 可恢复态。
+    if (job && job.status === "active") {
       this.renderProgressPanel(panel, job);
       this.schedulePoll();
       return;
     }
+    if (this.reselecting) {
+      this.renderTabsPanel(panel);
+      return;
+    }
+    if (job && job.status === "preview") {
+      this.renderTabsPanel(panel);
+      return;
+    }
+    if (!job) {
+      // 不存在任何作业：历史完成标记兜底，否则进入方案选择。
+      if (settingsInitialized) {
+        this.renderDonePanel(panel);
+      } else {
+        this.renderTabsPanel(panel);
+      }
+      return;
+    }
+    if (job.status === "initialized") {
+      this.renderDonePanel(panel);
+      return;
+    }
+    // 可恢复态优先于历史完成标记：settings 已 initialized 但出现新的
+    // 未完成作业（paused/cancelled/failed/blocked/write_uncertain）时，
+    // 不能被「知识库已就绪」遮住。
     this.renderPausedPanel(panel, job);
   }
 
@@ -178,6 +212,57 @@ export class KnowledgeInitializationSection {
       this.loaded = true;
     } catch {
       // 保留当前界面状态；由下一次渲染展示可重试的状态。
+    }
+  }
+
+  // ------------------------------------------------------------ action errors
+
+  /** 记录面向用户的短文案；原始错误只出现在「查看技术详情」里。 */
+  private recordActionError(error: unknown): void {
+    this.actionErrorDetail = error instanceof Error ? error.message : String(error);
+    this.actionError = this.zh
+      ? "操作没有完成，可以再试一次。"
+      : "The action didn't complete. You can try again.";
+  }
+
+  private clearActionError(): void {
+    this.actionError = "";
+    this.actionErrorDetail = "";
+    if (this.actionErrorEl?.isConnected) this.actionErrorEl.remove();
+    this.actionErrorEl = null;
+  }
+
+  private renderActionError(panel: HTMLElement): void {
+    if (!this.actionError) return;
+    const box = panel.createDiv({
+      cls: "echoink-knowledge-init-action-error",
+      attr: { role: "alert" }
+    });
+    this.actionErrorEl = box;
+    box.createDiv({ cls: "echoink-knowledge-init-action-error-text", text: this.actionError });
+    const details = box.createEl("details", { cls: "echoink-knowledge-init-tech" });
+    details.createEl("summary", {
+      text: this.zh ? "查看技术详情" : "View technical details"
+    });
+    details.createDiv({
+      cls: "echoink-knowledge-init-tech-value",
+      text: this.actionErrorDetail
+    });
+  }
+
+  /** 统一的动作包装：开始清错误、失败记错误并刷新状态、绝不静默。 */
+  private async runAction(action: () => Promise<void>): Promise<void> {
+    if (this.busy) return;
+    this.busy = true;
+    this.clearActionError();
+    try {
+      await action();
+    } catch (error) {
+      this.recordActionError(error);
+      await this.reloadAfterActionError();
+    } finally {
+      this.busy = false;
+      this.scheduleRender();
     }
   }
 
@@ -294,20 +379,13 @@ export class KnowledgeInitializationSection {
   }
 
   private async startRecommended(): Promise<void> {
-    if (this.busy) return;
-    this.busy = true;
     this.reselecting = false;
-    try {
+    await this.runAction(async () => {
       // 单次明确确认：UI 内部依次生成推荐 preview 并立即确认执行。
       this.job = await this.plugin.startEchoInkKnowledgeInitialization("recommended");
       this.job = await this.plugin.confirmEchoInkKnowledgeInitialization();
       this.loaded = true;
-    } catch {
-      await this.reloadAfterActionError();
-    } finally {
-      this.busy = false;
-      this.scheduleRender();
-    }
+    });
   }
 
   // --------------------------------------------------------------- custom tab
@@ -374,7 +452,9 @@ export class KnowledgeInitializationSection {
     try {
       this.job = await this.plugin.startEchoInkKnowledgeInitialization("custom");
       this.loaded = true;
-    } catch {
+      this.clearActionError();
+    } catch (error) {
+      this.recordActionError(error);
       await this.reloadAfterActionError();
     } finally {
       this.customPreviewLoading = false;
@@ -383,18 +463,11 @@ export class KnowledgeInitializationSection {
   }
 
   private async confirmCustom(): Promise<void> {
-    if (this.busy) return;
-    this.busy = true;
     this.reselecting = false;
-    try {
+    await this.runAction(async () => {
       this.job = await this.plugin.confirmEchoInkKnowledgeInitialization();
       this.loaded = true;
-    } catch {
-      await this.reloadAfterActionError();
-    } finally {
-      this.busy = false;
-      this.scheduleRender();
-    }
+    });
   }
 
   // ----------------------------------------------------------- directory list
@@ -434,12 +507,17 @@ export class KnowledgeInitializationSection {
         text: String(notes.length),
         attr: { "aria-label": zh ? `${label} 已分配 ${notes.length} 篇` : `${notes.length} notes in ${label}` }
       });
+      const addLabel = dir.role === "raw"
+        ? (zh ? "移回 Raw" : "Move back to Raw")
+        : (zh ? "添加笔记" : "Add notes");
       const add = row.createEl("button", {
         cls: "echoink-knowledge-init-dir-add",
-        text: zh ? "添加笔记" : "Add notes",
+        text: addLabel,
         attr: {
           type: "button",
-          "aria-label": zh ? `添加笔记到 ${label}` : `Add notes to ${label}`
+          "aria-label": dir.role === "raw"
+            ? (zh ? "把其他目录的笔记移回 Raw" : "Move notes back to Raw")
+            : (zh ? `添加笔记到 ${label}` : `Add notes to ${label}`)
         }
       }) as HTMLButtonElement;
       add.disabled = this.busy;
@@ -503,17 +581,27 @@ export class KnowledgeInitializationSection {
       notes,
       roleLabel: (candidate) => this.dirLabel(candidate),
       triggerEl,
-      onConfirm: (assignments) => this.applyAssignments(assignments, role)
+      // 目录列表提交后会被重建：按 role 找重建后的按钮，且只在 isConnected
+      // 时 focus；取消 / Escape / 提交成功 / 失败后再取消四条路径都走这里。
+      restoreFocus: () => this.focusDirAddButton(role),
+      onConfirm: (assignments) => this.applyAssignments(assignments, role, true)
     });
     modal.open();
   }
 
+  private focusDirAddButton(role: KnowledgeInitDirectoryRole): void {
+    const button = this.dirAddButtons.get(role);
+    if (button?.isConnected) button.focus();
+  }
+
   private async applyAssignments(
     assignments: readonly KnowledgeInitializationAssignment[],
-    focusRole?: KnowledgeInitDirectoryRole
+    focusRole?: KnowledgeInitDirectoryRole,
+    rethrow = false
   ): Promise<void> {
     if (this.busy || assignments.length === 0) return;
     this.busy = true;
+    this.clearActionError();
     try {
       this.job = await this.plugin.assignManyEchoInkKnowledgeInitializationNotes(assignments);
       this.loaded = true;
@@ -521,11 +609,14 @@ export class KnowledgeInitializationSection {
       // 「添加笔记」按钮，保持键盘用户的位置。
       if (this.dirListEl?.isConnected) {
         this.renderDirectoryList();
-        if (focusRole) this.dirAddButtons.get(focusRole)?.focus();
+        if (focusRole) this.focusDirAddButton(focusRole);
       } else this.scheduleRender();
-    } catch {
+    } catch (error) {
+      this.recordActionError(error);
       await this.reloadAfterActionError();
       this.scheduleRender();
+      // Modal 路径：把错误抛回，让 Modal 保持打开并显示自己的内联错误。
+      if (rethrow) throw error;
     } finally {
       this.busy = false;
     }
@@ -542,10 +633,11 @@ export class KnowledgeInitializationSection {
       cls: "echoink-knowledge-init-heading",
       text: zh ? "正在初始化知识库" : "Initializing your knowledge base"
     });
+    // 进度只来自真实 job 字段；运行中不会出现 100%（完成即切换完成态）。
     const progress = buildKnowledgeInitializationProgress(job, false);
     const step = progressStepLabel(progress.stage, zh);
     const rootEl = panel.createDiv({ cls: "echoink-knowledge-init-progress" });
-    // 稳定存在的 live region：后续只更新文本，不设置 tabindex。
+    // 稳定存在的 live region；后续只更新文本，不设置 tabindex。
     const statusEl = rootEl.createDiv({
       cls: "echoink-knowledge-init-status",
       attr: { role: "status", "aria-live": "polite" }
@@ -616,18 +708,11 @@ export class KnowledgeInitializationSection {
   }
 
   private async pauseRun(): Promise<void> {
-    if (this.busy) return;
-    this.busy = true;
-    try {
+    await this.runAction(async () => {
       // 复用现有 cancel API；后台 cancelled 状态仍可通过「继续初始化」恢复。
       this.job = await this.plugin.cancelEchoInkKnowledgeInitialization();
       this.loaded = true;
-    } catch {
-      await this.reloadAfterActionError();
-    } finally {
-      this.busy = false;
-      this.scheduleRender();
-    }
+    });
   }
 
   // -------------------------------------------------------------- paused/error
@@ -637,11 +722,18 @@ export class KnowledgeInitializationSection {
     job: Readonly<KnowledgeInitializationJob>
   ): void {
     const zh = this.zh;
+    // 恢复方式完全由结构化字段派生（status / 两个 digest / Provider 快照），
+    // 不解析 lastError 中文字符串。
+    const recovery = deriveKnowledgeInitializationRecovery({
+      job,
+      currentProvider: this.currentProviderSnapshot()
+    });
     panel.createDiv({
       cls: "echoink-knowledge-init-heading",
-      text: zh ? "初始化暂停了" : "Initialization paused"
+      text: recovery.kind === "recheck-conflict"
+        ? (zh ? "初始化遇到冲突" : "Initialization hit a conflict")
+        : (zh ? "初始化暂停了" : "Initialization paused")
     });
-    const providerMissing = job.extractionQueue.length > 0 && !this.currentProviderReady();
     const notice = panel.createDiv({
       cls: "echoink-knowledge-init-pause",
       attr: { role: "status", "aria-live": "polite" }
@@ -651,30 +743,110 @@ export class KnowledgeInitializationSection {
     icon.setAttr("aria-hidden", "true");
     notice.createDiv({
       cls: "echoink-knowledge-init-pause-text",
-      text: providerMissing
-        ? (zh
-            ? "需要先设置可用模型，才能把 Raw 笔记提炼成 Wiki。"
-            : "Set up an available model first so Raw notes can be distilled into Wiki.")
-        : (zh
-            ? "初始化暂停了。已经完成的内容会保留，解决问题后可以继续。"
-            : "Initialization paused. Completed work is kept; you can continue after fixing the issue.")
+      text: this.pauseNoticeText(recovery, job, zh)
     });
     const actions = panel.createDiv({ cls: "echoink-knowledge-init-actions" });
-    const resume = actions.createEl("button", {
-      cls: "mod-cta echoink-knowledge-init-cta",
-      text: zh ? "继续初始化" : "Continue initialization",
-      attr: { type: "button", "data-echoink-focus-key": FOCUS_KEY }
-    });
-    resume.onclick = () => void this.resumeRun();
-    const reselect = actions.createEl("button", {
-      cls: "echoink-knowledge-init-secondary",
-      text: zh ? "重新选择方案" : "Choose a different plan",
-      attr: { type: "button" }
-    });
-    reselect.onclick = () => {
-      this.reselecting = true;
-      this.scheduleRender();
-    };
+    if (recovery.kind === "recheck-conflict") {
+      // blocked_conflict：禁止展示必然失败的「继续初始化」。
+      const recheck = actions.createEl("button", {
+        cls: "mod-cta echoink-knowledge-init-cta",
+        text: zh ? "重新检查冲突" : "Recheck conflicts",
+        attr: { type: "button", "data-echoink-focus-key": FOCUS_KEY }
+      });
+      recheck.onclick = () => void this.recheckConflict();
+      const reselect = actions.createEl("button", {
+        cls: "echoink-knowledge-init-secondary",
+        text: job.mode === "custom"
+          ? (zh ? "修改分配" : "Edit assignments")
+          : (zh ? "重新选择方案" : "Choose a different plan"),
+        attr: { type: "button" }
+      });
+      reselect.onclick = () => {
+        if (job.mode === "custom") {
+          void this.rescanCustomPreservingAssignments();
+          return;
+        }
+        this.enterPlanSelection();
+      };
+    } else if (recovery.kind === "recheck-preview") {
+      // Provider 缺失/变化或 digest 不一致：不能直接 continueJob()，
+      // 必须重新生成 preview。
+      const recheck = actions.createEl("button", {
+        cls: "mod-cta echoink-knowledge-init-cta",
+        text: zh ? "重新检查并继续" : "Recheck and continue",
+        attr: { type: "button", "data-echoink-focus-key": FOCUS_KEY }
+      });
+      recheck.onclick = () => void this.recheckPreviewAndContinue();
+      // 保留「重新选择方案」出口：计划已失效时用户也可以直接回到方案选择。
+      const reselect = actions.createEl("button", {
+        cls: "echoink-knowledge-init-secondary",
+        text: zh ? "重新选择方案" : "Choose a different plan",
+        attr: { type: "button" }
+      });
+      reselect.onclick = () => this.enterPlanSelection();
+    } else {
+      const resume = actions.createEl("button", {
+        cls: "mod-cta echoink-knowledge-init-cta",
+        text: zh ? "继续初始化" : "Continue initialization",
+        attr: { type: "button", "data-echoink-focus-key": FOCUS_KEY }
+      });
+      resume.onclick = () => void this.resumeRun();
+      const reselect = actions.createEl("button", {
+        cls: "echoink-knowledge-init-secondary",
+        text: zh ? "重新选择方案" : "Choose a different plan",
+        attr: { type: "button" }
+      });
+      reselect.onclick = () => this.enterPlanSelection();
+    }
+    this.renderTechnicalDetails(panel, job);
+  }
+
+  private pauseNoticeText(
+    recovery: KnowledgeInitializationRecovery,
+    job: Readonly<KnowledgeInitializationJob>,
+    zh: boolean
+  ): string {
+    if (recovery.kind === "recheck-conflict") {
+      return zh
+        ? "有些笔记的目标位置已存在文件，EchoInk 不会覆盖。处理冲突或修改分配后，重新检查即可。"
+        : "Some notes have existing files at their targets, and EchoInk will not overwrite them. Resolve the conflicts or edit the assignments, then recheck.";
+    }
+    if (recovery.kind === "recheck-preview") {
+      // 作业快照本身没有 Provider（创建时就没配）且还有待提炼内容：
+      // 直接说「先设置模型」，而不是「模型已变化」。
+      const jobLacksProvider =
+        job.provider === null && job.extractionQueue.length > 0;
+      if (jobLacksProvider || this.currentProviderSnapshot() === null) {
+        return zh
+          ? "需要先设置可用模型，才能把 Raw 笔记提炼成 Wiki。"
+          : "Set up an available model first so Raw notes can be distilled into Wiki.";
+      }
+      return zh
+        ? "模型或计划已经变化，原来的确认不再有效。重新检查并确认新的计划后即可继续。"
+        : "The model or plan has changed, so the previous confirmation is no longer valid. Recheck and confirm the new plan to continue.";
+    }
+    return zh
+      ? "初始化暂停了。已经完成的内容会保留，解决问题后可以继续。"
+      : "Initialization paused. Completed work is kept; you can continue after fixing the issue.";
+  }
+
+  /**
+   * 通用「重新选择方案」：直接回到 Tab 选择界面，不做任何后台调用。
+   * custom 预览由 renderTabsPanel → ensureCustomPreview 自动重建
+   * （只产生一次 start:custom，不移动文件、不调用 Provider）。
+   * 保留旧分配的一次性恢复只发生在恢复按钮的 recheck 路径里。
+   */
+  private enterPlanSelection(): void {
+    this.reselecting = true;
+    this.clearActionError();
+    this.scheduleRender();
+  }
+
+  private renderTechnicalDetails(
+    panel: HTMLElement,
+    job: Readonly<KnowledgeInitializationJob>
+  ): void {
+    const zh = this.zh;
     const details = panel.createEl("details", { cls: "echoink-knowledge-init-tech" });
     details.createEl("summary", { text: zh ? "查看技术详情" : "View technical details" });
     const rows = details.createDiv({ cls: "echoink-knowledge-init-tech-list" });
@@ -697,18 +869,77 @@ export class KnowledgeInitializationSection {
   }
 
   private async resumeRun(): Promise<void> {
-    if (this.busy) return;
-    this.busy = true;
     this.reselecting = false;
-    try {
+    await this.runAction(async () => {
       this.job = await this.plugin.continueEchoInkKnowledgeInitialization();
       this.loaded = true;
-    } catch {
-      await this.reloadAfterActionError();
-    } finally {
-      this.busy = false;
-      this.scheduleRender();
+    });
+  }
+
+  /** blocked_conflict 的重新检查：绝不直接调用 continue。 */
+  private async recheckConflict(): Promise<void> {
+    const job = this.job;
+    if (!job) return;
+    if (job.mode === "recommended") {
+      // 推荐模式：重新扫描后立即确认；若冲突仍在，confirm 会再次停在冲突态。
+      this.reselecting = false;
+      await this.runAction(async () => {
+        this.job = await this.plugin.startEchoInkKnowledgeInitialization("recommended");
+        this.job = await this.plugin.confirmEchoInkKnowledgeInitialization();
+        this.loaded = true;
+      });
+      return;
     }
+    // 自定义模式：回到可修改的 preview，不直接移动文件。
+    await this.rescanCustomPreservingAssignments();
+  }
+
+  /** Provider/digest 变化后的重新检查：必须重新生成 preview，不直接 continueJob。 */
+  private async recheckPreviewAndContinue(): Promise<void> {
+    const job = this.job;
+    if (!job) return;
+    if (job.mode === "recommended") {
+      // 推荐模式：用户点击后重新 preview + confirm。
+      this.reselecting = false;
+      await this.runAction(async () => {
+        this.job = await this.plugin.startEchoInkKnowledgeInitialization("recommended");
+        this.job = await this.plugin.confirmEchoInkKnowledgeInitialization();
+        this.loaded = true;
+      });
+      return;
+    }
+    // 自定义模式：重新扫描、保留合法旧分配，然后停在 preview 让用户再确认。
+    await this.rescanCustomPreservingAssignments();
+  }
+
+  /**
+   * 自定义模式重新扫描：按 sourcePath 保留仍然存在且合法的旧目录分配，
+   * 用一次 assignMany() 恢复，然后停在 preview 让用户再次确认。
+   * 重新 preview 阶段不移动文件、不调用 Provider。
+   */
+  private async rescanCustomPreservingAssignments(): Promise<void> {
+    const previous = this.job;
+    const preserved = (previous?.items ?? [])
+      // raw 是默认分配，不需要恢复；其余合法选择（包括兼容的 keep）都应
+      // 在重新扫描后保留，避免用户点「修改分配」时静默丢失旧决定。
+      .filter((item) => item.role !== "raw")
+      .map((item) => ({ sourcePath: item.sourcePath, role: item.role }));
+    this.reselecting = false;
+    await this.runAction(async () => {
+      this.job = await this.plugin.startEchoInkKnowledgeInitialization("custom");
+      this.loaded = true;
+      const validPaths = new Set((this.job?.items ?? []).map((item) => item.sourcePath));
+      const restorable = preserved.filter(
+        (assignment) => validPaths.has(assignment.sourcePath)
+          && isKnowledgeInitializationRole(assignment.role)
+      );
+      if (restorable.length > 0) {
+        this.job = await this.plugin.assignManyEchoInkKnowledgeInitializationNotes(
+          Object.freeze(restorable)
+        );
+      }
+      this.selectedTab = "custom";
+    });
   }
 
   // ------------------------------------------------------------------- done
@@ -748,10 +979,16 @@ export class KnowledgeInitializationSection {
     return this.zh ? "保持原位" : "Keep in place";
   }
 
-  private currentProviderReady(): boolean {
+  /** 当前设置派生的可用 Provider 快照；不可用时为 null。 */
+  private currentProviderSnapshot(): KnowledgeInitializationProviderSnapshot | null {
     const provider = getActiveApiProvider(this.plugin.settings);
-    if (!provider || !apiProviderHasUsableApiKey(provider)) return false;
-    return validateApiProvider(provider).length === 0;
+    if (!provider || !apiProviderHasUsableApiKey(provider)) return null;
+    if (validateApiProvider(provider).length > 0) return null;
+    return { providerId: provider.id, model: provider.model };
+  }
+
+  private currentProviderReady(): boolean {
+    return this.currentProviderSnapshot() !== null;
   }
 
   private async openFile(relativePath: string): Promise<void> {

@@ -18,6 +18,7 @@ import {
   type KnowledgeInitializationVaultFile
 } from "../knowledge-base/initializer";
 import { buildKnowledgeInitializationProgress } from "../knowledge-base/initialization-progress";
+import { deriveKnowledgeInitializationRecovery } from "../settings/knowledge-initialization-recovery";
 
 export async function runKnowledgeInitializationTests(): Promise<void> {
   assertRootLevelInitializationFileHasNoFolderCreation();
@@ -25,7 +26,10 @@ export async function runKnowledgeInitializationTests(): Promise<void> {
   await assertRecommendedAndCustomPreview();
   await assertArchiveAndTemplatesRoles();
   await assertAssignManyBatchSemantics();
+  await assertAssignManyCloneOnWriteFailureSemantics();
+  await assertPreviewStageNeverMovesOrCallsProvider();
   assertKnowledgeInitializationProgressContract();
+  assertKnowledgeInitializationRecoveryDerivation();
   await assertProviderOrModelChangeRequiresNewPreview();
   await assertZeroQueuePreservesUserFilesAndSkipsProvider();
   await assertSerialBatchSizes();
@@ -278,14 +282,14 @@ function assertKnowledgeInitializationProgressContract(): void {
     { stage: "guide", percent: 95, completed: 0, total: 0 }
   );
 
-  // 16/17. job.status 已 initialized 但 settings 未标记时最多 99%；
-  // settings 真正 initialized 后才 100%。
+  // 16/17. 正式完成即进入 100%/完成态：无论 settings 标记先后，
+  // job.status/phase 一旦完成就是 done；不存在永远无法展示的 99→100 死逻辑。
   assert.deepEqual(
     buildKnowledgeInitializationProgress(
       { ...baseJob, phase: "complete", status: "initialized" },
       false
     ),
-    { stage: "done", percent: 99, completed: 0, total: 0 }
+    { stage: "done", percent: 100, completed: 0, total: 0 }
   );
   assert.deepEqual(
     buildKnowledgeInitializationProgress(
@@ -294,6 +298,10 @@ function assertKnowledgeInitializationProgressContract(): void {
     ),
     { stage: "done", percent: 100, completed: 0, total: 0 }
   );
+  // 运行中的任何阶段都不得提前显示 100%。
+  assert.ok(buildKnowledgeInitializationProgress(
+    { ...baseJob, phase: "generate_guide", status: "active" }, false
+  ).percent < 100, "running job must never show 100% early");
 
   // 15. 空目录 / 0 篇移动 / 0 篇提炼不产生 NaN，按区间完成处理。
   const emptyDirs = buildKnowledgeInitializationProgress(
@@ -316,6 +324,82 @@ function assertKnowledgeInitializationProgressContract(): void {
     assert.equal(Number.isNaN(progress.percent), false);
     assert.ok(progress.percent >= 0 && progress.percent <= 100);
   }
+}
+
+/**
+ * 修复2 回归：暂停/冲突态的恢复方式完全由结构化字段派生
+ * （status / confirmedDigest / planDigest / Provider 快照），
+ * 禁止解析 lastError 中文字符串。
+ */
+function assertKnowledgeInitializationRecoveryDerivation(): void {
+  const planDigest = "sha256:plan-fixture";
+  const provider: KnowledgeInitializationProviderSnapshot = {
+    providerId: "provider-ready", model: "model-ready"
+  };
+  const base = {
+    mode: "recommended" as const,
+    planDigest,
+    extractionQueue: [] as string[],
+    lastError: "这段中文错误文案不应该影响恢复分支判断",
+    recoveryAction: "这段中文恢复指引也不应该影响恢复分支判断"
+  };
+
+  // A. digest 一致 + Provider 一致 + 非冲突 → continue。
+  for (const status of ["paused", "cancelled", "failed_recoverable", "write_uncertain"] as const) {
+    const recovery = deriveKnowledgeInitializationRecovery({
+      job: { ...base, status, provider, confirmedDigest: planDigest } as never,
+      currentProvider: provider
+    });
+    assert.equal(recovery.kind, "continue", `${status} with matching digest/provider`);
+    assert.equal(recovery.digestMismatch, false);
+    assert.equal(recovery.providerOutdated, false);
+  }
+
+  // B. blocked_conflict → recheck-conflict，即使 digest/Provider 都一致。
+  assert.equal(deriveKnowledgeInitializationRecovery({
+    job: { ...base, status: "blocked_conflict", provider, confirmedDigest: planDigest } as never,
+    currentProvider: provider
+  }).kind, "recheck-conflict");
+
+  // C. 从未确认（confirmedDigest 为 null）→ recheck-preview。
+  assert.equal(deriveKnowledgeInitializationRecovery({
+    job: { ...base, status: "paused", provider, confirmedDigest: null } as never,
+    currentProvider: provider
+  }).kind, "recheck-preview");
+
+  // D. digest 不一致 → recheck-preview。
+  assert.equal(deriveKnowledgeInitializationRecovery({
+    job: { ...base, status: "paused", provider, confirmedDigest: "sha256:other" } as never,
+    currentProvider: provider
+  }).kind, "recheck-preview");
+
+  // E. Provider 模型或 id 变化 → recheck-preview。
+  assert.equal(deriveKnowledgeInitializationRecovery({
+    job: { ...base, status: "paused", provider, confirmedDigest: planDigest } as never,
+    currentProvider: { providerId: "provider-ready", model: "model-new" }
+  }).kind, "recheck-preview");
+  assert.equal(deriveKnowledgeInitializationRecovery({
+    job: { ...base, status: "paused", provider, confirmedDigest: planDigest } as never,
+    currentProvider: { providerId: "provider-other", model: "model-ready" }
+  }).kind, "recheck-preview");
+
+  // F. 待提炼队列非空但当前无可用 Provider → recheck-preview。
+  const queueRecovery = deriveKnowledgeInitializationRecovery({
+    job: {
+      ...base, status: "paused", provider, confirmedDigest: planDigest,
+      extractionQueue: ["raw/imported/note-0.md"]
+    } as never,
+    currentProvider: null
+  });
+  assert.equal(queueRecovery.kind, "recheck-preview");
+  assert.equal(queueRecovery.providerOutdated, true);
+
+  // G. 队列为空时，当前没有 Provider 也不算 Provider 变化（两边都视为空键），
+  //    digest 一致即可 continue；这与 continueJob 只在有队列时要求 Provider 一致。
+  assert.equal(deriveKnowledgeInitializationRecovery({
+    job: { ...base, status: "paused", provider: null, confirmedDigest: planDigest } as never,
+    currentProvider: null
+  }).kind, "continue");
 }
 
 function makeProgressItems(count: number): string[] {
@@ -555,6 +639,128 @@ async function assertRestartPausesWithoutProviderReplay(): Promise<void> {
   });
 }
 
+/**
+ * assignMany clone-on-write 失败注入回归：
+ * 1. persist 前失败（pathExists 注入）：磁盘、缓存、digest、角色不变；
+ * 2. plan 写入失败：缓存与磁盘保持完整旧状态，不回传半成功结果；
+ * 3. job 写入失败（plan 已写）：plan 被回滚为旧内容，重新读取仍为完整旧状态；
+ * 4. 成功时仍只通知一次；
+ * 5. 同一 sourcePath 最后一个 assignment 获胜（与基线语义一致）。
+ */
+async function assertAssignManyCloneOnWriteFailureSemantics(): Promise<void> {
+  // 1. persist 前失败：磁盘、缓存、digest、角色全部不变，且不通知。
+  await withHost(async (host) => {
+    host.addFile("outside/a.md", "alpha");
+    host.addFile("outside/b.md", "beta");
+    const initializer = new KnowledgeBaseInitializer(host);
+    await initializer.initialize();
+    const preview = await initializer.startPreview("custom");
+    host.failPathExists = true;
+    const stateBeforeInvalid = host.stateChangedCalls;
+    await assert.rejects(
+      initializer.assignMany([
+        { sourcePath: "outside/a.md", role: "wiki" },
+        { sourcePath: "outside/b.md", role: "projects" }
+      ]),
+      /injected pathExists failure/u
+    );
+    const afterFail = initializer.snapshot();
+    assert.equal(afterFail?.planDigest, preview.planDigest, "digest unchanged after pre-persist failure");
+    assert.deepEqual(
+      afterFail?.items.map((item) => item.role),
+      ["raw", "raw"],
+      "roles unchanged after pre-persist failure"
+    );
+    assert.equal(host.stateChangedCalls, stateBeforeInvalid, "no notification on pre-persist failure");
+  });
+
+  // 2. plan 写入失败：缓存与磁盘保持完整旧状态。
+  await withHost(async (host) => {
+    host.addFile("outside/a.md", "alpha");
+    const initializer = new KnowledgeBaseInitializer(host);
+    await initializer.initialize();
+    const preview = await initializer.startPreview("custom");
+    const diskJobBefore = await readPrivateFile(host, "knowledge/initialization/onboarding-v1/job.json");
+    host.failNextPlanPersist = new Error("injected plan write failure");
+    await assert.rejects(
+      initializer.assignMany([{ sourcePath: "outside/a.md", role: "wiki" }]),
+      /injected plan write failure/u
+    );
+    const cacheAfterPlanFail = initializer.snapshot();
+    assert.equal(cacheAfterPlanFail?.items[0]?.role, "raw", "cache keeps old role after plan write failure");
+    assert.equal(cacheAfterPlanFail?.planDigest, preview.planDigest);
+    assert.equal(
+      await readPrivateFile(host, "knowledge/initialization/onboarding-v1/job.json"),
+      diskJobBefore,
+      "disk job file unchanged after plan write failure"
+    );
+  });
+
+  // 3. job 写入失败（plan 已写）：plan 回滚为写入前内容；重新读取仍是完整旧状态。
+  await withHost(async (host) => {
+    host.addFile("outside/a.md", "alpha");
+    const initializer = new KnowledgeBaseInitializer(host);
+    await initializer.initialize();
+    const preview = await initializer.startPreview("custom");
+    const planRelPath = `knowledge/initialization/onboarding-v1/plans/${preview.jobId}.json`;
+    const planBefore = await readPrivateFile(host, planRelPath);
+    assert.ok(planBefore !== null, "plan file exists after startPreview");
+    const diskJobBefore = await readPrivateFile(host, "knowledge/initialization/onboarding-v1/job.json");
+    host.failNextJobPersist = new Error("injected job write failure");
+    await assert.rejects(
+      initializer.assignMany([{ sourcePath: "outside/a.md", role: "wiki" }]),
+      /injected job write failure/u
+    );
+    assert.equal(
+      await readPrivateFile(host, planRelPath),
+      planBefore,
+      "plan file rolled back to pre-write content after job write failure"
+    );
+    assert.equal(
+      await readPrivateFile(host, "knowledge/initialization/onboarding-v1/job.json"),
+      diskJobBefore,
+      "job file unchanged after job write failure"
+    );
+    // 重新读取（新实例）得到的必须是完整旧状态，不能是混合状态。
+    const reloaded = new KnowledgeBaseInitializer(host);
+    await reloaded.initialize();
+    const reloadedJob = reloaded.snapshot();
+    assert.equal(reloadedJob?.planDigest, preview.planDigest);
+    assert.equal(reloadedJob?.items[0]?.role, "raw");
+    assert.equal(reloadedJob?.confirmedDigest, null);
+  });
+
+  // 4. 成功时只通知一次；同一 sourcePath 最后一个 assignment 获胜。
+  await withHost(async (host) => {
+    host.addFile("outside/a.md", "alpha");
+    const initializer = new KnowledgeBaseInitializer(host);
+    await initializer.initialize();
+    await initializer.startPreview("custom");
+    const stateBefore = host.stateChangedCalls;
+    const assigned = await initializer.assignMany([
+      { sourcePath: "outside/a.md", role: "wiki" },
+      { sourcePath: "outside/a.md", role: "projects" }
+    ]);
+    assert.equal(host.stateChangedCalls, stateBefore + 1, "exactly one notification on success");
+    assert.equal(assigned.items[0]?.role, "projects", "last assignment wins for same sourcePath");
+  });
+}
+
+/** preview 阶段（startPreview + assignMany）绝不移动文件、绝不调用 Provider。 */
+async function assertPreviewStageNeverMovesOrCallsProvider(): Promise<void> {
+  await withHost(async (host) => {
+    host.addFile("outside/a.md", "alpha");
+    host.addFile("outside/b.md", "beta");
+    const initializer = new KnowledgeBaseInitializer(host);
+    await initializer.initialize();
+    await initializer.startPreview("custom");
+    await initializer.assignMany([{ sourcePath: "outside/a.md", role: "wiki" }]);
+    assert.equal(host.moveCalls, 0, "preview stage must not move any file");
+    assert.equal(host.batchCalls.length, 0, "preview stage must not call Provider");
+    assert.equal(host.read("outside/a.md"), "alpha", "source untouched during preview");
+  });
+}
+
 async function waitForTerminal(
   initializer: KnowledgeBaseInitializer
 ): Promise<Readonly<KnowledgeInitializationJob>> {
@@ -605,7 +811,27 @@ class MemoryKnowledgeInitializationHost implements KnowledgeInitializationHost {
   blockBatchUntilAbort = false;
   blockFolders = false;
   stateChangedCalls = 0;
+  moveCalls = 0;
+  failPathExists = false;
+  /** 下一次 plan 写入注入的错误；触发一次后清空。 */
+  failNextPlanPersist: Error | null = null;
+  /** 下一次 job 写入注入的错误；触发一次后清空。 */
+  failNextJobPersist: Error | null = null;
   private clock = 1_700_000_000_000;
+
+  faultInjectPersist = (stage: "plan" | "job"): Error | null => {
+    if (stage === "plan" && this.failNextPlanPersist) {
+      const error = this.failNextPlanPersist;
+      this.failNextPlanPersist = null;
+      return error;
+    }
+    if (stage === "job" && this.failNextJobPersist) {
+      const error = this.failNextJobPersist;
+      this.failNextJobPersist = null;
+      return error;
+    }
+    return null;
+  };
 
   constructor(
     readonly privateRootPath: string,
@@ -642,6 +868,7 @@ class MemoryKnowledgeInitializationHost implements KnowledgeInitializationHost {
   }
 
   async pathExists(relativePath: string): Promise<boolean> {
+    if (this.failPathExists) throw new Error("injected pathExists failure");
     return this.files.has(relativePath) || this.folders.has(relativePath);
   }
 
@@ -669,6 +896,7 @@ class MemoryKnowledgeInitializationHost implements KnowledgeInitializationHost {
   }
 
   async moveMarkdown(sourcePath: string, targetPath: string, expectedContentHash: string): Promise<void> {
+    this.moveCalls += 1;
     const source = this.files.get(sourcePath);
     if (source === undefined || hash(source) !== expectedContentHash) throw new Error("version_conflict");
     if (this.files.has(targetPath)) throw new Error("already_exists");
@@ -732,4 +960,20 @@ class MemoryKnowledgeInitializationHost implements KnowledgeInitializationHost {
 
 function hash(content: string): string {
   return `sha256:${createHash("sha256").update(content).digest("hex")}`;
+}
+
+/** 从 host 的 privateRootPath（真实临时磁盘）读取私有文件。 */
+async function readPrivateFile(
+  host: MemoryKnowledgeInitializationHost,
+  relativePath: string
+): Promise<string | null> {
+  try {
+    return await fsp.readFile(path.join(host.privateRootPath, relativePath), "utf8");
+  } catch (error) {
+    const code = typeof error === "object" && error !== null && "code" in error
+      ? String(error.code)
+      : "";
+    if (code === "ENOENT") return null;
+    throw error;
+  }
 }

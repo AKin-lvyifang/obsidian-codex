@@ -23,9 +23,10 @@ export interface KnowledgeInitializationProgress {
  * - createdDirectories / 10：5–20%
  * - moveCursor / items.length：20–45%
  * - extractionCursor / extractionQueue.length：45–90%
- * - generate_guide / readback：90–99%
- * - 只有 settings.knowledgeBase.initialization.status === "initialized" 才 100%；
- *   job.status 已是 initialized 但 settings 尚未 markInitialized 时最多 99%。
+ * - generate_guide / readback：90–95%
+ * - 正式完成（settings 已 initialized，或 job.status/phase 已完成）即 100%。
+ *   运行中的任何阶段都不会提前显示 100%；完成判定一旦成立就直接进入完成态，
+ *   不存在永远无法展示的 99→100 中间态。
  * 0 个目录、0 篇移动、0 篇提炼时视为该区间已完成，不产生 NaN。
  */
 export function buildKnowledgeInitializationProgress(
@@ -33,11 +34,8 @@ export function buildKnowledgeInitializationProgress(
   settingsInitialized: boolean
 ): KnowledgeInitializationProgress {
   if (!job) return { stage: "idle", percent: 0, completed: 0, total: 0 };
-  if (settingsInitialized) {
+  if (settingsInitialized || job.status === "initialized" || job.phase === "complete") {
     return { stage: "done", percent: 100, completed: 0, total: 0 };
-  }
-  if (job.status === "initialized" || job.phase === "complete") {
-    return { stage: "done", percent: 99, completed: 0, total: 0 };
   }
   switch (job.phase) {
     case "scan":
