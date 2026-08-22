@@ -359,7 +359,10 @@ function assertMemoryComposerVisualCssContract(): void {
     /\.codex-composer-send-button\.codex-send-button\s*\{([^}]*)\}/u
   )?.[1] ?? "";
   const sendIconRule = css.match(
-    /\.codex-composer-send-button\.codex-send-button svg\s*\{([^}]*)\}/u
+    /\.codex-composer-send-icon-wrap svg\s*\{([^}]*)\}/u
+  )?.[1] ?? "";
+  const permissionKeyboardFocusRule = css.match(
+    /\.codex-permission-control \.codex-composer-native-select\.codex-select:focus-visible\s*\{([^}]*)\}/u
   )?.[1] ?? "";
 
   assert.match(currentRule, /background:\s*var\(--background-secondary\);/u);
@@ -383,8 +386,19 @@ function assertMemoryComposerVisualCssContract(): void {
   assert.match(sendButtonRule, /width:\s*34px;/u);
   assert.match(sendButtonRule, /height:\s*34px;/u);
   assert.match(sendButtonRule, /flex:\s*0 0 34px;/u);
-  assert.match(sendIconRule, /width:\s*24px;/u);
-  assert.match(sendIconRule, /height:\s*24px;/u);
+  assert.match(sendIconRule, /width:\s*20px;/u);
+  assert.match(sendIconRule, /height:\s*20px;/u);
+  assert.match(permissionKeyboardFocusRule, /outline:\s*2px solid var\(--interactive-accent\);/u);
+  assert.doesNotMatch(
+    css,
+    /\.codex-permission-control:focus-within\s*\{[^}]*outline:\s*2px solid currentColor/u,
+    "pointer-opened native permission menus must not leave a yellow focus ring behind"
+  );
+  assert.match(
+    css,
+    /\.codex-composer-send-button\.codex-send-button\.is-send-action:is\(:hover, :focus-visible\) \.codex-composer-send-icon-confirm\s*\{[\s\S]*?opacity:\s*1;/u,
+    "the ordinary send action uses the btn-24 send-to-check morph"
+  );
 }
 
 async function assertProviderTextGenerationCompletionContract(): Promise<void> {
@@ -3820,6 +3834,16 @@ function assertAboutGitHubActionsContract(): void {
     css,
     /\.echoink-about-btn-issue:hover \.echoink-about-morph-icon-hover\s*\{[\s\S]*?opacity:\s*1;[\s\S]*?scale\(1\)/u,
     "btn-24 hover morph reveals the check icon"
+  );
+  const aboutButtonRule = css.match(/\.echoink-about-btn\s*\{([^}]*)\}/u)?.[1] ?? "";
+  const issueButtonRule = css.match(/\.echoink-about-btn-issue\s*\{([^}]*)\}/u)?.[1] ?? "";
+  assert.match(aboutButtonRule, /min-height:\s*28px;/u);
+  assert.match(aboutButtonRule, /border-radius:\s*7px;/u);
+  assert.match(issueButtonRule, /padding-inline:\s*10px;/u);
+  assert.doesNotMatch(
+    css,
+    /\.echoink-about-btn-issue:hover,[\s\S]*?padding-inline:\s*28px/u,
+    "About actions must not grow into oversized pills on hover"
   );
   console.log("PASS settings: about actions remove source and morph issue feedback");
 }

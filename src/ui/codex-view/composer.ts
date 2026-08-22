@@ -317,6 +317,7 @@ export function renderComposerToolbar(
     cls: "codex-send-button codex-composer-send-button",
     attr: { type: "button", "aria-label": sendButtonView.label, title: sendButtonView.title }
   });
+  sendButton.toggleClass("is-send-action", action === "send");
   sendButton.toggleClass("is-queue-action", action === "enqueue" || action === "resume-queue");
   sendButton.toggleClass("is-stop-action", action === "stop-turn" || action === "cancel-knowledge-task");
   sendButton.disabled = state.promptEnhancerRunning;
@@ -324,7 +325,16 @@ export function renderComposerToolbar(
     sendButton.setAttribute("aria-label", "提示词增强中");
     sendButton.setAttribute("title", "提示词增强完成后再发送");
   }
-  setIcon(sendButton, sendButtonView.icon);
+  const sendIconWrap = sendButton.createSpan({
+    cls: "codex-composer-send-icon-wrap",
+    attr: { "aria-hidden": "true" }
+  });
+  const sendIcon = sendIconWrap.createSpan({ cls: "codex-composer-send-icon-default" });
+  setIcon(sendIcon, sendButtonView.icon);
+  if (action === "send") {
+    const sendCheckIcon = sendIconWrap.createSpan({ cls: "codex-composer-send-icon-confirm" });
+    setIcon(sendCheckIcon, "check");
+  }
   sendButton.onclick = () => {
     if (action === "cancel-knowledge-task") callbacks.onCancelKnowledgeTask();
     else if (action === "stop-turn") callbacks.onStopTurn();

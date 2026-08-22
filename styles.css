@@ -9400,10 +9400,9 @@ body.theme-light .codex-container {
   color: var(--text-error);
 }
 
-.codex-permission-control:focus-within {
-  outline: 2px solid currentColor;
-  outline-offset: 1px;
-  background: var(--background-modifier-hover);
+.codex-permission-control .codex-composer-native-select.codex-select:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
 }
 
 .codex-composer-model-button {
@@ -9770,10 +9769,48 @@ body.theme-light .codex-container {
   transform: none !important;
 }
 
-.codex-composer-send-button.codex-send-button svg {
-  width: 24px;
-  height: 24px;
+.codex-composer-send-icon-wrap {
+  position: relative;
+  display: inline-grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+}
+
+.codex-composer-send-icon-default,
+.codex-composer-send-icon-confirm {
+  position: absolute;
+  display: inline-flex;
+  inset: 0;
+  align-items: center;
+  justify-content: center;
+  transition-property: opacity, transform, filter;
+  transition-duration: 180ms;
+  transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
+}
+
+.codex-composer-send-icon-confirm {
+  opacity: 0;
+  transform: scale(0.25);
+  filter: blur(4px);
+}
+
+.codex-composer-send-icon-wrap svg {
+  width: 20px;
+  height: 20px;
   stroke-width: 2.3;
+}
+
+.codex-composer-send-button.codex-send-button.is-send-action:is(:hover, :focus-visible) .codex-composer-send-icon-default {
+  opacity: 0;
+  transform: scale(0.25);
+  filter: blur(4px);
+}
+
+.codex-composer-send-button.codex-send-button.is-send-action:is(:hover, :focus-visible) .codex-composer-send-icon-confirm {
+  opacity: 1;
+  transform: scale(1);
+  filter: blur(0);
 }
 
 .codex-mcp-retry {
@@ -13295,18 +13332,18 @@ button.echoink-picker-row:focus-visible {
 .echoink-about-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  padding-top: 4px;
+  gap: 6px;
+  padding-top: 2px;
 }
 
 .echoink-about-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  height: 34px;
-  padding: 0 16px;
-  border-radius: 40px;
+  gap: 5px;
+  min-height: 28px;
+  padding: 4px 10px;
+  border-radius: 7px;
   font-size: 12px;
   font-weight: 500;
   text-decoration: none;
@@ -13432,15 +13469,9 @@ button.echoink-picker-row:focus-visible {
 
 /* Feedback button — amicro btn-24 morph interaction. */
 .echoink-about-btn-issue {
-  gap: 10px;
-  min-width: 75px;
-  padding-inline: 24px;
-}
-
-.echoink-about-btn-issue:hover,
-.echoink-about-btn-issue:focus-visible,
-.echoink-about-btn-issue:active {
-  padding-inline: 28px;
+  gap: 6px;
+  min-width: 0;
+  padding-inline: 10px;
 }
 
 .echoink-about-morph-icon-wrap {
