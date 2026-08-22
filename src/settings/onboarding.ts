@@ -56,23 +56,17 @@ export interface EchoInkOnboardingAdvanceResult {
 }
 
 export function shouldAutoStartEchoInkOnboarding(
-  emptyData: boolean,
+  _emptyData: boolean,
   setup: Readonly<SetupSettings>
 ): boolean {
-  return emptyData
-    && setup.completedAt === 0
-    && setup.dismissedVersion !== ECHOINK_ONBOARDING_VERSION;
+  // dismissedVersion also acts as the last-seen tutorial version. Bumping the
+  // onboarding version therefore shows the guide once after an update, while
+  // the same version never reopens it in an existing Vault.
+  return setup.dismissedVersion !== ECHOINK_ONBOARDING_VERSION;
 }
 
 export function dismissEchoInkOnboardingTutorial(setup: SetupSettings): void {
   setup.dismissedVersion = ECHOINK_ONBOARDING_VERSION;
-}
-
-export function resumeEchoInkOnboardingTutorial(
-  setup: SetupSettings
-): EchoInkOnboardingStep {
-  setup.dismissedVersion = "";
-  return setup.tutorialStep;
 }
 
 /** Advance only from an explicit control bound to the currently shown step. */
@@ -95,7 +89,7 @@ export function advanceEchoInkOnboardingTutorial(
   }
   setup.completedAt = now;
   setup.lastCheckedAt = now;
-  setup.dismissedVersion = "";
+  setup.dismissedVersion = ECHOINK_ONBOARDING_VERSION;
   setup.tutorialStep = "provider";
   return Object.freeze({ changed: true, completed: true, nextStep: null });
 }

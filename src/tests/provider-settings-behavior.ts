@@ -100,7 +100,6 @@ import {
   dismissEchoInkOnboardingTutorial,
   echoInkOnboardingTab,
   isEmptyEchoInkPluginData,
-  resumeEchoInkOnboardingTutorial,
   shouldAutoStartEchoInkOnboarding
 } from "../settings/onboarding";
 
@@ -108,6 +107,8 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   assertSettingsV50MigrationContract();
   assertOnboardingTruthContract();
   await assertOnboardingCoachmarkAccessibilityContract();
+  await assertOnboardingDoesNotLockSettingsNavigation();
+  await assertManualOnboardingReopenIsRemoved();
   await assertRetiredSettingsRewritePersistence();
   assertProviderScopedRollbackPreservesConcurrentSettings();
   await assertPersistedProviderRollbackPreservesQueuedSettingsSave();
@@ -145,7 +146,7 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   await assertIdentityEntryWithoutTemplateOpensPicker();
   await assertIdentityEntryFirstRunKeepsSingleTransaction();
   await assertIdentityEntryWithTemplateOpensEditModal();
-  await assertTemplatePickerTableStructure();
+  await assertTemplatePickerCardGridStructure();
   await assertPersonalityResetStillRequiresConfirm();
   await assertIdentityEntryRespectsFailClosedRetry();
   await assertIdentityModalNameValidation();
@@ -1597,9 +1598,17 @@ function assertOnboardingTruthContract(): void {
 
   const settings = structuredClone(DEFAULT_SETTINGS);
   assert.equal(shouldAutoStartEchoInkOnboarding(true, settings.setup), true);
-  assert.equal(shouldAutoStartEchoInkOnboarding(false, settings.setup), false);
+  assert.equal(
+    shouldAutoStartEchoInkOnboarding(false, settings.setup),
+    true,
+    "an unseen onboarding version starts once after an update"
+  );
   settings.setup.completedAt = 1;
-  assert.equal(shouldAutoStartEchoInkOnboarding(true, settings.setup), false);
+  assert.equal(
+    shouldAutoStartEchoInkOnboarding(true, settings.setup),
+    true,
+    "legacy completion alone does not mark the current onboarding version as seen"
+  );
   settings.setup.completedAt = 0;
   assert.equal(settings.setup.tutorialStep, "provider");
   let truth = deriveEchoInkOnboardingTruth(settings, null);
@@ -1631,6 +1640,8 @@ function assertOnboardingTruthContract(): void {
   assert.deepEqual(finish, { changed: true, completed: true, nextStep: null });
   assert.equal(settings.setup.completedAt, 104);
   assert.equal(settings.setup.lastCheckedAt, 104);
+  assert.equal(settings.setup.dismissedVersion, "onboarding-v1");
+  assert.equal(shouldAutoStartEchoInkOnboarding(false, settings.setup), false);
   assert.equal(settings.setup.tutorialStep, "provider");
 
   const resumed = normalizeSettingsData({
@@ -1647,9 +1658,11 @@ function assertOnboardingTruthContract(): void {
   assert.equal(shouldAutoStartEchoInkOnboarding(true, resumed.setup), false);
   dismissEchoInkOnboardingTutorial(resumed.setup);
   assert.equal(resumed.setup.tutorialStep, "knowledge");
-  assert.equal(resumeEchoInkOnboardingTutorial(resumed.setup), "knowledge");
-  assert.equal(resumed.setup.dismissedVersion, "");
-  assert.equal(echoInkOnboardingTab(resumed.setup.tutorialStep), "knowledgeBase");
+  assert.equal(
+    shouldAutoStartEchoInkOnboarding(false, resumed.setup),
+    false,
+    "an existing Vault must not manually restart onboarding"
+  );
   assert.equal(normalizeSettingsData({
     ...structuredClone(DEFAULT_SETTINGS),
     setup: { tutorialStep: "invalid" }
@@ -1685,7 +1698,7 @@ async function assertOnboardingCoachmarkAccessibilityContract(): Promise<void> {
 
   for (const fixture of [
     { step: "provider" as const, key: "providers:add", label: "添加可用模型", action: "下一步" },
-    { step: "knowledge" as const, key: "knowledge:initialize", label: "初始化知识库", action: "下一步" },
+    { step: "knowledge" as const, key: "knowledge:onboarding", label: "初始化知识库", action: "下一步" },
     { step: "personality" as const, key: "general:personality-template", label: "选择初始风格", action: "完成" }
   ]) {
     tab.containerEl.empty();
@@ -1745,7 +1758,7 @@ async function assertOnboardingCoachmarkAccessibilityContract(): Promise<void> {
   settings.setup.tutorialStep = "provider";
   for (const fixture of [
     { step: "provider" as const, key: "providers:add", tab: "providers" as const, nextTab: "knowledgeBase" as const },
-    { step: "knowledge" as const, key: "knowledge:initialize", tab: "knowledgeBase" as const, nextTab: "general" as const },
+    { step: "knowledge" as const, key: "knowledge:onboarding", tab: "knowledgeBase" as const, nextTab: "general" as const },
     { step: "personality" as const, key: "general:personality-template", tab: "general" as const, nextTab: null }
   ]) {
     settings.settingsTab = fixture.tab;
@@ -1787,6 +1800,62 @@ async function assertOnboardingCoachmarkAccessibilityContract(): Promise<void> {
 
   const css = readFileSync("styles.css", "utf8");
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.echoink-onboarding-coachmark\s*\{[\s\S]*?animation:\s*none/u);
+}
+
+async function assertOnboardingDoesNotLockSettingsNavigation(): Promise<void> {
+  installProviderModalDomFixture();
+  const settings = structuredClone(DEFAULT_SETTINGS);
+  settings.settingsLanguage = "zh-CN";
+  settings.settingsTab = "general";
+  settings.setup.tutorialStep = "knowledge";
+  const plugin = withSettingsTabDefaults({
+    app: new App(),
+    manifest: { id: "codex-echoink" },
+    settings,
+    saveSettings: async () => undefined,
+    isEchoInkOnboardingRequested: () => true,
+    getEchoInkOnboardingStep: () => "knowledge" as const
+  });
+  const tab = new CodexSettingTab(plugin as never);
+  const mutable = tab as unknown as {
+    settingsVisible: boolean;
+    refreshOnboardingCoachmark(): Promise<void>;
+  };
+  mutable.settingsVisible = true;
+
+  await mutable.refreshOnboardingCoachmark();
+
+  assert.equal(
+    settings.settingsTab,
+    "general",
+    "an active tutorial must not force the user back from a manually selected settings tab"
+  );
+  assert.equal(
+    providerModalTestDocument.body.querySelector(".echoink-onboarding-coachmark"),
+    null,
+    "the coachmark stays hidden until the user returns to the tutorial step"
+  );
+  console.log("PASS settings: onboarding never locks manual settings navigation");
+}
+
+async function assertManualOnboardingReopenIsRemoved(): Promise<void> {
+  installProviderModalDomFixture();
+  const fixtureState = createIdentityFixtureState();
+  const { plugin } = createIdentityTestPlugin(fixtureState);
+  plugin.settings.settingsTab = "general";
+  const tab = new CodexSettingTab(withSettingsTabDefaults(plugin) as never);
+  const mutable = tab as unknown as { personalMemoryState: Record<string, any> | null };
+  mutable.personalMemoryState = structuredClone(fixtureState);
+  tab.display();
+
+  assert.doesNotMatch(
+    tab.containerEl.textContent,
+    /首次设置|重新打开|First-time setup|Reopen/u,
+    "existing Vault settings must not expose a manual tutorial restart"
+  );
+  const bootstrapSource = readFileSync("src/plugin/bootstrap.ts", "utf8");
+  assert.doesNotMatch(bootstrapSource, /open-echoink-onboarding|重新打开首次设置/u);
+  console.log("PASS settings: manual onboarding reopen entry and command are removed");
 }
 
 async function assertRetiredSettingsRewritePersistence(): Promise<void> {
@@ -1979,8 +2048,7 @@ async function assertKnowledgeSettingsDetailRetiresLegacyControls(): Promise<voi
     isEchoInkOnboardingRequested: () => false,
     getEchoInkOnboardingStep: () => "provider" as const,
     advanceEchoInkOnboarding: async () => null,
-    dismissEchoInkOnboarding: async () => undefined,
-    openEchoInkOnboarding: async () => undefined
+    dismissEchoInkOnboarding: async () => undefined
   };
   const tab = new CodexSettingTab(withSettingsTabDefaults(plugin) as never);
   const mutableTab = tab as unknown as {
@@ -2247,6 +2315,11 @@ async function assertKnowledgeInitDefaultTabAndOneClickStart(): Promise<void> {
   const { plugin, calls } = createKnowledgeInitPluginFixture(state);
   const tab = await renderKnowledgeInitTab(plugin);
   const panel = knowledgeInitPanel(tab);
+  assert.equal(
+    panel.getAttribute("data-echoink-focus-key"),
+    "knowledge:onboarding",
+    "the knowledge tutorial anchor must exist for every initialization state"
+  );
 
   // 1. 默认 Tab 为初始选中，roving tabindex。
   const tabs = panel.querySelectorAll('[role="tab"]');
@@ -2541,6 +2614,11 @@ async function assertKnowledgeInitProgressAndCompletion(): Promise<void> {
   done.settings.knowledgeBase.initialization.status = "initialized";
   const doneTab = await renderKnowledgeInitTab(done.plugin);
   const donePanel = knowledgeInitPanel(doneTab);
+  assert.equal(
+    donePanel.getAttribute("data-echoink-focus-key"),
+    "knowledge:onboarding",
+    "an initialized knowledge base must still expose the tutorial anchor"
+  );
   assert.match(donePanel.textContent, /知识库已就绪/u);
   assert.deepEqual(
     knowledgeInitButtons(donePanel).map((button) => button.textContent),
@@ -3870,7 +3948,7 @@ async function assertIdentityEntryWithTemplateOpensEditModal(): Promise<void> {
   console.log("PASS settings: identity entry with template opens the edit modal only");
 }
 
-async function assertTemplatePickerTableStructure(): Promise<void> {
+async function assertTemplatePickerCardGridStructure(): Promise<void> {
   installProviderModalDomFixture();
   const fixtureState = createNoTemplateIdentityFixtureState();
   const { plugin } = createIdentityTestPlugin(fixtureState);
@@ -3906,27 +3984,44 @@ async function assertTemplatePickerTableStructure(): Promise<void> {
   );
   assert.ok(picker, "picker opens");
 
-  // Two-column header: 风格 / 行为表现.
-  const header = tab.containerEl.querySelector<ProviderModalTestElement>(
-    ".echoink-picker-columns-header"
+  const introTitle = picker.querySelector(".echoink-picker-intro-title");
+  const introCopy = picker.querySelector(".echoink-picker-intro-copy");
+  assert.match(introTitle?.textContent ?? "", /选择 Agent 的初始风格/u);
+  assert.match(introCopy?.textContent ?? "", /起点/u);
+  assert.equal(
+    picker.querySelector(".echoink-picker-columns-header"),
+    null,
+    "the card grid must not retain the table header"
   );
-  assert.ok(header, "picker renders a column header row");
-  assert.match(header!.querySelector(".echoink-picker-column-name")!.textContent, /风格/u);
-  assert.match(header!.querySelector(".echoink-picker-column-desc")!.textContent, /行为表现/u);
+  assert.ok(picker.querySelector(".echoink-picker-list"), "picker renders one card grid");
 
-  // Each template is exactly one whole-row button carrying name + description.
+  // Each template is one whole-card button carrying a left-aligned hierarchy and
+  // a stable action affordance.
   const rows = tab.containerEl.querySelectorAll<ProviderModalTestElement>(".echoink-picker-row");
   assert.equal(rows.length, PERSONALITY_TEMPLATES.length, "eight template rows");
   PERSONALITY_TEMPLATES.forEach((template, index) => {
     const row = rows[index];
-    assert.equal(row.tagName, "BUTTON", `row ${template.id} is a single clickable button`);
+    assert.equal(row.tagName, "BUTTON", `card ${template.id} is a single clickable button`);
     assert.equal(row.querySelectorAll("button").length, 0, `row ${template.id} has no nested buttons`);
-    const name = row.querySelector(".echoink-picker-column-name");
-    const desc = row.querySelector(".echoink-picker-column-desc");
+    const name = row.querySelector(".echoink-picker-row-name");
+    const desc = row.querySelector(".echoink-picker-row-desc");
+    const indicator = row.querySelector(".echoink-picker-row-indicator");
     assert.ok(name && desc, `row ${template.id} carries name and description nodes`);
+    assert.ok(indicator, `row ${template.id} keeps a visible selection affordance`);
     assert.equal(name!.textContent, template.labelZh, `row order follows PERSONALITY_TEMPLATES (${template.id})`);
     assert.equal(desc!.textContent, template.richDescZh, `description for ${template.id} comes from the template constant`);
+    assert.equal(row.getAttribute("aria-current"), null, "first selection has no current template badge");
   });
+
+  const css = readFileSync("styles.css", "utf8");
+  assert.match(css, /\.echoink-picker-list\s*\{[\s\S]*?display:\s*grid;[\s\S]*?repeat\(2,\s*minmax\(0,\s*1fr\)\)/u);
+  assert.match(css, /button\.echoink-picker-row\s*\{[\s\S]*?text-align:\s*start/u);
+  assert.match(
+    css,
+    /button\.echoink-picker-row\s*\{[\s\S]*?height:\s*auto;[\s\S]*?max-height:\s*none;/u,
+    "Obsidian's fixed button height must not clip the card description"
+  );
+  assert.match(css, /@container\s*\(max-width:\s*520px\)[\s\S]*?\.echoink-picker-list\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\)/u);
 
   // Cancel closes the list with zero writes.
   const cancelBtn = tab.containerEl.querySelector<ProviderModalTestElement>(".echoink-picker-cancel-btn");
@@ -3936,7 +4031,7 @@ async function assertTemplatePickerTableStructure(): Promise<void> {
   assert.ok(closedPicker && !closedPicker.hasClass("is-visible"), "cancel closes the picker");
   assert.equal(tab.containerEl.querySelectorAll(".echoink-picker-row").length, 0, "rows removed on cancel");
   assert.equal(templateCalls, 0, "cancel keeps zero writes");
-  console.log("PASS settings: template picker renders as a left-aligned two-column table");
+  console.log("PASS settings: template picker renders as a responsive card grid");
 }
 
 async function assertPersonalityResetStillRequiresConfirm(): Promise<void> {
@@ -4002,6 +4097,15 @@ async function assertPersonalityResetStillRequiresConfirm(): Promise<void> {
   assert.ok(
     tab.containerEl.querySelector(".echoink-template-picker.is-visible"),
     "accepting opens the template list"
+  );
+  const currentCard = tab.containerEl.querySelector<ProviderModalTestElement>(
+    '.echoink-picker-row[data-template-id="executor"]'
+  );
+  assert.ok(currentCard, "the current template card remains present during reset");
+  assert.equal(currentCard!.getAttribute("aria-current"), "true");
+  assert.match(
+    currentCard!.querySelector(".echoink-picker-current-badge")?.textContent ?? "",
+    /当前模板/u
   );
   assert.equal(templateCalls, 0, "opening the reset list writes nothing");
   console.log("PASS settings: personality reset still requires the confirmation modal");
@@ -4953,7 +5057,6 @@ function withSettingsTabDefaults<T extends object>(plugin: T) {
     getEchoInkOnboardingStep: () => "provider" as const,
     advanceEchoInkOnboarding: async () => null,
     dismissEchoInkOnboarding: async () => undefined,
-    openEchoInkOnboarding: async () => undefined,
     ...plugin
   };
 }

@@ -31,11 +31,6 @@ export function registerEchoInkPluginFeatures(plugin: CodexForObsidianPlugin): E
     callback: () => void plugin.activateHomeView()
   });
   plugin.addCommand({
-    id: "open-echoink-onboarding",
-    name: "重新打开首次设置",
-    callback: () => void plugin.openEchoInkOnboarding()
-  });
-  plugin.addCommand({
     id: "open-codex-sidebar",
     name: "打开 EchoInk Agent 侧栏",
     callback: () => void plugin.activateView()
@@ -89,7 +84,7 @@ export function registerEchoInkPluginFeatures(plugin: CodexForObsidianPlugin): E
 
 export function registerEchoInkStartupTasks(plugin: CodexForObsidianPlugin): void {
   if (plugin.shouldAutoOpenEchoInkOnboarding()) {
-    plugin.app.workspace.onLayoutReady(() => void plugin.openEchoInkOnboarding());
+    plugin.app.workspace.onLayoutReady(() => void plugin.openPendingEchoInkOnboarding());
   }
   if (plugin.settings.autoOpen) {
     plugin.app.workspace.onLayoutReady(() => void plugin.activateView());

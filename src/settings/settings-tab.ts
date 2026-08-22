@@ -418,7 +418,9 @@ export class CodexSettingTab extends PluginSettingTab {
     const step = this.plugin.getEchoInkOnboardingStep();
     const requiredTab = echoInkOnboardingTab(step);
     if (this.plugin.settings.settingsTab !== requiredTab) {
-      await this.activateSettingsTab(requiredTab, true);
+      // 教程只在对应页面提供提示，不接管设置导航。用户主动切到其他
+      // Tab 时隐藏 coachmark；点「下一步」仍会显式导航到下一站。
+      this.clearOnboardingCoachmark(false);
       return;
     }
     const settingsWindow = this.containerEl.ownerDocument.defaultView ?? window;
@@ -436,7 +438,7 @@ export class CodexSettingTab extends PluginSettingTab {
     const anchorKey = step === "provider"
       ? "providers:add"
       : step === "knowledge"
-        ? "knowledge:initialize"
+        ? "knowledge:onboarding"
         : "general:personality-template";
     const anchor = this.containerEl.querySelector<HTMLElement>(
       `[data-echoink-focus-key="${anchorKey}"]`
@@ -612,15 +614,6 @@ export class CodexSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         });
       }));
-
-    applySettingsRow(new Setting(interfaceGroup)
-      .setName(zh ? "首次设置" : "First-time setup")
-      .setDesc(zh
-        ? "重新打开 Provider、知识库和初始风格三步引导；不会重置已完成的设置。"
-        : "Reopen the Provider, Knowledge, and initial-style guide without resetting completed setup.")
-      .addButton((button) => button
-        .setButtonText(zh ? "重新打开" : "Reopen")
-        .onClick(() => void this.plugin.openEchoInkOnboarding())));
 
     applySettingsRow(new Setting(interfaceGroup)
       .setName(copy.general.autoOpenHome)
@@ -1054,6 +1047,7 @@ export class CodexSettingTab extends PluginSettingTab {
     const scores = currentPersonalityScores(state);
     const template = state.templateId ? getPersonalityTemplate(state.templateId) : null;
     refs.templateBtn.dataset.hasTemplate = template ? "true" : "false";
+    refs.templateBtn.dataset.templateId = template?.id ?? "";
     refs.templateBtn.setText(template
       ? (zh ? "重置人格" : "Reset personality")
       : (zh ? "初始风格选择" : "Choose initial style"));
@@ -1100,39 +1094,61 @@ export class CodexSettingTab extends PluginSettingTab {
     const panel = refs.pickerPanel;
     panel.empty();
     panel.addClass("is-visible");
-    const stepLabel = panel.createDiv({ cls: "echoink-picker-step-label" });
-    stepLabel.setText(zh
-      ? (reset
-          ? "选择新模板完成重置（取消不做任何修改）"
-          : "选择一个最接近你期望的风格（本地立即生效，不调用模型）")
-      : (reset
-          ? "Pick a new template to finish the reset (cancel changes nothing)"
-          : "Choose the closest style (applies locally and immediately, no model calls)"));
-    // 双列表格布局：外层容器统一承担轻边框与圆角，表头与每一行共用同一套
-    // 列定义（CSS 变量集中在 .echoink-picker-columns），文案只在此处维护。
-    const columns = panel.createDiv({ cls: "echoink-picker-columns" });
-    const columnsHeader = columns.createDiv({ cls: "echoink-picker-columns-header" });
-    columnsHeader.createDiv({
-      cls: "echoink-picker-column-name",
-      text: zh ? "风格" : "Style"
+    const intro = panel.createDiv({ cls: "echoink-picker-intro" });
+    const introText = intro.createDiv({ cls: "echoink-picker-intro-text" });
+    introText.createDiv({
+      cls: "echoink-picker-intro-title",
+      text: zh
+        ? (reset ? "选择新的初始风格" : "选择 Agent 的初始风格")
+        : (reset ? "Choose a new starting style" : "Choose the Agent's starting style")
     });
-    columnsHeader.createDiv({
-      cls: "echoink-picker-column-desc",
-      text: zh ? "行为表现" : "Behavior"
+    introText.createDiv({
+      cls: "echoink-picker-intro-copy",
+      text: zh
+        ? (reset
+            ? "选中即重置到该模板；长期 Memory 不会删除。取消不会产生任何修改。"
+            : "选择一个最接近你的起点。名称和头像将在下一步设置，人格之后会随长期协作缓慢演化。")
+        : (reset
+            ? "Selecting a card resets to that template without deleting long-term Memory. Cancel changes nothing."
+            : "Choose the closest starting point. You'll set the name and avatar next, and personality can evolve gradually over time.")
     });
-    const list = columns.createDiv({ cls: "echoink-picker-list" });
+    intro.createDiv({
+      cls: "echoink-picker-count",
+      text: zh ? `${PERSONALITY_TEMPLATES.length} 种风格` : `${PERSONALITY_TEMPLATES.length} styles`
+    });
+    const list = panel.createDiv({ cls: "echoink-picker-list" });
 
     // 描述统一来自 PERSONALITY_TEMPLATES 常量，不再在此重复维护（避免漂移）。
 
     for (const tpl of PERSONALITY_TEMPLATES) {
+      const isCurrent = reset && refs.templateBtn.dataset.templateId === tpl.id;
       const row = list.createEl("button", {
         cls: "echoink-picker-row",
-        attr: { type: "button" }
+        attr: {
+          type: "button",
+          "data-template-id": tpl.id,
+          ...(isCurrent ? { "aria-current": "true" } : {})
+        }
       });
-      row.createDiv({ cls: "echoink-picker-column-name echoink-picker-row-name" })
-        .setText(zh ? tpl.labelZh : tpl.labelEn);
-      row.createDiv({ cls: "echoink-picker-column-desc echoink-picker-row-desc" })
+      row.classList.toggle("is-current", isCurrent);
+      const heading = row.createDiv({ cls: "echoink-picker-row-heading" });
+      heading.createSpan({
+        cls: "echoink-picker-row-name",
+        text: zh ? tpl.labelZh : tpl.labelEn
+      });
+      if (isCurrent) {
+        heading.createSpan({
+          cls: "echoink-picker-current-badge",
+          text: zh ? "当前模板" : "Current"
+        });
+      }
+      row.createDiv({ cls: "echoink-picker-row-desc" })
         .setText(zh ? tpl.richDescZh : tpl.richDescEn);
+      const indicator = row.createSpan({
+        cls: "echoink-picker-row-indicator",
+        attr: { "aria-hidden": "true" }
+      });
+      setIcon(indicator, "arrow-up-right");
 
       row.onclick = () => {
         row.setAttr("disabled", "true");

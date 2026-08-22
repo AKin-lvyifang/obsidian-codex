@@ -101,8 +101,6 @@ import {
   advanceEchoInkOnboardingTutorial,
   dismissEchoInkOnboardingTutorial,
   echoInkOnboardingTab,
-  ECHOINK_ONBOARDING_VERSION,
-  resumeEchoInkOnboardingTutorial,
   shouldAutoStartEchoInkOnboarding,
   type EchoInkOnboardingStep
 } from "./settings/onboarding";
@@ -188,12 +186,10 @@ export default class CodexForObsidianPlugin extends Plugin {
   async activateHomeAndSidebar(): Promise<void> { return this.getViewService().activateHomeAndSidebar(); }
   async activateHomeView(options: { keepRightSidebar?: boolean } = {}): Promise<void> { return this.getViewService().activateHomeView(options); }
   async activateView(): Promise<void> { return this.getViewService().activateView(); }
-  async openEchoInkOnboarding(): Promise<void> {
-    this.onboardingRequested = true;
-    if (this.settings.setup.dismissedVersion === ECHOINK_ONBOARDING_VERSION) {
-      resumeEchoInkOnboardingTutorial(this.settings.setup);
-      await this.saveSettings(true);
-    }
+  async openPendingEchoInkOnboarding(): Promise<void> {
+    // Only the first-install startup path may open the tutorial. Existing
+    // Vaults cannot turn it back on through a setting or command.
+    if (!this.onboardingRequested) return;
     await this.getViewService().openEchoInkSettings(
       echoInkOnboardingTab(this.settings.setup.tutorialStep)
     );

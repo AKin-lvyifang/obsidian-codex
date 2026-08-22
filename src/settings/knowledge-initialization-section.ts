@@ -134,7 +134,10 @@ export class KnowledgeInitializationSection {
       surface: "flat"
     });
     const panel = section.createDiv({
-      cls: "echoink-settings-feature-card echoink-knowledge-init-panel"
+      cls: "echoink-settings-feature-card echoink-knowledge-init-panel",
+      // Stable tutorial anchor: unlike the initialization CTA, this remains in
+      // the DOM after the knowledge base is already initialized.
+      attr: { "data-echoink-focus-key": "knowledge:onboarding" }
     });
     if (!this.loaded && !this.loading && !this.loadError) void this.load();
     if (this.loading && !this.loaded) {
