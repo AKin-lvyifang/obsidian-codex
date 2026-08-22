@@ -19,7 +19,6 @@ import { normalizeHarnessRunUsage, type HarnessRunUsage } from "../harness/contr
 import { defaultResourceSettings } from "../resources/registry";
 import { normalizeMcpConnectionRecords } from "../resources/mcp-connections";
 import type { EchoInkResourceSettings } from "../resources/types";
-import { AGENTS_RULES_FILE, DEFAULT_KNOWLEDGE_BASE_RULES_FILE, LEGACY_CLAUDE_RULES_FILE } from "../knowledge-base/constants";
 import type {
   KnowledgeBaseCitationSummary,
   KnowledgeBaseRunCompletion,
@@ -208,8 +207,6 @@ export interface KnowledgeBaseMaintenanceHistoryEntry {
 }
 
 export interface KnowledgeBaseSettings {
-  useCustomRulesFile: boolean;
-  rulesFilePath: string;
   lastRunAt: number;
   lastRunStatus: KnowledgeBaseRunStatus;
   lastReportPath: string;
@@ -227,7 +224,6 @@ export interface KnowledgeBaseSettings {
 export interface KnowledgeBaseInitializationSettings {
   status: KnowledgeBaseInitStatus;
   initializedAt: number;
-  rulesFilePath: string;
   templateVersion: string;
   lastPreviewSummary: string;
 }
@@ -364,8 +360,6 @@ export const DEFAULT_SETTINGS: CodexForObsidianSettings = {
   },
   resourceManagementTab: "plugins",
   knowledgeBase: {
-    useCustomRulesFile: true,
-    rulesFilePath: DEFAULT_KNOWLEDGE_BASE_RULES_FILE,
     lastRunAt: 0,
     lastRunStatus: "idle",
     lastReportPath: "",
@@ -377,7 +371,6 @@ export const DEFAULT_SETTINGS: CodexForObsidianSettings = {
     initialization: {
       status: "not-started",
       initializedAt: 0,
-      rulesFilePath: "",
       templateVersion: "v0.7",
       lastPreviewSummary: ""
     },
@@ -558,6 +551,10 @@ function hasRetiredSettingsData(data: Record<string, unknown>): boolean {
   if (knowledgeBase && Object.keys(knowledgeBase).some((key) => !KNOWLEDGE_BASE_SETTINGS_KEYS.has(key))) {
     return true;
   }
+  const knowledgeInitialization = settingsRecord(knowledgeBase?.initialization);
+  if (knowledgeInitialization && Object.hasOwn(knowledgeInitialization, "rulesFilePath")) {
+    return true;
+  }
   const resources = settingsRecord(data.resources);
   if (!resources) return false;
   if (Object.hasOwn(resources, "enabledByScope")) return true;
@@ -568,8 +565,6 @@ function hasRetiredSettingsData(data: Record<string, unknown>): boolean {
 }
 
 const KNOWLEDGE_BASE_SETTINGS_KEYS = new Set<string>([
-  "useCustomRulesFile",
-  "rulesFilePath",
   "lastRunAt",
   "lastRunStatus",
   "lastReportPath",
@@ -951,21 +946,6 @@ export function filterEnabledSkills(skills: CodexSkill[], overrides: Record<stri
   return skills.filter((skill) => resourceEnabled(overrides, skill.path || skill.name, skill.enabled !== false));
 }
 
-export function getKnowledgeBaseRulesFileChoices(paths: string[]): string[] {
-  const seen = new Set<string>();
-  for (const item of paths) {
-    const raw = String(item ?? "").replace(/\\/g, "/").trim();
-    if (raw.split("/").some((part) => part === "..")) continue;
-    const clean = normalizeKnowledgeBaseRulesPath(item, "");
-    if (!clean || !/\.md$/i.test(clean)) continue;
-    seen.add(clean);
-  }
-  return Array.from(seen).sort((left, right) => {
-    const byRank = rulesFileChoiceRank(left) - rulesFileChoiceRank(right);
-    return byRank || left.localeCompare(right);
-  });
-}
-
 export function newId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -999,24 +979,6 @@ function normalizeKnowledgeBaseRunStatus(value: unknown): KnowledgeBaseRunStatus
 
 function normalizeKnowledgeBaseInitStatus(value: unknown): KnowledgeBaseInitStatus {
   return value === "preview-ready" || value === "initialized" || value === "failed" ? value : "not-started";
-}
-
-function normalizeKnowledgeBaseRulesPath(value: unknown, fallback: string): string {
-  const raw = normalizeText(value, fallback).replace(/\\/g, "/").trim();
-  const withoutLeadingSlash = raw.replace(/^\/+/, "");
-  const clean = withoutLeadingSlash
-    .split("/")
-    .filter((part) => part && part !== "." && part !== "..")
-    .join("/");
-  return clean || fallback;
-}
-
-function rulesFileChoiceRank(value: string): number {
-  const upper = value.toUpperCase();
-  if (upper === DEFAULT_KNOWLEDGE_BASE_RULES_FILE.toUpperCase()) return 0;
-  if (upper === AGENTS_RULES_FILE.toUpperCase()) return 1;
-  if (upper === LEGACY_CLAUDE_RULES_FILE.toUpperCase()) return 2;
-  return value.includes("/") ? 3 : 2;
 }
 
 function normalizeEchoInkResourceSettings(value: unknown, legacyWorkspaceResources: unknown): EchoInkResourceSettings {
@@ -1127,10 +1089,7 @@ function normalizeMemorySettings(input: unknown): EchoInkMemorySettings {
 
 function normalizeKnowledgeBaseSettings(input: unknown): KnowledgeBaseSettings {
   const value = settingsRecord(input) ?? {};
-  const fallback = DEFAULT_SETTINGS.knowledgeBase;
   const normalized: KnowledgeBaseSettings = {
-    useCustomRulesFile: value?.useCustomRulesFile === true,
-    rulesFilePath: normalizeKnowledgeBaseRulesPath(value?.rulesFilePath, fallback.rulesFilePath),
     lastRunAt: normalizeNonNegativeNumber(value?.lastRunAt),
     lastRunStatus: normalizeKnowledgeBaseRunStatus(value?.lastRunStatus),
     lastReportPath: normalizeOptionalText(value?.lastReportPath),
@@ -1200,7 +1159,6 @@ function normalizeKnowledgeBaseInitialization(input: unknown): KnowledgeBaseInit
   return {
     status: normalizeKnowledgeBaseInitStatus(value?.status),
     initializedAt: normalizeNonNegativeNumber(value?.initializedAt),
-    rulesFilePath: normalizeKnowledgeBaseRulesPath(value?.rulesFilePath, fallback.rulesFilePath),
     templateVersion: normalizeText(value?.templateVersion, fallback.templateVersion),
     lastPreviewSummary: normalizeOptionalText(value?.lastPreviewSummary)
   };

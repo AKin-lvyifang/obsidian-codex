@@ -1493,6 +1493,51 @@ function assertSettingsV50MigrationContract(): void {
     );
   });
 
+  check("retired LLM-WIKI settings are removed without touching current Knowledge state", () => {
+    const legacyInput: unknown = {
+      ...structuredClone(DEFAULT_SETTINGS),
+      knowledgeBase: {
+        ...structuredClone(DEFAULT_SETTINGS.knowledgeBase),
+        useCustomRulesFile: true,
+        rulesFilePath: "LLM-WIKI.md",
+        initialization: {
+          ...structuredClone(DEFAULT_SETTINGS.knowledgeBase.initialization),
+          rulesFilePath: "LLM-WIKI.md"
+        }
+      }
+    };
+    const result = normalizeSettingsData(legacyInput);
+    assert.equal(result.changed, true);
+    assert.equal(
+      Object.hasOwn(result.settings.knowledgeBase, "useCustomRulesFile"),
+      false
+    );
+    assert.equal(
+      Object.hasOwn(result.settings.knowledgeBase, "rulesFilePath"),
+      false
+    );
+    assert.equal(
+      Object.hasOwn(result.settings.knowledgeBase.initialization, "rulesFilePath"),
+      false
+    );
+
+    const nestedOnly = normalizeSettingsData({
+      ...structuredClone(DEFAULT_SETTINGS),
+      knowledgeBase: {
+        ...structuredClone(DEFAULT_SETTINGS.knowledgeBase),
+        initialization: {
+          ...structuredClone(DEFAULT_SETTINGS.knowledgeBase.initialization),
+          rulesFilePath: "LLM-WIKI.md"
+        }
+      }
+    });
+    assert.equal(nestedOnly.changed, true);
+    assert.equal(
+      Object.hasOwn(nestedOnly.settings.knowledgeBase.initialization, "rulesFilePath"),
+      false
+    );
+  });
+
   check("legacy resource scope overrides collapse to one false-wins global switch", () => {
     const resource = {
       id: "skill-false-wins",

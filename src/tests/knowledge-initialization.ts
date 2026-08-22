@@ -32,6 +32,7 @@ export async function runKnowledgeInitializationTests(): Promise<void> {
   assertKnowledgeInitializationProgressContract();
   assertKnowledgeInitializationRecoveryDerivation();
   await assertProviderOrModelChangeRequiresNewPreview();
+  await assertInitializationDoesNotGenerateLegacyRulesFile();
   await assertZeroQueuePreservesUserFilesAndSkipsProvider();
   await assertSerialBatchSizes();
   await assertFrozenExtractionSourcesAndNoProgress();
@@ -115,7 +116,7 @@ async function assertCustomPreviewIncludesCurrentManagedMarkdown(): Promise<void
 }
 
 function assertRootLevelInitializationFileHasNoFolderCreation(): void {
-  assert.equal(knowledgeInitializationParentFolder("LLM-WIKI.md"), null);
+  assert.equal(knowledgeInitializationParentFolder("README.md"), null);
   assert.equal(
     knowledgeInitializationParentFolder("wiki/开始使用 EchoInk 知识库.md"),
     "wiki"
@@ -136,13 +137,27 @@ async function assertHiddenInitializationFileExistsOutsideVaultIndex(): Promise<
       true,
       "disk files hidden from Obsidian's Vault index must still count as existing"
     );
-    assert.equal(
-      await knowledgeInitializationPathExists(vaultRoot, "LLM-WIKI.md", false),
-      false
-    );
   } finally {
     await fsp.rm(vaultRoot, { recursive: true, force: true });
   }
+}
+
+async function assertInitializationDoesNotGenerateLegacyRulesFile(): Promise<void> {
+  await withHost(async (host) => {
+    const initializer = new KnowledgeBaseInitializer(host);
+    await initializer.initialize();
+    const preview = await initializer.startPreview("recommended");
+    assert.deepEqual(preview.extractionQueue, []);
+    await initializer.confirm();
+    const completed = await waitForTerminal(initializer);
+    assert.equal(completed.status, "initialized");
+    assert.equal(
+      host.read("LLM-WIKI.md"),
+      null,
+      "fresh initialization must not generate the retired LLM-WIKI rules file"
+    );
+    assert.ok(host.read(KNOWLEDGE_INITIALIZATION_GUIDE_PATH));
+  }, null);
 }
 
 async function assertProviderOrModelChangeRequiresNewPreview(): Promise<void> {
@@ -627,7 +642,7 @@ async function assertConflictCancellationAndProviderRecoveryStops(): Promise<voi
 async function assertZeroQueuePreservesUserFilesAndSkipsProvider(): Promise<void> {
   await withHost(async (host) => {
     host.addFile("wiki/index.md", "# User index\n\nKeep me.\n");
-    host.addFile("LLM-WIKI.md", "# Existing profile\n");
+    host.addFile("LLM-WIKI.md", "# Existing user-authored legacy file\n");
     const initializer = new KnowledgeBaseInitializer(host);
     await initializer.initialize();
     const preview = await initializer.startPreview("recommended");
@@ -638,7 +653,11 @@ async function assertZeroQueuePreservesUserFilesAndSkipsProvider(): Promise<void
     assert.equal(host.batchCalls.length, 0);
     assert.match(host.read("wiki/index.md") ?? "", /Keep me/u);
     assert.match(host.read("wiki/index.md") ?? "", /echoink-onboarding-kb-init:start/u);
-    assert.equal(host.read("LLM-WIKI.md"), "# Existing profile\n");
+    assert.equal(
+      host.read("LLM-WIKI.md"),
+      "# Existing user-authored legacy file\n",
+      "existing legacy files must remain byte-for-byte untouched"
+    );
     assert.ok(host.read(KNOWLEDGE_INITIALIZATION_GUIDE_PATH));
     assert.equal(host.openedGuide, KNOWLEDGE_INITIALIZATION_GUIDE_PATH);
     await waitUntil(() => host.initializedJob?.status === "initialized");

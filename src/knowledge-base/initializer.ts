@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
-import { buildVaultProfileTemplate } from "../workflows/knowledge/profile/profile-parser";
 
 export const KNOWLEDGE_BASE_TEMPLATE_VERSION = "onboarding-v1";
 export const KNOWLEDGE_INITIALIZATION_GUIDE_PATH = "wiki/开始使用 EchoInk 知识库.md";
@@ -168,6 +167,8 @@ const INDEX_MARKER_END = "<!-- echoink-onboarding-kb-init:end -->";
 const EXTRACTION_BATCH_SIZE = 20;
 const MAX_PROVIDER_ATTEMPTS = 2;
 const FIXED_ROOTS = new Set<string>(KNOWLEDGE_INITIALIZATION_ROOTS);
+// Legacy user files are protected from initialization moves, but EchoInk no longer
+// reads, generates, repairs, or otherwise manages LLM-WIKI.md.
 const EXCLUDED_FILENAMES = new Set(["llm-wiki.md", "agents.md"]);
 
 export class KnowledgeBaseInitializer {
@@ -617,8 +618,6 @@ export class KnowledgeBaseInitializer {
     assertJobActive(job, signal);
     await this.createTextIfMissing(KNOWLEDGE_INITIALIZATION_TRACKER_PATH, buildTrackerTemplate(now));
     assertJobActive(job, signal);
-    await this.createTextIfMissing("LLM-WIKI.md", buildKnowledgeBaseRulesTemplate(now));
-    assertJobActive(job, signal);
     const [guide, index] = await Promise.all([
       this.host.readText(KNOWLEDGE_INITIALIZATION_GUIDE_PATH),
       this.host.readText(KNOWLEDGE_INITIALIZATION_INDEX_PATH)
@@ -978,10 +977,6 @@ function stableJson(value: unknown): string {
 
 function sha256(value: string): string {
   return `sha256:${createHash("sha256").update(value, "utf8").digest("hex")}`;
-}
-
-export function buildKnowledgeBaseRulesTemplate(now: Date): string {
-  return buildVaultProfileTemplate(now);
 }
 
 export function buildKnowledgeInitializationGuideTemplate(now: Date): string {

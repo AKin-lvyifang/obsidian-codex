@@ -168,9 +168,6 @@
     "src/ui/modals.ts::@typescript-eslint/no-unsafe-member-access": 18,
     "src/ui/render-message.ts::@typescript-eslint/no-unsafe-assignment": 2,
     "src/ui/render-message.ts::@typescript-eslint/no-unsafe-call": 1,
-    "src/ui/render-message.ts::@typescript-eslint/no-unsafe-member-access": 2,
-    "src/workflows/knowledge/profile/profile-parser.ts::@typescript-eslint/no-unsafe-assignment": 7,
-    "src/workflows/knowledge/profile/profile-parser.ts::@typescript-eslint/no-unsafe-call": 1,
-    "src/workflows/knowledge/profile/profile-parser.ts::@typescript-eslint/no-unsafe-member-access": 15
+    "src/ui/render-message.ts::@typescript-eslint/no-unsafe-member-access": 2
   }
 }

@@ -311,7 +311,6 @@ function createKnowledgeInitializationHost(
       plugin.settings.knowledgeBase.initialization = {
         status: "initialized",
         initializedAt: job.updatedAt,
-        rulesFilePath: "LLM-WIKI.md",
         templateVersion: job.templateVersion,
         lastPreviewSummary: `移动 ${job.counts.move}，保留 ${job.counts.keep}，提炼 ${job.counts.extraction}，批次 ${job.expectedBatches}`
       };
