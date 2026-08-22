@@ -23,7 +23,12 @@ export function renderCodexHeader(rootEl: HTMLElement, callbacks: CodexHeaderCal
 
   const settingsButton = headerActions.createEl("button", {
     cls: "codex-icon-button codex-settings-button",
-    attr: { type: "button", "aria-label": "打开插件设置", title: "打开插件设置" }
+    attr: {
+      type: "button",
+      "aria-label": "打开插件设置",
+      title: "打开插件设置",
+      "data-echoink-onboarding-anchor": "settings"
+    }
   });
   renderSettingsGearIcon(settingsButton);
   settingsButton.onclick = callbacks.onOpenSettings;

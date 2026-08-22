@@ -8,6 +8,7 @@ import {
   createApiProviderConfig,
   DEFAULT_SETTINGS,
   normalizeSettingsData,
+  resolveEchoInkWelcomeCopy,
   removeApiProvider
 } from "../settings/settings";
 import { API_PROVIDER_PRESETS, apiProviderRequestUrl } from "../settings/provider-presets";
@@ -98,14 +99,19 @@ import {
   advanceEchoInkOnboardingTutorial,
   deriveEchoInkOnboardingTruth,
   dismissEchoInkOnboardingTutorial,
+  ECHOINK_ONBOARDING_VERSION,
   echoInkOnboardingTab,
   isEmptyEchoInkPluginData,
+  onboardingCoachmarkCopy,
+  prepareEchoInkOnboardingTutorial,
   shouldAutoStartEchoInkOnboarding
 } from "../settings/onboarding";
+import { renderCodexHeader } from "../ui/codex-view/header";
 
 export async function runProviderSettingsBehaviorTests(): Promise<void> {
   assertSettingsV50MigrationContract();
   assertOnboardingTruthContract();
+  assertFiveStepOnboardingEntrypoints();
   await assertOnboardingCoachmarkAccessibilityContract();
   await assertOnboardingDoesNotLockSettingsNavigation();
   await assertManualOnboardingReopenIsRemoved();
@@ -141,6 +147,8 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   await runHarnessV2PiProviderSecurityTests();
   await runPiNativeControlledProviderTests();
   await assertAgentIdentityCardPlacementAndCopy();
+  await assertCustomWelcomeSettingsUi();
+  assertCustomWelcomeContract();
   assertAboutGitHubActionsContract();
   await assertIdentityEditSaveRefreshesSettingsAndPersonalization();
   await assertFirstNamingModalZeroWriteOnCancel();
@@ -701,7 +709,8 @@ async function assertPersistedProviderRollbackPreservesQueuedSettingsSave(): Pro
   activateApiProvider(persisted, candidate);
   const concurrentSave = store.withSettingsPersistenceAuthorityGate(async () => {
     persisted.settingsLanguage = "en";
-    persisted.showWelcome = false;
+    persisted.customWelcomeEnabled = true;
+    persisted.customWelcomeTitle = "Concurrent title";
   });
   const rollback = store.restorePersistedApiProviderSettingsSnapshot(
     providerSnapshot
@@ -709,7 +718,8 @@ async function assertPersistedProviderRollbackPreservesQueuedSettingsSave(): Pro
   await Promise.all([concurrentSave, rollback]);
   assert.equal(persisted.activeApiProviderId, old.id);
   assert.equal(persisted.settingsLanguage, "en");
-  assert.equal(persisted.showWelcome, false);
+  assert.equal(persisted.customWelcomeEnabled, true);
+  assert.equal(persisted.customWelcomeTitle, "Concurrent title");
 }
 
 async function assertProviderApiKeyPersistenceLifecycle(): Promise<void> {
@@ -1201,7 +1211,7 @@ function assertSettingsAccessibleNamesAndOverflow(): void {
     "启动时自动打开首页",
     "使用长期记忆",
     "显示上下文容量",
-    settingsCopy("zh-CN").general.showWelcome
+    settingsCopy("zh-CN").general.customWelcome
   ]) {
     assertSettingsToggleAccessibleName(tab.containerEl, label);
   }
@@ -1272,11 +1282,13 @@ function assertProviderScopedRollbackPreservesConcurrentSettings(): void {
   settings.apiProviders = [candidate];
   activateApiProvider(settings, candidate);
   settings.settingsLanguage = "en";
-  settings.showWelcome = false;
+  settings.customWelcomeEnabled = true;
+  settings.customWelcomeSubtitle = "Concurrent greeting";
   restoreApiProviderSettings(settings, snapshot);
   assert.equal(settings.activeApiProviderId, old.id);
   assert.equal(settings.settingsLanguage, "en");
-  assert.equal(settings.showWelcome, false);
+  assert.equal(settings.customWelcomeEnabled, true);
+  assert.equal(settings.customWelcomeSubtitle, "Concurrent greeting");
 }
 
 async function assertMcpModalFieldAccessibility(): Promise<void> {
@@ -1598,20 +1610,34 @@ function assertOnboardingTruthContract(): void {
   assert.equal(isEmptyEchoInkPluginData({ settingsVersion: 49 }), false);
 
   const settings = structuredClone(DEFAULT_SETTINGS);
+  assert.equal(settings.setup.tutorialStep, "sidebar");
+  assert.equal(settings.setup.tutorialVersion, "");
   assert.equal(shouldAutoStartEchoInkOnboarding(true, settings.setup), true);
   assert.equal(
     shouldAutoStartEchoInkOnboarding(false, settings.setup),
     true,
     "an unseen onboarding version starts once after an update"
   );
-  settings.setup.completedAt = 1;
+  assert.equal(prepareEchoInkOnboardingTutorial(settings.setup, { forceRestart: false }), true);
+  assert.equal(settings.setup.tutorialVersion, ECHOINK_ONBOARDING_VERSION);
+  assert.equal(settings.setup.tutorialStep, "sidebar");
+
+  settings.setup.dismissedVersion = ECHOINK_ONBOARDING_VERSION;
   assert.equal(
-    shouldAutoStartEchoInkOnboarding(true, settings.setup),
-    true,
-    "legacy completion alone does not mark the current onboarding version as seen"
+    shouldAutoStartEchoInkOnboarding(false, settings.setup, false),
+    false,
+    "ordinary Obsidian startup must not repeat a seen tutorial"
   );
-  settings.setup.completedAt = 0;
-  assert.equal(settings.setup.tutorialStep, "provider");
+  assert.equal(
+    shouldAutoStartEchoInkOnboarding(false, settings.setup, true),
+    true,
+    "enabling the plugin after layout-ready restarts onboarding"
+  );
+  settings.setup.tutorialStep = "knowledge";
+  assert.equal(prepareEchoInkOnboardingTutorial(settings.setup, { forceRestart: true }), true);
+  assert.equal(settings.setup.tutorialStep, "sidebar");
+  settings.setup.dismissedVersion = "";
+
   let truth = deriveEchoInkOnboardingTruth(settings, null);
   assert.equal(truth.providerComplete, false);
   assert.equal(truth.knowledgeComplete, false);
@@ -1628,47 +1654,106 @@ function assertOnboardingTruthContract(): void {
     knowledgeComplete: true,
     personalityComplete: true
   });
-  assert.equal(settings.setup.tutorialStep, "provider");
+  assert.equal(settings.setup.tutorialStep, "sidebar");
 
-  const first = advanceEchoInkOnboardingTutorial(settings.setup, "provider", 101);
-  assert.deepEqual(first, { changed: true, completed: false, nextStep: "knowledge" });
+  const first = advanceEchoInkOnboardingTutorial(settings.setup, "sidebar", 101);
+  assert.deepEqual(first, { changed: true, completed: false, nextStep: "settings" });
   assert.equal(settings.setup.completedAt, 0);
-  const stale = advanceEchoInkOnboardingTutorial(settings.setup, "provider", 102);
-  assert.deepEqual(stale, { changed: false, completed: false, nextStep: "knowledge" });
-  const second = advanceEchoInkOnboardingTutorial(settings.setup, "knowledge", 103);
-  assert.deepEqual(second, { changed: true, completed: false, nextStep: "personality" });
-  const finish = advanceEchoInkOnboardingTutorial(settings.setup, "personality", 104);
+  const stale = advanceEchoInkOnboardingTutorial(settings.setup, "sidebar", 102);
+  assert.deepEqual(stale, { changed: false, completed: false, nextStep: "settings" });
+  assert.deepEqual(
+    advanceEchoInkOnboardingTutorial(settings.setup, "settings", 103),
+    { changed: true, completed: false, nextStep: "provider" }
+  );
+  assert.deepEqual(
+    advanceEchoInkOnboardingTutorial(settings.setup, "provider", 104),
+    { changed: true, completed: false, nextStep: "knowledge" }
+  );
+  assert.deepEqual(
+    advanceEchoInkOnboardingTutorial(settings.setup, "knowledge", 105),
+    { changed: true, completed: false, nextStep: "personality" }
+  );
+  const finish = advanceEchoInkOnboardingTutorial(settings.setup, "personality", 106);
   assert.deepEqual(finish, { changed: true, completed: true, nextStep: null });
-  assert.equal(settings.setup.completedAt, 104);
-  assert.equal(settings.setup.lastCheckedAt, 104);
-  assert.equal(settings.setup.dismissedVersion, "onboarding-v1");
+  assert.equal(settings.setup.completedAt, 106);
+  assert.equal(settings.setup.lastCheckedAt, 106);
+  assert.equal(settings.setup.dismissedVersion, ECHOINK_ONBOARDING_VERSION);
   assert.equal(shouldAutoStartEchoInkOnboarding(false, settings.setup), false);
-  assert.equal(settings.setup.tutorialStep, "provider");
+  assert.equal(settings.setup.tutorialStep, "sidebar");
+
+  assert.equal(echoInkOnboardingTab("provider"), "providers");
+  assert.equal(echoInkOnboardingTab("knowledge"), "knowledgeBase");
+  assert.equal(echoInkOnboardingTab("personality"), "general");
 
   const resumed = normalizeSettingsData({
     ...structuredClone(DEFAULT_SETTINGS),
     setup: {
       completedAt: 0,
       lastCheckedAt: 0,
-      dismissedVersion: "onboarding-v1",
+      dismissedVersion: ECHOINK_ONBOARDING_VERSION,
+      tutorialVersion: ECHOINK_ONBOARDING_VERSION,
       tutorialStep: "knowledge"
     }
   }).settings;
   assert.equal(resumed.setup.tutorialStep, "knowledge");
-  assert.equal(resumed.setup.dismissedVersion, "onboarding-v1");
+  assert.equal(resumed.setup.dismissedVersion, ECHOINK_ONBOARDING_VERSION);
   assert.equal(shouldAutoStartEchoInkOnboarding(true, resumed.setup), false);
   dismissEchoInkOnboardingTutorial(resumed.setup);
   assert.equal(resumed.setup.tutorialStep, "knowledge");
   assert.equal(
     shouldAutoStartEchoInkOnboarding(false, resumed.setup),
     false,
-    "an existing Vault must not manually restart onboarding"
+    "a seen tutorial stays closed during an ordinary restart"
   );
   assert.equal(normalizeSettingsData({
     ...structuredClone(DEFAULT_SETTINGS),
     setup: { tutorialStep: "invalid" }
-  }).settings.setup.tutorialStep, "provider");
+  }).settings.setup.tutorialStep, "sidebar");
   assert.equal(settings.memory.dreamEnabled, false);
+}
+
+function assertFiveStepOnboardingEntrypoints(): void {
+  installProviderModalDomFixture();
+  const expected = [
+    ["sidebar", "第 1 步，共 5 步", "打开 Agent 侧栏"],
+    ["settings", "第 2 步，共 5 步", "进入 EchoInk 设置"],
+    ["provider", "第 3 步，共 5 步", "连接一个模型"],
+    ["knowledge", "第 4 步，共 5 步", "建立知识库"],
+    ["personality", "第 5 步，共 5 步", "选择 Agent 风格"]
+  ] as const;
+  for (const [step, stepLabel, title] of expected) {
+    const copy = onboardingCoachmarkCopy(step, true);
+    assert.equal(copy.step, stepLabel);
+    assert.equal(copy.title, title);
+    assert.doesNotMatch(copy.description, /本教程|配置完整|可恢复的预览|Memory 学习/u);
+  }
+  assert.equal(onboardingCoachmarkCopy("sidebar", true).action, null);
+  assert.equal(onboardingCoachmarkCopy("settings", true).action, null);
+  assert.equal(onboardingCoachmarkCopy("provider", true).action, "下一步");
+  assert.equal(onboardingCoachmarkCopy("knowledge", true).action, "下一步");
+  assert.equal(onboardingCoachmarkCopy("personality", true).action, "完成");
+
+  const root = providerModalTestDocument.createElement("div");
+  let settingsCalls = 0;
+  renderCodexHeader(root as never, {
+    onOpenWorkspaceResources: () => undefined,
+    onOpenSettings: () => { settingsCalls += 1; }
+  });
+  const settingsButton = root.querySelector<ProviderModalTestElement>(".codex-settings-button");
+  assert.ok(settingsButton);
+  assert.equal(settingsButton!.getAttribute("data-echoink-onboarding-anchor"), "settings");
+  settingsButton!.click();
+  assert.equal(settingsCalls, 1);
+
+  const bootstrapSource = readFileSync("src/plugin/bootstrap.ts", "utf8");
+  assert.match(bootstrapSource, /setEchoInkOnboardingRibbonAnchor/u);
+  assert.match(bootstrapSource, /handleEchoInkOnboardingTargetActivated\("sidebar"\)/u);
+  const mainSource = readFileSync("src/main.ts", "utf8");
+  assert.match(mainSource, /workspace\.layoutReady/u);
+  assert.match(mainSource, /prepareEchoInkOnboardingTutorial/u);
+  assert.match(mainSource, /\.modal\.mod-settings/u);
+  assert.match(mainSource, /MutationObserver/u);
+  console.log("PASS settings: onboarding starts from ribbon and sidebar settings gear");
 }
 
 async function assertOnboardingCoachmarkAccessibilityContract(): Promise<void> {
@@ -1684,23 +1769,27 @@ async function assertOnboardingCoachmarkAccessibilityContract(): Promise<void> {
     settings,
     saveSettings: async () => undefined,
     dismissEchoInkOnboarding: async () => { dismissCalls += 1; },
-    advanceEchoInkOnboarding: async (step: "provider" | "knowledge" | "personality") => {
+    advanceEchoInkOnboarding: async (
+      step: "sidebar" | "settings" | "provider" | "knowledge" | "personality"
+    ) => {
       advanceCalls.push(step);
       return advanceEchoInkOnboardingTutorial(settings.setup, step, ++now).nextStep;
     }
   });
   const tab = new CodexSettingTab(plugin as never);
   const mutable = tab as unknown as {
-    renderOnboardingCoachmark(step: "provider" | "knowledge" | "personality"): void;
+    renderOnboardingCoachmark(
+      step: "sidebar" | "settings" | "provider" | "knowledge" | "personality"
+    ): void;
     clearOnboardingCoachmark(restoreFocus: boolean): void;
   };
   const restoreFocus = providerModalTestDocument.createElement("button");
   providerModalTestDocument.body.appendChild(restoreFocus);
 
   for (const fixture of [
-    { step: "provider" as const, key: "providers:add", label: "添加可用模型", action: "下一步" },
-    { step: "knowledge" as const, key: "knowledge:onboarding", label: "初始化知识库", action: "下一步" },
-    { step: "personality" as const, key: "general:personality-template", label: "选择初始风格", action: "完成" }
+    { step: "provider" as const, key: "providers:add", label: "连接一个模型", action: "下一步" },
+    { step: "knowledge" as const, key: "knowledge:onboarding", label: "建立知识库", action: "下一步" },
+    { step: "personality" as const, key: "general:personality-template", label: "选择 Agent 风格", action: "完成" }
   ]) {
     tab.containerEl.empty();
     const anchor = tab.containerEl.createEl("button", {
@@ -1738,7 +1827,9 @@ async function assertOnboardingCoachmarkAccessibilityContract(): Promise<void> {
     attr: { "data-echoink-focus-key": "providers:add" }
   });
   const detachedMutable = detachedTab as unknown as {
-    renderOnboardingCoachmark(step: "provider" | "knowledge" | "personality"): void;
+    renderOnboardingCoachmark(
+      step: "sidebar" | "settings" | "provider" | "knowledge" | "personality"
+    ): void;
     clearOnboardingCoachmark(restoreFocus: boolean): void;
   };
   detachedMutable.renderOnboardingCoachmark("provider");
@@ -1757,6 +1848,7 @@ async function assertOnboardingCoachmarkAccessibilityContract(): Promise<void> {
 
   settings.setup.completedAt = 0;
   settings.setup.tutorialStep = "provider";
+  settings.setup.tutorialVersion = ECHOINK_ONBOARDING_VERSION;
   for (const fixture of [
     { step: "provider" as const, key: "providers:add", tab: "providers" as const, nextTab: "knowledgeBase" as const },
     { step: "knowledge" as const, key: "knowledge:onboarding", tab: "knowledgeBase" as const, nextTab: "general" as const },
@@ -1778,7 +1870,7 @@ async function assertOnboardingCoachmarkAccessibilityContract(): Promise<void> {
   }
   assert.deepEqual(advanceCalls, ["provider", "knowledge", "personality"]);
   assert.equal(settings.setup.completedAt, 203);
-  assert.equal(settings.setup.tutorialStep, "provider");
+  assert.equal(settings.setup.tutorialStep, "sidebar");
   assert.equal(
     providerModalTestDocument.body.querySelector(".echoink-onboarding-coachmark"),
     null
@@ -3600,6 +3692,95 @@ async function assertAgentIdentityCardPlacementAndCopy(): Promise<void> {
   console.log("PASS settings: identity card placement and profile copy");
 }
 
+async function assertCustomWelcomeSettingsUi(): Promise<void> {
+  installProviderModalDomFixture();
+  const fixtureState = createIdentityFixtureState();
+  const { plugin, refreshCalls } = createIdentityTestPlugin(fixtureState);
+  let saveCalls = 0;
+  plugin.saveSettings = async () => { saveCalls += 1; };
+  const tab = new CodexSettingTab(withSettingsTabDefaults(plugin) as never);
+  const mutable = tab as unknown as { personalMemoryState: Record<string, any> | null };
+  mutable.personalMemoryState = structuredClone(fixtureState);
+
+  tab.display();
+  const customToggleRow = Array.from(
+    tab.containerEl.querySelectorAll<ProviderModalTestElement>(".setting-item")
+  ).find((row) => row.querySelector(".setting-item-name")?.textContent === "自定义加载欢迎语");
+  assert.ok(customToggleRow, "custom welcome toggle renders");
+  assert.equal(
+    customToggleRow!.querySelector<ProviderModalTestElement>('input[type="checkbox"]')?.checked,
+    false,
+    "custom welcome is disabled by default"
+  );
+  assert.equal(tab.containerEl.querySelector('input[aria-label="欢迎标题"]'), null);
+  assert.equal(tab.containerEl.querySelector('input[aria-label="问候语"]'), null);
+
+  plugin.settings.customWelcomeEnabled = true;
+  tab.display();
+  const title = tab.containerEl.querySelector<ProviderModalTestElement>(
+    'input[aria-label="欢迎标题"]'
+  );
+  const subtitle = tab.containerEl.querySelector<ProviderModalTestElement>(
+    'input[aria-label="问候语"]'
+  );
+  assert.ok(title && subtitle, "enabling custom welcome exposes exactly two editable lines");
+  assert.equal(title!.value, "What's new?");
+  assert.match(subtitle!.value, /当前 Conversation/u);
+
+  title!.value = "今天想聊什么？";
+  title!.onchange?.();
+  subtitle!.value = "从一个问题开始，我来陪你想清楚。";
+  subtitle!.onchange?.();
+  await settleMicrotasks();
+  assert.equal(plugin.settings.customWelcomeTitle, "今天想聊什么？");
+  assert.equal(plugin.settings.customWelcomeSubtitle, "从一个问题开始，我来陪你想清楚。");
+  assert.equal(saveCalls, 2);
+  assert.equal(refreshCalls(), 2, "both fields refresh the empty conversation UI");
+  console.log("PASS settings: custom welcome exposes two editable lines only when enabled");
+}
+
+function assertCustomWelcomeContract(): void {
+  assert.equal(DEFAULT_SETTINGS.customWelcomeEnabled, false);
+  assert.deepEqual(resolveEchoInkWelcomeCopy(DEFAULT_SETTINGS), {
+    title: "What's new?",
+    subtitle: "当前 Conversation 需要先选择工作区；添加笔记只作为本轮上下文。"
+  });
+
+  const customized = structuredClone(DEFAULT_SETTINGS);
+  customized.customWelcomeEnabled = true;
+  customized.customWelcomeTitle = "  今天想聊什么？  ";
+  customized.customWelcomeSubtitle = "  从一个问题开始。  ";
+  assert.deepEqual(resolveEchoInkWelcomeCopy(customized), {
+    title: "今天想聊什么？",
+    subtitle: "从一个问题开始。"
+  });
+  customized.customWelcomeTitle = "   ";
+  customized.customWelcomeSubtitle = "";
+  assert.deepEqual(
+    resolveEchoInkWelcomeCopy(customized),
+    resolveEchoInkWelcomeCopy(DEFAULT_SETTINGS),
+    "blank custom lines fall back to the shipped welcome copy"
+  );
+
+  const legacy = structuredClone(DEFAULT_SETTINGS) as unknown as Record<string, unknown>;
+  delete legacy.customWelcomeEnabled;
+  delete legacy.customWelcomeTitle;
+  delete legacy.customWelcomeSubtitle;
+  legacy.showWelcome = false;
+  const normalized = normalizeSettingsData(legacy).settings;
+  assert.equal(normalized.customWelcomeEnabled, false);
+  assert.equal(Object.hasOwn(normalized, "showWelcome"), false);
+
+  const controllerSource = readFileSync("src/ui/codex-view/message-controller.ts", "utf8");
+  assert.match(controllerSource, /resolveEchoInkWelcomeCopy/u);
+  assert.doesNotMatch(controllerSource, /settings\.showWelcome/u);
+  const listSource = readFileSync("src/ui/codex-view/message-list.ts", "utf8");
+  assert.match(listSource, /welcomeCopy\.title/u);
+  assert.match(listSource, /welcomeCopy\.subtitle/u);
+  assert.doesNotMatch(listSource, /shouldRenderEchoInkWelcome/u);
+  console.log("PASS settings: default welcome always renders and custom copy has safe fallbacks");
+}
+
 function assertAboutGitHubActionsContract(): void {
   installProviderModalDomFixture();
   const { plugin } = createIdentityTestPlugin(createIdentityFixtureState());
@@ -4115,9 +4296,21 @@ async function assertPersonalityResetStillRequiresConfirm(): Promise<void> {
   );
   const confirmDialog = openTestModals[openTestModals.length - 1];
   assert.ok(confirmDialog, "confirmation modal opens for personality reset");
+  const resetBody = (confirmDialog.contentEl as unknown as ProviderModalTestElement)
+    .querySelector<ProviderModalTestElement>(".echoink-confirm-modal-preformatted");
+  assert.ok(resetBody, "reset consequences use a scan-friendly preformatted body");
+  assert.match(resetBody!.textContent, /选择新模板后：/u);
+  assert.match(resetBody!.textContent, /• 当前自动演化的人格会被替换。/u);
+  assert.match(resetBody!.textContent, /• 长期 Memory 不会删除。/u);
+  assert.match(resetBody!.textContent, /「复盘」/u);
+  assert.doesNotMatch(resetBody!.textContent, /重置会把 Agent 当前人格恢复到你重新选择的模板/u);
   const dialogButtons = (confirmDialog.contentEl as unknown as ProviderModalTestElement)
     .querySelectorAll<ProviderModalTestElement>("button");
   const decline = dialogButtons.find((button) => button.textContent === "取消");
+  assert.ok(
+    dialogButtons.some((button) => button.textContent === "选择新模板"),
+    "the primary action says what happens next"
+  );
   assert.ok(decline, "confirm dialog offers cancel");
   decline!.click();
   await settleMicrotasks();
@@ -4152,6 +4345,11 @@ async function assertPersonalityResetStillRequiresConfirm(): Promise<void> {
     /当前模板/u
   );
   assert.equal(templateCalls, 0, "opening the reset list writes nothing");
+  const css = readFileSync("styles.css", "utf8");
+  assert.match(
+    css,
+    /\.echoink-confirm-modal-preformatted\s*\{[\s\S]*?line-height:\s*1\.6/u
+  );
   console.log("PASS settings: personality reset still requires the confirmation modal");
 }
 

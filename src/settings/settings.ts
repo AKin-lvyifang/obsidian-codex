@@ -150,7 +150,17 @@ export interface SetupSettings {
   completedAt: number;
   lastCheckedAt: number;
   dismissedVersion: string;
-  tutorialStep: "provider" | "knowledge" | "personality";
+  tutorialVersion: string;
+  tutorialStep: "sidebar" | "settings" | "provider" | "knowledge" | "personality";
+}
+
+export const DEFAULT_ECHOINK_WELCOME_TITLE = "What's new?";
+export const DEFAULT_ECHOINK_WELCOME_SUBTITLE =
+  "当前 Conversation 需要先选择工作区；添加笔记只作为本轮上下文。";
+
+export interface EchoInkWelcomeCopy {
+  readonly title: string;
+  readonly subtitle: string;
 }
 
 export interface EchoInkMemorySettings {
@@ -298,7 +308,9 @@ export interface CodexForObsidianSettings {
   autoOpen: boolean;
   autoOpenHome: boolean;
   showContext: boolean;
-  showWelcome: boolean;
+  customWelcomeEnabled: boolean;
+  customWelcomeTitle: string;
+  customWelcomeSubtitle: string;
   setup: SetupSettings;
   memory: EchoInkMemorySettings;
   resourceManagementTab: ResourceManagementTab;
@@ -333,12 +345,15 @@ export const DEFAULT_SETTINGS: CodexForObsidianSettings = {
   autoOpen: false,
   autoOpenHome: false,
   showContext: true,
-  showWelcome: true,
+  customWelcomeEnabled: false,
+  customWelcomeTitle: DEFAULT_ECHOINK_WELCOME_TITLE,
+  customWelcomeSubtitle: DEFAULT_ECHOINK_WELCOME_SUBTITLE,
   setup: {
     completedAt: 0,
     lastCheckedAt: 0,
     dismissedVersion: "",
-    tutorialStep: "provider"
+    tutorialVersion: "",
+    tutorialStep: "sidebar"
   },
   memory: {
     enabled: true,
@@ -420,7 +435,15 @@ export function normalizeSettingsData(input: unknown): { settings: CodexForObsid
     autoOpenHome: data?.autoOpenHome === true,
     activeApiProviderId: typeof data?.activeApiProviderId === "string" ? data.activeApiProviderId.trim() : "",
     apiProviders: normalizeApiProviders(data?.apiProviders),
-    showWelcome: data?.showWelcome !== false,
+    customWelcomeEnabled: data?.customWelcomeEnabled === true,
+    customWelcomeTitle: normalizeWelcomeLine(
+      data?.customWelcomeTitle,
+      DEFAULT_ECHOINK_WELCOME_TITLE
+    ),
+    customWelcomeSubtitle: normalizeWelcomeLine(
+      data?.customWelcomeSubtitle,
+      DEFAULT_ECHOINK_WELCOME_SUBTITLE
+    ),
     setup: normalizeSetupSettings(data?.setup),
     memory: normalizeMemorySettings(data?.memory),
     resourceManagementTab: normalizeResourceManagementTab(data?.resourceManagementTab),
@@ -495,14 +518,37 @@ export function normalizeSettingsData(input: unknown): { settings: CodexForObsid
       settings.activeSessionId !== data?.activeSessionId
       || settings.sessions.length !== (Array.isArray(data?.sessions) ? data.sessions.length : 0)
     );
+  const welcomeSettingsChanged = Object.hasOwn(data, "showWelcome")
+    || !Object.hasOwn(data, "customWelcomeEnabled")
+    || !Object.hasOwn(data, "customWelcomeTitle")
+    || !Object.hasOwn(data, "customWelcomeSubtitle");
   return {
     settings,
     changed: previousVersion !== DEFAULT_SETTINGS.settingsVersion
       || languageChanged
       || !currentProductData
       || sessionBoundaryChanged
+      || welcomeSettingsChanged
       || retiredDataPresent
   };
+}
+
+export function resolveEchoInkWelcomeCopy(
+  settings: Pick<
+    CodexForObsidianSettings,
+    "customWelcomeEnabled" | "customWelcomeTitle" | "customWelcomeSubtitle"
+  >
+): Readonly<EchoInkWelcomeCopy> {
+  if (!settings.customWelcomeEnabled) {
+    return Object.freeze({
+      title: DEFAULT_ECHOINK_WELCOME_TITLE,
+      subtitle: DEFAULT_ECHOINK_WELCOME_SUBTITLE
+    });
+  }
+  return Object.freeze({
+    title: settings.customWelcomeTitle.trim() || DEFAULT_ECHOINK_WELCOME_TITLE,
+    subtitle: settings.customWelcomeSubtitle.trim() || DEFAULT_ECHOINK_WELCOME_SUBTITLE
+  });
 }
 
 function hasRetiredSettingsData(data: Record<string, unknown>): boolean {
@@ -1043,14 +1089,23 @@ function normalizeUiMode(value: unknown, fallback: UiMode): UiMode {
 
 function normalizeSetupSettings(input: unknown): SetupSettings {
   const value = settingsRecord(input) ?? {};
+  const tutorialStep = value?.tutorialStep;
   return {
     completedAt: normalizeNonNegativeNumber(value?.completedAt),
     lastCheckedAt: normalizeNonNegativeNumber(value?.lastCheckedAt),
     dismissedVersion: normalizeOptionalText(value?.dismissedVersion),
-    tutorialStep: value?.tutorialStep === "knowledge" || value?.tutorialStep === "personality"
-      ? value.tutorialStep
-      : "provider"
+    tutorialVersion: normalizeOptionalText(value?.tutorialVersion),
+    tutorialStep: tutorialStep === "settings"
+      || tutorialStep === "provider"
+      || tutorialStep === "knowledge"
+      || tutorialStep === "personality"
+      ? tutorialStep
+      : "sidebar"
   };
+}
+
+function normalizeWelcomeLine(value: unknown, fallback: string): string {
+  return typeof value === "string" ? value : fallback;
 }
 
 function normalizeMemorySettings(input: unknown): EchoInkMemorySettings {

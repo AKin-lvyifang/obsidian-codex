@@ -51,8 +51,12 @@ const ZH_CN = {
     autoOpen: "启动时自动打开侧栏",
     autoOpenHome: "启动时自动打开首页",
     showContext: "显示上下文容量",
-    showWelcome: "显示加载欢迎语",
-    showWelcomeDesc: "只控制空会话界面，不写入对话，也不占用模型 Token。",
+    customWelcome: "自定义加载欢迎语",
+    customWelcomeDesc: "开启后可修改空会话里的标题和问候语；关闭时使用默认文案。不会写入对话，也不占用模型 Token。",
+    welcomeTitle: "欢迎标题",
+    welcomeTitleDesc: "空会话中显示的大标题；留空时使用默认标题。",
+    welcomeGreeting: "问候语",
+    welcomeGreetingDesc: "标题下方的小字；留空时使用默认问候语。",
     languageOptions: {
       "zh-CN": "中文",
       en: "English"
@@ -327,8 +331,12 @@ const EN: SettingsCopy = {
     autoOpen: "Open sidebar on startup",
     autoOpenHome: "Open homepage on startup",
     showContext: "Show context usage",
-    showWelcome: "Show welcome message",
-    showWelcomeDesc: "Only changes the empty-chat UI. It is never written to the conversation or counted as model tokens.",
+    customWelcome: "Customize welcome message",
+    customWelcomeDesc: "Turn this on to edit the empty-chat title and greeting. When off, EchoInk uses the default copy. It is never added to the conversation or model tokens.",
+    welcomeTitle: "Welcome title",
+    welcomeTitleDesc: "The large heading shown in an empty conversation. Leave blank to use the default.",
+    welcomeGreeting: "Greeting",
+    welcomeGreetingDesc: "The smaller line below the title. Leave blank to use the default.",
     languageOptions: {
       "zh-CN": "中文",
       en: "English"

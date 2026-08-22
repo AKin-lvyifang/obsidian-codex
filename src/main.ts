@@ -1,6 +1,6 @@
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
-import { Plugin } from "obsidian";
+import { Notice, Plugin } from "obsidian";
 import { closeMcpBrokerConnectionPool } from "./resources/mcp-broker";
 import {
   EchoInkMcpBrokerService,
@@ -101,9 +101,15 @@ import {
   advanceEchoInkOnboardingTutorial,
   dismissEchoInkOnboardingTutorial,
   echoInkOnboardingTab,
+  onboardingCoachmarkCopy,
+  prepareEchoInkOnboardingTutorial,
   shouldAutoStartEchoInkOnboarding,
   type EchoInkOnboardingStep
 } from "./settings/onboarding";
+import {
+  mountEchoInkOnboardingCoachmark,
+  type EchoInkOnboardingCoachmarkHandle
+} from "./ui/onboarding-coachmark";
 
 interface PiConversationActivationTask {
   readonly generation: number;
@@ -148,12 +154,23 @@ export default class CodexForObsidianPlugin extends Plugin {
   private personalMemoryCorrection: PersonalMemoryCorrectionService | null = null;
   private readonly productActivity = new ProductActivityGate();
   private onboardingRequested = false;
+  private onboardingRibbonAnchor: HTMLElement | null = null;
+  private onboardingWorkspaceCoachmark: EchoInkOnboardingCoachmarkHandle | null = null;
+  private onboardingDesktopWaitCleanup: (() => void) | null = null;
   async onload(): Promise<void> {
+    const enabledAfterLayoutReady = this.app.workspace.layoutReady;
     const settingsLoad = await this.loadSettings();
     this.onboardingRequested = shouldAutoStartEchoInkOnboarding(
       settingsLoad.emptyData,
-      this.settings.setup
+      this.settings.setup,
+      enabledAfterLayoutReady
     );
+    if (this.onboardingRequested && prepareEchoInkOnboardingTutorial(
+      this.settings.setup,
+      { forceRestart: enabledAfterLayoutReady }
+    )) {
+      await this.saveSettings(true);
+    }
     await this.initializePiLocalData();
     // Cognitive main-chain (personality / dreaming / secondary facts): start the
     // scheduler as soon as local data is ready; failures never block the plugin.
@@ -171,6 +188,8 @@ export default class CodexForObsidianPlugin extends Plugin {
   }
 
   private async performUnload(): Promise<void> {
+    this.clearEchoInkOnboardingWorkspaceCoachmark(false);
+    this.onboardingRibbonAnchor = null;
     this.cognitiveSystem?.dispose();
     this.cognitiveSystem = null;
     await this.knowledgeBase?.unload();
@@ -187,19 +206,58 @@ export default class CodexForObsidianPlugin extends Plugin {
   async activateHomeView(options: { keepRightSidebar?: boolean } = {}): Promise<void> { return this.getViewService().activateHomeView(options); }
   async activateView(): Promise<void> { return this.getViewService().activateView(); }
   async openPendingEchoInkOnboarding(): Promise<void> {
-    // Only the first-install startup path may open the tutorial. Existing
-    // Vaults cannot turn it back on through a setting or command.
     if (!this.onboardingRequested) return;
+    const step = this.settings.setup.tutorialStep;
+    if (step === "sidebar" || step === "settings") {
+      await this.showEchoInkOnboardingWorkspaceCoachmark(step);
+      return;
+    }
     await this.getViewService().openEchoInkSettings(
-      echoInkOnboardingTab(this.settings.setup.tutorialStep)
+      echoInkOnboardingTab(step)
     );
+  }
+  setEchoInkOnboardingRibbonAnchor(anchor: HTMLElement): void {
+    this.onboardingRibbonAnchor = anchor;
+  }
+  async handleEchoInkOnboardingTargetActivated(
+    expectedStep: "sidebar" | "settings"
+  ): Promise<boolean> {
+    if (
+      !this.onboardingRequested
+      || this.settings.setup.tutorialStep !== expectedStep
+    ) return false;
+    let nextStep: EchoInkOnboardingStep | null;
+    try {
+      nextStep = await this.advanceEchoInkOnboarding(expectedStep);
+    } catch (error) {
+      console.error("EchoInk onboarding advance failed", error);
+      new Notice(this.settings.settingsLanguage === "en"
+        ? "Tutorial progress could not be saved. Try again."
+        : "引导进度保存失败，请重试。");
+      return true;
+    }
+    this.clearEchoInkOnboardingWorkspaceCoachmark(false);
+    if (nextStep === "settings") {
+      await this.showEchoInkOnboardingWorkspaceCoachmark("settings");
+    } else if (nextStep === "provider") {
+      await this.getViewService().openEchoInkSettings("providers");
+    }
+    return true;
   }
   isEchoInkOnboardingRequested(): boolean { return this.onboardingRequested; }
   shouldAutoOpenEchoInkOnboarding(): boolean { return this.onboardingRequested; }
   async dismissEchoInkOnboarding(): Promise<void> {
+    const previousRequested = this.onboardingRequested;
+    const previousSetup = { ...this.settings.setup };
     this.onboardingRequested = false;
     dismissEchoInkOnboardingTutorial(this.settings.setup);
-    await this.saveSettings(true);
+    try {
+      await this.saveSettings(true);
+    } catch (error) {
+      this.onboardingRequested = previousRequested;
+      Object.assign(this.settings.setup, previousSetup);
+      throw error;
+    }
   }
   getEchoInkOnboardingStep(): EchoInkOnboardingStep {
     return this.settings.setup.tutorialStep;
@@ -208,6 +266,8 @@ export default class CodexForObsidianPlugin extends Plugin {
     expectedStep: EchoInkOnboardingStep
   ): Promise<EchoInkOnboardingStep | null> {
     if (!this.onboardingRequested) return null;
+    const previousRequested = this.onboardingRequested;
+    const previousSetup = { ...this.settings.setup };
     const result = advanceEchoInkOnboardingTutorial(
       this.settings.setup,
       expectedStep,
@@ -215,9 +275,89 @@ export default class CodexForObsidianPlugin extends Plugin {
     );
     if (result.completed) this.onboardingRequested = false;
     if (result.changed) {
-      await this.saveSettings(true);
+      try {
+        await this.saveSettings(true);
+      } catch (error) {
+        this.onboardingRequested = previousRequested;
+        Object.assign(this.settings.setup, previousSetup);
+        throw error;
+      }
     }
     return result.nextStep;
+  }
+  private async showEchoInkOnboardingWorkspaceCoachmark(
+    step: "sidebar" | "settings"
+  ): Promise<void> {
+    this.clearEchoInkOnboardingWorkspaceCoachmark(false);
+    if (step === "sidebar" && !this.isEchoInkOnboardingDesktopReady()) {
+      this.waitForEchoInkOnboardingDesktop();
+      return;
+    }
+    if (step === "settings" && !this.findEchoInkOnboardingSettingsAnchor()) {
+      await this.activateView();
+    }
+    const anchor = step === "sidebar"
+      ? this.onboardingRibbonAnchor
+      : this.findEchoInkOnboardingSettingsAnchor();
+    if (!anchor?.isConnected) return;
+    const zh = this.settings.settingsLanguage !== "en";
+    const copy = onboardingCoachmarkCopy(step, zh);
+    this.onboardingWorkspaceCoachmark = mountEchoInkOnboardingCoachmark({
+      anchor,
+      stepClass: step,
+      stepLabel: copy.step,
+      title: copy.title,
+      description: copy.description,
+      dismissLabel: zh ? "稍后设置" : "Set up later",
+      initialFocus: "anchor",
+      onDismiss: async () => {
+        await this.dismissEchoInkOnboarding();
+      },
+      onDismissError: (error) => {
+        console.error("EchoInk onboarding dismiss failed", error);
+        new Notice(zh ? "引导状态保存失败，请重试。" : "Tutorial state could not be saved. Try again.");
+      }
+    });
+  }
+  private findEchoInkOnboardingSettingsAnchor(): HTMLElement | null {
+    return this.app.workspace.containerEl.ownerDocument.querySelector<HTMLElement>(
+      '[data-echoink-onboarding-anchor="settings"]'
+    );
+  }
+  private isEchoInkOnboardingDesktopReady(): boolean {
+    const ownerDocument = this.app.workspace.containerEl.ownerDocument;
+    const settingsModal = ownerDocument.querySelector<HTMLElement>(".modal.mod-settings");
+    if (!settingsModal) return true;
+    const computed = ownerDocument.defaultView?.getComputedStyle(settingsModal);
+    return computed?.display === "none" || computed?.visibility === "hidden";
+  }
+  private waitForEchoInkOnboardingDesktop(): void {
+    const ownerDocument = this.app.workspace.containerEl.ownerDocument;
+    const MutationObserverCtor = ownerDocument.defaultView?.MutationObserver
+      ?? MutationObserver;
+    const observer = new MutationObserverCtor(() => {
+      if (
+        !this.onboardingRequested
+        || this.settings.setup.tutorialStep !== "sidebar"
+        || !this.isEchoInkOnboardingDesktopReady()
+      ) return;
+      observer.disconnect();
+      this.onboardingDesktopWaitCleanup = null;
+      void this.showEchoInkOnboardingWorkspaceCoachmark("sidebar");
+    });
+    observer.observe(ownerDocument.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["class", "style", "aria-hidden"]
+    });
+    this.onboardingDesktopWaitCleanup = () => observer.disconnect();
+  }
+  private clearEchoInkOnboardingWorkspaceCoachmark(restoreFocus: boolean): void {
+    this.onboardingDesktopWaitCleanup?.();
+    this.onboardingDesktopWaitCleanup = null;
+    this.onboardingWorkspaceCoachmark?.destroy(restoreFocus);
+    this.onboardingWorkspaceCoachmark = null;
   }
   applyComposerDefaultsToView(): void { this.getViewService().applyComposerDefaultsToView(); }
   getCodexView(): CodexView | null { return this.getViewService().getCodexView(); }

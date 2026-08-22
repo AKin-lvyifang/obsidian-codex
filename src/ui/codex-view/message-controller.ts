@@ -1,6 +1,10 @@
 import type { App, Component } from "obsidian";
 import type CodexForObsidianPlugin from "../../main";
-import type { ChatMessage, StoredSession } from "../../settings/settings";
+import {
+  resolveEchoInkWelcomeCopy,
+  type ChatMessage,
+  type StoredSession
+} from "../../settings/settings";
 import { swallowError } from "../../core/error-handling";
 import { settleStaleRunningMessages } from "../../core/message-state";
 import { SessionMessageStore, type SessionMessageInput } from "./session-message-store";
@@ -82,7 +86,7 @@ export function renderMessages(host: CodexMessageHost, options: { forceBottom?: 
     messagesEl: host.messagesEl,
     virtualListEl: host.virtualListEl,
     sessionId: session.id,
-    showWelcome: host.plugin.settings.showWelcome,
+    welcomeCopy: resolveEchoInkWelcomeCopy(host.plugin.settings),
     settingsLanguage: host.plugin.settings.settingsLanguage,
     agentIdentity: host.plugin.getEchoInkAgentIdentityView(),
     messages,

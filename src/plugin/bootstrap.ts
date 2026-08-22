@@ -21,9 +21,13 @@ export function registerEchoInkPluginFeatures(plugin: CodexForObsidianPlugin): E
   plugin.registerView(VIEW_TYPE_ECHOINK_HOME, (leaf: WorkspaceLeaf) => new EchoInkHomeView(leaf, plugin));
   plugin.registerView(VIEW_TYPE_REVIEW_PREVIEW, (leaf: WorkspaceLeaf) => new ReviewPreviewView(leaf, plugin));
 
-  plugin.addRibbonIcon("bot", "打开 EchoInk 首页和 Agent 侧栏", () => {
-    void plugin.activateHomeAndSidebar();
+  const ribbonAnchor = plugin.addRibbonIcon("bot", "打开 EchoInk 首页和 Agent 侧栏", () => {
+    void (async () => {
+      await plugin.activateHomeAndSidebar();
+      await plugin.handleEchoInkOnboardingTargetActivated("sidebar");
+    })();
   });
+  plugin.setEchoInkOnboardingRibbonAnchor(ribbonAnchor);
 
   plugin.addCommand({
     id: "open-echoink-home",
@@ -85,6 +89,9 @@ export function registerEchoInkPluginFeatures(plugin: CodexForObsidianPlugin): E
 export function registerEchoInkStartupTasks(plugin: CodexForObsidianPlugin): void {
   if (plugin.shouldAutoOpenEchoInkOnboarding()) {
     plugin.app.workspace.onLayoutReady(() => void plugin.openPendingEchoInkOnboarding());
+    // The first two guide steps deliberately wait for real user clicks. Do not
+    // let the normal auto-open preferences skip those controls underneath it.
+    return;
   }
   if (plugin.settings.autoOpen) {
     plugin.app.workspace.onLayoutReady(() => void plugin.activateView());

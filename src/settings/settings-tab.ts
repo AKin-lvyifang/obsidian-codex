@@ -21,6 +21,10 @@ import {
 } from "../harness/memory/personality-templates";
 import { AGENT_AVATAR_PRESETS, resolveAgentAvatarUrl } from "../ui/agent-avatar-presets";
 import { AgentIdentityModal } from "../ui/agent-identity-modal";
+import {
+  mountEchoInkOnboardingCoachmark,
+  type EchoInkOnboardingCoachmarkHandle
+} from "../ui/onboarding-coachmark";
 import { buildActiveEchoInkResourceCatalog } from "../resources/registry";
 import {
   mcpConnectionStatus,
@@ -109,8 +113,11 @@ import {
   restoreDefaultKnowledgeMaintenancePreference,
   type KnowledgeMaintenancePreferenceEditorState
 } from "./knowledge-maintenance-preference-editor";
-import type { EchoInkOnboardingStep } from "./onboarding";
-import { echoInkOnboardingTab } from "./onboarding";
+import {
+  echoInkOnboardingTab,
+  onboardingCoachmarkCopy,
+  type EchoInkOnboardingStep
+} from "./onboarding";
 
 type PersonalMemoryControlState = Awaited<
   ReturnType<CodexForObsidianPlugin["getEchoInkPersonalMemoryState"]>
@@ -179,8 +186,7 @@ export class CodexSettingTab extends PluginSettingTab {
   private archivedConversationBusyId = "";
   private settingsTabsResizeObserver: ResizeObserver | null = null;
   private readonly verifiedProviderConnections = new Map<string, string>();
-  private onboardingCoachmarkEl: HTMLElement | null = null;
-  private onboardingCoachmarkCleanup: (() => void) | null = null;
+  private onboardingCoachmarkHandle: EchoInkOnboardingCoachmarkHandle | null = null;
   private onboardingRestoreFocusEl: HTMLElement | null = null;
   private onboardingRefreshGeneration = 0;
 
@@ -421,6 +427,10 @@ export class CodexSettingTab extends PluginSettingTab {
       return;
     }
     const step = this.plugin.getEchoInkOnboardingStep();
+    if (step === "sidebar" || step === "settings") {
+      this.clearOnboardingCoachmark(false);
+      return;
+    }
     const requiredTab = echoInkOnboardingTab(step);
     if (this.plugin.settings.settingsTab !== requiredTab) {
       // 教程只在对应页面提供提示，不接管设置导航。用户主动切到其他
@@ -440,6 +450,10 @@ export class CodexSettingTab extends PluginSettingTab {
   }
 
   private renderOnboardingCoachmark(step: EchoInkOnboardingStep): void {
+    if (step === "sidebar" || step === "settings") {
+      this.clearOnboardingCoachmark(false);
+      return;
+    }
     const anchorKey = step === "provider"
       ? "providers:add"
       : step === "knowledge"
@@ -453,7 +467,6 @@ export class CodexSettingTab extends PluginSettingTab {
       return;
     }
     const settingsDocument = anchor.ownerDocument;
-    const settingsWindow = settingsDocument.defaultView ?? window;
     if (!this.onboardingRestoreFocusEl) {
       const active = settingsDocument.activeElement;
       this.onboardingRestoreFocusEl = active instanceof HTMLElement ? active : null;
@@ -461,80 +474,31 @@ export class CodexSettingTab extends PluginSettingTab {
     this.clearOnboardingCoachmark(false);
     const zh = this.plugin.settings.settingsLanguage !== "en";
     const copy = onboardingCoachmarkCopy(step, zh);
-    const coachmark = settingsDocument.body.createDiv({
-      cls: `echoink-onboarding-coachmark is-${step}`,
-      attr: {
-        role: "dialog",
-        "aria-modal": "false",
-        "aria-label": copy.title,
-        tabindex: "-1"
-      }
-    });
-    this.onboardingCoachmarkEl = coachmark;
-    anchor.addClass("is-echoink-onboarding-target");
-    anchor.scrollIntoView({ block: "center", inline: "nearest" });
-    coachmark.createDiv({ cls: "echoink-onboarding-step", text: copy.step });
-    coachmark.createDiv({
-      cls: "echoink-onboarding-title",
-      text: copy.title,
-      attr: { role: "heading", "aria-level": "3" }
-    });
-    coachmark.createDiv({ cls: "echoink-onboarding-copy", text: copy.description });
-    const actions = coachmark.createDiv({ cls: "echoink-onboarding-actions" });
-    const dismiss = actions.createEl("button", {
-      text: zh ? "稍后再说" : "Not now",
-      attr: { type: "button" }
-    });
-    const next = actions.createEl("button", {
-      cls: "mod-cta",
-      text: copy.action,
-      attr: { type: "button" }
-    });
-    const dismissOnboarding = () => {
-      void this.plugin.dismissEchoInkOnboarding().finally(() => {
-        this.clearOnboardingCoachmark(true);
-      });
-    };
-    dismiss.onclick = dismissOnboarding;
-    next.onclick = () => {
-      if (next.disabled) return;
-      next.disabled = true;
-      void this.advanceOnboardingTutorial(step).catch((error) => {
+    const handle = mountEchoInkOnboardingCoachmark({
+      anchor,
+      stepClass: step,
+      stepLabel: copy.step,
+      title: copy.title,
+      description: copy.description,
+      dismissLabel: zh ? "稍后设置" : "Set up later",
+      actionLabel: copy.action,
+      restoreFocusEl: this.onboardingRestoreFocusEl,
+      onDismiss: async () => {
+        await this.plugin.dismissEchoInkOnboarding();
+      },
+      onDismissError: (error) => {
+        console.error("EchoInk onboarding dismiss failed", error);
+        new Notice(zh ? "引导状态保存失败，请重试" : "Failed to save tutorial state. Try again.");
+      },
+      onAction: async () => {
+        await this.advanceOnboardingTutorial(step);
+      },
+      onActionError: (error) => {
         console.error("EchoInk onboarding advance failed", error);
         new Notice(zh ? "引导进度保存失败，请重试" : "Failed to save tutorial progress. Try again.");
-      }).finally(() => {
-        if (next.isConnected) next.disabled = false;
-      });
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      dismissOnboarding();
-    };
-    const position = () => positionOnboardingCoachmark(
-      coachmark,
-      anchor,
-      settingsWindow
-    );
-    const ResizeObserverCtor = settingsWindow.ResizeObserver;
-    const observer = typeof ResizeObserverCtor === "undefined"
-      ? null
-      : new ResizeObserverCtor(position);
-    observer?.observe(anchor);
-    observer?.observe(coachmark);
-    settingsWindow.addEventListener("resize", position);
-    settingsDocument.addEventListener("scroll", position, true);
-    settingsDocument.addEventListener("keydown", onKeyDown, true);
-    this.onboardingCoachmarkCleanup = () => {
-      observer?.disconnect();
-      settingsWindow.removeEventListener("resize", position);
-      settingsDocument.removeEventListener("scroll", position, true);
-      settingsDocument.removeEventListener("keydown", onKeyDown, true);
-      anchor.removeClass("is-echoink-onboarding-target");
-      coachmark.remove();
-    };
-    position();
-    coachmark.focus({ preventScroll: true });
+      }
+    });
+    this.onboardingCoachmarkHandle = handle;
   }
 
   private async advanceOnboardingTutorial(step: EchoInkOnboardingStep): Promise<void> {
@@ -558,9 +522,8 @@ export class CodexSettingTab extends PluginSettingTab {
   }
 
   private clearOnboardingCoachmark(restoreFocus: boolean): void {
-    this.onboardingCoachmarkCleanup?.();
-    this.onboardingCoachmarkCleanup = null;
-    this.onboardingCoachmarkEl = null;
+    this.onboardingCoachmarkHandle?.destroy(false);
+    this.onboardingCoachmarkHandle = null;
     if (!restoreFocus) return;
     const restore = this.onboardingRestoreFocusEl;
     this.onboardingRestoreFocusEl = null;
@@ -742,16 +705,49 @@ export class CodexSettingTab extends PluginSettingTab {
     // User profile: read-only (maintained by dreaming / memory corrections)
     this.addReadOnlyUserProfileCard(group, this.personalMemoryState.user);
     applySettingsRow(new Setting(group)
-      .setName(this.copy.general.showWelcome)
-      .setDesc(this.copy.general.showWelcomeDesc)
+      .setName(this.copy.general.customWelcome)
+      .setDesc(this.copy.general.customWelcomeDesc)
       .addToggle((toggle) => {
-        labelSettingsToggle(toggle, this.copy.general.showWelcome);
-        toggle.setValue(this.plugin.settings.showWelcome).onChange(async (value) => {
-          this.plugin.settings.showWelcome = value;
+        labelSettingsToggle(toggle, this.copy.general.customWelcome);
+        toggle.setValue(this.plugin.settings.customWelcomeEnabled).onChange(async (value) => {
+          this.plugin.settings.customWelcomeEnabled = value;
           await this.plugin.saveSettings(true);
           this.plugin.getCodexView()?.refreshPersonalizationUi();
+          this.scheduleDisplay();
         });
       }));
+    if (this.plugin.settings.customWelcomeEnabled) {
+      applySettingsRow(new Setting(group)
+        .setName(this.copy.general.welcomeTitle)
+        .setDesc(this.copy.general.welcomeTitleDesc)
+        .addText((text) => {
+          text
+            .setValue(this.plugin.settings.customWelcomeTitle)
+            .setPlaceholder("What's new?")
+            .onChange(async (value) => {
+              this.plugin.settings.customWelcomeTitle = value;
+              await this.plugin.saveSettings(true);
+              this.plugin.getCodexView()?.refreshPersonalizationUi();
+            });
+          text.inputEl.maxLength = 80;
+          text.inputEl.setAttr("aria-label", this.copy.general.welcomeTitle);
+        }));
+      applySettingsRow(new Setting(group)
+        .setName(this.copy.general.welcomeGreeting)
+        .setDesc(this.copy.general.welcomeGreetingDesc)
+        .addText((text) => {
+          text
+            .setValue(this.plugin.settings.customWelcomeSubtitle)
+            .setPlaceholder("当前 Conversation 需要先选择工作区；添加笔记只作为本轮上下文。")
+            .onChange(async (value) => {
+              this.plugin.settings.customWelcomeSubtitle = value;
+              await this.plugin.saveSettings(true);
+              this.plugin.getCodexView()?.refreshPersonalizationUi();
+            });
+          text.inputEl.maxLength = 240;
+          text.inputEl.setAttr("aria-label", this.copy.general.welcomeGreeting);
+        }));
+    }
 
     this.renderAboutSection(page);
   }
@@ -1007,10 +1003,11 @@ export class CodexSettingTab extends PluginSettingTab {
           this.app,
           zh ? "重置人格" : "Reset personality",
           zh
-            ? "重置会把 Agent 当前人格恢复到你重新选择的模板，并清除当前自动演化结果。\n\n你的长期 Memory 不会被删除。只要相关记忆仍然存在，后续做梦很可能再次形成相似的处事和回复风格。若某条记忆不准确，请先到「复盘 → 记忆修正」中修正或忘记它。"
-            : "Reset restores the Agent's personality to the template you pick next and clears the current auto-evolved results.\n\nYour long-term Memory will NOT be deleted. As long as the related memories remain, future dreaming will very likely re-form a similar style. If a memory is inaccurate, correct or forget it first in Review → Memory correction.",
-          zh ? "继续选择模板" : "Continue to templates",
-          zh ? "取消" : "Cancel"
+            ? "选择新模板后：\n\n• 当前自动演化的人格会被替换。\n• 长期 Memory 不会删除。\n• 保留的记忆可能让 Agent 以后再次形成相似风格。\n\n如果某条记忆不准确，请先在「复盘」中修正或忘记。"
+            : "After you choose a new template:\n\n• The current evolved personality will be replaced.\n• Long-term Memory will not be deleted.\n• Retained memories may lead the Agent toward a similar style again.\n\nIf a memory is inaccurate, correct or forget it first in Review.",
+          zh ? "选择新模板" : "Choose new template",
+          zh ? "取消" : "Cancel",
+          { preformatted: true }
         ).then((confirmed) => {
           if (!confirmed) return;
           // 确认后仅打开 8 套模板列表；真正写入只发生在选中新模板时。
@@ -4049,89 +4046,6 @@ function labelSettingsToggle(
     ? toggle.toggleEl
     : toggle.toggleEl.querySelector<HTMLInputElement>('input[type="checkbox"]');
   inputEl?.setAttr("aria-label", label);
-}
-
-function onboardingCoachmarkCopy(
-  step: EchoInkOnboardingStep,
-  zh: boolean
-): Readonly<{
-  step: string;
-  title: string;
-  description: string;
-  action: string;
-}> {
-  const index = step === "provider" ? 1 : step === "knowledge" ? 2 : 3;
-  if (!zh) {
-    return Object.freeze({
-      step: `Step ${index} of 3`,
-      title: step === "provider"
-        ? "Add your model"
-        : step === "knowledge"
-          ? "Initialize Knowledge"
-          : "Choose an initial style",
-      description: step === "provider"
-        ? "This is where you can save and activate a Provider. It is optional for this tutorial and does not prove network connectivity."
-        : step === "knowledge"
-          ? "Initialize now or later with a recoverable preview before EchoInk moves or refines any note."
-          : "Choose a style now or later. Memory learning and recall are recommendations; dreaming remains optional and off by default.",
-      action: step === "personality" ? "Finish" : "Next"
-    });
-  }
-  return Object.freeze({
-    step: `第 ${index} 步，共 3 步`,
-    title: step === "provider"
-      ? "添加可用模型"
-      : step === "knowledge"
-        ? "初始化知识库"
-        : "选择初始风格",
-    description: step === "provider"
-      ? "这里可以保存并启用 Provider；本教程不要求现在完成，配置完整也不代表已验证网络连接。"
-      : step === "knowledge"
-        ? "可以现在或稍后初始化；EchoInk 移动或提炼笔记前仍会先给出可恢复的预览。"
-        : "可以现在或稍后选择风格。Memory 学习与读取只是建议；做梦保持默认关闭且可选。",
-    action: step === "personality" ? "完成" : "下一步"
-  });
-}
-
-function positionOnboardingCoachmark(
-  coachmark: HTMLElement,
-  anchor: HTMLElement,
-  settingsWindow: Window
-): void {
-  const anchorRect = anchor.getBoundingClientRect();
-  const margin = 12;
-  const viewportWidth = settingsWindow.innerWidth;
-  const viewportHeight = settingsWindow.innerHeight;
-  if (viewportWidth <= 640) {
-    coachmark.setCssStyles({
-      left: `${margin}px`,
-      right: `${margin}px`,
-      top: "auto",
-      bottom: `${margin}px`,
-      width: "auto"
-    });
-    coachmark.dataset.placement = "bottom-sheet";
-    return;
-  }
-  const width = Math.min(360, viewportWidth - margin * 2);
-  const coachmarkHeight = Math.max(coachmark.offsetHeight, 180);
-  const below = anchorRect.bottom + margin;
-  const above = anchorRect.top - coachmarkHeight - margin;
-  const top = below + coachmarkHeight <= viewportHeight - margin
-    ? below
-    : Math.max(margin, above);
-  const left = Math.min(
-    viewportWidth - width - margin,
-    Math.max(margin, anchorRect.left)
-  );
-  coachmark.setCssStyles({
-    left: `${left}px`,
-    right: "auto",
-    top: `${top}px`,
-    bottom: "auto",
-    width: `${width}px`
-  });
-  coachmark.dataset.placement = top === below ? "below" : "above";
 }
 
 const RESOURCE_TABS: Array<{ id: ResourceManagementTab; icon: string }> = [

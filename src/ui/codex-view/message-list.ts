@@ -1,5 +1,11 @@
 import { Notice, normalizePath, Platform, setIcon, TFile, type App, type Component, type Editor } from "obsidian";
-import type { ChatMessage, DiffSummary, SettingsLanguage, StoredAttachment } from "../../settings/settings";
+import type {
+  ChatMessage,
+  DiffSummary,
+  EchoInkWelcomeCopy,
+  SettingsLanguage,
+  StoredAttachment
+} from "../../settings/settings";
 import type { KnowledgeBaseCitation, KnowledgeBaseCitationBucket, KnowledgeBaseCitationSummary, KnowledgeWorkflowEvent, KnowledgeWorkflowPhaseId } from "../../knowledge-base/types";
 import type { ProcessFileRef, TokenUsage } from "../../types/app-server";
 import { showItemInFinder } from "../../core/electron";
@@ -52,7 +58,7 @@ export interface MessageListRenderInput {
   messagesEl: HTMLElement;
   virtualListEl: HTMLElement;
   sessionId: string;
-  showWelcome: boolean;
+  welcomeCopy: Readonly<EchoInkWelcomeCopy>;
   settingsLanguage: SettingsLanguage;
   messages: ChatMessage[];
   /** 当前 Agent 身份展示快照；缺省时回退 EchoInk + bot 图标。 */
@@ -188,10 +194,6 @@ export function shouldPinMessageListBottom(options: MessageListRenderOptions, ne
   return Boolean(options.forceBottom) || (!options.fromScroll && !options.preserveScroll && nearBottom);
 }
 
-export function shouldRenderEchoInkWelcome(showWelcome: boolean): boolean {
-  return showWelcome;
-}
-
 export function piConversationDeriveActionLabel(
   message: Pick<ChatMessage, "role">
 ): "从这条回复新建会话" | null {
@@ -249,12 +251,9 @@ export class CodexMessageListRenderer {
     virtualListEl.empty();
     if (messages.length === 0) {
       virtualListEl.setCssStyles({ height: "100%" });
-      if (!shouldRenderEchoInkWelcome(env.showWelcome)) {
-        return;
-      }
       const welcome = virtualListEl.createDiv({ cls: "codex-welcome" });
-      welcome.createDiv({ cls: "codex-welcome-title", text: "What's new?" });
-      welcome.createDiv({ cls: "codex-resource-note", text: "当前 Conversation 需要先选择工作区；添加笔记只作为本轮上下文。" });
+      welcome.createDiv({ cls: "codex-welcome-title", text: env.welcomeCopy.title });
+      welcome.createDiv({ cls: "codex-resource-note", text: env.welcomeCopy.subtitle });
       return;
     }
 

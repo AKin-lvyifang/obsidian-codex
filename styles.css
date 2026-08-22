@@ -1325,7 +1325,7 @@ button.codex-user-message-copy {
   }
 }
 
-/* EchoInk onboarding-v1: three fixed settings anchors, not a generic tour. */
+/* EchoInk onboarding-v2: two workspace anchors followed by three settings anchors. */
 .is-echoink-onboarding-target {
   position: relative;
   z-index: 1001;
@@ -5468,6 +5468,8 @@ button.echoink-settings-navigation-row:focus-visible {
   overflow-wrap: anywhere;
   max-height: 50vh;
   overflow-y: auto;
+  color: var(--text-muted);
+  line-height: 1.6;
 }
 
 .echoink-memory-correction-intro {

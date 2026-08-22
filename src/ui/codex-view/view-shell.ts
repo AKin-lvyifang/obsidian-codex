@@ -48,7 +48,13 @@ export function renderViewShell(host: CodexViewShellHost): void {
 
   renderCodexHeader(host.rootEl, {
     onOpenWorkspaceResources: () => void host.plugin.openWorkspaceResourceSettings("plugins"),
-    onOpenSettings: () => host.openPluginSettings()
+    onOpenSettings: () => {
+      void host.plugin.handleEchoInkOnboardingTargetActivated("settings")
+        .then((handled) => {
+          if (!handled) host.openPluginSettings();
+        })
+        .catch(() => host.openPluginSettings());
+    }
   });
   host.registerDomEvent(document, "click", (event) => {
     const target = event.target instanceof Node ? event.target : null;
