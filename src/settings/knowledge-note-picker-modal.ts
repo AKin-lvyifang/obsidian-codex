@@ -35,6 +35,22 @@ export interface KnowledgeNotePickerOptions {
   readonly restoreFocus?: () => void;
 }
 
+const KNOWLEDGE_NOTE_NAME_COLLATOR = new Intl.Collator("en", {
+  numeric: true,
+  sensitivity: "base"
+});
+
+export function sortKnowledgeNotePickerNotes(
+  notes: readonly KnowledgeNotePickerNote[]
+): KnowledgeNotePickerNote[] {
+  return [...notes].sort((left, right) => {
+    const leftName = left.sourcePath.split("/").at(-1) ?? left.sourcePath;
+    const rightName = right.sourcePath.split("/").at(-1) ?? right.sourcePath;
+    return KNOWLEDGE_NOTE_NAME_COLLATOR.compare(leftName, rightName)
+      || KNOWLEDGE_NOTE_NAME_COLLATOR.compare(left.sourcePath, right.sourcePath);
+  });
+}
+
 /**
  * 知识库初始化的多选笔记 Modal：
  * - 真实 checkbox 多选，整行 label 与 checkbox 同一点击区域；
@@ -47,6 +63,7 @@ export interface KnowledgeNotePickerOptions {
  * 确认时再静默分配回 Raw。
  */
 export class KnowledgeNotePickerModal extends Modal {
+  private readonly notes: readonly KnowledgeNotePickerNote[];
   private readonly checked = new Set<string>();
   private query = "";
   private searchEl: HTMLInputElement | null = null;
@@ -63,9 +80,10 @@ export class KnowledgeNotePickerModal extends Modal {
     private readonly options: KnowledgeNotePickerOptions
   ) {
     super(app);
+    this.notes = Object.freeze(sortKnowledgeNotePickerNotes(options.notes));
     // Raw 目标是「移回 Raw」：没有预勾选；其他目录预勾选当前已在该目录的笔记。
     if (options.targetRole !== "raw") {
-      for (const note of options.notes) {
+      for (const note of this.notes) {
         if (note.role === options.targetRole) this.checked.add(note.sourcePath);
       }
     }
@@ -165,17 +183,21 @@ export class KnowledgeNotePickerModal extends Modal {
   private renderList(): void {
     const list = this.listEl;
     if (!list) return;
-    const { zh, notes, targetRole, targetLabel, roleLabel } = this.options;
+    const { zh, targetRole, targetLabel, roleLabel } = this.options;
     const rawTarget = targetRole === "raw";
     list.empty();
     const query = this.query.trim().toLocaleLowerCase();
-    const visible = notes.filter((note) =>
+    const visible = this.notes.filter((note) =>
       !query || note.sourcePath.toLocaleLowerCase().includes(query)
     );
     if (visible.length === 0) {
       list.createDiv({
         cls: "echoink-knowledge-note-picker-empty",
-        text: zh ? "没有匹配的笔记。" : "No matching notes."
+        text: query
+          ? (zh ? "没有匹配的笔记。" : "No matching notes.")
+          : (zh
+              ? "Vault 中还没有可分配的 Markdown 笔记。"
+              : "There are no assignable Markdown notes in this Vault yet.")
       });
       return;
     }
@@ -199,11 +221,6 @@ export class KnowledgeNotePickerModal extends Modal {
         continue;
       }
       const row = list.createEl("label", { cls: "echoink-knowledge-note-picker-row" });
-      const checkbox = row.createEl("input", {
-        cls: "echoink-knowledge-note-picker-checkbox",
-        attr: { type: "checkbox" }
-      }) as HTMLInputElement;
-      checkbox.checked = this.checked.has(note.sourcePath);
       const copy = row.createDiv({ cls: "echoink-knowledge-note-picker-copy" });
       copy.createDiv({
         cls: "echoink-knowledge-note-picker-path",
@@ -211,6 +228,11 @@ export class KnowledgeNotePickerModal extends Modal {
         attr: { title: note.sourcePath }
       });
       const badge = copy.createDiv({ cls: "echoink-knowledge-note-picker-badge" });
+      const checkbox = row.createEl("input", {
+        cls: "echoink-knowledge-note-picker-checkbox",
+        attr: { type: "checkbox" }
+      }) as HTMLInputElement;
+      checkbox.checked = this.checked.has(note.sourcePath);
       const renderBadge = (): void => {
         const isChecked = this.checked.has(note.sourcePath);
         if (rawTarget) {
@@ -238,9 +260,9 @@ export class KnowledgeNotePickerModal extends Modal {
   }
 
   private collectAssignments(): KnowledgeInitializationAssignment[] {
-    const { targetRole, notes } = this.options;
+    const { targetRole } = this.options;
     const assignments: KnowledgeInitializationAssignment[] = [];
-    for (const note of notes) {
+    for (const note of this.notes) {
       const isChecked = this.checked.has(note.sourcePath);
       if (targetRole === "raw") {
         // 移回 Raw：只有被勾选且当前不在 Raw 的笔记产生写入。
@@ -296,8 +318,8 @@ export class KnowledgeNotePickerModal extends Modal {
       this.setSubmitting(false);
       this.showError(
         this.options.zh
-          ? `保存失败：${error instanceof Error ? error.message : String(error)}`
-          : `Save failed: ${error instanceof Error ? error.message : String(error)}`
+          ? "没有保存成功，请再试一次。"
+          : "Changes weren't saved. Try again."
       );
     }
   }

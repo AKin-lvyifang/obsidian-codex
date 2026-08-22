@@ -24,6 +24,7 @@ export async function runKnowledgeInitializationTests(): Promise<void> {
   assertRootLevelInitializationFileHasNoFolderCreation();
   await assertHiddenInitializationFileExistsOutsideVaultIndex();
   await assertRecommendedAndCustomPreview();
+  await assertCustomPreviewIncludesCurrentManagedMarkdown();
   await assertArchiveAndTemplatesRoles();
   await assertAssignManyBatchSemantics();
   await assertAssignManyCloneOnWriteFailureSemantics();
@@ -39,6 +40,78 @@ export async function runKnowledgeInitializationTests(): Promise<void> {
   await assertGuideConflictPreservesUserFile();
   await assertPriorGeneratedGuideIsReusableAfterNewPreview();
   await assertRestartPausesWithoutProviderReplay();
+}
+
+async function assertCustomPreviewIncludesCurrentManagedMarkdown(): Promise<void> {
+  await withHost(async (host) => {
+    host.addFile("10-root.md", "ten");
+    host.addFile("2-root.md", "two");
+    host.addFile("wiki/Alpha.md", "wiki");
+    host.addFile("raw/9.md", "raw");
+    host.addFile("inbox/Beta.md", "inbox");
+    host.addFile("assets/readme.md", "asset markdown is not assignable");
+
+    const initializer = new KnowledgeBaseInitializer(host);
+    await initializer.initialize();
+
+    const custom = await initializer.startPreview("custom");
+    const byPath = new Map(custom.items.map((item) => [item.sourcePath, item] as const));
+    assert.deepEqual([...byPath.keys()], [
+      "10-root.md",
+      "2-root.md",
+      "inbox/Beta.md",
+      "raw/9.md",
+      "wiki/Alpha.md"
+    ]);
+    assert.equal(byPath.get("wiki/Alpha.md")?.role, "wiki");
+    assert.equal(byPath.get("wiki/Alpha.md")?.targetPath, null);
+    assert.equal(byPath.get("wiki/Alpha.md")?.state, "kept");
+    assert.equal(byPath.get("raw/9.md")?.role, "raw");
+    assert.equal(byPath.get("raw/9.md")?.targetPath, null);
+    assert.deepEqual(custom.extractionQueue, [
+      "raw/9.md",
+      "raw/imported/10-root.md",
+      "raw/imported/2-root.md"
+    ]);
+    assert.equal(byPath.has("assets/readme.md"), false);
+
+    // 点击选择器前重新生成 preview 必须看到此刻刚创建的笔记，而不是
+    // 继续复用上一次冻结列表。
+    host.addFile("3-new.md", "new");
+    const refreshed = await initializer.startPreview("custom");
+    assert.ok(refreshed.items.some((item) => item.sourcePath === "3-new.md"));
+
+    // 已在固定目录里的笔记可以改分配；选回它实际所在的目录时恢复原位，
+    // 不产生一次毫无意义的同目录 imported 移动。
+    const moved = await initializer.assignMany([
+      { sourcePath: "wiki/Alpha.md", role: "projects" }
+    ]);
+    const movedWiki = moved.items.find((item) => item.sourcePath === "wiki/Alpha.md");
+    assert.equal(movedWiki?.targetPath, "projects/imported/wiki/Alpha.md");
+    assert.equal(movedWiki?.state, "pending");
+
+    const restored = await initializer.assignMany([
+      { sourcePath: "wiki/Alpha.md", role: "wiki" }
+    ]);
+    const restoredWiki = restored.items.find((item) => item.sourcePath === "wiki/Alpha.md");
+    assert.equal(restoredWiki?.targetPath, null);
+    assert.equal(restoredWiki?.state, "kept");
+
+    // Raw 中的原笔记若被分配到其他目录，就不能仍留在待提炼队列里。
+    const rawMovedAway = await initializer.assignMany([
+      { sourcePath: "raw/9.md", role: "wiki" }
+    ]);
+    assert.equal(rawMovedAway.extractionQueue.includes("raw/9.md"), false);
+
+    const rawMovedBack = await initializer.assignMany([
+      { sourcePath: "raw/9.md", role: "raw" }
+    ]);
+    assert.equal(
+      rawMovedBack.extractionQueue.includes("raw/9.md"),
+      true,
+      "moving an existing Raw note back to Raw must restore its extraction source"
+    );
+  });
 }
 
 function assertRootLevelInitializationFileHasNoFolderCreation(): void {

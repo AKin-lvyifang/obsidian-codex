@@ -37,6 +37,16 @@ export function isKnowledgeInitializationRole(value: unknown): value is Knowledg
   if (value === "keep") return true;
   return (KNOWLEDGE_INITIALIZATION_MARKDOWN_ROLES as readonly string[]).includes(value);
 }
+
+/**
+ * 自定义初始化里一篇笔记的默认归属：已经位于九个 Markdown 目录中的
+ * 笔记保持当前目录；其他位置的 Markdown 默认进入 Raw。
+ */
+export function knowledgeInitializationSourceDefaultRole(
+  sourcePath: string
+): Exclude<KnowledgeInitializationRole, "keep"> {
+  return managedMarkdownRole(sourcePath) ?? "raw";
+}
 export type KnowledgeInitializationPhase =
   | "scan" | "preview" | "confirmed" | "create_directories"
   | "move_notes" | "batch_extraction" | "generate_guide" | "complete";
@@ -223,7 +233,22 @@ export class KnowledgeBaseInitializer {
             contentHash
           });
         }
-        ignored += 1;
+        const managedRole = managedMarkdownRole(relativePath);
+        if (mode === "custom" && managedRole) {
+          items.push({
+            sourcePath: relativePath,
+            targetPath: null,
+            role: managedRole,
+            sourceRevision: fileRevision(file, contentHash),
+            contentHash,
+            size: file.size,
+            mtime: file.mtime,
+            state: "kept",
+            reason: `笔记已位于 ${managedRole}，默认保持原位`
+          });
+        } else {
+          ignored += 1;
+        }
         continue;
       }
       const targetPath = importedTarget("raw", relativePath);
@@ -308,7 +333,7 @@ export class KnowledgeBaseInitializer {
     // pathExists 只读：期间不得触碰当前 job。
     const conflictByPath = new Map<string, boolean>();
     for (const [sourcePath, role] of planned) {
-      if (role === "keep") continue;
+      if (role === "keep" || role === managedMarkdownRole(sourcePath)) continue;
       conflictByPath.set(
         sourcePath,
         await this.host.pathExists(importedTarget(role, sourcePath))
@@ -319,12 +344,18 @@ export class KnowledgeBaseInitializer {
       const item = nextJob.items.find((candidate) => candidate.sourcePath === sourcePath);
       if (!item) continue;
       item.role = role;
-      item.targetPath = role === "keep" ? null : importedTarget(role, item.sourcePath);
-      item.state = role === "keep"
+      const existingRole = managedMarkdownRole(item.sourcePath);
+      const remainsInExistingDirectory = role !== "keep" && role === existingRole;
+      item.targetPath = role === "keep" || remainsInExistingDirectory
+        ? null
+        : importedTarget(role, item.sourcePath);
+      item.state = role === "keep" || remainsInExistingDirectory
         ? "kept"
         : conflictByPath.get(sourcePath) ? "conflict" : "pending";
       item.reason = role === "keep"
         ? "用户选择保持原位"
+        : remainsInExistingDirectory
+          ? `笔记已位于 ${role}，保持原位`
         : item.state === "conflict" ? `目标已存在：${item.targetPath}` : `用户分配到 ${role}`;
     }
     nextJob.provider = this.host.currentProvider();
@@ -755,8 +786,19 @@ function refreshFrozenPlan(
       sourceRevision: item.sourceRevision,
       contentHash: item.contentHash
     }));
+  const managedRawBySourcePath = new Map(
+    job.items
+      .filter((item) => managedMarkdownRole(item.sourcePath) === "raw")
+      .map((item) => [item.sourcePath, item] as const)
+  );
   job.extractionSources = uniqueSources([...existingRaw, ...movableRaw]);
-  job.extractionQueue = job.extractionSources.map((source) => source.path);
+  job.extractionQueue = job.extractionSources
+    .filter((source) => {
+      const managedRawItem = managedRawBySourcePath.get(source.path);
+      if (!managedRawItem) return true;
+      return managedRawItem.role === "raw" && managedRawItem.targetPath === null;
+    })
+    .map((source) => source.path);
   job.expectedBatches = Math.ceil(job.extractionQueue.length / EXTRACTION_BATCH_SIZE);
   job.counts = Object.freeze({
     move: job.items.filter((item) => item.state === "pending").length,
@@ -797,7 +839,10 @@ function existingRawSources(
   const generatedRawTargets = new Set(job.items.map((item) =>
     importedTarget("raw", item.sourcePath)
   ));
-  return job.extractionSources.filter((item) => !generatedRawTargets.has(item.path));
+  // 保留扫描时发现的 Raw 来源快照，即使用户暂时把它分配到别的目录。
+  // refreshFrozenPlan 会按当前角色决定它是否进入 extractionQueue；这样再
+  // 移回 Raw 时仍能恢复提炼资格，同时不会把体系外笔记的旧生成目标复活。
+  return job.extractionSources.filter((source) => !generatedRawTargets.has(source.path));
 }
 
 function shouldExcludeFile(relativePath: string, file: Readonly<KnowledgeInitializationVaultFile>): boolean {
@@ -815,6 +860,16 @@ function normalizeRelativePath(value: string): string {
   const normalized = value.trim().replaceAll("\\", "/").replace(/^\/+|\/+$/gu, "");
   if (!normalized || normalized.split("/").some((segment) => !segment || segment === "." || segment === "..")) return "";
   return normalized;
+}
+
+function managedMarkdownRole(
+  sourcePath: string
+): Exclude<KnowledgeInitializationRole, "keep"> | null {
+  const normalized = normalizeRelativePath(sourcePath);
+  const topLevel = normalized.split("/")[0]?.toLocaleLowerCase() ?? "";
+  return (KNOWLEDGE_INITIALIZATION_MARKDOWN_ROLES as readonly string[]).includes(topLevel)
+    ? topLevel as Exclude<KnowledgeInitializationRole, "keep">
+    : null;
 }
 
 export function knowledgeInitializationParentFolder(

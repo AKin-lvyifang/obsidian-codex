@@ -13630,6 +13630,8 @@ button.echoink-picker-row:focus-visible {
 
 .echoink-knowledge-init-copy,
 .echoink-knowledge-init-plan-copy,
+.echoink-knowledge-init-plan-lead,
+.echoink-knowledge-init-plan-confirm,
 .echoink-knowledge-init-pause-text {
   max-width: 68ch;
   color: var(--text-normal);
@@ -13675,8 +13677,6 @@ button.echoink-picker-row:focus-visible {
 .echoink-knowledge-init-note-remove:focus-visible,
 .echoink-knowledge-init-cta:focus-visible,
 .echoink-knowledge-init-secondary:focus-visible,
-.echoink-knowledge-init-plan-details summary:focus-visible,
-.echoink-knowledge-init-tech summary:focus-visible,
 .echoink-knowledge-note-picker-row:focus-within {
   outline: 2px solid var(--interactive-accent);
   outline-offset: 2px;
@@ -13690,25 +13690,50 @@ button.echoink-picker-row:focus-visible {
   min-width: 0;
 }
 
-/* 方案说明折叠区。 */
-.echoink-knowledge-init-plan-details summary,
-.echoink-knowledge-init-tech summary {
-  display: inline-flex;
-  align-items: center;
-  min-height: 32px;
-  padding: 4px 6px;
-  margin-inline-start: -6px;
-  border-radius: var(--echoink-settings-radius-sm, 8px);
+.echoink-knowledge-init-plan-copy {
   color: var(--text-muted);
   font-size: var(--font-ui-small);
-  cursor: pointer;
-  user-select: none;
 }
 
-.echoink-knowledge-init-plan-copy {
-  padding: 8px 6px 2px;
-  color: var(--text-muted);
+.echoink-knowledge-init-plan-lead,
+.echoink-knowledge-init-plan-confirm {
   font-size: var(--font-ui-small);
+  font-weight: 600;
+}
+
+.echoink-knowledge-init-folder-purposes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 18px;
+  margin: 0;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.echoink-knowledge-init-folder-purpose {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 10px;
+  min-width: 0;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.echoink-knowledge-init-folder-purpose dt,
+.echoink-knowledge-init-folder-purpose dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: var(--font-ui-small);
+  line-height: 1.45;
+}
+
+.echoink-knowledge-init-folder-purpose dt {
+  color: var(--text-normal);
+  font-weight: 600;
+}
+
+.echoink-knowledge-init-folder-purpose dd {
+  color: var(--text-muted);
 }
 
 /* 目录分配列表：列表行 + 细分隔线，不嵌套卡片。 */
@@ -13905,25 +13930,17 @@ button.echoink-picker-row:focus-visible {
   flex: 1;
   min-width: 0;
   height: 8px;
-  border: none;
   border-radius: 999px;
   background: var(--background-modifier-border);
   overflow: hidden;
 }
 
-.echoink-knowledge-init-bar::-webkit-progress-bar {
-  background: var(--background-modifier-border);
-  border-radius: 999px;
-}
-
-.echoink-knowledge-init-bar::-webkit-progress-value {
+.echoink-knowledge-init-bar-indicator {
+  width: var(--echoink-knowledge-init-progress, 0%);
+  height: 100%;
   background: var(--interactive-accent);
   border-radius: 999px;
-}
-
-.echoink-knowledge-init-bar::-moz-progress-bar {
-  background: var(--interactive-accent);
-  border-radius: 999px;
+  transition: width 560ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .echoink-knowledge-init-percent {
@@ -13946,7 +13963,7 @@ button.echoink-picker-row:focus-visible {
   font-variant-numeric: tabular-nums;
 }
 
-/* 暂停 / 错误：文字 + 图标同时表达，技术细节只出现在折叠区。 */
+/* 暂停 / 错误：文字 + 图标同时表达。 */
 .echoink-knowledge-init-pause {
   display: flex;
   align-items: flex-start;
@@ -13963,33 +13980,6 @@ button.echoink-picker-row:focus-visible {
 .echoink-knowledge-init-pause-icon svg {
   width: 18px;
   height: 18px;
-}
-
-.echoink-knowledge-init-tech-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 8px 6px 2px;
-}
-
-.echoink-knowledge-init-tech-row {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.echoink-knowledge-init-tech-label {
-  color: var(--text-faint);
-  font-size: var(--font-ui-smaller);
-}
-
-.echoink-knowledge-init-tech-value {
-  color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
-  font-family: var(--font-monospace);
-  line-height: 1.5;
-  overflow-wrap: anywhere;
 }
 
 /* 多选笔记 Modal。类直接加在 modalEl 上，因此选择器必须匹配同一元素：
@@ -14022,8 +14012,9 @@ button.echoink-picker-row:focus-visible {
 }
 
 .echoink-knowledge-note-picker-row {
-  display: flex;
-  align-items: flex-start;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
   gap: 10px;
   min-height: 40px;
   padding: 8px 12px;
@@ -14040,7 +14031,7 @@ button.echoink-picker-row:focus-visible {
 
 .echoink-knowledge-note-picker-checkbox {
   flex: none;
-  margin-top: 3px;
+  margin: 0;
   width: 16px;
   height: 16px;
 }
@@ -14126,6 +14117,10 @@ button.echoink-picker-row:focus-visible {
 }
 
 @media (max-width: 560px) {
+  .echoink-knowledge-init-folder-purposes {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .echoink-knowledge-init-dir-row {
     grid-template-columns: auto minmax(0, 1fr) auto;
   }
@@ -14436,6 +14431,10 @@ button.echoink-picker-row:focus-visible {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .echoink-knowledge-init-bar-indicator {
+    transition: none;
+  }
+
   :is(
     .echoink-amicro-button,
     .echoink-amicro-button-icon > span,

@@ -2,6 +2,7 @@ import { Notice, setIcon } from "obsidian";
 import type CodexForObsidianPlugin from "../main";
 import {
   isKnowledgeInitializationRole,
+  knowledgeInitializationSourceDefaultRole,
   type KnowledgeInitializationAssignment,
   type KnowledgeInitializationJob,
   type KnowledgeInitializationMode,
@@ -31,6 +32,8 @@ interface KnowledgeInitDirectoryDef {
   readonly role: KnowledgeInitDirectoryRole;
   readonly labelZh: string;
   readonly labelEn: string;
+  readonly descriptionZh: string;
+  readonly descriptionEn: string;
 }
 
 /**
@@ -38,30 +41,19 @@ interface KnowledgeInitDirectoryDef {
  * 只展示、不参与笔记分配。
  */
 export const KNOWLEDGE_INIT_DIRECTORIES: readonly KnowledgeInitDirectoryDef[] = Object.freeze([
-  { role: "raw", labelZh: "Raw", labelEn: "Raw" },
-  { role: "wiki", labelZh: "Wiki", labelEn: "Wiki" },
-  { role: "projects", labelZh: "Projects", labelEn: "Projects" },
-  { role: "outputs", labelZh: "Outputs", labelEn: "Outputs" },
-  { role: "inbox", labelZh: "Inbox", labelEn: "Inbox" },
-  { role: "journal", labelZh: "Journal", labelEn: "Journal" },
-  { role: "work", labelZh: "Work", labelEn: "Work" },
-  { role: "archive", labelZh: "Archive", labelEn: "Archive" },
-  { role: "templates", labelZh: "Templates", labelEn: "Templates" }
+  { role: "raw", labelZh: "Raw", labelEn: "Raw", descriptionZh: "现有原始笔记和后续待提炼资料", descriptionEn: "Original notes and new material waiting to be distilled" },
+  { role: "wiki", labelZh: "Wiki", labelEn: "Wiki", descriptionZh: "AI 提炼后的长期知识与索引", descriptionEn: "Long-term knowledge and indexes distilled by AI" },
+  { role: "projects", labelZh: "Projects", labelEn: "Projects", descriptionZh: "按项目组织的资料与知识", descriptionEn: "Notes and knowledge organized by project" },
+  { role: "outputs", labelZh: "Outputs", labelEn: "Outputs", descriptionZh: "整理过程记录与生成结果", descriptionEn: "Processing records and generated results" },
+  { role: "inbox", labelZh: "Inbox", labelEn: "Inbox", descriptionZh: "暂时还没分类的新笔记", descriptionEn: "New notes that have not been sorted yet" },
+  { role: "journal", labelZh: "Journal", labelEn: "Journal", descriptionZh: "日记、复盘与时间记录", descriptionEn: "Journals, reviews, and time-based notes" },
+  { role: "work", labelZh: "Work", labelEn: "Work", descriptionZh: "正在处理的工作资料", descriptionEn: "Active working material" },
+  { role: "archive", labelZh: "Archive", labelEn: "Archive", descriptionZh: "已结束或暂时不用的内容", descriptionEn: "Completed or inactive material" },
+  { role: "templates", labelZh: "Templates", labelEn: "Templates", descriptionZh: "可重复使用的笔记模板", descriptionEn: "Reusable note templates" }
 ]);
 
 const KNOWLEDGE_INIT_ASSETS_LABEL_ZH = "附件目录";
 const KNOWLEDGE_INIT_ASSETS_LABEL_EN = "Attachments folder";
-
-const PLAN_COPY_ZH =
-  "参考卡帕西式的分层知识整理思路，EchoInk 会创建 Raw、Wiki、Projects 等固定目录。"
-  + "体系外的 Markdown 笔记会移动到 Raw，随后按最多 20 篇一批调用 /maintain 提炼为 Wiki。"
-  + "已有笔记不会被改写或删除，附件保持原位；中途暂停后可以继续。";
-
-const PLAN_COPY_EN =
-  "Inspired by Karpathy-style layered knowledge organization, EchoInk creates fixed folders "
-  + "such as Raw, Wiki, and Projects. Markdown notes outside the structure move into Raw, then "
-  + "/maintain distills them into Wiki in batches of up to 20. Existing notes are never rewritten "
-  + "or deleted, attachments stay in place, and you can resume after pausing.";
 
 const FOCUS_KEY = "knowledge:initialize";
 
@@ -69,6 +61,7 @@ interface KnowledgeInitProgressRefs {
   readonly rootEl: HTMLElement;
   readonly statusEl: HTMLElement;
   readonly barEl: HTMLElement;
+  readonly indicatorEl: HTMLElement;
   readonly percentEl: HTMLElement;
   readonly stepEl: HTMLElement;
   readonly countEl: HTMLElement;
@@ -79,7 +72,7 @@ interface KnowledgeInitProgressRefs {
  * 调用 render() 并在 hide() 时 dispose()；全部初始化 UI 状态在这里维护。
  *
  * 普通主界面不暴露 revision/hash、冻结计划、Provider/model 快照、WAL、CAS、
- * Readback 等内部概念；它们保留在后台 job 中，仅出现在「查看技术详情」折叠区。
+ * Readback 等内部概念；它们只保留在后台 job 中。
  *
  * 渲染优先级：当前作业优先，历史完成标记兜底。settings 里的 initialized
  * 历史事实不会被清除，但只要存在未完成作业（preview/active/可恢复态），
@@ -99,7 +92,6 @@ export class KnowledgeInitializationSection {
   private pageEl: HTMLElement | null = null;
   private zh = true;
   private actionError = "";
-  private actionErrorDetail = "";
   private actionErrorEl: HTMLElement | null = null;
   private tabButtonEls: Record<KnowledgeInitializationMode, HTMLElement | null> = {
     recommended: null,
@@ -202,8 +194,10 @@ export class KnowledgeInitializationSection {
       this.job = await this.plugin.getEchoInkKnowledgeInitializationState();
       this.loaded = true;
       if (this.job?.mode === "custom") this.selectedTab = "custom";
-    } catch (error) {
-      this.loadError = error instanceof Error ? error.message : String(error);
+    } catch {
+      this.loadError = this.zh
+        ? "无法读取初始化状态，请重试。"
+        : "Unable to load initialization status. Try again.";
     } finally {
       this.loading = false;
       this.scheduleRender();
@@ -221,9 +215,8 @@ export class KnowledgeInitializationSection {
 
   // ------------------------------------------------------------ action errors
 
-  /** 记录面向用户的短文案；原始错误只出现在「查看技术详情」里。 */
-  private recordActionError(error: unknown): void {
-    this.actionErrorDetail = error instanceof Error ? error.message : String(error);
+  /** 只记录面向用户的恢复提示；内部异常不进入普通设置界面。 */
+  private recordActionError(_error: unknown): void {
     this.actionError = this.zh
       ? "操作没有完成，可以再试一次。"
       : "The action didn't complete. You can try again.";
@@ -231,7 +224,6 @@ export class KnowledgeInitializationSection {
 
   private clearActionError(): void {
     this.actionError = "";
-    this.actionErrorDetail = "";
     if (this.actionErrorEl?.isConnected) this.actionErrorEl.remove();
     this.actionErrorEl = null;
   }
@@ -244,14 +236,6 @@ export class KnowledgeInitializationSection {
     });
     this.actionErrorEl = box;
     box.createDiv({ cls: "echoink-knowledge-init-action-error-text", text: this.actionError });
-    const details = box.createEl("details", { cls: "echoink-knowledge-init-tech" });
-    details.createEl("summary", {
-      text: this.zh ? "查看技术详情" : "View technical details"
-    });
-    details.createDiv({
-      cls: "echoink-knowledge-init-tech-value",
-      text: this.actionErrorDetail
-    });
   }
 
   /** 统一的动作包装：开始清错误、失败记错误并刷新状态、绝不静默。 */
@@ -363,14 +347,39 @@ export class KnowledgeInitializationSection {
     body.createDiv({
       cls: "echoink-knowledge-init-copy",
       text: zh
-        ? "一次点击：体系外的 Markdown 收进 Raw，再分批提炼成 Wiki。"
-        : "One click moves stray Markdown into Raw, then distills it into Wiki in batches."
+        ? "默认方案采用 Karpathy（卡帕西）的分层知识库管理方法。EchoInk 会先整理目录，再用 AI 把原始笔记提炼成便于长期使用的 Wiki。"
+        : "The default plan follows Karpathy-style layered knowledge management. EchoInk first organizes the folder structure, then uses AI to distill original notes into a durable Wiki."
     });
-    const details = body.createEl("details", { cls: "echoink-knowledge-init-plan-details" });
-    details.createEl("summary", { text: zh ? "方案说明" : "Plan details" });
-    details.createDiv({
+    body.createDiv({
+      cls: "echoink-knowledge-init-plan-lead",
+      text: zh ? "初始化会创建这些目录：" : "Initialization creates these folders:"
+    });
+    const folderList = body.createEl("dl", {
+      cls: "echoink-knowledge-init-folder-purposes"
+    });
+    for (const directory of KNOWLEDGE_INIT_DIRECTORIES) {
+      const row = folderList.createDiv({ cls: "echoink-knowledge-init-folder-purpose" });
+      row.createEl("dt", { text: directory.labelEn });
+      row.createEl("dd", {
+        text: zh ? directory.descriptionZh : directory.descriptionEn
+      });
+    }
+    const assetsRow = folderList.createDiv({ cls: "echoink-knowledge-init-folder-purpose" });
+    assetsRow.createEl("dt", { text: "Assets" });
+    assetsRow.createEl("dd", {
+      text: zh ? "图片、PDF 等附件，保持原位" : "Images, PDFs, and other attachments, kept in place"
+    });
+    body.createDiv({
       cls: "echoink-knowledge-init-plan-copy",
-      text: zh ? PLAN_COPY_ZH : PLAN_COPY_EN
+      text: zh
+        ? "现有 Markdown 笔记会原样移入 Raw，并保留原来的相对路径；EchoInk 不会删除或改写原笔记。随后，AI 会最多每 20 篇分批提炼并生成 Wiki，文件多时会自动分批处理。"
+        : "Existing Markdown notes move into Raw unchanged while keeping their relative paths; EchoInk never deletes or rewrites the originals. AI then distills them into Wiki in batches of up to 20, automatically splitting larger Vaults into multiple batches."
+    });
+    body.createDiv({
+      cls: "echoink-knowledge-init-plan-confirm",
+      text: zh
+        ? "确认无误后，点击“开始初始化”。"
+        : "When this looks right, select “Start initialization”."
     });
     const actions = body.createDiv({ cls: "echoink-knowledge-init-actions" });
     const cta = actions.createEl("button", {
@@ -528,7 +537,7 @@ export class KnowledgeInitializationSection {
       }) as HTMLButtonElement;
       applyAmicroButton(add, { variant: "secondary", motion: "slide", icon: "folder-plus" });
       add.disabled = this.busy;
-      add.onclick = () => this.openNotePicker(dir.role, add);
+      add.onclick = () => void this.openNotePicker(dir.role, add);
       this.dirAddButtons.set(dir.role, add);
       toggle.onclick = () => {
         if (expanded) this.expandedDirs.delete(dir.role);
@@ -575,7 +584,15 @@ export class KnowledgeInitializationSection {
     });
   }
 
-  private openNotePicker(role: KnowledgeInitDirectoryRole, triggerEl: HTMLElement): void {
+  private async openNotePicker(
+    role: KnowledgeInitDirectoryRole,
+    triggerEl: HTMLElement
+  ): Promise<void> {
+    // 每次打开都重新读取当前 Vault，并恢复用户已明确做过的分配。这样用户
+    // 在旧 preview 之后新建的笔记也会立刻出现在列表里；此步骤只更新预览，
+    // 不移动文件，也不调用 Provider。
+    if (!await this.rebuildCustomPreviewPreservingAssignments()) return;
+    if (this.dirListEl?.isConnected) this.renderDirectoryList();
     const job = this.job;
     if (!job) return;
     const notes = job.items
@@ -651,14 +668,24 @@ export class KnowledgeInitializationSection {
     });
     statusEl.setText(progressStatusSentence(progress.stage, progress, zh));
     const barRow = rootEl.createDiv({ cls: "echoink-knowledge-init-bar-row" });
-    const barEl = barRow.createEl("progress", {
+    const barEl = barRow.createDiv({
       cls: "echoink-knowledge-init-bar",
       attr: {
-        max: "100",
-        value: String(progress.percent),
+        role: "progressbar",
+        "aria-valuemin": "0",
+        "aria-valuemax": "100",
+        "aria-valuenow": String(progress.percent),
         "aria-label": zh ? "初始化进度" : "Initialization progress"
       }
     });
+    const indicatorEl = barEl.createDiv({
+      cls: "echoink-knowledge-init-bar-indicator",
+      attr: { "aria-hidden": "true" }
+    });
+    indicatorEl.style.setProperty(
+      "--echoink-knowledge-init-progress",
+      `${progress.percent}%`
+    );
     const percentEl = barRow.createSpan({
       cls: "echoink-knowledge-init-percent",
       text: `${progress.percent}%`
@@ -668,7 +695,15 @@ export class KnowledgeInitializationSection {
       cls: "echoink-knowledge-init-count",
       text: progress.total > 0 ? `${progress.completed} / ${progress.total}` : ""
     });
-    this.progressRefs = { rootEl, statusEl, barEl, percentEl, stepEl, countEl };
+    this.progressRefs = {
+      rootEl,
+      statusEl,
+      barEl,
+      indicatorEl,
+      percentEl,
+      stepEl,
+      countEl
+    };
     const actions = panel.createDiv({ cls: "echoink-knowledge-init-actions" });
     const pause = actions.createEl("button", {
       cls: "echoink-knowledge-init-secondary",
@@ -700,7 +735,11 @@ export class KnowledgeInitializationSection {
     const refs = this.progressRefs;
     if (!refs || !refs.rootEl.isConnected || !this.job) return false;
     const progress = buildKnowledgeInitializationProgress(this.job, false);
-    refs.barEl.setAttr("value", String(progress.percent));
+    refs.barEl.setAttr("aria-valuenow", String(progress.percent));
+    refs.indicatorEl.style.setProperty(
+      "--echoink-knowledge-init-progress",
+      `${progress.percent}%`
+    );
     refs.percentEl.setText(`${progress.percent}%`);
     refs.stepEl.setText(progressStepLabel(progress.stage, this.zh));
     refs.countEl.setText(progress.total > 0 ? `${progress.completed} / ${progress.total}` : "");
@@ -805,7 +844,6 @@ export class KnowledgeInitializationSection {
       });
       reselect.onclick = () => this.enterPlanSelection();
     }
-    this.renderTechnicalDetails(panel, job);
   }
 
   private pauseNoticeText(
@@ -847,32 +885,6 @@ export class KnowledgeInitializationSection {
     this.reselecting = true;
     this.clearActionError();
     this.scheduleRender();
-  }
-
-  private renderTechnicalDetails(
-    panel: HTMLElement,
-    job: Readonly<KnowledgeInitializationJob>
-  ): void {
-    const zh = this.zh;
-    const details = panel.createEl("details", { cls: "echoink-knowledge-init-tech" });
-    details.createEl("summary", { text: zh ? "查看技术详情" : "View technical details" });
-    const rows = details.createDiv({ cls: "echoink-knowledge-init-tech-list" });
-    const addRow = (label: string, value: string): void => {
-      const row = rows.createDiv({ cls: "echoink-knowledge-init-tech-row" });
-      row.createDiv({ cls: "echoink-knowledge-init-tech-label", text: label });
-      row.createDiv({ cls: "echoink-knowledge-init-tech-value", text: value || "-" });
-    };
-    addRow(zh ? "内部状态" : "Internal status", `${job.status} · ${job.phase}`);
-    addRow("lastError", job.lastError);
-    addRow("recoveryAction", job.recoveryAction);
-    addRow("Provider", job.provider ? `${job.provider.providerId} · ${job.provider.model}` : "");
-    addRow("planDigest", job.planDigest);
-    addRow(
-      zh ? "内部计数" : "Internal counts",
-      `move ${job.counts.move} · keep ${job.counts.keep} · conflict ${job.counts.conflict}`
-      + ` · ignored ${job.counts.ignored} · extraction ${job.counts.extraction}`
-      + ` · batches ${job.expectedBatches}`
-    );
   }
 
   private async resumeRun(): Promise<void> {
@@ -925,14 +937,28 @@ export class KnowledgeInitializationSection {
    * 重新 preview 阶段不移动文件、不调用 Provider。
    */
   private async rescanCustomPreservingAssignments(): Promise<void> {
-    const previous = this.job;
-    const preserved = (previous?.items ?? [])
-      // raw 是默认分配，不需要恢复；其余合法选择（包括兼容的 keep）都应
-      // 在重新扫描后保留，避免用户点「修改分配」时静默丢失旧决定。
-      .filter((item) => item.role !== "raw")
-      .map((item) => ({ sourcePath: item.sourcePath, role: item.role }));
     this.reselecting = false;
-    await this.runAction(async () => {
+    if (await this.rebuildCustomPreviewPreservingAssignments()) {
+      this.scheduleRender();
+    }
+  }
+
+  private customAssignmentsToPreserve(
+    job: Readonly<KnowledgeInitializationJob> | null
+  ): KnowledgeInitializationAssignment[] {
+    return (job?.items ?? [])
+      .filter((item) => item.role === "keep"
+        || item.role !== knowledgeInitializationSourceDefaultRole(item.sourcePath))
+      .map((item) => ({ sourcePath: item.sourcePath, role: item.role }));
+  }
+
+  private async rebuildCustomPreviewPreservingAssignments(): Promise<boolean> {
+    if (this.busy) return false;
+    const previous = this.job;
+    const preserved = this.customAssignmentsToPreserve(previous);
+    this.busy = true;
+    this.clearActionError();
+    try {
       this.job = await this.plugin.startEchoInkKnowledgeInitialization("custom");
       this.loaded = true;
       const validPaths = new Set((this.job?.items ?? []).map((item) => item.sourcePath));
@@ -946,7 +972,15 @@ export class KnowledgeInitializationSection {
         );
       }
       this.selectedTab = "custom";
-    });
+      return true;
+    } catch (error) {
+      this.recordActionError(error);
+      await this.reloadAfterActionError();
+      this.scheduleRender();
+      return false;
+    } finally {
+      this.busy = false;
+    }
   }
 
   // ------------------------------------------------------------------- done

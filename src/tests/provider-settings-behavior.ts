@@ -68,6 +68,7 @@ import {
   snapshotApiProviderSettings
 } from "../plugin/settings-store";
 import { AgentIdentityModal } from "../ui/agent-identity-modal";
+import { KnowledgeNotePickerModal } from "../settings/knowledge-note-picker-modal";
 import {
   AGENT_AVATAR_OUTPUT_MAX_DATA_URL_CHARS,
   AGENT_AVATAR_SOURCE_MAX_BYTES,
@@ -2408,7 +2409,7 @@ function knowledgeInitButtons(panel: ReturnType<typeof knowledgeInitPanel>) {
 async function assertKnowledgeInitializationExperienceContract(): Promise<void> {
   await assertKnowledgeInitDefaultTabAndOneClickStart();
   await assertKnowledgeInitCustomTabDirectoriesAndAssignments();
-  await assertKnowledgeInitPausedMappingsAndTechnicalDetails();
+  await assertKnowledgeInitPausedMappingsHideTechnicalDetails();
   await assertKnowledgeInitProgressAndCompletion();
   await assertKnowledgeInitNotePickerModalContract();
   await assertKnowledgeInitRecoveryAndActionErrorRendering();
@@ -2443,9 +2444,18 @@ async function assertKnowledgeInitDefaultTabAndOneClickStart(): Promise<void> {
   assert.ok(tabpanel);
   assert.equal(tabpanel.getAttribute("aria-labelledby"), defaultTab.getAttribute("id"));
 
-  // 默认方案内容：一句说明 + 可展开方案说明 + 单个主 CTA。
-  assert.match(panel.textContent, /方案说明/u);
-  assert.match(panel.textContent, /卡帕西式/u);
+  // 默认方案内容：直接用用户能理解的顺序说清楚方法、十个目录、
+  // 原笔记保护与 AI 分批提炼；不再藏在「方案说明」折叠区。
+  assert.match(panel.textContent, /Karpathy（卡帕西）/u);
+  assert.match(panel.textContent, /现有 Markdown 笔记/u);
+  assert.match(panel.textContent, /Raw/u);
+  assert.match(panel.textContent, /AI/u);
+  assert.match(panel.textContent, /Wiki/u);
+  assert.match(panel.textContent, /不会删除或改写原笔记/u);
+  assert.match(panel.textContent, /确认无误后/u);
+  assert.equal(panel.querySelectorAll(".echoink-knowledge-init-folder-purpose").length, 10);
+  assert.equal(panel.querySelector(".echoink-knowledge-init-plan-details"), null);
+  assert.doesNotMatch(panel.textContent, /一次点击|体系外的 Markdown/u);
   assert.equal(panel.querySelectorAll(".mod-cta").length, 1);
   assert.equal(panel.querySelector(".mod-cta")?.textContent, "开始初始化");
   assert.ok(panel.querySelector('[data-echoink-focus-key="knowledge:initialize"]'));
@@ -2582,9 +2592,10 @@ async function assertKnowledgeInitCustomTabDirectoriesAndAssignments(): Promise<
   );
 }
 
-async function assertKnowledgeInitPausedMappingsAndTechnicalDetails(): Promise<void> {
+async function assertKnowledgeInitPausedMappingsHideTechnicalDetails(): Promise<void> {
   installProviderModalDomFixture();
-  // 3/19. 内部状态只出现在「查看技术详情」折叠区。
+  // 暂停态只展示人话原因和恢复动作，内部状态、错误、Provider 与 digest
+  // 在用户界面中完全不出现。
   // 夹具 digest 一致、Provider 与当前设置一致 → 派生为 continue 分支。
   const state = {
     job: makeKnowledgeInitJobFixture({
@@ -2614,14 +2625,8 @@ async function assertKnowledgeInitPausedMappingsAndTechnicalDetails(): Promise<v
     knowledgeInitButtons(panel).some((button) => button.textContent === "重新选择方案")
   );
 
-  const tech = panel.querySelector(".echoink-knowledge-init-tech");
-  assert.ok(tech);
-  assert.match(tech.textContent, /查看技术详情/u);
-  assert.match(tech.textContent, /failed_recoverable/u);
-  assert.match(tech.textContent, /File already exists/u);
-  assert.match(tech.textContent, /provider-ready/u);
-  assert.match(tech.textContent, /plan-digest-fixture/u);
-  const mainText = panel.textContent.replace(tech.textContent, "");
+  assert.equal(panel.querySelector(".echoink-knowledge-init-tech"), null);
+  const mainText = panel.textContent;
   for (const internal of [
     "failed_recoverable",
     "blocked_conflict",
@@ -2693,10 +2698,16 @@ async function assertKnowledgeInitProgressAndCompletion(): Promise<void> {
   const { plugin } = createKnowledgeInitPluginFixture(state);
   const tab = await renderKnowledgeInitTab(plugin);
   const panel = knowledgeInitPanel(tab);
-  const bar = panel.querySelector("progress");
+  const bar = panel.querySelector('.echoink-knowledge-init-bar[role="progressbar"]');
   assert.ok(bar);
-  assert.equal(bar.getAttribute("max"), "100");
-  assert.equal(bar.getAttribute("value"), "28");
+  assert.equal(bar.getAttribute("aria-valuemin"), "0");
+  assert.equal(bar.getAttribute("aria-valuemax"), "100");
+  assert.equal(bar.getAttribute("aria-valuenow"), "28");
+  assert.equal(
+    panel.querySelector<HTMLElement>(".echoink-knowledge-init-bar-indicator")
+      ?.style.getPropertyValue("--echoink-knowledge-init-progress"),
+    "28%"
+  );
   assert.equal(panel.querySelector(".echoink-knowledge-init-percent")?.textContent, "28%");
   assert.equal(panel.querySelector(".echoink-knowledge-init-step")?.textContent, "正在移动笔记");
   assert.equal(panel.querySelector(".echoink-knowledge-init-count")?.textContent, "12 / 40");
@@ -2738,12 +2749,26 @@ async function assertKnowledgeInitNotePickerModalContract(): Promise<void> {
   installProviderModalDomFixture();
   const state = { job: makeKnowledgeInitJobFixture() };
   const { plugin, calls } = createKnowledgeInitPluginFixture(state);
+  const originalStart = plugin.startEchoInkKnowledgeInitialization;
+  plugin.startEchoInkKnowledgeInitialization = async (mode: string) => {
+    const refreshed = await originalStart(mode);
+    if (mode === "custom") {
+      // 模拟用户在旧 preview 生成后才新建的两篇笔记；点击「添加笔记」
+      // 必须重新读取当前 Vault，不能继续展示旧冻结列表。
+      refreshed.items.push(
+        makeKnowledgeInitItemFixture("notes/10.md", "raw"),
+        makeKnowledgeInitItemFixture("notes/2.md", "raw")
+      );
+    }
+    return refreshed;
+  };
   const tab = await renderKnowledgeInitTab(plugin);
   let panel = knowledgeInitPanel(tab);
   let wikiRow = panel.querySelectorAll(".echoink-knowledge-init-dir-row")[1];
   const add = wikiRow.querySelector<HTMLButtonElement>(".echoink-knowledge-init-dir-add");
   add.focus();
   add.click();
+  await flushProviderModalTasks();
   const modal = openTestModals.at(-1);
   assert.ok(modal, "note picker modal opens");
 
@@ -2755,14 +2780,26 @@ async function assertKnowledgeInitNotePickerModalContract(): Promise<void> {
   assert.equal(providerModalTestDocument.activeElement, search);
   assert.equal(
     modal.contentEl.querySelectorAll(".echoink-knowledge-note-picker-row").length,
-    4
+    6
   );
+  const defaultPaths = modal.contentEl
+    .querySelectorAll(".echoink-knowledge-note-picker-path")
+    .map((element) => element.textContent);
+  assert.deepEqual(defaultPaths, [
+    "notes/2.md",
+    "notes/10.md",
+    "notes/alpha.md",
+    "notes/beta.md",
+    "notes/delta.md",
+    "notes/gamma.md"
+  ]);
+  assert.equal(modal.contentEl.querySelector(".echoink-knowledge-note-picker-empty"), null);
   const checkboxes = modal.contentEl.querySelectorAll<HTMLInputElement>(
     ".echoink-knowledge-note-picker-checkbox"
   );
   assert.deepEqual(
     checkboxes.map((checkbox) => checkbox.checked),
-    [true, false, false, false]
+    [false, false, true, false, false, false]
   );
   assert.match(modal.contentEl.textContent, /当前：Projects/u);
   assert.equal(
@@ -2782,17 +2819,44 @@ async function assertKnowledgeInitNotePickerModalContract(): Promise<void> {
   const checkboxesAfterFilter = modal.contentEl.querySelectorAll<HTMLInputElement>(
     ".echoink-knowledge-note-picker-checkbox"
   );
-  assert.equal(checkboxesAfterFilter.length, 4);
-  assert.equal(checkboxesAfterFilter[0].checked, true);
+  assert.equal(checkboxesAfterFilter.length, 6);
+  assert.equal(checkboxesAfterFilter[2].checked, true);
 
-  // 整行 label 与 checkbox 同一点击区域。
-  assert.equal(checkboxesAfterFilter[1].parentElement?.tagName.toLowerCase(), "label");
+  search.value = "does-not-exist";
+  search.fireEvent("input");
+  assert.match(
+    modal.contentEl.querySelector(".echoink-knowledge-note-picker-empty")?.textContent ?? "",
+    /没有匹配的笔记/u
+  );
+  search.value = "";
+  search.fireEvent("input");
+
+  // 整行 label 与 checkbox 同一点击区域；复选框是每行最右侧元素。
+  const selectableRows = modal.contentEl.querySelectorAll<HTMLLabelElement>(
+    ".echoink-knowledge-note-picker-row:not(.is-readonly)"
+  );
+  for (const row of selectableRows) {
+    const checkbox = row.querySelector(".echoink-knowledge-note-picker-checkbox");
+    assert.equal(checkbox?.parentElement?.tagName.toLowerCase(), "label");
+    assert.equal(row.children.at(-1) === checkbox, true);
+  }
 
   // 勾选 beta 与 delta → 计数更新。
-  checkboxesAfterFilter[1].checked = true;
-  checkboxesAfterFilter[1].fireEvent("change");
-  checkboxesAfterFilter[3].checked = true;
-  checkboxesAfterFilter[3].fireEvent("change");
+  const checkboxFor = (sourcePath: string): HTMLInputElement => {
+    const row = modal.contentEl.querySelectorAll<HTMLLabelElement>(
+      ".echoink-knowledge-note-picker-row"
+    ).find((candidate) => candidate.textContent.includes(sourcePath));
+    const checkbox = row?.querySelector<HTMLInputElement>(
+      ".echoink-knowledge-note-picker-checkbox"
+    );
+    assert.ok(checkbox, `expected checkbox for ${sourcePath}`);
+    return checkbox;
+  };
+  for (const sourcePath of ["notes/beta.md", "notes/delta.md"]) {
+    const checkbox = checkboxFor(sourcePath);
+    checkbox.checked = true;
+    checkbox.fireEvent("change");
+  }
   assert.equal(
     modal.contentEl.querySelector(".echoink-knowledge-note-picker-confirm")?.textContent,
     "选好了（3）"
@@ -2808,7 +2872,7 @@ async function assertKnowledgeInitNotePickerModalContract(): Promise<void> {
   // 确认后一次性批量写入，焦点恢复到触发按钮。
   modal.contentEl.querySelector(".echoink-knowledge-note-picker-confirm")?.click();
   await flushProviderModalTasks();
-  const assignCall = calls.find((call) => call.method === "assignMany");
+  const assignCall = calls.filter((call) => call.method === "assignMany").at(-1);
   assert.deepEqual(assignCall?.args, [
     { sourcePath: "notes/beta.md", role: "wiki" },
     { sourcePath: "notes/delta.md", role: "wiki" }
@@ -2825,8 +2889,10 @@ async function assertKnowledgeInitNotePickerModalContract(): Promise<void> {
   const addAgain = wikiRow.querySelector<HTMLButtonElement>(".echoink-knowledge-init-dir-add");
   addAgain.focus();
   addAgain.click();
+  await flushProviderModalTasks();
   const cancelModal = openTestModals.at(-1);
   assert.ok(cancelModal);
+  const writesBeforeEscape = calls.filter((call) => call.method === "assignMany").length;
   const cancelCheckboxes = cancelModal.contentEl.querySelectorAll<HTMLInputElement>(
     ".echoink-knowledge-note-picker-checkbox"
   );
@@ -2837,10 +2903,27 @@ async function assertKnowledgeInitNotePickerModalContract(): Promise<void> {
   assert.equal(openTestModals.length, 0);
   assert.equal(
     calls.filter((call) => call.method === "assignMany").length,
-    1,
+    writesBeforeEscape,
     "Escape must not write assignments"
   );
-  assert.equal(providerModalTestDocument.activeElement, addAgain);
+  const addAfterEscape = panel.querySelectorAll(".echoink-knowledge-init-dir-row")[1]
+    .querySelector(".echoink-knowledge-init-dir-add");
+  assert.equal(providerModalTestDocument.activeElement === addAfterEscape, true);
+
+  // Vault 真的没有可分配笔记时使用独立空状态；只有用户输入搜索且无结果
+  // 才能说「没有匹配的笔记」。
+  const emptyModal = new KnowledgeNotePickerModal(plugin.app, {
+    zh: true,
+    targetRole: "wiki",
+    targetLabel: "Wiki",
+    notes: [],
+    roleLabel: (role) => String(role),
+    onConfirm: async () => undefined
+  });
+  emptyModal.open();
+  assert.match(emptyModal.contentEl.textContent, /还没有可分配的 Markdown 笔记/u);
+  assert.doesNotMatch(emptyModal.contentEl.textContent, /没有匹配的笔记/u);
+  emptyModal.close();
 }
 
 /**
@@ -2990,7 +3073,7 @@ async function assertKnowledgeInitRecoveryAndActionErrorRendering(): Promise<voi
   assert.match(stalePanel.textContent, /模型或计划已经变化/u);
   staleTab.hide();
 
-  // 5. 用户动作失败可见可重试：开始初始化抛错 → 内联错误 + 技术详情；
+  // 5. 用户动作失败可见可重试：开始初始化抛错 → 只显示人话错误；
   //    再次点击成功 → 错误消失并进入进度界面。
   //    用闭包标志切换「抛错 / 成功」，避免渲染后替换方法被快照绕过。
   const errorState = { job: null as Record<string, any> | null };
@@ -3009,7 +3092,7 @@ async function assertKnowledgeInitRecoveryAndActionErrorRendering(): Promise<voi
   const errorBoxPresent = errorPanel.querySelector(".echoink-knowledge-init-action-error") !== null;
   assert.equal(errorBoxPresent, true, "failed user action must surface a visible error");
   assert.match(errorPanel.textContent, /操作没有完成，可以再试一次/u);
-  assert.match(errorPanel.textContent, /injected-start-failure/u);
+  assert.doesNotMatch(errorPanel.textContent, /injected-start-failure|查看技术详情/u);
   // 重试成功：切到成功分支，错误提示消失，进入运行态。
   startShouldThrow = false;
   errorPanel.querySelector<HTMLButtonElement>(".echoink-knowledge-init-cta")?.click();
@@ -3030,6 +3113,20 @@ async function assertKnowledgeInitRawPickerSemantics(): Promise<void> {
   installProviderModalDomFixture();
   const state = { job: makeKnowledgeInitJobFixture() };
   const { plugin, calls } = createKnowledgeInitPluginFixture(state);
+  const originalStart = plugin.startEchoInkKnowledgeInitialization;
+  plugin.startEchoInkKnowledgeInitialization = async (mode: string) => {
+    const refreshed = await originalStart(mode);
+    if (mode === "custom") {
+      // fixture 中 notes/* 都是体系外笔记，重新扫描时它们的默认目录应为 Raw；
+      // UI 再恢复用户明确做过的非 Raw 分配。
+      for (const item of refreshed.items) {
+        item.role = "raw";
+        item.targetPath = `raw/imported/${item.sourcePath}`;
+        item.state = "pending";
+      }
+    }
+    return refreshed;
+  };
   // 失败注入必须在渲染前接好：renderKnowledgeInitTab 会把 plugin 展开成快照，
   // 渲染之后再替换方法不会生效。这里用闭包标志切换「下一次 assignMany 抛错」。
   const originalAssign = plugin.assignManyEchoInkKnowledgeInitializationNotes;
@@ -3053,6 +3150,7 @@ async function assertKnowledgeInitRawPickerSemantics(): Promise<void> {
   assert.equal(rawAdd.getAttribute("aria-label"), "把其他目录的笔记移回 Raw");
   rawAdd.focus();
   rawAdd.click();
+  await flushProviderModalTasks();
   const modal = openTestModals.at(-1);
   assert.ok(modal, "raw picker modal opens");
   assert.match(modal.titleEl.textContent, /移回 Raw/u);
@@ -3080,7 +3178,7 @@ async function assertKnowledgeInitRawPickerSemantics(): Promise<void> {
   );
   modal.contentEl.querySelector(".echoink-knowledge-note-picker-confirm")?.click();
   await flushProviderModalTasks();
-  assert.deepEqual(calls.filter((call) => call.method === "assignMany")[0]?.args, [
+  assert.deepEqual(calls.filter((call) => call.method === "assignMany").at(-1)?.args, [
     { sourcePath: "notes/alpha.md", role: "raw" }
   ]);
   assert.equal(openTestModals.length, 0);
@@ -3091,10 +3189,11 @@ async function assertKnowledgeInitRawPickerSemantics(): Promise<void> {
   assert.equal(providerModalTestDocument.activeElement, rebuiltRawAdd);
 
   // 提交失败：Modal 保持打开、内联错误、按钮可再次点击；重试成功后关闭。
-  failNextAssign = true;
   rebuiltRawAdd.click();
+  await flushProviderModalTasks();
   const failModal = openTestModals.at(-1);
   assert.ok(failModal, "raw picker reopens for the failure scenario");
+  failNextAssign = true;
   const failCheckboxes = failModal.contentEl.querySelectorAll<HTMLInputElement>(
     ".echoink-knowledge-note-picker-checkbox"
   );
@@ -3110,7 +3209,8 @@ async function assertKnowledgeInitRawPickerSemantics(): Promise<void> {
   assert.equal(openTestModals.length, 1, "failed save must keep the modal open");
   const inlineError = failModal.contentEl.querySelector(".echoink-knowledge-note-picker-error");
   assert.ok(inlineError, "failed save must render an inline error");
-  assert.match(inlineError.textContent, /保存失败：injected-assign-failure/u);
+  assert.match(inlineError.textContent, /没有保存成功，请再试一次/u);
+  assert.doesNotMatch(inlineError.textContent, /injected-assign-failure/u);
   assert.equal(failConfirm.disabled, false, "confirm button must be re-enabled after failure");
   assert.ok(
     knowledgeInitPanel(tab).querySelector(".echoink-knowledge-init-action-error"),
@@ -3147,6 +3247,22 @@ function assertKnowledgeInitNarrowLayoutCssContract(): void {
     css,
     /\.echoink-knowledge-note-picker-path\s*\{[^}]*overflow-wrap:\s*anywhere/u
   );
+  assert.match(
+    css,
+    /\.echoink-knowledge-note-picker-row\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto/u,
+    "note text must occupy the left column and the checkbox the right column"
+  );
+  assert.match(
+    css,
+    /\.echoink-knowledge-init-bar-indicator\s*\{[^}]*transition:\s*width/u,
+    "the progress indicator must animate real percentage changes"
+  );
+  assert.match(
+    css,
+    /prefers-reduced-motion:\s*reduce[\s\S]*\.echoink-knowledge-init-bar-indicator[\s\S]*transition:\s*none/u,
+    "reduced-motion users must get immediate progress updates"
+  );
+  assert.doesNotMatch(css, /\.echoink-knowledge-init-tech(?:-|\s|\.)/u);
   assert.match(
     css,
     /\.echoink-knowledge-init-note-path\s*\{[^}]*overflow-wrap:\s*anywhere/u
@@ -4945,6 +5061,10 @@ class ProviderModalTestStyle {
 
   setProperty(name: string, value: string): void {
     this.values.set(name, value);
+  }
+
+  getPropertyValue(name: string): string {
+    return this.values.get(name) ?? "";
   }
 
   removeProperty(name: string): string {
