@@ -3084,6 +3084,131 @@ body.theme-light .codex-code-wrapper pre {
   height: 16px;
 }
 
+.codex-settings-tab-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.codex-settings-tab-icon.is-animating svg {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+/* Motion adapted from the matching Animate Icons Lucide components (MIT).
+   The selected icon moves once; its idle glyph remains Obsidian's Lucide SVG. */
+.codex-settings-tab-icon.is-animating[data-animated-icon="settings"] svg {
+  animation: echoink-tab-icon-settings 760ms ease-in-out;
+  animation-delay: var(--echoink-tab-icon-delay, 0ms);
+}
+
+.codex-settings-tab-icon.is-animating[data-animated-icon="settings"] svg circle:last-of-type {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: echoink-tab-icon-core 520ms ease-in-out 150ms;
+  animation-delay: calc(var(--echoink-tab-icon-delay, 0ms) + 150ms);
+}
+
+.codex-settings-tab-icon.is-animating[data-animated-icon="key-round"] svg {
+  animation: echoink-tab-icon-key 760ms ease-in-out;
+  animation-delay: var(--echoink-tab-icon-delay, 0ms);
+}
+
+.codex-settings-tab-icon.is-animating[data-animated-icon="key-round"] svg circle:last-of-type {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: echoink-tab-icon-key-head 460ms ease-in-out 260ms;
+  animation-delay: calc(var(--echoink-tab-icon-delay, 0ms) + 260ms);
+}
+
+.codex-settings-tab-icon.is-animating[data-animated-icon="blocks"] svg {
+  animation: echoink-tab-icon-blocks 820ms ease-in-out;
+  animation-delay: var(--echoink-tab-icon-delay, 0ms);
+}
+
+.codex-settings-tab-icon.is-animating[data-animated-icon="blocks"] svg rect:last-of-type {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: echoink-tab-icon-block 640ms ease-in-out 90ms;
+  animation-delay: calc(var(--echoink-tab-icon-delay, 0ms) + 90ms);
+}
+
+.codex-settings-tab-icon.is-animating[data-animated-icon="book-open"] svg {
+  animation: echoink-tab-icon-book 760ms ease-in-out;
+  animation-delay: var(--echoink-tab-icon-delay, 0ms);
+}
+
+.codex-settings-tab-icon.is-animating[data-animated-icon="clipboard-check"] svg {
+  animation: echoink-tab-icon-clipboard 720ms ease-in-out;
+  animation-delay: var(--echoink-tab-icon-delay, 0ms);
+}
+
+.codex-settings-tab-icon.is-animating[data-animated-icon="clipboard-check"] svg path:last-of-type {
+  stroke-dasharray: 12;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: echoink-tab-icon-check 500ms ease-out 120ms both;
+  animation-delay: calc(var(--echoink-tab-icon-delay, 0ms) + 120ms);
+}
+
+@keyframes echoink-tab-icon-settings {
+  0%, 100% { transform: translateY(0) rotate(0) scale(1); }
+  48% { transform: translateY(-0.8px) rotate(16deg) scale(1.06); }
+}
+
+@keyframes echoink-tab-icon-core {
+  0%, 100% { transform: scale(1); }
+  52% { transform: scale(1.14); }
+}
+
+@keyframes echoink-tab-icon-key {
+  0%, 100% { transform: translate(0, 0) rotate(0) scale(1); }
+  30% { transform: translate(0, 0) rotate(-3deg) scale(1.02); }
+  68% { transform: translate(1.2px, -0.6px) rotate(3deg) scale(1.04); }
+}
+
+@keyframes echoink-tab-icon-key-head {
+  0%, 100% { transform: rotate(0) scale(1); }
+  35% { transform: rotate(-8deg) scale(1.14); }
+  70% { transform: rotate(8deg) scale(1.06); }
+}
+
+@keyframes echoink-tab-icon-blocks {
+  0%, 100% { transform: rotate(0) scale(1); }
+  32% { transform: rotate(-2deg) scale(1.05); }
+  66% { transform: rotate(2deg) scale(0.95); }
+}
+
+@keyframes echoink-tab-icon-block {
+  0%, 100% { transform: scale(1); }
+  40% { transform: scale(1.18); }
+  72% { transform: scale(0.92); }
+}
+
+@keyframes echoink-tab-icon-book {
+  0%, 100% { transform: rotate(0) scale(1, 1); }
+  32% { transform: rotate(-2deg) scale(1.06, 1.03); }
+  68% { transform: rotate(2deg) scale(0.97, 1); }
+}
+
+@keyframes echoink-tab-icon-clipboard {
+  0%, 100% { transform: translateY(0) scale(1); }
+  48% { transform: translateY(-2px) scale(1.04); }
+}
+
+@keyframes echoink-tab-icon-check {
+  0% {
+    opacity: 0.35;
+    stroke-dashoffset: 12;
+    transform: scale(0.88);
+  }
+  100% {
+    opacity: 1;
+    stroke-dashoffset: 0;
+    transform: scale(1);
+  }
+}
+
 .codex-settings-tab-label {
   font-size: 13px;
   font-weight: 500;
@@ -3699,6 +3824,12 @@ button.echoink-settings-navigation-row:focus-visible {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .codex-settings-tab-icon.is-animating svg,
+  .codex-settings-tab-icon.is-animating svg * {
+    animation: none !important;
+    transform: none !important;
+  }
+
   .codex-settings-tabs button.codex-settings-tab,
   .codex-resource-manager button.codex-resource-tab,
   .codex-resource-manager button.codex-resource-refresh,

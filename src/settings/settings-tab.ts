@@ -92,6 +92,10 @@ import {
   type ProviderModelSaveResult
 } from "./provider-model-modal";
 import { renderProviderBrandIcon } from "./provider-brand-icons";
+import {
+  renderAnimatedSettingsTabIcon,
+  type AnimatedSettingsTabIconName
+} from "./animated-settings-tab-icon";
 import { McpServerModal } from "./mcp-server-modal";
 import {
   applySettingsRow,
@@ -185,6 +189,11 @@ export class CodexSettingTab extends PluginSettingTab {
   private archivedConversationQuery = "";
   private archivedConversationBusyId = "";
   private settingsTabsResizeObserver: ResizeObserver | null = null;
+  private lastRenderedSettingsTab: VisibleSettingsTab | null = null;
+  private settingsTabIconAnimation: Readonly<{
+    tabId: VisibleSettingsTab;
+    startedAtMs: number;
+  }> | null = null;
   private readonly verifiedProviderConnections = new Map<string, string>();
   private onboardingCoachmarkHandle: EchoInkOnboardingCoachmarkHandle | null = null;
   private onboardingRestoreFocusEl: HTMLElement | null = null;
@@ -203,6 +212,8 @@ export class CodexSettingTab extends PluginSettingTab {
 
   display(): void {
     this.settingsVisible = true;
+    this.lastRenderedSettingsTab = null;
+    this.settingsTabIconAnimation = null;
     if (this.displayFrame !== null) {
       window.cancelAnimationFrame(this.displayFrame);
       this.displayFrame = null;
@@ -2451,6 +2462,28 @@ export class CodexSettingTab extends PluginSettingTab {
       this.settingsTabsResizeObserver.observe(tabs);
     }
     let activeButton: HTMLButtonElement | null = null;
+    const now = Date.now();
+    if (
+      this.lastRenderedSettingsTab !== null
+      && this.lastRenderedSettingsTab !== activeTab
+    ) {
+      this.settingsTabIconAnimation = { tabId: activeTab, startedAtMs: now };
+    }
+    const activeAnimationElapsed =
+      this.settingsTabIconAnimation?.tabId === activeTab
+        ? Math.max(0, now - this.settingsTabIconAnimation.startedAtMs)
+        : null;
+    if (
+      activeAnimationElapsed !== null
+      && activeAnimationElapsed >= SETTINGS_TAB_ICON_ANIMATION_WINDOW_MS
+    ) {
+      this.settingsTabIconAnimation = null;
+    }
+    const activeAnimationProgress =
+      activeAnimationElapsed !== null
+      && activeAnimationElapsed < SETTINGS_TAB_ICON_ANIMATION_WINDOW_MS
+        ? activeAnimationElapsed
+        : null;
     SETTINGS_TABS.forEach((tab, index) => {
       const label = copy.tabs[tab.id];
       const isActive = activeTab === tab.id;
@@ -2468,7 +2501,11 @@ export class CodexSettingTab extends PluginSettingTab {
         }
       });
       const icon = button.createSpan({ cls: "codex-settings-tab-icon" });
-      setIcon(icon, tab.icon);
+      renderAnimatedSettingsTabIcon(
+        icon,
+        tab.icon,
+        isActive ? activeAnimationProgress : null
+      );
       button.createSpan({
         cls: "codex-settings-tab-label",
         text: label
@@ -2492,6 +2529,7 @@ export class CodexSettingTab extends PluginSettingTab {
         void this.activateSettingsTab(SETTINGS_TABS[nextIndex].id, true);
       };
     });
+    this.lastRenderedSettingsTab = activeTab;
     window.requestAnimationFrame(updateOverflowHint);
 
     if (!activeButton) {
@@ -4124,8 +4162,12 @@ const SETTINGS_PANEL_ID = "echoink-settings-panel";
 const SETTINGS_TITLE_ID = "echoink-settings-title";
 const RESOURCE_PANEL_ID = "echoink-resource-panel";
 const RESOURCE_TITLE_ID = "echoink-resource-title";
+const SETTINGS_TAB_ICON_ANIMATION_WINDOW_MS = 900;
 
-const SETTINGS_TABS: Array<{ id: VisibleSettingsTab; icon: string }> = [
+const SETTINGS_TABS: Array<{
+  id: VisibleSettingsTab;
+  icon: AnimatedSettingsTabIconName;
+}> = [
   { id: "general", icon: "settings" },
   { id: "providers", icon: "key-round" },
   { id: "resources", icon: "blocks" },

@@ -133,6 +133,7 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   assertNewProductGenerationKeepsConfigurationButDropsLegacyHistory();
   await assertKnowledgeSettingsDetailRetiresLegacyControls();
   await assertKnowledgeInitializationExperienceContract();
+  await assertAnimatedSettingsTabIcons();
   assertSettingsAccessibleNamesAndOverflow();
   await assertMemoryCorrectionModalContract();
   assertMemoryComposerVisualCssContract();
@@ -166,6 +167,124 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   await assertAvatarProcessorContract();
   await assertPersonalityCardUsesNewBehaviorDimensions();
   await assertHexagonCaptionSurvivesRepeatedAsyncRender();
+}
+
+async function assertAnimatedSettingsTabIcons(): Promise<void> {
+  installProviderModalDomFixture();
+  const settings = structuredClone(DEFAULT_SETTINGS);
+  settings.settingsTab = "providers";
+  const plugin = withSettingsTabDefaults({
+    app: new App(),
+    manifest: { id: "codex-echoink" },
+    settings,
+    saveSettings: async () => undefined,
+    getCognitiveSystem: async () => createCognitiveSystemStub(),
+    getEchoInkPersonalMemoryState: async () => ({
+      agent: "# Agent",
+      user: "# User",
+      memory: "# Memory",
+      revision: 0,
+      learningEnabled: true,
+      records: [],
+      forgottenIds: []
+    }),
+    listPiConversations: async () => [],
+    setPiConversationStatus: async () => undefined,
+    getCodexView: () => null
+  });
+  const tab = new CodexSettingTab(plugin as never);
+  tab.display();
+
+  const expected = [
+    ["general", "settings"],
+    ["providers", "key-round"],
+    ["resources", "blocks"],
+    ["knowledgeBase", "book-open"],
+    ["review", "clipboard-check"]
+  ] as const;
+  const icons = tab.containerEl.querySelectorAll<ProviderModalTestElement>(
+    ".codex-settings-tab-icon"
+  );
+  assert.equal(icons.length, expected.length);
+  expected.forEach(([tabId, iconName], index) => {
+    assert.equal(
+      icons[index]?.parentElement?.getAttribute("data-settings-tab"),
+      tabId
+    );
+    assert.equal(icons[index]?.getAttribute("data-animated-icon"), iconName);
+    assert.equal(icons[index]?.hasClass("is-animating"), false);
+  });
+
+  const providers = tab.containerEl.querySelector<ProviderModalTestElement>(
+    '[data-settings-tab="providers"]'
+  );
+  assert.ok(providers);
+  providers.fireEvent("keydown", { key: "End" });
+  await flushProviderModalTasks();
+
+  const review = tab.containerEl.querySelector<ProviderModalTestElement>(
+    '[data-settings-tab="review"]'
+  );
+  assert.equal(review?.getAttribute("aria-selected"), "true");
+  assert.equal(review?.getAttribute("tabindex"), "0");
+  assert.equal(
+    review?.querySelector(".codex-settings-tab-icon")?.hasClass("is-animating"),
+    true
+  );
+
+  const mutableTab = tab as unknown as {
+    renderSettingsContent(): void;
+    settingsTabIconAnimation: { tabId: string; startedAtMs: number } | null;
+  };
+  assert.ok(mutableTab.settingsTabIconAnimation);
+  mutableTab.settingsTabIconAnimation.startedAtMs = Date.now() - 400;
+  mutableTab.renderSettingsContent();
+  const continuedIcon = tab.containerEl.querySelector('[data-settings-tab="review"]')
+    ?.querySelector<ProviderModalTestElement>(".codex-settings-tab-icon");
+  assert.equal(continuedIcon?.hasClass("is-animating"), true);
+  assert.ok(
+    Number.parseInt(
+      continuedIcon?.style.getPropertyValue("--echoink-tab-icon-delay") ?? "0",
+      10
+    ) <= -350,
+    "same-tab rerenders continue the original timeline instead of replaying it"
+  );
+  mutableTab.settingsTabIconAnimation = {
+    tabId: "review",
+    startedAtMs: Date.now() - 1_000
+  };
+  mutableTab.renderSettingsContent();
+  assert.equal(
+    tab.containerEl.querySelector('[data-settings-tab="review"]')
+      ?.querySelector(".codex-settings-tab-icon")?.hasClass("is-animating"),
+    false,
+    "the tab icon animation ends after its bounded window"
+  );
+
+  tab.display();
+  const providersAgain = tab.containerEl.querySelector<ProviderModalTestElement>(
+    '[data-settings-tab="providers"]'
+  );
+  assert.ok(providersAgain);
+  providersAgain.fireEvent("pointerdown");
+  providersAgain.click();
+  await flushProviderModalTasks();
+  assert.equal(
+    tab.containerEl.querySelector('[data-settings-tab="providers"]')
+      ?.querySelector(".codex-settings-tab-icon")?.hasClass("is-animating"),
+    true,
+    "pointer tab switches animate the newly selected icon once"
+  );
+
+  const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+  for (const keyframe of ["settings", "key", "blocks", "book", "clipboard", "check"]) {
+    assert.match(css, new RegExp(`@keyframes echoink-tab-icon-${keyframe}\\b`, "u"));
+  }
+  assert.match(
+    css,
+    /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.codex-settings-tab-icon\.is-animating svg[\s\S]*animation:\s*none !important;/u
+  );
+  tab.hide();
 }
 
 async function assertMemoryCorrectionModalContract(): Promise<void> {
