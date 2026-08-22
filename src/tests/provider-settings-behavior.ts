@@ -2726,6 +2726,54 @@ async function assertKnowledgeInitRecoveryAndActionErrorRendering(): Promise<voi
   assert.deepEqual(conflict.calls.map((call) => call.method), ["start:recommended", "confirm"]);
   conflictTab.hide();
 
+  // 3b. 自定义冲突点「修改分配」时，重新扫描后必须一次性恢复仍然合法的
+  // 旧目录选择；兼容的 keep 也必须保留，不能静默退回 Raw。
+  const customConflictState = {
+    job: makeKnowledgeInitJobFixture({
+      mode: "custom",
+      status: "blocked_conflict",
+      phase: "confirmed",
+      confirmedDigest: "sha256:plan-digest-fixture",
+      items: [
+        makeKnowledgeInitItemFixture("notes/alpha.md", "wiki"),
+        makeKnowledgeInitItemFixture("notes/beta.md", "keep", {
+          targetPath: null,
+          state: "kept"
+        }),
+        makeKnowledgeInitItemFixture("notes/gamma.md", "raw"),
+        makeKnowledgeInitItemFixture("notes/delta.md", "projects"),
+      ]
+    })
+  };
+  const customConflict = createKnowledgeInitPluginFixture(customConflictState);
+  const customConflictTab = await renderKnowledgeInitTab(customConflict.plugin);
+  const customConflictPanel = knowledgeInitPanel(customConflictTab);
+  const editAssignments = knowledgeInitButtons(customConflictPanel).find(
+    (button) => button.textContent === "修改分配"
+  );
+  assert.ok(editAssignments, "custom conflict must offer an edit-assignments action");
+  editAssignments.click();
+  await settleKnowledgeInitTab(customConflictTab);
+  assert.deepEqual(
+    customConflict.calls.map((call) => call.method),
+    ["start:custom", "assignMany"],
+    "editing a custom conflict must rescan once and restore assignments once"
+  );
+  assert.deepEqual(
+    customConflict.calls.find((call) => call.method === "assignMany")?.args,
+    [
+      { sourcePath: "notes/alpha.md", role: "wiki" },
+      { sourcePath: "notes/beta.md", role: "keep" },
+      { sourcePath: "notes/delta.md", role: "projects" },
+    ],
+    "custom recovery must preserve every still-valid non-Raw assignment"
+  );
+  assert.ok(
+    knowledgeInitPanel(customConflictTab).querySelector('[role="tabpanel"]'),
+    "custom recovery must stop at the editable preview instead of confirming"
+  );
+  customConflictTab.hide();
+
   // 4a. Provider 缺失（当前设置没有可用 Provider）→ 重新检查并继续 + 人话提示。
   const providerlessState = {
     job: makeKnowledgeInitJobFixture({
@@ -2879,6 +2927,10 @@ async function assertKnowledgeInitRawPickerSemantics(): Promise<void> {
   assert.ok(inlineError, "failed save must render an inline error");
   assert.match(inlineError.textContent, /保存失败：injected-assign-failure/u);
   assert.equal(failConfirm.disabled, false, "confirm button must be re-enabled after failure");
+  assert.ok(
+    knowledgeInitPanel(tab).querySelector(".echoink-knowledge-init-action-error"),
+    "the parent panel must also surface the failed assignment"
+  );
   // 再次提交：成功并关闭。
   failConfirm.click();
   await flushProviderModalTasks();
@@ -2886,6 +2938,11 @@ async function assertKnowledgeInitRawPickerSemantics(): Promise<void> {
   assert.deepEqual(
     calls.filter((call) => call.method === "assignMany").at(-1)?.args,
     [{ sourcePath: "notes/delta.md", role: "raw" }]
+  );
+  assert.equal(
+    knowledgeInitPanel(tab).querySelector(".echoink-knowledge-init-action-error"),
+    null,
+    "a successful retry must remove the stale parent error banner immediately"
   );
   tab.hide();
 }

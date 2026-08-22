@@ -99,6 +99,7 @@ export class KnowledgeInitializationSection {
   private zh = true;
   private actionError = "";
   private actionErrorDetail = "";
+  private actionErrorEl: HTMLElement | null = null;
   private tabButtonEls: Record<KnowledgeInitializationMode, HTMLElement | null> = {
     recommended: null,
     custom: null
@@ -120,12 +121,14 @@ export class KnowledgeInitializationSection {
     }
     this.pageEl = null;
     this.progressRefs = null;
+    this.actionErrorEl = null;
   }
 
   render(page: HTMLElement, zh: boolean): void {
     this.pageEl = page;
     this.zh = zh;
     this.progressRefs = null;
+    this.actionErrorEl = null;
     const section = createSettingsSection(page, {
       title: zh ? "知识库管理" : "Knowledge management",
       surface: "flat"
@@ -225,6 +228,8 @@ export class KnowledgeInitializationSection {
   private clearActionError(): void {
     this.actionError = "";
     this.actionErrorDetail = "";
+    if (this.actionErrorEl?.isConnected) this.actionErrorEl.remove();
+    this.actionErrorEl = null;
   }
 
   private renderActionError(panel: HTMLElement): void {
@@ -233,6 +238,7 @@ export class KnowledgeInitializationSection {
       cls: "echoink-knowledge-init-action-error",
       attr: { role: "alert" }
     });
+    this.actionErrorEl = box;
     box.createDiv({ cls: "echoink-knowledge-init-action-error-text", text: this.actionError });
     const details = box.createEl("details", { cls: "echoink-knowledge-init-tech" });
     details.createEl("summary", {
@@ -755,7 +761,13 @@ export class KnowledgeInitializationSection {
           : (zh ? "重新选择方案" : "Choose a different plan"),
         attr: { type: "button" }
       });
-      reselect.onclick = () => this.enterPlanSelection(job.mode);
+      reselect.onclick = () => {
+        if (job.mode === "custom") {
+          void this.rescanCustomPreservingAssignments();
+          return;
+        }
+        this.enterPlanSelection();
+      };
     } else if (recovery.kind === "recheck-preview") {
       // Provider 缺失/变化或 digest 不一致：不能直接 continueJob()，
       // 必须重新生成 preview。
@@ -771,7 +783,7 @@ export class KnowledgeInitializationSection {
         text: zh ? "重新选择方案" : "Choose a different plan",
         attr: { type: "button" }
       });
-      reselect.onclick = () => this.enterPlanSelection(job.mode);
+      reselect.onclick = () => this.enterPlanSelection();
     } else {
       const resume = actions.createEl("button", {
         cls: "mod-cta echoink-knowledge-init-cta",
@@ -784,7 +796,7 @@ export class KnowledgeInitializationSection {
         text: zh ? "重新选择方案" : "Choose a different plan",
         attr: { type: "button" }
       });
-      reselect.onclick = () => this.enterPlanSelection(job.mode);
+      reselect.onclick = () => this.enterPlanSelection();
     }
     this.renderTechnicalDetails(panel, job);
   }
@@ -824,7 +836,7 @@ export class KnowledgeInitializationSection {
    * （只产生一次 start:custom，不移动文件、不调用 Provider）。
    * 保留旧分配的一次性恢复只发生在恢复按钮的 recheck 路径里。
    */
-  private enterPlanSelection(_mode: KnowledgeInitializationMode): void {
+  private enterPlanSelection(): void {
     this.reselecting = true;
     this.clearActionError();
     this.scheduleRender();
@@ -908,7 +920,9 @@ export class KnowledgeInitializationSection {
   private async rescanCustomPreservingAssignments(): Promise<void> {
     const previous = this.job;
     const preserved = (previous?.items ?? [])
-      .filter((item) => item.role !== "keep" && item.role !== "raw")
+      // raw 是默认分配，不需要恢复；其余合法选择（包括兼容的 keep）都应
+      // 在重新扫描后保留，避免用户点「修改分配」时静默丢失旧决定。
+      .filter((item) => item.role !== "raw")
       .map((item) => ({ sourcePath: item.sourcePath, role: item.role }));
     this.reselecting = false;
     await this.runAction(async () => {
