@@ -17,7 +17,6 @@ export interface KnowledgeNotePickerOptions {
   readonly targetLabel: string;
   /** 当前 preview 中全部可分配笔记（keep 等遗留状态由调用方过滤）。 */
   readonly notes: readonly KnowledgeNotePickerNote[];
-  readonly roleLabel: (role: KnowledgeInitializationRole) => string;
   /**
    * 确认后回传变更集合；未变化时不会调用。
    * 抛错 = 保存失败：Modal 保持打开、不锁死、显示内联错误，允许再次提交。
@@ -183,7 +182,7 @@ export class KnowledgeNotePickerModal extends Modal {
   private renderList(): void {
     const list = this.listEl;
     if (!list) return;
-    const { zh, targetRole, targetLabel, roleLabel } = this.options;
+    const { zh, targetRole } = this.options;
     const rawTarget = targetRole === "raw";
     list.empty();
     const query = this.query.trim().toLocaleLowerCase();
@@ -227,33 +226,14 @@ export class KnowledgeNotePickerModal extends Modal {
         text: note.sourcePath,
         attr: { title: note.sourcePath }
       });
-      const badge = copy.createDiv({ cls: "echoink-knowledge-note-picker-badge" });
       const checkbox = row.createEl("input", {
         cls: "echoink-knowledge-note-picker-checkbox",
         attr: { type: "checkbox" }
       }) as HTMLInputElement;
       checkbox.checked = this.checked.has(note.sourcePath);
-      const renderBadge = (): void => {
-        const isChecked = this.checked.has(note.sourcePath);
-        if (rawTarget) {
-          badge.setText(isChecked
-            ? (zh ? "将移回 Raw" : "Moves back to Raw")
-            : (zh ? `当前：${roleLabel(note.role)}` : `Now: ${roleLabel(note.role)}`));
-          return;
-        }
-        badge.setText(isChecked
-          ? (note.role !== targetRole
-              ? (zh ? `将移动到 ${targetLabel}` : `Moves to ${targetLabel}`)
-              : "")
-          : (note.role !== "raw" && note.role !== targetRole
-              ? (zh ? `当前：${roleLabel(note.role)}` : `Now: ${roleLabel(note.role)}`)
-              : ""));
-      };
-      renderBadge();
       checkbox.onchange = () => {
         if (checkbox.checked) this.checked.add(note.sourcePath);
         else this.checked.delete(note.sourcePath);
-        renderBadge();
         if (this.confirmEl && !this.submitting) this.confirmEl.setText(this.confirmLabel());
       };
     }

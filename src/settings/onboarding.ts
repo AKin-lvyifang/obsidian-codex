@@ -147,12 +147,12 @@ export function onboardingCoachmarkCopy(
       },
       provider: {
         title: "Connect a model",
-        description: "Add and enable a model service so EchoInk can start chatting. You can also continue now and set it up later.",
+        description: "Add and enable a model service so EchoInk can start chatting.",
         action: "Next"
       },
       knowledge: {
         title: "Set up Knowledge",
-        description: "Choose the recommended or custom plan. EchoInk shows a preview before organizing notes, and you can also do this later.",
+        description: "Choose the recommended or custom plan. EchoInk shows a preview before organizing notes.",
         action: "Next"
       },
       personality: {
@@ -176,12 +176,12 @@ export function onboardingCoachmarkCopy(
     },
     provider: {
       title: "连接一个模型",
-      description: "添加并启用一个模型服务，EchoInk 才能开始对话。你也可以先继续，之后再设置。",
+      description: "添加并启用一个模型服务，EchoInk 才能开始对话。",
       action: "下一步"
     },
     knowledge: {
       title: "建立知识库",
-      description: "选择默认或自定义方案。EchoInk 会先显示预览，再整理笔记；也可以稍后处理。",
+      description: "选择默认或自定义方案。EchoInk 会先显示预览，再整理笔记。",
       action: "下一步"
     },
     personality: {

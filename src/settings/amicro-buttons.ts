@@ -44,6 +44,54 @@ export function applyAmicroButton(
   return button;
 }
 
+const particleButtonTimers = new WeakMap<HTMLButtonElement, number>();
+
+/**
+ * Native DOM adaptation of Kokonut UI's Particle Button. The plugin keeps the
+ * same press + six-particle burst without importing React, Motion, or Tailwind.
+ */
+export function applyParticleButton(
+  button: HTMLButtonElement,
+  iconName = "refresh-cw"
+): HTMLButtonElement {
+  const label = button.textContent ?? "";
+  applyAmicroButton(button, { variant: "primary" });
+  button.addClass("echoink-particle-button");
+  button.empty();
+  button.createSpan({ cls: "echoink-particle-button-label", text: label });
+  const icon = button.createSpan({
+    cls: "echoink-particle-button-icon",
+    attr: {
+      "aria-hidden": "true",
+      "data-echoink-icon": iconName
+    }
+  });
+  setIcon(icon, iconName);
+  const burst = button.createSpan({
+    cls: "echoink-particle-button-burst",
+    attr: { "aria-hidden": "true" }
+  });
+  for (let index = 0; index < 6; index += 1) {
+    burst.createSpan({ cls: "echoink-particle-button-dot" });
+  }
+  return button;
+}
+
+export function triggerParticleButton(button: HTMLButtonElement): void {
+  const ownerWindow = button.ownerDocument.defaultView ?? window;
+  const previousTimer = particleButtonTimers.get(button);
+  if (previousTimer !== undefined) ownerWindow.clearTimeout(previousTimer);
+  button.removeClass("is-particle-bursting");
+  // Restart the keyframes when the same recoverable action is tried again.
+  void button.offsetWidth;
+  button.addClass("is-particle-bursting");
+  const timer = ownerWindow.setTimeout(() => {
+    button.removeClass("is-particle-bursting");
+    particleButtonTimers.delete(button);
+  }, 820);
+  particleButtonTimers.set(button, timer);
+}
+
 export function setAmicroButtonPending(
   button: HTMLButtonElement,
   pending: boolean

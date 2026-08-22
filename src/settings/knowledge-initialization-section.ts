@@ -26,7 +26,11 @@ import {
 } from "./settings";
 import { createSettingsSection, createSettingsState } from "./settings-v2";
 import { KnowledgeNotePickerModal } from "./knowledge-note-picker-modal";
-import { applyAmicroButton } from "./amicro-buttons";
+import {
+  applyAmicroButton,
+  applyParticleButton,
+  triggerParticleButton
+} from "./amicro-buttons";
 
 type KnowledgeInitDirectoryRole = Exclude<KnowledgeInitializationRole, "keep">;
 
@@ -108,7 +112,8 @@ export class KnowledgeInitializationSection {
 
   constructor(
     private readonly plugin: CodexForObsidianPlugin,
-    private readonly scheduleRender: () => void
+    private readonly scheduleRender: () => void,
+    private readonly openProviderSettings: () => void | Promise<void>
   ) {}
 
   dispose(): void {
@@ -719,7 +724,6 @@ export class KnowledgeInitializationSection {
       targetRole: role,
       targetLabel: this.dirLabel(role),
       notes,
-      roleLabel: (candidate) => this.dirLabel(candidate),
       triggerEl,
       // 目录列表提交后会被重建：按 role 找重建后的按钮，且只在 isConnected
       // 时 focus；取消 / Escape / 提交成功 / 失败后再取消四条路径都走这里。
@@ -992,23 +996,30 @@ export class KnowledgeInitializationSection {
       job,
       currentProvider: this.currentProviderSnapshot()
     });
+    const needsProviderSetup = this.recoveryNeedsProviderSetup(recovery, job);
     panel.createDiv({
       cls: "echoink-knowledge-init-heading",
       text: recovery.kind === "recheck-conflict"
         ? (zh ? "初始化遇到冲突" : "Initialization hit a conflict")
         : (zh ? "初始化暂停了" : "Initialization paused")
     });
-    const notice = panel.createDiv({
-      cls: "echoink-knowledge-init-pause",
-      attr: { role: "status", "aria-live": "polite" }
-    });
+    const notice = panel.createDiv({ cls: "echoink-knowledge-init-pause" });
     const icon = notice.createSpan({ cls: "echoink-knowledge-init-pause-icon" });
     setIcon(icon, "alert-triangle");
     icon.setAttr("aria-hidden", "true");
-    notice.createDiv({
-      cls: "echoink-knowledge-init-pause-text",
-      text: this.pauseNoticeText(recovery, job, zh)
+    const pauseText = notice.createDiv({ cls: "echoink-knowledge-init-pause-text" });
+    pauseText.createSpan({
+      text: this.pauseNoticeText(recovery, job, zh, needsProviderSetup),
+      attr: { role: "status", "aria-live": "polite" }
     });
+    if (needsProviderSetup) {
+      const providerLink = pauseText.createEl("button", {
+        cls: "echoink-knowledge-init-provider-link",
+        text: zh ? "去设置 API Provider" : "Set up API Provider",
+        attr: { type: "button" }
+      });
+      providerLink.onclick = () => void this.openProviderSettings();
+    }
     const actions = panel.createDiv({ cls: "echoink-knowledge-init-actions" });
     if (recovery.kind === "recheck-conflict") {
       // blocked_conflict：禁止展示必然失败的「继续初始化」。
@@ -1040,7 +1051,11 @@ export class KnowledgeInitializationSection {
         text: zh ? "重新检查并继续" : "Recheck and continue",
         attr: { type: "button", "data-echoink-focus-key": FOCUS_KEY }
       });
-      recheck.onclick = () => void this.recheckPreviewAndContinue();
+      applyParticleButton(recheck, "refresh-cw");
+      recheck.onclick = () => {
+        triggerParticleButton(recheck);
+        void this.recheckPreviewAndContinue();
+      };
       // 保留「重新选择方案」出口：计划已失效时用户也可以直接回到方案选择。
       const reselect = actions.createEl("button", {
         cls: "echoink-knowledge-init-secondary",
@@ -1067,7 +1082,8 @@ export class KnowledgeInitializationSection {
   private pauseNoticeText(
     recovery: KnowledgeInitializationRecovery,
     job: Readonly<KnowledgeInitializationJob>,
-    zh: boolean
+    zh: boolean,
+    needsProviderSetup = this.recoveryNeedsProviderSetup(recovery, job)
   ): string {
     if (recovery.kind === "recheck-conflict") {
       return zh
@@ -1077,9 +1093,7 @@ export class KnowledgeInitializationSection {
     if (recovery.kind === "recheck-preview") {
       // 作业快照本身没有 Provider（创建时就没配）且还有待提炼内容：
       // 直接说「先设置模型」，而不是「模型已变化」。
-      const jobLacksProvider =
-        job.provider === null && job.extractionQueue.length > 0;
-      if (jobLacksProvider || this.currentProviderSnapshot() === null) {
+      if (needsProviderSetup) {
         return zh
           ? "需要先设置可用模型，才能把 Raw 笔记提炼成 Wiki。"
           : "Set up an available model first so Raw notes can be distilled into Wiki.";
@@ -1091,6 +1105,16 @@ export class KnowledgeInitializationSection {
     return zh
       ? "初始化暂停了。已经完成的内容会保留，解决问题后可以继续。"
       : "Initialization paused. Completed work is kept; you can continue after fixing the issue.";
+  }
+
+  private recoveryNeedsProviderSetup(
+    recovery: KnowledgeInitializationRecovery,
+    job: Readonly<KnowledgeInitializationJob>
+  ): boolean {
+    if (recovery.kind !== "recheck-preview") return false;
+    const jobLacksProvider =
+      job.provider === null && job.extractionQueue.length > 0;
+    return jobLacksProvider || this.currentProviderSnapshot() === null;
   }
 
   /**

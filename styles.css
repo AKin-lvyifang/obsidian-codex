@@ -1375,8 +1375,66 @@ button.codex-user-message-copy {
 .echoink-onboarding-actions {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
   margin-top: 16px;
+}
+
+/* Amicro btn-32 adaptation: the arrow tilts while the same label rolls upward
+   through a clipped line. The duplicate is generated in CSS so screen readers
+   announce the action only once. */
+.echoink-onboarding-coachmark .echoink-onboarding-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 144px;
+  min-width: 144px;
+  min-height: 40px;
+  padding: 0 14px;
+}
+
+.echoink-onboarding-action-label-window {
+  display: block;
+  height: 18px;
+  overflow: hidden;
+}
+
+.echoink-onboarding-action-icon {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  transition: transform 220ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.echoink-onboarding-action-icon svg {
+  width: 16px;
+  height: 16px;
+  stroke-width: 1.9px;
+}
+
+.echoink-onboarding-action-label {
+  display: block;
+  height: 18px;
+  line-height: 18px;
+  text-align: center;
+  white-space: nowrap;
+  transition: transform 240ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.echoink-onboarding-action-label::after {
+  display: block;
+  height: 18px;
+  line-height: 18px;
+  content: attr(data-label);
+}
+
+.echoink-onboarding-action:is(:hover, :focus-visible) .echoink-onboarding-action-icon {
+  transform: rotate(45deg);
+}
+
+.echoink-onboarding-action:is(:hover, :focus-visible) .echoink-onboarding-action-label {
+  transform: translateY(-18px);
 }
 
 @keyframes echoink-onboarding-enter {
@@ -1391,13 +1449,25 @@ button.codex-user-message-copy {
 
   .echoink-onboarding-actions {
     align-items: stretch;
-    flex-direction: column-reverse;
+  }
+
+  .echoink-onboarding-coachmark .echoink-onboarding-action {
+    width: 100%;
+    min-width: 0;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .echoink-onboarding-coachmark {
     animation: none;
+  }
+
+  .echoink-onboarding-action-icon {
+    transition: none;
+  }
+
+  .echoink-onboarding-action-label {
+    transition: none;
   }
 }
 
@@ -14026,6 +14096,41 @@ button.echoink-picker-row:focus-visible {
   height: 18px;
 }
 
+/* Smooth Button link adaptation: an inline, accent-colored recovery route
+   whose underline grows left-to-right without turning the text into a card. */
+.echoink-knowledge-init-pause .echoink-knowledge-init-provider-link {
+  position: relative;
+  display: inline;
+  min-height: 0;
+  margin-inline-start: 0.4em;
+  padding: 0 0 2px;
+  border: 0;
+  border-radius: 0;
+  background-color: transparent;
+  background-image: linear-gradient(currentColor, currentColor);
+  background-repeat: no-repeat;
+  background-position: 0 100%;
+  background-size: 0 1px;
+  box-shadow: none;
+  color: var(--text-accent);
+  font: inherit;
+  font-weight: 600;
+  line-height: inherit;
+  cursor: pointer;
+  transition: color 140ms ease, background-size 180ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.echoink-knowledge-init-pause .echoink-knowledge-init-provider-link:is(:hover, :focus-visible) {
+  background-color: transparent;
+  background-size: 100% 1px;
+  color: var(--text-accent-hover, var(--text-accent));
+}
+
+.echoink-knowledge-init-provider-link:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 3px;
+}
+
 /* 多选笔记 Modal。类直接加在 modalEl 上，因此选择器必须匹配同一元素：
    .modal.echoink-knowledge-note-picker，而不是后代表达式。 */
 .modal.echoink-knowledge-note-picker {
@@ -14370,6 +14475,112 @@ button.echoink-picker-row:focus-visible {
   gap: 7px;
 }
 
+/* Kokonut Particle Button adaptation. Six deterministic particles keep the
+   original short press-and-burst feel while avoiding a runtime dependency. */
+.echoink-particle-button {
+  position: relative;
+  overflow: visible;
+  transition: transform 100ms ease-out,
+    color 140ms cubic-bezier(0.2, 0, 0, 1),
+    background-color 140ms cubic-bezier(0.2, 0, 0, 1),
+    box-shadow 140ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.echoink-particle-button-icon {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  align-items: center;
+  justify-content: center;
+}
+
+.echoink-particle-button-icon svg {
+  width: 16px;
+  height: 16px;
+  stroke-width: 1.9px;
+}
+
+.echoink-particle-button-burst {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.echoink-particle-button-dot {
+  --echoink-particle-x: 0px;
+  --echoink-particle-y: -34px;
+  --echoink-particle-delay: 0ms;
+  position: absolute;
+  top: -2px;
+  left: -2px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--text-on-accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--interactive-accent) 35%, transparent);
+  opacity: 0;
+}
+
+.echoink-particle-button-dot:nth-child(2) {
+  --echoink-particle-x: 31px;
+  --echoink-particle-y: -22px;
+  --echoink-particle-delay: 35ms;
+}
+
+.echoink-particle-button-dot:nth-child(3) {
+  --echoink-particle-x: 36px;
+  --echoink-particle-y: 16px;
+  --echoink-particle-delay: 70ms;
+}
+
+.echoink-particle-button-dot:nth-child(4) {
+  --echoink-particle-x: -28px;
+  --echoink-particle-y: 26px;
+  --echoink-particle-delay: 105ms;
+}
+
+.echoink-particle-button-dot:nth-child(5) {
+  --echoink-particle-x: -39px;
+  --echoink-particle-y: -8px;
+  --echoink-particle-delay: 140ms;
+}
+
+.echoink-particle-button-dot:nth-child(6) {
+  --echoink-particle-x: 8px;
+  --echoink-particle-y: 34px;
+  --echoink-particle-delay: 175ms;
+}
+
+.echoink-particle-button.is-particle-bursting {
+  transform: scale(0.95);
+}
+
+.echoink-particle-button.is-particle-bursting .echoink-particle-button-dot {
+  animation: echoink-particle-button-burst 620ms ease-out var(--echoink-particle-delay) both;
+}
+
+@keyframes echoink-particle-button-burst {
+  0% {
+    opacity: 0;
+    transform: translate(0, 0) scale(0);
+  }
+  28% {
+    opacity: 1;
+    transform: translate(
+      calc(var(--echoink-particle-x) * 0.42),
+      calc(var(--echoink-particle-y) * 0.42)
+    ) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(var(--echoink-particle-x), var(--echoink-particle-y)) scale(0);
+  }
+}
+
 .echoink-amicro-button-icon {
   position: relative;
   display: inline-grid;
@@ -14507,5 +14718,13 @@ button.echoink-picker-row:focus-visible {
 
   .echoink-amicro-button:is(:active, .is-amicro-confirmed) {
     transform: none;
+  }
+
+  .echoink-particle-button.is-particle-bursting {
+    transform: none;
+  }
+
+  .echoink-particle-button-dot {
+    animation: none !important;
   }
 }

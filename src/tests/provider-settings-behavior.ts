@@ -1790,7 +1790,7 @@ function assertFiveStepOnboardingEntrypoints(): void {
     const copy = onboardingCoachmarkCopy(step, true);
     assert.equal(copy.step, stepLabel);
     assert.equal(copy.title, title);
-    assert.doesNotMatch(copy.description, /本教程|配置完整|可恢复的预览|Memory 学习/u);
+    assert.doesNotMatch(copy.description, /本教程|配置完整|可恢复的预览|Memory 学习|稍后/u);
   }
   assert.equal(onboardingCoachmarkCopy("sidebar", true).action, "打开 EchoInk");
   assert.equal(onboardingCoachmarkCopy("settings", true).action, "打开设置");
@@ -1880,12 +1880,24 @@ async function assertOnboardingCoachmarkAccessibilityContract(): Promise<void> {
     assert.equal(coachmark.getAttribute("aria-label"), fixture.label);
     assert.equal(coachmark.getAttribute("tabindex"), "-1");
     assert.equal(
-      coachmark.querySelector("button.mod-cta")?.textContent,
+      coachmark.querySelector("button.echoink-onboarding-action")?.textContent,
+      fixture.action
+    );
+    assert.equal(coachmark.querySelectorAll("button").length, 1);
+    const action = coachmark.querySelector("button.echoink-onboarding-action");
+    assert.equal(action?.getAttribute("aria-label"), fixture.action);
+    assert.equal(
+      action?.querySelector(".echoink-onboarding-action-icon")?.getAttribute("data-echoink-icon"),
+      "arrow-right"
+    );
+    assert.equal(action?.querySelectorAll(".echoink-onboarding-action-icon").length, 1);
+    assert.equal(
+      action?.querySelector(".echoink-onboarding-action-label")?.getAttribute("data-label"),
       fixture.action
     );
     assert.equal(providerModalTestDocument.activeElement, coachmark);
     assert.equal(anchor.hasClass("is-echoink-onboarding-target"), true);
-    assert.equal(anchor.scrollIntoViewCalls, 1);
+    assert.equal(anchor.scrollIntoViewCalls, 3);
     mutable.clearOnboardingCoachmark(true);
     assert.equal(providerModalTestDocument.activeElement, restoreFocus);
     assert.equal(anchor.hasClass("is-echoink-onboarding-target"), false);
@@ -1936,7 +1948,7 @@ async function assertOnboardingCoachmarkAccessibilityContract(): Promise<void> {
     mutable.renderOnboardingCoachmark(fixture.step);
     const next = providerModalTestDocument.body
       .querySelector<ProviderModalTestElement>(".echoink-onboarding-coachmark")
-      ?.querySelector<ProviderModalTestElement>("button.mod-cta");
+      ?.querySelector<ProviderModalTestElement>("button.echoink-onboarding-action");
     assert.ok(next);
     next.click();
     await flushProviderModalTasks();
@@ -1958,7 +1970,7 @@ async function assertOnboardingCoachmarkAccessibilityContract(): Promise<void> {
   mutable.renderOnboardingCoachmark("provider");
   providerModalTestDocument.fireEvent("keydown", { key: "Escape" });
   await flushProviderModalTasks();
-  assert.equal(dismissCalls, 1);
+  assert.equal(dismissCalls, 0);
   assert.equal(
     providerModalTestDocument.body.querySelector(".echoink-onboarding-coachmark"),
     null
@@ -2007,13 +2019,18 @@ async function assertOnboardingCoachmarkAccessibilityContract(): Promise<void> {
   mandatoryCoachmark = providerModalTestDocument.body.querySelector(
     ".echoink-onboarding-coachmark.is-sidebar"
   );
-  mandatoryCoachmark?.querySelector<ProviderModalTestElement>("button.mod-cta")?.click();
+  mandatoryCoachmark?.querySelector<ProviderModalTestElement>("button.echoink-onboarding-action")?.click();
   await flushProviderModalTasks();
   assert.equal(mandatoryActionCalls, 1);
   mandatoryHandle.destroy();
 
   const css = readFileSync("styles.css", "utf8");
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.echoink-onboarding-coachmark\s*\{[\s\S]*?animation:\s*none/u);
+  assert.match(css, /\.echoink-onboarding-coachmark \.echoink-onboarding-action\s*\{[^}]*width:\s*144px;[^}]*min-height:\s*40px;/u);
+  assert.match(css, /\.echoink-onboarding-action-label-window\s*\{[^}]*height:\s*18px;[^}]*overflow:\s*hidden/u);
+  assert.match(css, /\.echoink-onboarding-action-label::after\s*\{[^}]*content:\s*attr\(data-label\)/u);
+  assert.match(css, /\.echoink-onboarding-action:is\(:hover, :focus-visible\) \.echoink-onboarding-action-icon\s*\{[^}]*rotate\(45deg\)/u);
+  assert.match(css, /\.echoink-onboarding-action:is\(:hover, :focus-visible\) \.echoink-onboarding-action-label\s*\{[^}]*translateY\(-18px\)/u);
 }
 
 async function assertOnboardingDoesNotLockSettingsNavigation(): Promise<void> {
@@ -3059,7 +3076,7 @@ async function assertKnowledgeInitNotePickerModalContract(): Promise<void> {
     checkboxes.map((checkbox) => checkbox.checked),
     [false, false, true, false, false, false]
   );
-  assert.match(modal.contentEl.textContent, /当前：Projects/u);
+  assert.doesNotMatch(modal.contentEl.textContent, /当前：|将移动到|将移回/u);
   assert.equal(
     modal.contentEl.querySelector(".echoink-knowledge-note-picker-confirm")?.textContent,
     "选好了（1）"
@@ -3115,6 +3132,7 @@ async function assertKnowledgeInitNotePickerModalContract(): Promise<void> {
     checkbox.checked = true;
     checkbox.fireEvent("change");
   }
+  assert.doesNotMatch(modal.contentEl.textContent, /当前：|将移动到|将移回/u);
   assert.equal(
     modal.contentEl.querySelector(".echoink-knowledge-note-picker-confirm")?.textContent,
     "选好了（3）"
@@ -3175,7 +3193,6 @@ async function assertKnowledgeInitNotePickerModalContract(): Promise<void> {
     targetRole: "wiki",
     targetLabel: "Wiki",
     notes: [],
-    roleLabel: (role) => String(role),
     onConfirm: async () => undefined
   });
   emptyModal.open();
@@ -3314,8 +3331,35 @@ async function assertKnowledgeInitRecoveryAndActionErrorRendering(): Promise<voi
   const providerless = createKnowledgeInitPluginFixture(providerlessState);
   const providerlessTab = await renderKnowledgeInitTab(providerless.plugin);
   const providerlessPanel = knowledgeInitPanel(providerlessTab);
-  assert.equal(providerlessPanel.querySelector(".echoink-knowledge-init-cta")?.textContent, "重新检查并继续");
+  const providerlessRecheck = providerlessPanel.querySelector<HTMLButtonElement>(
+    ".echoink-knowledge-init-cta"
+  );
+  assert.equal(providerlessRecheck?.textContent, "重新检查并继续");
+  assert.ok(providerlessRecheck?.hasClass("echoink-particle-button"));
+  assert.equal(
+    providerlessRecheck?.querySelector(".echoink-particle-button-icon")
+      ?.getAttribute("data-echoink-icon"),
+    "refresh-cw"
+  );
+  assert.equal(
+    providerlessRecheck?.querySelectorAll(".echoink-particle-button-dot").length,
+    6
+  );
   assert.match(providerlessPanel.textContent, /需要先设置可用模型/u);
+  const providerLink = providerlessPanel.querySelector<HTMLButtonElement>(
+    ".echoink-knowledge-init-provider-link"
+  );
+  assert.equal(providerLink?.textContent, "去设置 API Provider");
+  assert.equal(providerLink?.getAttribute("type"), "button");
+  assert.equal(
+    providerLink?.closest('[role="status"]'),
+    null,
+    "the interactive Provider link must stay outside the live status node"
+  );
+  providerLink?.click();
+  await flushProviderModalTasks();
+  assert.equal(providerless.settings.settingsTab, "providers");
+  assert.deepEqual(providerless.calls, [], "opening Provider settings must not retry initialization");
   providerlessTab.hide();
 
   // 4b. digest 不一致（从未确认）→ 重新检查并继续，提示「计划已变化」。
@@ -3332,6 +3376,11 @@ async function assertKnowledgeInitRecoveryAndActionErrorRendering(): Promise<voi
   const stalePanel = knowledgeInitPanel(staleTab);
   assert.equal(stalePanel.querySelector(".echoink-knowledge-init-cta")?.textContent, "重新检查并继续");
   assert.match(stalePanel.textContent, /模型或计划已经变化/u);
+  assert.equal(
+    stalePanel.querySelector(".echoink-knowledge-init-provider-link"),
+    null,
+    "a changed plan with a usable Provider must not show the setup link"
+  );
   staleTab.hide();
 
   // 5. 用户动作失败可见可重试：开始初始化抛错 → 只显示人话错误；
@@ -3522,6 +3571,26 @@ function assertKnowledgeInitNarrowLayoutCssContract(): void {
     css,
     /prefers-reduced-motion:\s*reduce[\s\S]*\.echoink-knowledge-init-bar-indicator[\s\S]*transition:\s*none/u,
     "reduced-motion users must get immediate progress updates"
+  );
+  assert.match(
+    css,
+    /\.echoink-particle-button\.is-particle-bursting \.echoink-particle-button-dot\s*\{[^}]*animation:\s*echoink-particle-button-burst/u,
+    "the recoverable recheck action must use the six-particle burst"
+  );
+  assert.match(
+    css,
+    /prefers-reduced-motion:\s*reduce[\s\S]*\.echoink-particle-button-dot\s*\{[^}]*animation:\s*none\s*!important/u,
+    "particle motion must be disabled when reduced motion is requested"
+  );
+  assert.match(
+    css,
+    /\.echoink-knowledge-init-pause \.echoink-knowledge-init-provider-link\s*\{[^}]*background-size:\s*0\s+1px[^}]*color:\s*var\(--text-accent\)/u,
+    "the Provider route must look like an accent-colored animated text link"
+  );
+  assert.match(
+    css,
+    /\.echoink-knowledge-init-pause \.echoink-knowledge-init-provider-link:is\(:hover, :focus-visible\)\s*\{[^}]*background-size:\s*100%\s+1px/u,
+    "the Provider link underline must grow on hover and keyboard focus"
   );
   assert.doesNotMatch(css, /\.echoink-knowledge-init-tech(?:-|\s|\.)/u);
   assert.match(

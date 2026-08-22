@@ -1,15 +1,14 @@
+import { setIcon } from "obsidian";
+
 export interface EchoInkOnboardingCoachmarkOptions {
   readonly anchor: HTMLElement;
   readonly stepClass: string;
   readonly stepLabel: string;
   readonly title: string;
   readonly description: string;
-  readonly dismissLabel?: string | null;
   readonly actionLabel?: string | null;
   readonly restoreFocusEl?: HTMLElement | null;
   readonly initialFocus?: "coachmark" | "anchor";
-  readonly onDismiss?: () => void | Promise<void>;
-  readonly onDismissError?: (error: unknown) => void;
   readonly onAction?: () => void | Promise<void>;
   readonly onActionError?: (error: unknown) => void;
 }
@@ -39,7 +38,6 @@ export function mountEchoInkOnboardingCoachmark(
     }
   });
   anchor.addClass("is-echoink-onboarding-target");
-  anchor.scrollIntoView({ block: "center", inline: "nearest" });
   coachmark.createDiv({ cls: "echoink-onboarding-step", text: options.stepLabel });
   coachmark.createDiv({
     cls: "echoink-onboarding-title",
@@ -48,12 +46,32 @@ export function mountEchoInkOnboardingCoachmark(
   });
   coachmark.createDiv({ cls: "echoink-onboarding-copy", text: options.description });
   const actions = coachmark.createDiv({ cls: "echoink-onboarding-actions" });
-  const dismiss = options.dismissLabel && options.onDismiss
+  const action = options.actionLabel && options.onAction
     ? actions.createEl("button", {
-        text: options.dismissLabel,
-        attr: { type: "button" }
+        cls: "mod-cta echoink-amicro-button is-primary echoink-onboarding-action",
+        attr: { type: "button", "aria-busy": "false" }
       })
     : null;
+  if (action) {
+    const icon = action.createSpan({
+      cls: "echoink-onboarding-action-icon",
+      attr: {
+        "aria-hidden": "true",
+        "data-echoink-icon": "arrow-right"
+      }
+    });
+    setIcon(icon, "arrow-right");
+    const labelWindow = action.createSpan({
+      cls: "echoink-onboarding-action-label-window",
+      attr: { "aria-hidden": "true" }
+    });
+    labelWindow.createSpan({
+      cls: "echoink-onboarding-action-label",
+      text: options.actionLabel ?? "",
+      attr: { "data-label": options.actionLabel ?? "" }
+    });
+    action.setAttr("aria-label", options.actionLabel ?? "");
+  }
 
   let destroyed = false;
   const position = () => positionOnboardingCoachmark(coachmark, anchor, ownerWindow);
@@ -64,8 +82,7 @@ export function mountEchoInkOnboardingCoachmark(
   const onKeyDown = (event: KeyboardEvent) => {
     if (event.key !== "Escape") return;
     event.preventDefault();
-    if (dismiss) void dismissCoachmark();
-    else destroy(true);
+    destroy(true);
   };
   const destroy = (restoreFocus = false) => {
     if (destroyed) return;
@@ -80,30 +97,20 @@ export function mountEchoInkOnboardingCoachmark(
       restoreFocusEl.focus({ preventScroll: true });
     }
   };
-  const dismissCoachmark = async () => {
-    if (!options.onDismiss) return;
-    try {
-      await options.onDismiss();
-      destroy(true);
-    } catch (error) {
-      options.onDismissError?.(error);
-    }
-  };
-  if (dismiss) dismiss.onclick = () => void dismissCoachmark();
-
-  if (options.actionLabel && options.onAction) {
-    const action = actions.createEl("button", {
-      cls: "mod-cta",
-      text: options.actionLabel,
-      attr: { type: "button" }
-    });
+  if (action) {
     action.onclick = () => {
       if (action.disabled) return;
       action.disabled = true;
+      action.addClass("is-pending");
+      action.setAttr("aria-busy", "true");
       void Promise.resolve(options.onAction?.()).catch((error) => {
         options.onActionError?.(error);
       }).finally(() => {
-        if (action.isConnected) action.disabled = false;
+        if (action.isConnected) {
+          action.disabled = false;
+          action.removeClass("is-pending");
+          action.setAttr("aria-busy", "false");
+        }
       });
     };
   }
@@ -113,7 +120,20 @@ export function mountEchoInkOnboardingCoachmark(
   ownerWindow.addEventListener("resize", position);
   ownerDocument.addEventListener("scroll", position, true);
   ownerDocument.addEventListener("keydown", onKeyDown, true);
-  position();
+  // Settings restores its prior scroll snapshot after a tab render. A single
+  // scrollIntoView can therefore be overwritten and leave later tutorial
+  // targets below the fold. Recheck over two settled layout frames, then
+  // position the coachmark against the final target rectangle.
+  const revealAnchor = () => {
+    if (destroyed || !anchor.isConnected) return;
+    anchor.scrollIntoView({ behavior: "auto", block: "center", inline: "nearest" });
+    position();
+  };
+  revealAnchor();
+  ownerWindow.requestAnimationFrame(() => {
+    revealAnchor();
+    ownerWindow.requestAnimationFrame(revealAnchor);
+  });
   if (options.initialFocus === "anchor") anchor.focus({ preventScroll: true });
   else coachmark.focus({ preventScroll: true });
   return Object.freeze({ element: coachmark, destroy });

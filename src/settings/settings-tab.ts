@@ -480,16 +480,8 @@ export class CodexSettingTab extends PluginSettingTab {
       stepLabel: copy.step,
       title: copy.title,
       description: copy.description,
-      dismissLabel: zh ? "稍后设置" : "Set up later",
       actionLabel: copy.action,
       restoreFocusEl: this.onboardingRestoreFocusEl,
-      onDismiss: async () => {
-        await this.plugin.dismissEchoInkOnboarding();
-      },
-      onDismissError: (error) => {
-        console.error("EchoInk onboarding dismiss failed", error);
-        new Notice(zh ? "引导状态保存失败，请重试" : "Failed to save tutorial state. Try again.");
-      },
       onAction: async () => {
         await this.advanceOnboardingTutorial(step);
       },
@@ -1386,7 +1378,8 @@ export class CodexSettingTab extends PluginSettingTab {
     if (!this.knowledgeInitSection) {
       this.knowledgeInitSection = new KnowledgeInitializationSection(
         this.plugin,
-        () => this.scheduleDisplay()
+        () => this.scheduleDisplay(),
+        () => this.activateSettingsTab("providers", true)
       );
     }
     this.knowledgeInitSection.render(page, zh);
