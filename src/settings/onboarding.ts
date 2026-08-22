@@ -138,12 +138,12 @@ export function onboardingCoachmarkCopy(
       sidebar: {
         title: "Open the Agent sidebar",
         description: "Click the robot icon in Obsidian's left ribbon to open the EchoInk Agent sidebar.",
-        action: null
+        action: "Open EchoInk"
       },
       settings: {
         title: "Open EchoInk settings",
-        description: "Click the gear in the upper-right corner of the EchoInk sidebar.",
-        action: null
+        description: "For your first use, open Settings from the gear in the upper-right corner of the EchoInk sidebar.",
+        action: "Open settings"
       },
       provider: {
         title: "Connect a model",
@@ -167,12 +167,12 @@ export function onboardingCoachmarkCopy(
     sidebar: {
       title: "打开 Agent 侧栏",
       description: "点击 Obsidian 左侧栏里的机器人图标，打开 EchoInk Agent 侧栏。",
-      action: null
+      action: "打开 EchoInk"
     },
     settings: {
       title: "进入 EchoInk 设置",
-      description: "在 EchoInk 侧栏右上角，点击齿轮按钮。",
-      action: null
+      description: "第一次使用，请点击 EchoInk 侧栏右上角的齿轮，先进入设置。",
+      action: "打开设置"
     },
     provider: {
       title: "连接一个模型",

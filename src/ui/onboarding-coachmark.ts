@@ -4,11 +4,11 @@ export interface EchoInkOnboardingCoachmarkOptions {
   readonly stepLabel: string;
   readonly title: string;
   readonly description: string;
-  readonly dismissLabel: string;
+  readonly dismissLabel?: string | null;
   readonly actionLabel?: string | null;
   readonly restoreFocusEl?: HTMLElement | null;
   readonly initialFocus?: "coachmark" | "anchor";
-  readonly onDismiss: () => void | Promise<void>;
+  readonly onDismiss?: () => void | Promise<void>;
   readonly onDismissError?: (error: unknown) => void;
   readonly onAction?: () => void | Promise<void>;
   readonly onActionError?: (error: unknown) => void;
@@ -48,10 +48,12 @@ export function mountEchoInkOnboardingCoachmark(
   });
   coachmark.createDiv({ cls: "echoink-onboarding-copy", text: options.description });
   const actions = coachmark.createDiv({ cls: "echoink-onboarding-actions" });
-  const dismiss = actions.createEl("button", {
-    text: options.dismissLabel,
-    attr: { type: "button" }
-  });
+  const dismiss = options.dismissLabel && options.onDismiss
+    ? actions.createEl("button", {
+        text: options.dismissLabel,
+        attr: { type: "button" }
+      })
+    : null;
 
   let destroyed = false;
   const position = () => positionOnboardingCoachmark(coachmark, anchor, ownerWindow);
@@ -62,7 +64,8 @@ export function mountEchoInkOnboardingCoachmark(
   const onKeyDown = (event: KeyboardEvent) => {
     if (event.key !== "Escape") return;
     event.preventDefault();
-    void dismissCoachmark();
+    if (dismiss) void dismissCoachmark();
+    else destroy(true);
   };
   const destroy = (restoreFocus = false) => {
     if (destroyed) return;
@@ -78,6 +81,7 @@ export function mountEchoInkOnboardingCoachmark(
     }
   };
   const dismissCoachmark = async () => {
+    if (!options.onDismiss) return;
     try {
       await options.onDismiss();
       destroy(true);
@@ -85,7 +89,7 @@ export function mountEchoInkOnboardingCoachmark(
       options.onDismissError?.(error);
     }
   };
-  dismiss.onclick = () => void dismissCoachmark();
+  if (dismiss) dismiss.onclick = () => void dismissCoachmark();
 
   if (options.actionLabel && options.onAction) {
     const action = actions.createEl("button", {

@@ -2538,6 +2538,12 @@ export class CodexSettingTab extends PluginSettingTab {
   ): Promise<void> {
     if (this.plugin.settings.settingsTab === tabId) return;
     if (
+      this.plugin.settings.settingsTab === "knowledgeBase"
+      && tabId !== "knowledgeBase"
+    ) {
+      this.knowledgeInitSection?.invalidate();
+    }
+    if (
       this.settingsDetail === "knowledge-preferences"
       && knowledgeMaintenancePreferenceIsDirty(
         this.knowledgePreferenceEditor

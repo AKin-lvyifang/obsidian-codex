@@ -19,6 +19,7 @@ import {
   KnowledgeBaseInitializer,
   knowledgeInitializationParentFolder,
   knowledgeInitializationPathExists,
+  type KnowledgeBaseStructureRepairProgress,
   type KnowledgeInitializationAssignment,
   type KnowledgeInitializationHost,
   type KnowledgeInitializationJob,
@@ -93,6 +94,18 @@ export class EchoInkKnowledgeSurfaceService {
   async getInitializationState(): Promise<Readonly<KnowledgeInitializationJob> | null> {
     await this.initializerReady;
     return this.initializer.snapshot();
+  }
+
+  async getKnowledgeBaseStructure() {
+    await this.initializerReady;
+    return await this.initializer.inspectStructure();
+  }
+
+  async restoreKnowledgeBaseStructure(
+    onProgress?: (progress: Readonly<KnowledgeBaseStructureRepairProgress>) => void
+  ) {
+    await this.initializerReady;
+    return await this.initializer.restoreStructure(onProgress);
   }
 
   async startInitialization(
@@ -195,6 +208,18 @@ function createKnowledgeInitializationHost(
         normalized,
         plugin.app.vault.getAbstractFileByPath(normalized) !== null
       );
+    },
+    async pathKind(relativePath) {
+      const normalized = normalizePath(relativePath);
+      const indexed = plugin.app.vault.getAbstractFileByPath(normalized);
+      if (indexed) return "children" in indexed ? "folder" : "other";
+      try {
+        const stats = await fsp.lstat(path.resolve(vaultRootPath, normalized));
+        return stats.isDirectory() ? "folder" : "other";
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing";
+        throw error;
+      }
     },
     createFolder: ensureFolder,
     async createText(relativePath: string, content: string): Promise<void> {

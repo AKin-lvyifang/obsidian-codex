@@ -3,6 +3,8 @@ import type CodexForObsidianPlugin from "../main";
 import {
   isKnowledgeInitializationRole,
   knowledgeInitializationSourceDefaultRole,
+  type KnowledgeBaseStructureRepairProgress,
+  type KnowledgeBaseStructureSnapshot,
   type KnowledgeInitializationAssignment,
   type KnowledgeInitializationJob,
   type KnowledgeInitializationMode,
@@ -74,14 +76,14 @@ interface KnowledgeInitProgressRefs {
  * 普通主界面不暴露 revision/hash、冻结计划、Provider/model 快照、WAL、CAS、
  * Readback 等内部概念；它们只保留在后台 job 中。
  *
- * 渲染优先级：当前作业优先，历史完成标记兜底。settings 里的 initialized
- * 历史事实不会被清除，但只要存在未完成作业（preview/active/可恢复态），
- * 就显示作业界面，不会被「知识库已就绪」遮住。
+ * 渲染优先级：当前作业优先；没有待处理作业时，以实时 Vault 目录结构
+ * 为准。settings 里的 initialized 只保留历史，不再决定当前状态。
  */
 export class KnowledgeInitializationSection {
   private job: Readonly<KnowledgeInitializationJob> | null = null;
   private loaded = false;
   private loading = false;
+  private loadGeneration = 0;
   private loadError = "";
   private busy = false;
   private customPreviewLoading = false;
@@ -93,6 +95,8 @@ export class KnowledgeInitializationSection {
   private zh = true;
   private actionError = "";
   private actionErrorEl: HTMLElement | null = null;
+  private structure: Readonly<KnowledgeBaseStructureSnapshot> | null = null;
+  private structureRepairProgress: Readonly<KnowledgeBaseStructureRepairProgress> | null = null;
   private tabButtonEls: Record<KnowledgeInitializationMode, HTMLElement | null> = {
     recommended: null,
     custom: null
@@ -115,6 +119,16 @@ export class KnowledgeInitializationSection {
     this.pageEl = null;
     this.progressRefs = null;
     this.actionErrorEl = null;
+    this.invalidate();
+  }
+
+  /** 离开再进入知识库设置时强制重新读取真实 Vault 结构。 */
+  invalidate(): void {
+    this.loadGeneration += 1;
+    this.loaded = false;
+    this.loading = false;
+    this.loadError = "";
+    this.structure = null;
   }
 
   render(page: HTMLElement, zh: boolean): void {
@@ -140,10 +154,8 @@ export class KnowledgeInitializationSection {
       });
       return;
     }
-    const settingsInitialized =
-      this.plugin.settings.knowledgeBase.initialization.status === "initialized";
     const job = this.job;
-    if (this.loadError && !job) {
+    if (this.loadError && !this.loaded) {
       createSettingsState(panel, this.loadError, "error", {
         label: zh ? "重试" : "Retry",
         onActivate: () => void this.load()
@@ -152,6 +164,10 @@ export class KnowledgeInitializationSection {
     }
     // 用户动作失败提示：所有面板共用，成功或重新执行时清除。
     this.renderActionError(panel);
+    if (this.structureRepairProgress) {
+      this.renderStructureRepairProgress(panel, this.structureRepairProgress);
+      return;
+    }
     // 当前作业优先：运行中 > 重新选择方案 > 预览 > 可恢复态。
     if (job && job.status === "active") {
       this.renderProgressPanel(panel, job);
@@ -166,47 +182,71 @@ export class KnowledgeInitializationSection {
       this.renderTabsPanel(panel);
       return;
     }
-    if (!job) {
-      // 不存在任何作业：历史完成标记兜底，否则进入方案选择。
-      if (settingsInitialized) {
-        this.renderDonePanel(panel);
-      } else {
-        this.renderTabsPanel(panel);
-      }
+    if (job && job.status !== "initialized") {
+      this.renderPausedPanel(panel, job);
       return;
     }
-    if (job.status === "initialized") {
-      this.renderDonePanel(panel);
+    const structure = this.structure;
+    if (!structure) {
+      createSettingsState(
+        panel,
+        zh ? "无法确认知识库目录状态，请重试。" : "Unable to verify the Knowledge folder structure. Try again.",
+        "error",
+        { label: zh ? "重试" : "Retry", onActivate: () => void this.load() }
+      );
       return;
     }
-    // 可恢复态优先于历史完成标记：settings 已 initialized 但出现新的
-    // 未完成作业（paused/cancelled/failed/blocked/write_uncertain）时，
-    // 不能被「知识库已就绪」遮住。
-    this.renderPausedPanel(panel, job);
+    if (structure.state === "uninitialized") {
+      this.renderTabsPanel(panel);
+      return;
+    }
+    if (structure.state === "incomplete") {
+      this.renderStructureWarningPanel(panel, structure);
+      return;
+    }
+    this.renderDonePanel(panel);
   }
 
   // ---------------------------------------------------------------- loading
 
   private async load(): Promise<void> {
+    const generation = ++this.loadGeneration;
     this.loading = true;
     this.loadError = "";
     try {
-      this.job = await this.plugin.getEchoInkKnowledgeInitializationState();
+      const [job, structure] = await Promise.all([
+        this.plugin.getEchoInkKnowledgeInitializationState(),
+        this.plugin.getEchoInkKnowledgeBaseStructure()
+      ]);
+      if (generation !== this.loadGeneration) return;
+      this.job = job;
+      this.structure = structure;
       this.loaded = true;
-      if (this.job?.mode === "custom") this.selectedTab = "custom";
+      this.selectedTab = this.job?.mode === "custom"
+        && this.job.status !== "initialized"
+        ? "custom"
+        : "recommended";
     } catch {
+      if (generation !== this.loadGeneration) return;
       this.loadError = this.zh
         ? "无法读取初始化状态，请重试。"
         : "Unable to load initialization status. Try again.";
     } finally {
-      this.loading = false;
-      this.scheduleRender();
+      if (generation === this.loadGeneration) {
+        this.loading = false;
+        this.scheduleRender();
+      }
     }
   }
 
   private async reloadAfterActionError(): Promise<void> {
     try {
-      this.job = await this.plugin.getEchoInkKnowledgeInitializationState();
+      const [job, structure] = await Promise.all([
+        this.plugin.getEchoInkKnowledgeInitializationState(),
+        this.plugin.getEchoInkKnowledgeBaseStructure()
+      ]);
+      this.job = job;
+      this.structure = structure;
       this.loaded = true;
     } catch {
       // 保留当前界面状态；由下一次渲染展示可重试的状态。
@@ -216,10 +256,10 @@ export class KnowledgeInitializationSection {
   // ------------------------------------------------------------ action errors
 
   /** 只记录面向用户的恢复提示；内部异常不进入普通设置界面。 */
-  private recordActionError(_error: unknown): void {
-    this.actionError = this.zh
+  private recordActionError(_error: unknown, message?: string): void {
+    this.actionError = message ?? (this.zh
       ? "操作没有完成，可以再试一次。"
-      : "The action didn't complete. You can try again.";
+      : "The action didn't complete. You can try again.");
   }
 
   private clearActionError(): void {
@@ -252,6 +292,82 @@ export class KnowledgeInitializationSection {
       this.busy = false;
       this.scheduleRender();
     }
+  }
+
+  private renderStatusHeading(
+    panel: HTMLElement,
+    iconName: string,
+    title: string,
+    tone: "ready" | "warning" | "loading"
+  ): void {
+    const row = panel.createDiv({
+      cls: `echoink-knowledge-init-status-heading is-${tone}`
+    });
+    const icon = row.createSpan({
+      cls: "echoink-knowledge-init-status-icon",
+      attr: { "aria-hidden": "true" }
+    });
+    setIcon(icon, iconName);
+    row.createDiv({ cls: "echoink-knowledge-init-heading", text: title });
+  }
+
+  private mountProgress(
+    panel: HTMLElement,
+    data: Readonly<{
+      percent: number;
+      completed: number;
+      total: number;
+      status: string;
+      step: string;
+      ariaLabel: string;
+    }>
+  ): KnowledgeInitProgressRefs {
+    const rootEl = panel.createDiv({ cls: "echoink-knowledge-init-progress" });
+    const statusEl = rootEl.createDiv({
+      cls: "echoink-knowledge-init-status",
+      text: data.status,
+      attr: { role: "status", "aria-live": "polite" }
+    });
+    const barRow = rootEl.createDiv({ cls: "echoink-knowledge-init-bar-row" });
+    const barEl = barRow.createDiv({
+      cls: "echoink-knowledge-init-bar",
+      attr: {
+        role: "progressbar",
+        "aria-valuemin": "0",
+        "aria-valuemax": "100",
+        "aria-valuenow": String(data.percent),
+        "aria-label": data.ariaLabel
+      }
+    });
+    const indicatorEl = barEl.createDiv({
+      cls: "echoink-knowledge-init-bar-indicator",
+      attr: { "aria-hidden": "true" }
+    });
+    indicatorEl.style.setProperty(
+      "--echoink-knowledge-init-progress",
+      `${data.percent}%`
+    );
+    const percentEl = barRow.createSpan({
+      cls: "echoink-knowledge-init-percent",
+      text: `${data.percent}%`
+    });
+    const stepEl = rootEl.createDiv({
+      cls: "echoink-knowledge-init-step",
+      text: data.step
+    });
+    const countEl = rootEl.createDiv({
+      cls: "echoink-knowledge-init-count",
+      text: data.total > 0 ? `${data.completed} / ${data.total}` : ""
+    });
+    return {
+      rootEl,
+      statusEl,
+      barEl,
+      indicatorEl,
+      percentEl,
+      stepEl,
+      countEl
+    };
   }
 
   // ------------------------------------------------------------------- tabs
@@ -386,7 +502,7 @@ export class KnowledgeInitializationSection {
       cls: "mod-cta echoink-knowledge-init-cta",
       text: zh ? "开始初始化" : "Start initialization",
       attr: { type: "button", "data-echoink-focus-key": FOCUS_KEY }
-    }) as HTMLButtonElement;
+    });
     applyAmicroButton(cta, { variant: "primary", motion: "complete" });
     cta.disabled = this.busy;
     cta.onclick = () => void this.startRecommended();
@@ -447,7 +563,7 @@ export class KnowledgeInitializationSection {
       cls: "mod-cta echoink-knowledge-init-cta",
       text: zh ? "开始初始化" : "Start initialization",
       attr: { type: "button", "data-echoink-focus-key": FOCUS_KEY }
-    }) as HTMLButtonElement;
+    });
     applyAmicroButton(cta, { variant: "primary", motion: "complete" });
     cta.disabled = this.busy;
     cta.onclick = () => void this.confirmCustom();
@@ -534,7 +650,7 @@ export class KnowledgeInitializationSection {
             ? (zh ? "把其他目录的笔记移回 Raw" : "Move notes back to Raw")
             : (zh ? `添加笔记到 ${label}` : `Add notes to ${label}`)
         }
-      }) as HTMLButtonElement;
+      });
       applyAmicroButton(add, { variant: "secondary", motion: "slide", icon: "folder-plus" });
       add.disabled = this.busy;
       add.onclick = () => void this.openNotePicker(dir.role, add);
@@ -567,7 +683,7 @@ export class KnowledgeInitializationSection {
                 type: "button",
                 "aria-label": zh ? `把 ${sourcePath} 移回 Raw` : `Move ${sourcePath} back to Raw`
               }
-            }) as HTMLButtonElement;
+            });
             remove.disabled = this.busy;
             remove.onclick = () => void this.applyAssignments([
               { sourcePath, role: "raw" }
@@ -646,6 +762,137 @@ export class KnowledgeInitializationSection {
     }
   }
 
+  // -------------------------------------------------------- structure recovery
+
+  private renderStructureWarningPanel(
+    panel: HTMLElement,
+    structure: Readonly<KnowledgeBaseStructureSnapshot>
+  ): void {
+    const zh = this.zh;
+    this.renderStatusHeading(
+      panel,
+      "alert-triangle",
+      zh ? "知识库文件夹结构不完整" : "Knowledge folders need attention",
+      "warning"
+    );
+    panel.createDiv({
+      cls: "echoink-knowledge-init-copy",
+      text: zh
+        ? "EchoInk 需要完整的固定目录来存放原始笔记、Wiki 和附件。目录缺失时，整理和提炼功能可能无法正常工作。"
+        : "EchoInk needs the complete fixed folder structure for original notes, Wiki content, and attachments. Missing folders can interrupt organization and distillation."
+    });
+    if (structure.missingRoots.length > 0) {
+      panel.createDiv({
+        cls: "echoink-knowledge-init-structure-detail",
+        text: zh
+          ? `缺少目录：${structure.missingRoots.join("、")}`
+          : `Missing folders: ${structure.missingRoots.join(", ")}`
+      });
+    }
+    if (structure.conflictingRoots.length > 0) {
+      const warning = panel.createDiv({ cls: "echoink-knowledge-init-warning" });
+      const icon = warning.createSpan({ cls: "echoink-knowledge-init-warning-icon" });
+      setIcon(icon, "alert-triangle");
+      icon.setAttr("aria-hidden", "true");
+      warning.createSpan({
+        cls: "echoink-knowledge-init-warning-text",
+        text: zh
+          ? `这些路径已被同名文件占用：${structure.conflictingRoots.join("、")}。EchoInk 不会覆盖或移动它们，请先重命名这些文件。`
+          : `These paths are occupied by files: ${structure.conflictingRoots.join(", ")}. EchoInk will not overwrite or move them; rename those files first.`
+      });
+    }
+    panel.createDiv({
+      cls: "echoink-knowledge-init-plan-copy",
+      text: zh
+        ? "恢复只会补建缺少的文件夹，不会移动、删除或改写任何笔记，也不会调用模型。"
+        : "Recovery only creates missing folders. It never moves, deletes, or rewrites notes and does not call a model."
+    });
+    const actions = panel.createDiv({ cls: "echoink-knowledge-init-actions" });
+    const restore = actions.createEl("button", {
+      cls: "mod-cta echoink-knowledge-init-cta",
+      text: structure.missingRoots.length > 0
+        ? (zh ? "恢复文件夹体系" : "Restore folder structure")
+        : (zh ? "重新检查" : "Check again"),
+      attr: { type: "button", "data-echoink-focus-key": FOCUS_KEY }
+    });
+    applyAmicroButton(restore, { variant: "primary", motion: "complete" });
+    restore.disabled = this.busy;
+    restore.onclick = () => void this.restoreStructure();
+  }
+
+  private async restoreStructure(): Promise<void> {
+    if (this.busy) return;
+    const generation = this.loadGeneration;
+    this.busy = true;
+    this.clearActionError();
+    const total = Math.max(1,
+      (this.structure?.existingRoots.length ?? 0)
+      + (this.structure?.missingRoots.length ?? 0)
+      + (this.structure?.conflictingRoots.length ?? 0));
+    this.structureRepairProgress = Object.freeze({
+      completed: 0,
+      total,
+      percent: 0,
+      currentRoot: null
+    });
+    this.scheduleRender();
+    try {
+      const result = await this.plugin.restoreEchoInkKnowledgeBaseStructure((progress) => {
+        if (generation !== this.loadGeneration) return;
+        this.structureRepairProgress = progress;
+        this.scheduleRender();
+      });
+      if (generation !== this.loadGeneration) return;
+      this.structure = result.structure;
+      this.loaded = true;
+    } catch (error) {
+      if (generation !== this.loadGeneration) return;
+      this.recordActionError(
+        error,
+        this.zh
+          ? "文件夹体系没有恢复完成。已有笔记没有被移动或删除，请检查 Vault 是否可写后重试。"
+          : "The folder structure was not fully restored. Existing notes were not moved or deleted; check that the Vault is writable and try again."
+      );
+      await this.reloadAfterActionError();
+    } finally {
+      this.structureRepairProgress = null;
+      this.busy = false;
+      if (generation === this.loadGeneration) this.scheduleRender();
+    }
+  }
+
+  private renderStructureRepairProgress(
+    panel: HTMLElement,
+    progress: Readonly<KnowledgeBaseStructureRepairProgress>
+  ): void {
+    const zh = this.zh;
+    this.renderStatusHeading(
+      panel,
+      "loader-circle",
+      zh ? "正在恢复文件夹体系" : "Restoring folder structure",
+      "loading"
+    );
+    panel.createDiv({
+      cls: "echoink-knowledge-init-plan-copy",
+      text: zh
+        ? "正在检查并补齐固定目录；现有笔记保持原样。"
+        : "Checking and restoring fixed folders; existing notes remain unchanged."
+    });
+    const current = progress.currentRoot
+      ? (zh ? `正在处理 ${progress.currentRoot}` : `Checking ${progress.currentRoot}`)
+      : (zh ? "准备检查目录" : "Preparing to check folders");
+    this.progressRefs = this.mountProgress(panel, {
+      percent: progress.percent,
+      completed: progress.completed,
+      total: progress.total,
+      status: zh
+        ? `恢复文件夹体系 · ${progress.completed} / ${progress.total} · ${progress.percent}%`
+        : `Restoring folders · ${progress.completed} / ${progress.total} · ${progress.percent}%`,
+      step: current,
+      ariaLabel: zh ? "文件夹恢复进度" : "Folder recovery progress"
+    });
+  }
+
   // ---------------------------------------------------------------- progress
 
   private renderProgressPanel(
@@ -653,57 +900,23 @@ export class KnowledgeInitializationSection {
     job: Readonly<KnowledgeInitializationJob>
   ): void {
     const zh = this.zh;
-    panel.createDiv({
-      cls: "echoink-knowledge-init-heading",
-      text: zh ? "正在初始化知识库" : "Initializing your knowledge base"
-    });
+    this.renderStatusHeading(
+      panel,
+      "loader-circle",
+      zh ? "正在初始化知识库" : "Initializing your knowledge base",
+      "loading"
+    );
     // 进度只来自真实 job 字段；运行中不会出现 100%（完成即切换完成态）。
     const progress = buildKnowledgeInitializationProgress(job, false);
     const step = progressStepLabel(progress.stage, zh);
-    const rootEl = panel.createDiv({ cls: "echoink-knowledge-init-progress" });
-    // 稳定存在的 live region；后续只更新文本，不设置 tabindex。
-    const statusEl = rootEl.createDiv({
-      cls: "echoink-knowledge-init-status",
-      attr: { role: "status", "aria-live": "polite" }
+    this.progressRefs = this.mountProgress(panel, {
+      percent: progress.percent,
+      completed: progress.completed,
+      total: progress.total,
+      status: progressStatusSentence(progress.stage, progress, zh),
+      step,
+      ariaLabel: zh ? "初始化进度" : "Initialization progress"
     });
-    statusEl.setText(progressStatusSentence(progress.stage, progress, zh));
-    const barRow = rootEl.createDiv({ cls: "echoink-knowledge-init-bar-row" });
-    const barEl = barRow.createDiv({
-      cls: "echoink-knowledge-init-bar",
-      attr: {
-        role: "progressbar",
-        "aria-valuemin": "0",
-        "aria-valuemax": "100",
-        "aria-valuenow": String(progress.percent),
-        "aria-label": zh ? "初始化进度" : "Initialization progress"
-      }
-    });
-    const indicatorEl = barEl.createDiv({
-      cls: "echoink-knowledge-init-bar-indicator",
-      attr: { "aria-hidden": "true" }
-    });
-    indicatorEl.style.setProperty(
-      "--echoink-knowledge-init-progress",
-      `${progress.percent}%`
-    );
-    const percentEl = barRow.createSpan({
-      cls: "echoink-knowledge-init-percent",
-      text: `${progress.percent}%`
-    });
-    const stepEl = rootEl.createDiv({ cls: "echoink-knowledge-init-step", text: step });
-    const countEl = rootEl.createDiv({
-      cls: "echoink-knowledge-init-count",
-      text: progress.total > 0 ? `${progress.completed} / ${progress.total}` : ""
-    });
-    this.progressRefs = {
-      rootEl,
-      statusEl,
-      barEl,
-      indicatorEl,
-      percentEl,
-      stepEl,
-      countEl
-    };
     const actions = panel.createDiv({ cls: "echoink-knowledge-init-actions" });
     const pause = actions.createEl("button", {
       cls: "echoink-knowledge-init-secondary",
@@ -719,7 +932,12 @@ export class KnowledgeInitializationSection {
     if (!page || !page.isConnected) return;
     if (this.plugin.settings.settingsTab !== "knowledgeBase") return;
     try {
-      this.job = await this.plugin.getEchoInkKnowledgeInitializationState();
+      const job = await this.plugin.getEchoInkKnowledgeInitializationState();
+      const structure = job?.status === "active"
+        ? this.structure
+        : await this.plugin.getEchoInkKnowledgeBaseStructure();
+      this.job = job;
+      this.structure = structure;
       this.loaded = true;
     } catch {
       // 保留上一次状态，下一轮再试。
@@ -987,15 +1205,17 @@ export class KnowledgeInitializationSection {
 
   private renderDonePanel(panel: HTMLElement): void {
     const zh = this.zh;
-    panel.createDiv({
-      cls: "echoink-knowledge-init-heading",
-      text: zh ? "知识库已就绪" : "Knowledge is ready"
-    });
+    this.renderStatusHeading(
+      panel,
+      "circle-check",
+      zh ? "知识库状态正常" : "Knowledge folders are ready",
+      "ready"
+    );
     panel.createDiv({
       cls: "echoink-knowledge-init-copy",
       text: zh
-        ? "固定目录、指南与 Wiki 索引已生成；已有内容不会被改写。"
-        : "Fixed folders, the guide, and the Wiki index are ready; existing content is never rewritten."
+        ? "固定目录完整，EchoInk 可以正常整理原始笔记、Wiki 和附件。"
+        : "The fixed folder structure is complete, so EchoInk can organize original notes, Wiki content, and attachments."
     });
     const actions = panel.createDiv({ cls: "echoink-knowledge-init-actions" });
     const open = actions.createEl("button", {

@@ -36,6 +36,7 @@ import {
 import { EchoInkKnowledgeSurfaceService } from "./plugin/knowledge-surface-service";
 import type {
   KnowledgeInitializationAssignment,
+  KnowledgeBaseStructureRepairProgress,
   KnowledgeInitializationMode,
   KnowledgeInitializationRole
 } from "./knowledge-base/initializer";
@@ -308,14 +309,19 @@ export default class CodexForObsidianPlugin extends Plugin {
       stepLabel: copy.step,
       title: copy.title,
       description: copy.description,
-      dismissLabel: zh ? "稍后设置" : "Set up later",
+      actionLabel: copy.action,
       initialFocus: "anchor",
-      onDismiss: async () => {
-        await this.dismissEchoInkOnboarding();
+      onAction: async () => {
+        if (step === "sidebar") {
+          await this.activateHomeAndSidebar();
+          await this.handleEchoInkOnboardingTargetActivated("sidebar");
+          return;
+        }
+        await this.handleEchoInkOnboardingTargetActivated("settings");
       },
-      onDismissError: (error) => {
-        console.error("EchoInk onboarding dismiss failed", error);
-        new Notice(zh ? "引导状态保存失败，请重试。" : "Tutorial state could not be saved. Try again.");
+      onActionError: (error) => {
+        console.error("EchoInk onboarding action failed", error);
+        new Notice(zh ? "页面没有打开，请再试一次。" : "The page did not open. Try again.");
       }
     });
   }
@@ -938,6 +944,15 @@ export default class CodexForObsidianPlugin extends Plugin {
   getKnowledgeSurfaceService(): EchoInkKnowledgeSurfaceService | null { return this.knowledgeBase; }
   async getEchoInkKnowledgeInitializationState() {
     return await this.requireKnowledgeSurfaceService().getInitializationState();
+  }
+  async getEchoInkKnowledgeBaseStructure() {
+    return await this.requireKnowledgeSurfaceService().getKnowledgeBaseStructure();
+  }
+  async restoreEchoInkKnowledgeBaseStructure(
+    onProgress?: (progress: Readonly<KnowledgeBaseStructureRepairProgress>) => void
+  ) {
+    return await this.requireKnowledgeSurfaceService()
+      .restoreKnowledgeBaseStructure(onProgress);
   }
   async startEchoInkKnowledgeInitialization(mode: KnowledgeInitializationMode) {
     return await this.requireKnowledgeSurfaceService().startInitialization(mode);

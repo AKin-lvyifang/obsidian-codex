@@ -9,6 +9,7 @@ import {
   KnowledgeBaseInitializer,
   KNOWLEDGE_INITIALIZATION_GUIDE_PATH,
   KNOWLEDGE_INITIALIZATION_MARKDOWN_ROLES,
+  KNOWLEDGE_INITIALIZATION_ROOTS,
   knowledgeInitializationParentFolder,
   knowledgeInitializationPathExists,
   type KnowledgeInitializationBatchResult,
@@ -23,6 +24,7 @@ import { deriveKnowledgeInitializationRecovery } from "../settings/knowledge-ini
 export async function runKnowledgeInitializationTests(): Promise<void> {
   assertRootLevelInitializationFileHasNoFolderCreation();
   await assertHiddenInitializationFileExistsOutsideVaultIndex();
+  await assertKnowledgeBaseStructureInspectionAndRepair();
   await assertRecommendedAndCustomPreview();
   await assertCustomPreviewIncludesCurrentManagedMarkdown();
   await assertArchiveAndTemplatesRoles();
@@ -41,6 +43,47 @@ export async function runKnowledgeInitializationTests(): Promise<void> {
   await assertGuideConflictPreservesUserFile();
   await assertPriorGeneratedGuideIsReusableAfterNewPreview();
   await assertRestartPausesWithoutProviderReplay();
+}
+
+async function assertKnowledgeBaseStructureInspectionAndRepair(): Promise<void> {
+  await withHost(async (host) => {
+    const initializer = new KnowledgeBaseInitializer(host);
+    await initializer.initialize();
+
+    const empty = await initializer.inspectStructure();
+    assert.equal(empty.state, "uninitialized");
+    assert.deepEqual(empty.existingRoots, []);
+    assert.deepEqual(empty.missingRoots, KNOWLEDGE_INITIALIZATION_ROOTS);
+    assert.deepEqual(empty.conflictingRoots, []);
+
+    host.folders.add("raw");
+    host.folders.add("wiki");
+    host.addFile("projects", "same-name user file");
+    const incomplete = await initializer.inspectStructure();
+    assert.equal(incomplete.state, "incomplete");
+    assert.deepEqual(incomplete.existingRoots, ["raw", "wiki"]);
+    assert.deepEqual(incomplete.conflictingRoots, ["projects"]);
+
+    const progress: Array<{ completed: number; percent: number }> = [];
+    const repaired = await initializer.restoreStructure((entry) => {
+      progress.push({ completed: entry.completed, percent: entry.percent });
+    });
+    assert.equal(repaired.structure.state, "incomplete");
+    assert.deepEqual(repaired.structure.missingRoots, []);
+    assert.deepEqual(repaired.structure.conflictingRoots, ["projects"]);
+    assert.equal(host.read("projects"), "same-name user file");
+    assert.equal(host.moveCalls, 0);
+    assert.equal(host.batchCalls.length, 0);
+    assert.deepEqual(progress[0], { completed: 0, percent: 0 });
+    assert.deepEqual(progress.at(-1), { completed: 10, percent: 100 });
+    assert.equal(progress.length, 11);
+
+    host.files.delete("projects");
+    const completed = await initializer.restoreStructure();
+    assert.equal(completed.structure.state, "ready");
+    assert.deepEqual(completed.structure.existingRoots, KNOWLEDGE_INITIALIZATION_ROOTS);
+    assert.deepEqual(completed.createdRoots, ["projects"]);
+  });
 }
 
 async function assertCustomPreviewIncludesCurrentManagedMarkdown(): Promise<void> {
@@ -964,9 +1007,21 @@ class MemoryKnowledgeInitializationHost implements KnowledgeInitializationHost {
     return this.files.has(relativePath) || this.folders.has(relativePath);
   }
 
+  async pathKind(relativePath: string): Promise<"missing" | "folder" | "other"> {
+    if (this.failPathExists) throw new Error("injected pathKind failure");
+    if (this.folders.has(relativePath)) return "folder";
+    if (this.files.has(relativePath)) return "other";
+    return "missing";
+  }
+
   async createFolder(relativePath: string): Promise<void> {
     if (this.blockFolders) await new Promise<void>(() => {});
-    if (!relativePath || relativePath === "." || this.folders.has(relativePath)) {
+    if (
+      !relativePath
+      || relativePath === "."
+      || this.folders.has(relativePath)
+      || this.files.has(relativePath)
+    ) {
       throw new Error("Folder already exists.");
     }
     this.folders.add(relativePath);

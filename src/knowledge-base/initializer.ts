@@ -10,6 +10,7 @@ export const KNOWLEDGE_INITIALIZATION_ROOTS = Object.freeze([
   "raw", "wiki", "projects", "outputs", "inbox", "journal", "work",
   "archive", "templates", "assets"
 ] as const);
+export type KnowledgeBaseRoot = typeof KNOWLEDGE_INITIALIZATION_ROOTS[number];
 
 export type KnowledgeInitializationMode = "recommended" | "custom";
 export type KnowledgeInitializationRole =
@@ -61,6 +62,30 @@ export interface KnowledgeInitializationVaultFile {
   readonly mtime: number;
   readonly extension: string;
   readonly symbolicLink: boolean;
+}
+
+export type KnowledgeBasePathKind = "missing" | "folder" | "other";
+export type KnowledgeBaseStructureState = "uninitialized" | "incomplete" | "ready";
+
+export interface KnowledgeBaseStructureSnapshot {
+  readonly state: KnowledgeBaseStructureState;
+  readonly existingRoots: readonly KnowledgeBaseRoot[];
+  readonly missingRoots: readonly KnowledgeBaseRoot[];
+  /** 同名路径存在，但不是文件夹；恢复过程绝不会覆盖或移动它。 */
+  readonly conflictingRoots: readonly KnowledgeBaseRoot[];
+  readonly checkedAt: number;
+}
+
+export interface KnowledgeBaseStructureRepairProgress {
+  readonly completed: number;
+  readonly total: number;
+  readonly percent: number;
+  readonly currentRoot: KnowledgeBaseRoot | null;
+}
+
+export interface KnowledgeBaseStructureRepairResult {
+  readonly structure: Readonly<KnowledgeBaseStructureSnapshot>;
+  readonly createdRoots: readonly KnowledgeBaseRoot[];
 }
 
 export interface KnowledgeInitializationProviderSnapshot {
@@ -135,6 +160,7 @@ export interface KnowledgeInitializationHost {
   listVaultFiles(): Promise<readonly KnowledgeInitializationVaultFile[]>;
   readText(relativePath: string): Promise<string | null>;
   pathExists(relativePath: string): Promise<boolean>;
+  pathKind(relativePath: string): Promise<KnowledgeBasePathKind>;
   createFolder(relativePath: string): Promise<void>;
   createText(relativePath: string, content: string): Promise<void>;
   updateText(relativePath: string, expectedContentHash: string, content: string): Promise<void>;
@@ -190,6 +216,81 @@ export class KnowledgeBaseInitializer {
 
   snapshot(): Readonly<KnowledgeInitializationJob> | null {
     return this.job ? cloneJob(this.job) : null;
+  }
+
+  /** 每次由真实 Vault 路径类型派生，不读取历史 initialized 标记。 */
+  async inspectStructure(): Promise<Readonly<KnowledgeBaseStructureSnapshot>> {
+    const kinds = await Promise.all(
+      KNOWLEDGE_INITIALIZATION_ROOTS.map(async (root) => ({
+        root,
+        kind: await this.host.pathKind(root)
+      }))
+    );
+    const existingRoots = kinds
+      .filter((entry) => entry.kind === "folder")
+      .map((entry) => entry.root);
+    const missingRoots = kinds
+      .filter((entry) => entry.kind === "missing")
+      .map((entry) => entry.root);
+    const conflictingRoots = kinds
+      .filter((entry) => entry.kind === "other")
+      .map((entry) => entry.root);
+    const state: KnowledgeBaseStructureState = existingRoots.length === 0
+      && conflictingRoots.length === 0
+      ? "uninitialized"
+      : missingRoots.length === 0 && conflictingRoots.length === 0
+        ? "ready"
+        : "incomplete";
+    return Object.freeze({
+      state,
+      existingRoots: Object.freeze(existingRoots),
+      missingRoots: Object.freeze(missingRoots),
+      conflictingRoots: Object.freeze(conflictingRoots),
+      checkedAt: this.host.now()
+    });
+  }
+
+  /**
+   * 只补齐缺失的固定目录。现有文件夹保持原样；同名文件只报告冲突，
+   * 不移动、不删除、不覆盖，也不调用 Provider 或执行笔记整理。
+   */
+  async restoreStructure(
+    onProgress?: (progress: Readonly<KnowledgeBaseStructureRepairProgress>) => void
+  ): Promise<Readonly<KnowledgeBaseStructureRepairResult>> {
+    if (this.runFlight) throw new Error("知识库初始化正在运行，暂时不能恢复目录。");
+    const createdRoots: KnowledgeBaseRoot[] = [];
+    const total = KNOWLEDGE_INITIALIZATION_ROOTS.length;
+    const emit = (completed: number, currentRoot: KnowledgeBaseRoot | null) => {
+      const progress = Object.freeze({
+        completed,
+        total,
+        percent: Math.round((completed / total) * 100),
+        currentRoot
+      });
+      try {
+        onProgress?.(progress);
+      } catch {
+        // 进度观察者不能中断真实目录恢复。
+      }
+    };
+    emit(0, null);
+    for (let index = 0; index < KNOWLEDGE_INITIALIZATION_ROOTS.length; index += 1) {
+      const root = KNOWLEDGE_INITIALIZATION_ROOTS[index];
+      if (!root) continue;
+      const kind = await this.host.pathKind(root);
+      if (kind === "missing") {
+        await this.host.createFolder(root);
+        if (await this.host.pathKind(root) !== "folder") {
+          throw new Error(`目录创建后仍不可用：${root}`);
+        }
+        createdRoots.push(root);
+      }
+      emit(index + 1, root);
+    }
+    return Object.freeze({
+      structure: await this.inspectStructure(),
+      createdRoots: Object.freeze(createdRoots)
+    });
   }
 
   get isRunning(): boolean {
@@ -457,8 +558,12 @@ export class KnowledgeBaseInitializer {
     await this.persistJob(job);
     for (const root of KNOWLEDGE_INITIALIZATION_ROOTS) {
       assertNotCancelled(signal);
-      if (!await this.host.pathExists(root)) await this.host.createFolder(root);
-      if (!await this.host.pathExists(root)) throw new Error(`目录创建后回读失败：${root}`);
+      const kind = await this.host.pathKind(root);
+      if (kind === "other") throw new Error(`无法创建目录 ${root}：同名路径不是文件夹。`);
+      if (kind === "missing") await this.host.createFolder(root);
+      if (await this.host.pathKind(root) !== "folder") {
+        throw new Error(`目录创建后回读失败：${root}`);
+      }
       if (!job.createdDirectories.includes(root)) {
         job.createdDirectories.push(root);
         await this.persistJob(job);

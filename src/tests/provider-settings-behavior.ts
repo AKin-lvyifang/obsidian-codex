@@ -108,6 +108,8 @@ import {
   shouldAutoStartEchoInkOnboarding
 } from "../settings/onboarding";
 import { renderCodexHeader } from "../ui/codex-view/header";
+import { mountEchoInkOnboardingCoachmark } from "../ui/onboarding-coachmark";
+import { KNOWLEDGE_INITIALIZATION_ROOTS } from "../knowledge-base/initializer";
 
 export async function runProviderSettingsBehaviorTests(): Promise<void> {
   assertSettingsV50MigrationContract();
@@ -363,7 +365,7 @@ function assertMemoryComposerVisualCssContract(): void {
     /\.codex-composer-send-icon-wrap svg\s*\{([^}]*)\}/u
   )?.[1] ?? "";
   const permissionKeyboardFocusRule = css.match(
-    /\.codex-permission-control \.codex-composer-native-select\.codex-select:focus-visible\s*\{([^}]*)\}/u
+    /\.codex-permission-control \.codex-composer-native-select\.codex-select:is\(:focus, :focus-visible\)\s*\{([^}]*)\}/u
   )?.[1] ?? "";
 
   assert.match(currentRule, /background:\s*var\(--background-secondary\);/u);
@@ -389,7 +391,10 @@ function assertMemoryComposerVisualCssContract(): void {
   assert.match(sendButtonRule, /flex:\s*0 0 34px;/u);
   assert.match(sendIconRule, /width:\s*20px;/u);
   assert.match(sendIconRule, /height:\s*20px;/u);
-  assert.match(permissionKeyboardFocusRule, /outline:\s*2px solid var\(--interactive-accent\);/u);
+  assert.match(permissionKeyboardFocusRule, /outline:\s*none\s*!important;/u);
+  assert.match(permissionKeyboardFocusRule, /border:\s*0\s*!important;/u);
+  assert.match(permissionKeyboardFocusRule, /box-shadow:\s*none\s*!important;/u);
+  assert.doesNotMatch(permissionKeyboardFocusRule, /interactive-accent|currentColor/u);
   assert.doesNotMatch(
     css,
     /\.codex-permission-control:focus-within\s*\{[^}]*outline:\s*2px solid currentColor/u,
@@ -1787,8 +1792,8 @@ function assertFiveStepOnboardingEntrypoints(): void {
     assert.equal(copy.title, title);
     assert.doesNotMatch(copy.description, /本教程|配置完整|可恢复的预览|Memory 学习/u);
   }
-  assert.equal(onboardingCoachmarkCopy("sidebar", true).action, null);
-  assert.equal(onboardingCoachmarkCopy("settings", true).action, null);
+  assert.equal(onboardingCoachmarkCopy("sidebar", true).action, "打开 EchoInk");
+  assert.equal(onboardingCoachmarkCopy("settings", true).action, "打开设置");
   assert.equal(onboardingCoachmarkCopy("provider", true).action, "下一步");
   assert.equal(onboardingCoachmarkCopy("knowledge", true).action, "下一步");
   assert.equal(onboardingCoachmarkCopy("personality", true).action, "完成");
@@ -1813,6 +1818,15 @@ function assertFiveStepOnboardingEntrypoints(): void {
   assert.match(mainSource, /prepareEchoInkOnboardingTutorial/u);
   assert.match(mainSource, /\.modal\.mod-settings/u);
   assert.match(mainSource, /MutationObserver/u);
+  assert.match(mainSource, /actionLabel:\s*copy\.action/u);
+  assert.match(mainSource, /await this\.activateHomeAndSidebar\(\)/u);
+  assert.doesNotMatch(
+    mainSource.slice(
+      mainSource.indexOf("private async showEchoInkOnboardingWorkspaceCoachmark"),
+      mainSource.indexOf("private findEchoInkOnboardingSettingsAnchor")
+    ),
+    /稍后设置|Set up later|dismissLabel/u
+  );
   console.log("PASS settings: onboarding starts from ribbon and sidebar settings gear");
 }
 
@@ -1950,6 +1964,53 @@ async function assertOnboardingCoachmarkAccessibilityContract(): Promise<void> {
     null
   );
   assert.equal(providerModalTestDocument.activeElement, restoreFocus);
+
+  // 前两步是必须经过的导航动作：只提供主按钮；Escape 只临时关闭提示，
+  // 不调用持久化 dismiss，也不会把教程标记为完成。
+  const mandatoryAnchor = providerModalTestDocument.createElement("button");
+  providerModalTestDocument.body.appendChild(mandatoryAnchor);
+  let mandatoryActionCalls = 0;
+  mountEchoInkOnboardingCoachmark({
+    anchor: mandatoryAnchor as never,
+    stepClass: "sidebar",
+    stepLabel: "第 1 步，共 5 步",
+    title: "打开 Agent 侧栏",
+    description: "点击左侧机器人图标。",
+    actionLabel: "打开 EchoInk",
+    onAction: () => { mandatoryActionCalls += 1; }
+  });
+  let mandatoryCoachmark = providerModalTestDocument.body.querySelector(
+    ".echoink-onboarding-coachmark.is-sidebar"
+  );
+  assert.ok(mandatoryCoachmark);
+  assert.deepEqual(
+    Array.from(mandatoryCoachmark.querySelectorAll("button")).map((button) => button.textContent),
+    ["打开 EchoInk"]
+  );
+  providerModalTestDocument.fireEvent("keydown", { key: "Escape" });
+  await flushProviderModalTasks();
+  assert.equal(mandatoryActionCalls, 0);
+  assert.equal(
+    providerModalTestDocument.body.querySelector(".echoink-onboarding-coachmark.is-sidebar"),
+    null
+  );
+
+  const mandatoryHandle = mountEchoInkOnboardingCoachmark({
+    anchor: mandatoryAnchor as never,
+    stepClass: "sidebar",
+    stepLabel: "第 1 步，共 5 步",
+    title: "打开 Agent 侧栏",
+    description: "点击左侧机器人图标。",
+    actionLabel: "打开 EchoInk",
+    onAction: () => { mandatoryActionCalls += 1; }
+  });
+  mandatoryCoachmark = providerModalTestDocument.body.querySelector(
+    ".echoink-onboarding-coachmark.is-sidebar"
+  );
+  mandatoryCoachmark?.querySelector<ProviderModalTestElement>("button.mod-cta")?.click();
+  await flushProviderModalTasks();
+  assert.equal(mandatoryActionCalls, 1);
+  mandatoryHandle.destroy();
 
   const css = readFileSync("styles.css", "utf8");
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.echoink-onboarding-coachmark\s*\{[\s\S]*?animation:\s*none/u);
@@ -2352,7 +2413,27 @@ function makeKnowledgeInitJobFixture(
   };
 }
 
-function createKnowledgeInitPluginFixture(state: { job: Record<string, any> | null }) {
+function makeKnowledgeBaseStructureFixture(
+  state: "uninitialized" | "incomplete" | "ready",
+  overrides: Record<string, unknown> = {}
+): Record<string, any> {
+  const roots = [...KNOWLEDGE_INITIALIZATION_ROOTS];
+  const base = state === "ready"
+    ? { existingRoots: roots, missingRoots: [], conflictingRoots: [] }
+    : state === "incomplete"
+      ? {
+          existingRoots: ["raw", "wiki"],
+          missingRoots: roots.filter((root) => root !== "raw" && root !== "wiki"),
+          conflictingRoots: []
+        }
+      : { existingRoots: [], missingRoots: roots, conflictingRoots: [] };
+  return { state, ...base, checkedAt: 1, ...overrides };
+}
+
+function createKnowledgeInitPluginFixture(state: {
+  job: Record<string, any> | null;
+  structure?: Record<string, any>;
+}) {
   const calls: Array<{ method: string; args?: unknown }> = [];
   const settings = structuredClone(DEFAULT_SETTINGS);
   settings.settingsLanguage = "zh-CN";
@@ -2365,6 +2446,32 @@ function createKnowledgeInitPluginFixture(state: { job: Record<string, any> | nu
     getCognitiveSystem: async () => createCognitiveSystemStub(),
     getEchoInkKnowledgeMaintenancePreferenceState: async () => null,
     getEchoInkKnowledgeInitializationState: async () => state.job,
+    getEchoInkKnowledgeBaseStructure: async () => {
+      state.structure ??= state.job?.status === "initialized"
+        ? makeKnowledgeBaseStructureFixture("ready")
+        : makeKnowledgeBaseStructureFixture("uninitialized");
+      return state.structure;
+    },
+    restoreEchoInkKnowledgeBaseStructure: async (
+      onProgress?: (progress: Record<string, unknown>) => void
+    ) => {
+      calls.push({ method: "restore-structure" });
+      const previous = state.structure ?? makeKnowledgeBaseStructureFixture("uninitialized");
+      onProgress?.({ completed: 0, total: 10, percent: 0, currentRoot: null });
+      KNOWLEDGE_INITIALIZATION_ROOTS.forEach((root, index) => {
+        onProgress?.({
+          completed: index + 1,
+          total: 10,
+          percent: (index + 1) * 10,
+          currentRoot: root
+        });
+      });
+      state.structure = makeKnowledgeBaseStructureFixture("ready");
+      return {
+        structure: state.structure,
+        createdRoots: [...(previous.missingRoots ?? [])]
+      };
+    },
     startEchoInkKnowledgeInitialization: async (mode: string) => {
       calls.push({ method: `start:${mode}` });
       state.job = makeKnowledgeInitJobFixture({ mode });
@@ -2456,6 +2563,7 @@ async function assertKnowledgeInitializationExperienceContract(): Promise<void> 
   await assertKnowledgeInitCustomTabDirectoriesAndAssignments();
   await assertKnowledgeInitPausedMappingsHideTechnicalDetails();
   await assertKnowledgeInitProgressAndCompletion();
+  await assertKnowledgeInitStructureTruthAndRepair();
   await assertKnowledgeInitNotePickerModalContract();
   await assertKnowledgeInitRecoveryAndActionErrorRendering();
   await assertKnowledgeInitRawPickerSemantics();
@@ -2782,12 +2890,117 @@ async function assertKnowledgeInitProgressAndCompletion(): Promise<void> {
     "knowledge:onboarding",
     "an initialized knowledge base must still expose the tutorial anchor"
   );
-  assert.match(donePanel.textContent, /知识库已就绪/u);
+  assert.match(donePanel.textContent, /知识库状态正常/u);
+  assert.ok(donePanel.querySelector(".echoink-knowledge-init-status-heading.is-ready"));
   assert.deepEqual(
     knowledgeInitButtons(donePanel).map((button) => button.textContent),
     ["打开 Wiki 首页", "整理新增笔记"]
   );
   assert.doesNotMatch(donePanel.textContent, /Digest|provider-ready|移动 4/u);
+}
+
+async function assertKnowledgeInitStructureTruthAndRepair(): Promise<void> {
+  installProviderModalDomFixture();
+
+  // 历史 initialized 不能覆盖真实空 Vault：十个目录一个都没有时必须
+  // 回到默认/自定义初始化入口。
+  const emptyState = {
+    job: makeKnowledgeInitJobFixture({ status: "initialized", phase: "complete" }),
+    structure: makeKnowledgeBaseStructureFixture("uninitialized")
+  };
+  const empty = createKnowledgeInitPluginFixture(emptyState);
+  empty.settings.knowledgeBase.initialization.status = "initialized";
+  const emptyTab = await renderKnowledgeInitTab(empty.plugin);
+  const emptyPanel = knowledgeInitPanel(emptyTab);
+  assert.match(emptyPanel.textContent, /初始化知识库/u);
+  assert.equal(emptyPanel.querySelectorAll('[role="tab"]').length, 2);
+  assert.equal(
+    emptyPanel.querySelectorAll('[role="tab"]')[0]?.getAttribute("aria-selected"),
+    "true"
+  );
+  assert.doesNotMatch(emptyPanel.textContent, /知识库状态正常/u);
+  emptyTab.hide();
+
+  // 部分目录缺失：就地说明发生了什么、为什么影响使用、点击什么恢复。
+  const partialState = {
+    job: makeKnowledgeInitJobFixture({ status: "initialized", phase: "complete" }),
+    structure: makeKnowledgeBaseStructureFixture("incomplete", {
+      existingRoots: ["raw", "wiki", "outputs", "inbox", "journal", "work", "archive", "templates"],
+      missingRoots: ["projects", "assets"]
+    })
+  };
+  const partial = createKnowledgeInitPluginFixture(partialState);
+  const repairFlight = deferred<Record<string, any>>();
+  partial.plugin.restoreEchoInkKnowledgeBaseStructure = async (
+    onProgress?: (progress: Record<string, unknown>) => void
+  ) => {
+    onProgress?.({ completed: 0, total: 10, percent: 0, currentRoot: null });
+    onProgress?.({ completed: 4, total: 10, percent: 40, currentRoot: "outputs" });
+    return await repairFlight.promise;
+  };
+  const partialTab = await renderKnowledgeInitTab(partial.plugin);
+  let partialPanel = knowledgeInitPanel(partialTab);
+  assert.match(partialPanel.textContent, /知识库文件夹结构不完整/u);
+  assert.match(partialPanel.textContent, /缺少目录：projects、assets/u);
+  assert.match(partialPanel.textContent, /可能无法正常工作/u);
+  assert.match(partialPanel.textContent, /不会移动、删除或改写任何笔记/u);
+  assert.ok(partialPanel.querySelector(".echoink-knowledge-init-status-heading.is-warning"));
+  assert.equal(
+    knowledgeInitButtons(partialPanel).find((button) => button.textContent === "恢复文件夹体系")
+      ?.getAttribute("type"),
+    "button"
+  );
+
+  // 恢复期间显示真实 0–100% 进度；完成后再由真实结构切到正常态。
+  knowledgeInitButtons(partialPanel)
+    .find((button) => button.textContent === "恢复文件夹体系")
+    ?.click();
+  await flushProviderModalTasks();
+  partialTab.display();
+  partialPanel = knowledgeInitPanel(partialTab);
+  assert.match(partialPanel.textContent, /正在恢复文件夹体系/u);
+  assert.ok(partialPanel.querySelector(".echoink-knowledge-init-status-heading.is-loading"));
+  assert.equal(
+    partialPanel.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow"),
+    "40"
+  );
+  assert.equal(partialPanel.querySelector(".echoink-knowledge-init-percent")?.textContent, "40%");
+  repairFlight.resolve({
+    structure: makeKnowledgeBaseStructureFixture("ready"),
+    createdRoots: ["projects", "assets"]
+  });
+  await flushProviderModalTasks();
+  partialTab.display();
+  partialPanel = knowledgeInitPanel(partialTab);
+  assert.match(partialPanel.textContent, /知识库状态正常/u);
+  assert.ok(partialPanel.querySelector(".echoink-knowledge-init-status-heading.is-ready"));
+  // 关闭后重新进入必须重新读 Vault，不能继续复用上次的 ready 快照。
+  partialTab.hide();
+  partialState.structure = makeKnowledgeBaseStructureFixture("uninitialized");
+  partialTab.display();
+  await settleKnowledgeInitTab(partialTab);
+  assert.match(knowledgeInitPanel(partialTab).textContent, /初始化知识库/u);
+  assert.doesNotMatch(knowledgeInitPanel(partialTab).textContent, /知识库状态正常/u);
+  partialTab.hide();
+
+  // 同名文件冲突必须保留原文件，并明确要求先重命名；不能伪装成可自动覆盖。
+  const conflictState = {
+    job: makeKnowledgeInitJobFixture({ status: "initialized", phase: "complete" }),
+    structure: makeKnowledgeBaseStructureFixture("incomplete", {
+      existingRoots: KNOWLEDGE_INITIALIZATION_ROOTS.filter((root) => root !== "raw"),
+      missingRoots: [],
+      conflictingRoots: ["raw"]
+    })
+  };
+  const conflict = createKnowledgeInitPluginFixture(conflictState);
+  const conflictTab = await renderKnowledgeInitTab(conflict.plugin);
+  const conflictPanel = knowledgeInitPanel(conflictTab);
+  assert.match(conflictPanel.textContent, /同名文件占用：raw/u);
+  assert.match(conflictPanel.textContent, /不会覆盖或移动/u);
+  assert.ok(
+    knowledgeInitButtons(conflictPanel).some((button) => button.textContent === "重新检查")
+  );
+  conflictTab.hide();
 }
 
 async function assertKnowledgeInitNotePickerModalContract(): Promise<void> {
@@ -2974,7 +3187,7 @@ async function assertKnowledgeInitNotePickerModalContract(): Promise<void> {
 /**
  * 修复1/2/3 回归：
  * - 渲染优先级：settings 已 initialized 也不能遮住新的未完成作业；
- *   无 job + initialized → 完成态。
+ *   无 job 时由真实目录结构决定完成态。
  * - 恢复动作按结构化字段派生：blocked_conflict 不出现「继续初始化」；
  *   Provider 缺失 / digest 不一致 → 「重新检查并继续」。
  * - 用户动作失败必须可见可重试（actionError + 技术详情）。
@@ -2983,7 +3196,7 @@ async function assertKnowledgeInitRecoveryAndActionErrorRendering(): Promise<voi
   installProviderModalDomFixture();
 
   // 1. settings 已 initialized + 新的 paused 作业（digest 与 Provider 一致）：
-  //    必须显示恢复界面，而不是「知识库已就绪」。
+  //    必须显示恢复界面，而不是「知识库状态正常」。
   const maskedState = {
     job: makeKnowledgeInitJobFixture({
       status: "paused",
@@ -3000,18 +3213,21 @@ async function assertKnowledgeInitRecoveryAndActionErrorRendering(): Promise<voi
   masked.settings.knowledgeBase.initialization.status = "initialized";
   const maskedTab = await renderKnowledgeInitTab(masked.plugin);
   const maskedPanel = knowledgeInitPanel(maskedTab);
-  assert.doesNotMatch(maskedPanel.textContent, /知识库已就绪/u,
+  assert.doesNotMatch(maskedPanel.textContent, /知识库状态正常/u,
     "a pending job must never be masked by the done panel");
   assert.match(maskedPanel.textContent, /初始化暂停了/u);
   assert.equal(maskedPanel.querySelector(".echoink-knowledge-init-cta")?.textContent, "继续初始化");
   maskedTab.hide();
 
-  // 2. 无 job + settings initialized → 完成态（历史标记兜底）。
-  const doneState = { job: null as Record<string, any> | null };
+  // 2. 无 job + settings initialized + 真实目录完整 → 完成态。
+  const doneState = {
+    job: null as Record<string, any> | null,
+    structure: makeKnowledgeBaseStructureFixture("ready")
+  };
   const done = createKnowledgeInitPluginFixture(doneState);
   done.settings.knowledgeBase.initialization.status = "initialized";
   const doneTab = await renderKnowledgeInitTab(done.plugin);
-  assert.match(knowledgeInitPanel(doneTab).textContent, /知识库已就绪/u);
+  assert.match(knowledgeInitPanel(doneTab).textContent, /知识库状态正常/u);
   doneTab.hide();
 
   // 3. blocked_conflict：只有「重新检查冲突」+「重新选择方案」，
@@ -5484,6 +5700,12 @@ function dataAttributeKey(name: string): string {
 function withSettingsTabDefaults<T extends object>(plugin: T) {
   return {
     getEchoInkKnowledgeInitializationState: async () => null,
+    getEchoInkKnowledgeBaseStructure: async () =>
+      makeKnowledgeBaseStructureFixture("uninitialized"),
+    restoreEchoInkKnowledgeBaseStructure: async () => ({
+      structure: makeKnowledgeBaseStructureFixture("ready"),
+      createdRoots: [...KNOWLEDGE_INITIALIZATION_ROOTS]
+    }),
     isEchoInkOnboardingRequested: () => false,
     getEchoInkOnboardingStep: () => "provider" as const,
     advanceEchoInkOnboarding: async () => null,

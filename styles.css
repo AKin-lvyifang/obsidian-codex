@@ -9400,9 +9400,10 @@ body.theme-light .codex-container {
   color: var(--text-error);
 }
 
-.codex-permission-control .codex-composer-native-select.codex-select:focus-visible {
-  outline: 2px solid var(--interactive-accent);
-  outline-offset: 2px;
+.codex-permission-control .codex-composer-native-select.codex-select:is(:focus, :focus-visible) {
+  outline: none !important;
+  border: 0 !important;
+  box-shadow: none !important;
 }
 
 .codex-composer-model-button {
@@ -13628,6 +13629,40 @@ button.echoink-picker-row:focus-visible {
   line-height: 1.3;
 }
 
+.echoink-knowledge-init-status-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.echoink-knowledge-init-status-icon {
+  display: inline-flex;
+  flex: none;
+}
+
+.echoink-knowledge-init-status-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.echoink-knowledge-init-status-heading.is-ready .echoink-knowledge-init-status-icon {
+  color: var(--color-green, #2da44e);
+}
+
+.echoink-knowledge-init-status-heading.is-warning .echoink-knowledge-init-status-icon {
+  color: var(--text-warning, #d6a216);
+}
+
+.echoink-knowledge-init-status-heading.is-loading .echoink-knowledge-init-status-icon {
+  color: var(--interactive-accent);
+  animation: echoink-knowledge-init-spin 900ms linear infinite;
+}
+
+@keyframes echoink-knowledge-init-spin {
+  to { transform: rotate(360deg); }
+}
+
 .echoink-knowledge-init-copy,
 .echoink-knowledge-init-plan-copy,
 .echoink-knowledge-init-plan-lead,
@@ -13643,6 +13678,15 @@ button.echoink-picker-row:focus-visible {
   color: var(--text-muted);
   font-size: var(--font-ui-small);
   line-height: 1.5;
+}
+
+.echoink-knowledge-init-structure-detail {
+  max-width: 68ch;
+  color: var(--text-warning, var(--text-normal));
+  font-size: var(--font-ui-small);
+  font-weight: 600;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 /* Tabs：同一外层面板内的两项原生 button，roving tabindex。 */
@@ -14433,6 +14477,10 @@ button.echoink-picker-row:focus-visible {
 @media (prefers-reduced-motion: reduce) {
   .echoink-knowledge-init-bar-indicator {
     transition: none;
+  }
+
+  .echoink-knowledge-init-status-heading.is-loading .echoink-knowledge-init-status-icon {
+    animation: none;
   }
 
   :is(
