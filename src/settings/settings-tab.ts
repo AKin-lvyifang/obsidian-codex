@@ -71,6 +71,11 @@ import {
 } from "../knowledge-base/knowledge-maintenance-protocol";
 import { KnowledgeInitializationSection } from "./knowledge-initialization-section";
 import {
+  applyAmicroButton,
+  confirmAmicroButton,
+  setAmicroButtonPending
+} from "./amicro-buttons";
+import {
   confirmModal,
   memoryCorrectionModal,
   selectInputModal,
@@ -568,12 +573,17 @@ export class CodexSettingTab extends PluginSettingTab {
     action: () => Promise<void>
   ): Promise<void> {
     button.disabled = true;
+    setAmicroButtonPending(button, true);
     delete this.settingsActionErrors[context];
+    let completed = false;
     try {
       await action();
+      completed = true;
     } catch {
       this.reportSettingsActionError(context);
     } finally {
+      if (completed) confirmAmicroButton(button);
+      else setAmicroButtonPending(button, false);
       if (button.isConnected) button.disabled = false;
       this.scheduleDisplay();
     }
@@ -2637,8 +2647,7 @@ export class CodexSettingTab extends PluginSettingTab {
       cls: "codex-provider-add-button",
       attr: { type: "button", "data-echoink-focus-key": "providers:add" }
     });
-    const addIcon = addButton.createSpan();
-    setIcon(addIcon, "plus");
+    applyAmicroButton(addButton, { variant: "secondary", motion: "slide", icon: "plus" });
     addButton.createSpan({ text: label("添加模型", "Add model") });
     addButton.onclick = () => {
       this.openProviderModelModal(createApiProviderConfig(), false);
@@ -3297,8 +3306,7 @@ export class CodexSettingTab extends PluginSettingTab {
           "data-echoink-focus-key": "resources:mcp:add"
         }
       });
-      const addIcon = add.createSpan({ cls: "codex-resource-refresh-icon" });
-      setIcon(addIcon, "plus");
+      applyAmicroButton(add, { variant: "secondary", motion: "slide", icon: "plus" });
       add.createSpan({ text: this.plugin.settings.settingsLanguage === "en" ? "Add server" : "新增 Server" });
       add.onclick = () => this.openMcpServerModal();
     }
@@ -3306,8 +3314,7 @@ export class CodexSettingTab extends PluginSettingTab {
       cls: "codex-resource-refresh",
       attr: { type: "button", "aria-label": copy.resources.refreshTitle, "data-echoink-focus-key": "resources:refresh" }
     });
-    const refreshIcon = refresh.createSpan({ cls: "codex-resource-refresh-icon" });
-    setIcon(refreshIcon, "refresh-cw");
+    applyAmicroButton(refresh, { variant: "secondary", motion: "rotate", icon: "refresh-cw" });
     refresh.createSpan({ text: this.resourceLoadingTab === this.plugin.settings.resourceManagementTab ? copy.common.loading : copy.common.refresh });
     refresh.disabled = this.resourceLoadingTab === this.plugin.settings.resourceManagementTab;
     refresh.onclick = () => void this.loadWorkspaceResources(true, this.plugin.settings.resourceManagementTab);
@@ -3403,6 +3410,11 @@ export class CodexSettingTab extends PluginSettingTab {
           "aria-label": english ? `Copy full path: ${path}` : `复制完整路径：${path}`,
           "data-echoink-focus-key": `resource:${resource.id}:path`
         }
+      });
+      applyAmicroButton(pathButton, {
+        variant: "tertiary",
+        motion: "complete",
+        icon: "copy"
       });
       pathButton.onclick = () => void this.copySettingsValue(path, pathButton);
     }
@@ -3870,6 +3882,7 @@ export class CodexSettingTab extends PluginSettingTab {
       const message = this.plugin.settings.settingsLanguage === "en" ? "Copied full value." : "已复制完整内容。";
       this.announceSettingsStatus(message);
       new Notice(message);
+      confirmAmicroButton(button);
     } catch {
       this.settingsActionErrors.resources = this.plugin.settings.settingsLanguage === "en"
         ? "Could not copy the value. Select it from the visible field instead."

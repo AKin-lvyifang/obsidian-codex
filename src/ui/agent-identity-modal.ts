@@ -23,6 +23,7 @@ import {
   resolveAgentAvatarUrl,
   type AgentAvatarPreset
 } from "./agent-avatar-presets";
+import { applyAmicroButton } from "../settings/amicro-buttons";
 
 export interface AgentIdentityDraft {
   readonly displayName: string;
@@ -156,6 +157,7 @@ export class AgentIdentityModal extends Modal {
       cls: "echoink-agent-identity-cancel",
       text: zh ? "取消" : "Cancel"
     });
+    applyAmicroButton(cancelButton, { variant: "secondary" });
     cancelButton.addEventListener("click", () => this.close());
     this.confirmButtonEl = footer.createEl("button", {
       type: "button",
@@ -164,6 +166,7 @@ export class AgentIdentityModal extends Modal {
         ? (zh ? "完成设置" : "Finish setup")
         : (zh ? "保存" : "Save")
     }) as unknown as HTMLButtonElement;
+    applyAmicroButton(this.confirmButtonEl, { variant: "primary", motion: "complete" });
     this.confirmButtonEl.addEventListener("click", () => {
       void this.handleConfirm();
     });

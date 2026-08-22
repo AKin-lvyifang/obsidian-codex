@@ -12967,7 +12967,9 @@ body.theme-dark .codex-session-picker {
   border: 1px solid var(--background-modifier-border);
   background: transparent;
   color: var(--text-muted);
-  transition: all 0.2s ease;
+  transition-property: border-color, color, background-color, transform;
+  transition-duration: 140ms;
+  transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
 }
 
 .echoink-agent-profile-collapse-btn:hover {
@@ -13154,7 +13156,9 @@ button.echoink-picker-row:focus-visible {
   border: 1px solid var(--background-modifier-border);
   background: transparent;
   color: var(--text-muted);
-  transition: all 0.2s ease;
+  transition-property: border-color, color, background-color, transform;
+  transition-duration: 140ms;
+  transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
 }
 
 .echoink-picker-cancel-btn:hover {
@@ -14104,5 +14108,324 @@ button.echoink-picker-row:focus-visible {
 
   .echoink-knowledge-init-note-list {
     padding-left: 38px;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* EchoInk settings actions — native CSS adaptation of Amicro buttons. */
+/* React/Motion/Tailwind are deliberately not part of the plugin runtime. */
+/* ------------------------------------------------------------------ */
+
+:is(
+  .echoink-amicro-button,
+  .echoink-settings-page .setting-item-control > button,
+  .echoink-settings-page .echoink-settings-inline-actions > button,
+  .echoink-settings-page .echoink-settings-compact-actions > button,
+  .echoink-settings-page .echoink-personalization-actions > button,
+  .echoink-memory-correction-actions > button,
+  .echoink-picker-cancel-btn,
+  .echoink-agent-profile-collapse-btn,
+  .codex-provider-model-manager button,
+  .codex-resource-manager button,
+  .codex-provider-model-modal button,
+  .codex-mcp-server-modal button,
+  .echoink-agent-identity-modal button,
+  .modal.echoink-knowledge-note-picker button,
+  .echoink-onboarding-coachmark button
+) {
+  transition-property: color, background-color, border-color, box-shadow, transform, opacity;
+  transition-duration: 140ms;
+  transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
+}
+
+/* One obvious commit action per action group.  Accent fill is reserved for
+   saving, starting, or completing; it is not used for navigation. */
+:is(
+  .echoink-amicro-button.is-primary,
+  .echoink-settings-page button.mod-cta,
+  .codex-provider-model-modal button.mod-cta,
+  .codex-mcp-server-modal button.mod-cta,
+  .echoink-agent-identity-modal button.mod-cta,
+  .modal.echoink-knowledge-note-picker button.mod-cta,
+  .echoink-onboarding-coachmark button.mod-cta
+) {
+  min-height: 36px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--interactive-accent) 20%, transparent);
+}
+
+:is(
+  .echoink-amicro-button.is-primary,
+  .echoink-settings-page button.mod-cta,
+  .codex-provider-model-modal button.mod-cta,
+  .codex-mcp-server-modal button.mod-cta,
+  .echoink-agent-identity-modal button.mod-cta,
+  .modal.echoink-knowledge-note-picker button.mod-cta,
+  .echoink-onboarding-coachmark button.mod-cta
+):is(:hover, :focus-visible):not(:disabled) {
+  background: var(--interactive-accent-hover);
+  box-shadow: 0 3px 8px color-mix(in srgb, var(--interactive-accent) 24%, transparent);
+}
+
+/* Secondary actions are deliberately quiet.  The hairline border is kept
+   only where a modal/footer action must remain visibly separate. */
+:is(
+  .echoink-amicro-button.is-secondary,
+  .echoink-settings-page .setting-item-control > button:not(.mod-warning),
+  .codex-provider-model-modal .codex-provider-modal-actions > button:not(.mod-cta),
+  .codex-mcp-server-modal .codex-mcp-server-modal-footer > button:not(.mod-cta),
+  .echoink-agent-identity-cancel,
+  .echoink-agent-identity-edit,
+  .echoink-knowledge-note-picker-cancel,
+  .echoink-picker-cancel-btn,
+  .echoink-knowledge-init-secondary
+) {
+  min-height: 34px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+}
+
+:is(
+  .echoink-amicro-button.is-secondary,
+  .echoink-settings-page .setting-item-control > button:not(.mod-warning),
+  .codex-provider-model-modal .codex-provider-modal-actions > button:not(.mod-cta),
+  .codex-mcp-server-modal .codex-mcp-server-modal-footer > button:not(.mod-cta),
+  .echoink-agent-identity-cancel,
+  .echoink-agent-identity-edit,
+  .echoink-knowledge-note-picker-cancel,
+  .echoink-picker-cancel-btn,
+  .echoink-knowledge-init-secondary
+):is(:hover, :focus-visible):not(:disabled) {
+  border-color: var(--background-modifier-border-hover);
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+/* Tertiary and list-row actions should read as part of their content rather
+   than as little cards inside a card.  Hover supplies the only surface. */
+:is(
+  .echoink-amicro-button.is-tertiary,
+  .echoink-settings-page .echoink-settings-inline-actions > button:not(.mod-warning),
+  .echoink-settings-page .echoink-settings-compact-actions > button:not(.mod-warning),
+  .echoink-settings-page .echoink-personalization-actions > button:not(.mod-warning),
+  .echoink-memory-correction-actions > button:not(.mod-cta),
+  .echoink-knowledge-init-note-remove,
+  .codex-provider-model-manager button.codex-provider-row-action:not(.is-delete),
+  .echoink-agent-profile-expand-btn,
+  .echoink-agent-profile-reselect:not(.is-primary):not(.is-danger),
+  .echoink-settings-back,
+  .echoink-settings-state-action,
+  .codex-copyable-value
+) {
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+}
+
+:is(
+  .echoink-amicro-button.is-tertiary,
+  .echoink-settings-page .echoink-settings-inline-actions > button:not(.mod-warning),
+  .echoink-settings-page .echoink-settings-compact-actions > button:not(.mod-warning),
+  .echoink-settings-page .echoink-personalization-actions > button:not(.mod-warning),
+  .echoink-memory-correction-actions > button:not(.mod-cta),
+  .echoink-knowledge-init-note-remove,
+  .codex-provider-model-manager button.codex-provider-row-action:not(.is-delete),
+  .echoink-agent-profile-expand-btn,
+  .echoink-agent-profile-reselect:not(.is-primary):not(.is-danger),
+  .echoink-settings-back,
+  .echoink-settings-state-action,
+  .codex-copyable-value
+):is(:hover, :focus-visible):not(:disabled) {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+/* Danger is a quiet contextual warning.  Only a subsequent confirmation
+   modal may use a strong destructive CTA; hover never shakes the whole row. */
+:is(
+  .echoink-amicro-button.is-danger,
+  .echoink-settings-page button.mod-warning,
+  .codex-provider-model-manager button.codex-provider-row-action.is-delete,
+  .echoink-settings-page .echoink-settings-inline-actions > button.mod-warning,
+  .echoink-settings-page .echoink-settings-compact-actions > button.mod-warning,
+  .echoink-memory-correction-actions > button.mod-warning
+) {
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-error);
+}
+
+:is(
+  .echoink-amicro-button.is-danger,
+  .echoink-settings-page button.mod-warning,
+  .codex-provider-model-manager button.codex-provider-row-action.is-delete,
+  .echoink-settings-page .echoink-settings-inline-actions > button.mod-warning,
+  .echoink-settings-page .echoink-settings-compact-actions > button.mod-warning,
+  .echoink-memory-correction-actions > button.mod-warning
+):is(:hover, :focus-visible):not(:disabled) {
+  background: color-mix(in srgb, var(--text-error) 10%, transparent);
+  color: var(--text-error);
+}
+
+/* Selected-state controls are not promotional buttons.  Keep their existing
+   status-first treatment and just make their keyboard/pressed states agree. */
+:is(
+  .codex-settings-tabs button.codex-settings-tab,
+  .codex-resource-manager button.codex-resource-tab,
+  .echoink-knowledge-init-tab,
+  .echoink-picker-row,
+  .codex-provider-combobox-trigger,
+  .codex-provider-combobox-option,
+  .echoink-knowledge-init-dir-toggle,
+  .echoink-secondary-facts-toggle
+) {
+  transition-property: color, background-color, border-color, box-shadow, opacity;
+  transition-duration: 120ms;
+  transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
+}
+
+.echoink-amicro-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+
+.echoink-amicro-button-icon {
+  position: relative;
+  display: inline-grid;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  place-items: center;
+}
+
+.echoink-amicro-button-icon > span {
+  position: absolute;
+  display: inline-flex;
+  inset: 0;
+  align-items: center;
+  justify-content: center;
+  transition-property: opacity, transform, filter;
+  transition-duration: 150ms;
+  transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
+}
+
+.echoink-amicro-button-icon svg {
+  width: 16px;
+  height: 16px;
+  stroke-width: 1.8px;
+}
+
+.echoink-amicro-button-icon-success,
+.echoink-amicro-button-icon-arrow {
+  opacity: 0;
+  transform: scale(0.25);
+  filter: blur(4px);
+}
+
+.echoink-amicro-button.motion-complete.is-amicro-confirmed .echoink-amicro-button-icon-idle {
+  opacity: 0;
+  transform: scale(0.25);
+  filter: blur(4px);
+}
+
+.echoink-amicro-button.motion-complete.is-amicro-confirmed .echoink-amicro-button-icon-success {
+  opacity: 1;
+  transform: scale(1);
+  filter: blur(0);
+}
+
+.echoink-amicro-button.motion-slide:is(:hover, :focus-visible) .echoink-amicro-button-icon-idle {
+  opacity: 0;
+  transform: translateX(-5px) scale(0.6);
+  filter: blur(2px);
+}
+
+.echoink-amicro-button.motion-slide:is(:hover, :focus-visible) .echoink-amicro-button-icon-arrow {
+  opacity: 1;
+  transform: translateX(0) scale(1);
+  filter: blur(0);
+}
+
+@keyframes echoink-amicro-button-spin {
+  to { transform: rotate(360deg); }
+}
+
+.echoink-amicro-button.motion-rotate.is-amicro-pending .echoink-amicro-button-icon-idle,
+.echoink-amicro-button.motion-rotate:disabled .echoink-amicro-button-icon-idle {
+  animation: echoink-amicro-button-spin 750ms linear infinite;
+}
+
+:is(
+  .echoink-amicro-button,
+  .echoink-settings-page .setting-item-control > button,
+  .echoink-settings-page .echoink-settings-inline-actions > button,
+  .echoink-settings-page .echoink-settings-compact-actions > button,
+  .echoink-settings-page .echoink-personalization-actions > button,
+  .echoink-memory-correction-actions > button,
+  .echoink-picker-cancel-btn,
+  .echoink-agent-profile-collapse-btn,
+  .codex-provider-model-manager button,
+  .codex-resource-manager button,
+  .codex-provider-model-modal button,
+  .codex-mcp-server-modal button,
+  .echoink-agent-identity-modal button,
+  .modal.echoink-knowledge-note-picker button,
+  .echoink-onboarding-coachmark button
+):active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+:is(
+  .echoink-amicro-button,
+  .echoink-settings-page .setting-item-control > button,
+  .echoink-settings-page .echoink-settings-inline-actions > button,
+  .echoink-settings-page .echoink-settings-compact-actions > button,
+  .echoink-settings-page .echoink-personalization-actions > button,
+  .codex-provider-model-manager button,
+  .codex-resource-manager button,
+  .codex-provider-model-modal button,
+  .codex-mcp-server-modal button,
+  .echoink-agent-identity-modal button,
+  .modal.echoink-knowledge-note-picker button,
+  .echoink-onboarding-coachmark button
+):focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :is(
+    .echoink-amicro-button,
+    .echoink-amicro-button-icon > span,
+    .echoink-settings-page .setting-item-control > button,
+    .echoink-settings-page .echoink-settings-inline-actions > button,
+    .echoink-settings-page .echoink-settings-compact-actions > button,
+    .echoink-settings-page .echoink-personalization-actions > button,
+    .echoink-memory-correction-actions > button,
+    .echoink-picker-cancel-btn,
+    .echoink-agent-profile-collapse-btn,
+    .codex-provider-model-manager button,
+    .codex-resource-manager button,
+    .codex-provider-model-modal button,
+    .codex-mcp-server-modal button,
+    .echoink-agent-identity-modal button,
+    .modal.echoink-knowledge-note-picker button,
+    .echoink-onboarding-coachmark button
+  ) {
+    animation: none !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  .echoink-amicro-button:is(:active, .is-amicro-confirmed) {
+    transform: none;
   }
 }

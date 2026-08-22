@@ -25,6 +25,7 @@ import {
   providerPreflightApiKeyReady,
   type ProviderPreflightService
 } from "./provider-preflight";
+import { applyAmicroButton } from "./amicro-buttons";
 
 type ProviderFormField =
   | "apiKey"
@@ -235,12 +236,14 @@ export class ProviderModelModal extends Modal {
       text: this.label("取消", "Cancel"),
       attr: { type: "button", "data-modal-focus-key": "cancel" }
     });
+    applyAmicroButton(cancel, { variant: "secondary" });
     cancel.onclick = () => this.close();
     const save = actions.createEl("button", {
       cls: "mod-cta",
       text: this.options.copy.providers.saveAndUse,
       attr: { type: "button", "data-modal-focus-key": "save" }
     });
+    applyAmicroButton(save, { variant: "primary", motion: "complete" });
     save.dataset.idleLabel = this.options.copy.providers.saveAndUse;
     save.disabled = this.saving;
     save.onclick = () => {

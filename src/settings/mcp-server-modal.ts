@@ -4,6 +4,7 @@ import type {
   EchoInkMcpConnectionRecord,
   EchoInkResource
 } from "../resources/types";
+import { applyAmicroButton } from "./amicro-buttons";
 
 export interface McpServerModalOptions {
   readonly app: App;
@@ -277,6 +278,7 @@ export class McpServerModal extends Modal {
       text: this.label("取消", "Cancel"),
       attr: { type: "button", "data-mcp-modal-focus-key": "cancel" }
     });
+    applyAmicroButton(cancel, { variant: "secondary" });
     cancel.disabled = this.saving;
     cancel.onclick = () => this.close();
     const save = footer.createEl("button", {
@@ -284,6 +286,7 @@ export class McpServerModal extends Modal {
       text: this.saving ? this.label("保存中…", "Saving…") : this.label("保存 Server", "Save server"),
       attr: { type: "button", "data-mcp-modal-focus-key": "save" }
     });
+    applyAmicroButton(save, { variant: "primary", motion: "complete" });
     save.disabled = this.saving;
     save.onclick = () => void this.save();
     if (!this.editing) this.focus("name");

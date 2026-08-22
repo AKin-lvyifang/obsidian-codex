@@ -23,6 +23,7 @@ import {
 } from "./settings";
 import { createSettingsSection, createSettingsState } from "./settings-v2";
 import { KnowledgeNotePickerModal } from "./knowledge-note-picker-modal";
+import { applyAmicroButton } from "./amicro-buttons";
 
 type KnowledgeInitDirectoryRole = Exclude<KnowledgeInitializationRole, "keep">;
 
@@ -377,6 +378,7 @@ export class KnowledgeInitializationSection {
       text: zh ? "开始初始化" : "Start initialization",
       attr: { type: "button", "data-echoink-focus-key": FOCUS_KEY }
     }) as HTMLButtonElement;
+    applyAmicroButton(cta, { variant: "primary", motion: "complete" });
     cta.disabled = this.busy;
     cta.onclick = () => void this.startRecommended();
   }
@@ -437,6 +439,7 @@ export class KnowledgeInitializationSection {
       text: zh ? "开始初始化" : "Start initialization",
       attr: { type: "button", "data-echoink-focus-key": FOCUS_KEY }
     }) as HTMLButtonElement;
+    applyAmicroButton(cta, { variant: "primary", motion: "complete" });
     cta.disabled = this.busy;
     cta.onclick = () => void this.confirmCustom();
   }
@@ -523,6 +526,7 @@ export class KnowledgeInitializationSection {
             : (zh ? `添加笔记到 ${label}` : `Add notes to ${label}`)
         }
       }) as HTMLButtonElement;
+      applyAmicroButton(add, { variant: "secondary", motion: "slide", icon: "folder-plus" });
       add.disabled = this.busy;
       add.onclick = () => this.openNotePicker(dir.role, add);
       this.dirAddButtons.set(dir.role, add);

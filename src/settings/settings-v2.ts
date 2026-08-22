@@ -1,4 +1,5 @@
 import { Setting, setIcon } from "obsidian";
+import { applyAmicroButton } from "./amicro-buttons";
 
 export type SettingsStateTone = "neutral" | "error" | "success";
 
@@ -44,6 +45,7 @@ export function createSettingsPage(
       }
     });
     setIcon(back, "chevron-left");
+    applyAmicroButton(back, { variant: "tertiary" });
     back.onclick = options.onBack;
   }
   const heading = header.createDiv({ cls: "echoink-settings-page-heading" });
@@ -131,6 +133,7 @@ export function createSettingsNavigationRow(
   trailing.createSpan({ cls: "echoink-settings-navigation-action", text: options.actionLabel });
   const icon = trailing.createSpan({ cls: "echoink-settings-navigation-icon" });
   setIcon(icon, "chevron-right");
+  applyAmicroButton(row, { variant: "tertiary", motion: "slide" });
   row.onclick = options.onActivate;
   return row;
 }
@@ -158,6 +161,7 @@ export function createSettingsState(
       text: action.label,
       attr: { type: "button" }
     });
+    applyAmicroButton(button, { variant: "secondary" });
     button.onclick = action.onActivate;
   }
   return state;

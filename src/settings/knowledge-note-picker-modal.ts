@@ -3,6 +3,7 @@ import type {
   KnowledgeInitializationAssignment,
   KnowledgeInitializationRole
 } from "../knowledge-base/initializer";
+import { applyAmicroButton } from "./amicro-buttons";
 
 export interface KnowledgeNotePickerNote {
   readonly sourcePath: string;
@@ -119,12 +120,14 @@ export class KnowledgeNotePickerModal extends Modal {
       text: zh ? "取消" : "Cancel",
       attr: { type: "button" }
     });
+    applyAmicroButton(this.cancelEl, { variant: "secondary" });
     this.cancelEl.onclick = () => this.close();
     this.confirmEl = footer.createEl("button", {
       cls: "mod-cta echoink-knowledge-note-picker-confirm",
       text: this.confirmLabel(),
       attr: { type: "button" }
     });
+    applyAmicroButton(this.confirmEl, { variant: "primary", motion: "complete" });
     this.confirmEl.onclick = () => void this.confirm();
     this.keydownHandler = (event) => this.handleKeydown(event);
     this.modalEl.addEventListener("keydown", this.keydownHandler as EventListener);
