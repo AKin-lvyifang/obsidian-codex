@@ -13305,40 +13305,42 @@ button.echoink-picker-row:focus-visible {
   font-weight: 500;
   text-decoration: none;
   cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+  transition-property: background-color, border-color, color, transform, padding-inline;
+  transition-duration: 150ms;
+  transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
   white-space: nowrap;
+}
+
+.echoink-about-btn:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
 }
 
 .echoink-about-btn:active {
   transform: scale(0.96);
 }
 
-.echoink-about-btn-ghost {
-  border: 1px solid var(--background-modifier-border);
-  background: transparent;
-  color: var(--text-muted);
-}
-
-.echoink-about-btn-ghost:hover {
-  border-color: rgba(255, 255, 255, 0.1);
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--text-normal);
-}
-
-/* Star button — sparkle animation (amicro btn-2 style) */
-.echoink-about-btn-star {
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  background: rgba(255, 255, 255, 0.04);
+/* Shared GitHub action surface: theme-aware, quiet by default. */
+.echoink-about-btn-surface {
+  border: 1px solid color-mix(in srgb, var(--text-normal) 7%, transparent);
+  background-color: color-mix(in srgb, var(--text-normal) 4%, transparent);
   color: var(--text-muted);
   position: relative;
 }
 
-.echoink-about-btn-star:hover {
-  background: rgba(255, 255, 255, 0.07);
-  border-color: rgba(255, 255, 255, 0.1);
+.echoink-about-btn-surface:hover,
+.echoink-about-btn-surface:focus-visible {
+  background-color: color-mix(in srgb, var(--text-normal) 7%, transparent);
+  border-color: color-mix(in srgb, var(--text-normal) 12%, transparent);
   color: var(--text-normal);
   transform: scale(1.02);
 }
+
+.echoink-about-btn-surface:active {
+  transform: scale(0.96);
+}
+
+/* Star button — sparkle animation (amicro btn-2 style) */
 
 /* Sparkle icon container */
 .echoink-sparkle-icon-wrap {
@@ -13420,6 +13422,97 @@ button.echoink-picker-row:focus-visible {
 .echoink-about-btn-star:hover .echoink-sparkle-particle {
   opacity: 1;
   transform: scale(1) rotate(0deg);
+}
+
+/* Feedback button — amicro btn-24 morph interaction. */
+.echoink-about-btn-issue {
+  gap: 10px;
+  min-width: 75px;
+  padding-inline: 24px;
+}
+
+.echoink-about-btn-issue:hover,
+.echoink-about-btn-issue:focus-visible,
+.echoink-about-btn-issue:active {
+  padding-inline: 28px;
+}
+
+.echoink-about-morph-icon-wrap {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 16px;
+}
+
+.echoink-about-morph-icon-default,
+.echoink-about-morph-icon-hover {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition-property: opacity, transform, filter;
+  transition-duration: 180ms;
+  transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
+}
+
+.echoink-about-morph-icon-default {
+  opacity: 1;
+  transform: scale(1);
+  filter: blur(0);
+}
+
+.echoink-about-morph-icon-hover {
+  color: var(--color-green, #34d399);
+  opacity: 0;
+  transform: scale(0.25);
+  filter: blur(4px);
+}
+
+.echoink-about-btn-issue:hover .echoink-about-morph-icon-default {
+  opacity: 0;
+  transform: scale(0.25);
+  filter: blur(4px);
+}
+
+.echoink-about-btn-issue:focus-visible .echoink-about-morph-icon-default,
+.echoink-about-btn-issue:active .echoink-about-morph-icon-default {
+  opacity: 0;
+  transform: scale(0.25);
+  filter: blur(4px);
+}
+
+.echoink-about-btn-issue:hover .echoink-about-morph-icon-hover {
+  opacity: 1;
+  transform: scale(1);
+  filter: blur(0);
+}
+
+.echoink-about-btn-issue:focus-visible .echoink-about-morph-icon-hover,
+.echoink-about-btn-issue:active .echoink-about-morph-icon-hover {
+  opacity: 1;
+  transform: scale(1);
+  filter: blur(0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .echoink-about-btn,
+  .echoink-sparkle-icon-default,
+  .echoink-sparkle-icon-hover,
+  .echoink-sparkle-particle,
+  .echoink-about-morph-icon-default,
+  .echoink-about-morph-icon-hover {
+    transition-duration: 0.01ms !important;
+  }
+
+  .echoink-about-btn-surface:hover,
+  .echoink-about-btn-surface:focus-visible,
+  .echoink-about-btn-surface:active {
+    transform: none;
+  }
 }
 
 

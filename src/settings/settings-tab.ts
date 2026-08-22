@@ -805,7 +805,7 @@ export class CodexSettingTab extends PluginSettingTab {
 
     // Star on GitHub button (sparkle animation)
     const starBtn = actions.createEl("a", {
-      cls: "echoink-about-btn echoink-about-btn-star",
+      cls: "echoink-about-btn echoink-about-btn-surface echoink-about-btn-star",
       attr: {
         href: "https://github.com/AKin-lvyifang/codex-echoink",
         target: "_blank",
@@ -826,25 +826,22 @@ export class CodexSettingTab extends PluginSettingTab {
     sparkle2.innerHTML = `<svg width="6" height="6" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 7.6H22l-6.2 4.5 2.4 7.6-6.2-4.5-6.2 4.5 2.4-7.6L2 9.6h7.6z"/></svg>`;
     starBtn.createSpan({ cls: "echoink-about-btn-label", text: "Star on GitHub" });
 
-    // Repo link button
-    const repoBtn = actions.createEl("a", {
-      cls: "echoink-about-btn echoink-about-btn-ghost",
-      attr: {
-        href: "https://github.com/AKin-lvyifang/codex-echoink",
-        target: "_blank",
-        rel: "noopener noreferrer"
-      },
-      text: zh ? "查看源码" : "Source Code"
-    });
-
-    // Issues link
+    // Issues link (amicro btn-24: Send morphs into Check on hover/focus)
     const issuesBtn = actions.createEl("a", {
-      cls: "echoink-about-btn echoink-about-btn-ghost",
+      cls: "echoink-about-btn echoink-about-btn-surface echoink-about-btn-issue",
       attr: {
         href: "https://github.com/AKin-lvyifang/codex-echoink/issues",
         target: "_blank",
         rel: "noopener noreferrer"
-      },
+      }
+    });
+    const issueIconWrap = issuesBtn.createSpan({ cls: "echoink-about-morph-icon-wrap" });
+    const issueSendIcon = issueIconWrap.createSpan({ cls: "echoink-about-morph-icon-default" });
+    issueSendIcon.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z"/><path d="m21.854 2.147-10.94 10.939"/></svg>`;
+    const issueCheckIcon = issueIconWrap.createSpan({ cls: "echoink-about-morph-icon-hover" });
+    issueCheckIcon.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>`;
+    issuesBtn.createSpan({
+      cls: "echoink-about-btn-label",
       text: zh ? "反馈问题" : "Report Issue"
     });
   }

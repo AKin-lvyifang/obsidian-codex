@@ -141,6 +141,7 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   await runHarnessV2PiProviderSecurityTests();
   await runPiNativeControlledProviderTests();
   await assertAgentIdentityCardPlacementAndCopy();
+  assertAboutGitHubActionsContract();
   await assertIdentityEditSaveRefreshesSettingsAndPersonalization();
   await assertFirstNamingModalZeroWriteOnCancel();
   await assertIdentityEntryWithoutTemplateOpensPicker();
@@ -3597,6 +3598,49 @@ async function assertAgentIdentityCardPlacementAndCopy(): Promise<void> {
   assert.match(text, /查看完整画像/u);
   assert.doesNotMatch(text, /查看完整描述/u);
   console.log("PASS settings: identity card placement and profile copy");
+}
+
+function assertAboutGitHubActionsContract(): void {
+  installProviderModalDomFixture();
+  const { plugin } = createIdentityTestPlugin(createIdentityFixtureState());
+  const tab = new CodexSettingTab(withSettingsTabDefaults(plugin) as never);
+  const mutable = tab as unknown as { personalMemoryState: Record<string, any> | null };
+  mutable.personalMemoryState = createIdentityFixtureState();
+  tab.display();
+
+  const about = tab.containerEl.querySelector<ProviderModalTestElement>(
+    ".echoink-about-card"
+  );
+  assert.ok(about, "about card renders");
+  assert.doesNotMatch(about!.textContent, /查看源码|Source Code/u);
+
+  const actions = about!.querySelectorAll<ProviderModalTestElement>(
+    ".echoink-about-btn"
+  );
+  assert.equal(actions.length, 2, "about card keeps only Star and issue actions");
+  const star = actions.find((action) => action.textContent.includes("Star on GitHub"));
+  const issue = actions.find((action) => /反馈问题|Report Issue/u.test(action.textContent));
+  assert.ok(star && issue, "Star and issue actions both render");
+  assert.equal(star!.getAttribute("href"), "https://github.com/AKin-lvyifang/codex-echoink");
+  assert.equal(issue!.getAttribute("href"), "https://github.com/AKin-lvyifang/codex-echoink/issues");
+  assert.ok(star!.hasClass("echoink-about-btn-surface"), "Star uses the shared surface style");
+  assert.ok(issue!.hasClass("echoink-about-btn-surface"), "issue action matches Star's surface style");
+  assert.ok(issue!.hasClass("echoink-about-btn-issue"), "issue action uses the btn-24 interaction");
+  assert.ok(issue!.querySelector(".echoink-about-morph-icon-default"), "send icon renders");
+  assert.ok(issue!.querySelector(".echoink-about-morph-icon-hover"), "check icon renders");
+
+  const css = readFileSync("styles.css", "utf8");
+  assert.match(
+    css,
+    /\.echoink-about-btn-issue:hover \.echoink-about-morph-icon-default\s*\{[\s\S]*?opacity:\s*0;[\s\S]*?scale\(0\.25\)/u,
+    "btn-24 hover morph hides and shrinks the send icon"
+  );
+  assert.match(
+    css,
+    /\.echoink-about-btn-issue:hover \.echoink-about-morph-icon-hover\s*\{[\s\S]*?opacity:\s*1;[\s\S]*?scale\(1\)/u,
+    "btn-24 hover morph reveals the check icon"
+  );
+  console.log("PASS settings: about actions remove source and morph issue feedback");
 }
 
 async function assertIdentityEditSaveRefreshesSettingsAndPersonalization(): Promise<void> {
