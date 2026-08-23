@@ -222,6 +222,10 @@ function controlledProviderStream(
         || configured.providerId !== registeredModel.provider
         || configured.modelRef !== registeredModel.id
         || configured.apiProtocol !== registeredModel.api
+        || (
+          configured.authMode === "oauth"
+          && registeredModel.provider !== "openai-codex"
+        )
       ) {
         throw new Error("provider_configuration_changed");
       }

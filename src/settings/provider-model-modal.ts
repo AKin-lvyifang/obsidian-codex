@@ -1,7 +1,15 @@
 import { App, Modal, setIcon, setTooltip } from "obsidian";
 import type {
+  AuthEvent,
+  AuthInteraction,
+  AuthPrompt
+} from "@earendil-works/pi-ai";
+import type {
   PiProviderConfigurationDraft
 } from "../plugin/pi-provider-configuration-service";
+import type {
+  OpenAICodexAuthStatus
+} from "../plugin/openai-codex-oauth-service";
 import {
   applyApiProviderModelPreset,
   createApiProviderConfig,
@@ -28,6 +36,7 @@ import {
 import { applyAmicroButton } from "./amicro-buttons";
 
 type ProviderFormField =
+  | "oauth"
   | "apiKey"
   | "endpoint"
   | "model"
@@ -48,6 +57,12 @@ export interface ProviderModelModalOptions {
   readonly language: "zh-CN" | "en";
   readonly copy: SettingsCopy;
   readonly preflight: ProviderPreflightService;
+  readonly codexOAuth?: {
+    status(): Promise<OpenAICodexAuthStatus>;
+    login(interaction: AuthInteraction): Promise<OpenAICodexAuthStatus>;
+    logout(): Promise<void>;
+    openExternal(url: string): Promise<boolean>;
+  };
   readonly save: (
     draft: ApiProviderConfig,
     apiKey: string,
@@ -67,6 +82,16 @@ export class ProviderModelModal extends Modal {
   private formErrors: Partial<Record<ProviderFormField, string>> = {};
   private focusIntent: string | null = null;
   private liveRegionEl: HTMLElement | null = null;
+  private codexAuthStatus: OpenAICodexAuthStatus = {
+    state: "disconnected"
+  };
+  private codexAuthLoading = false;
+  private codexLoginController: AbortController | null = null;
+  private codexManualCode = "";
+  private codexManualResolve: ((value: string) => void) | null = null;
+  private codexManualReject: ((error: Error) => void) | null = null;
+  private codexAuthUrl = "";
+  private codexAuthError = "";
   private readonly accessibilityId = `echoink-provider-model-${++providerModelModalInstance}`;
   private readonly handleEscapeCapture = (event: KeyboardEvent): void => {
     if (event.key !== "Escape") return;
@@ -133,6 +158,9 @@ export class ProviderModelModal extends Modal {
     window.addEventListener("keydown", this.handleEscapeCapture, true);
     this.render();
     this.startInitialModelPreflight();
+    if (this.providerId === "openai-codex") {
+      void this.loadCodexAuthStatus();
+    }
   }
 
   close(): void {
@@ -163,6 +191,7 @@ export class ProviderModelModal extends Modal {
 
   onClose(): void {
     this.closed = true;
+    this.cancelCodexLogin();
     this.dismissProviderUrlTooltips();
     window.removeEventListener("keydown", this.handleEscapeCapture, true);
     this.preflight.cancel();
@@ -204,10 +233,17 @@ export class ProviderModelModal extends Modal {
         ? this.label("编辑模型", "Edit model")
         : this.label("添加模型", "Add model")
     });
-    this.titleEl.createSpan({
-      cls: "codex-provider-protocol-pill",
-      text: protocolPill(this.draft.apiProtocol, this.zh)
-    });
+    if (providerId === "openai-codex") {
+      this.titleEl.createSpan({
+        cls: "codex-provider-beta-pill",
+        text: "Beta"
+      });
+    } else {
+      this.titleEl.createSpan({
+        cls: "codex-provider-protocol-pill",
+        text: protocolPill(this.draft.apiProtocol, this.zh)
+      });
+    }
 
     this.contentEl.empty();
     this.contentEl.addClass("codex-provider-modal-content");
@@ -220,6 +256,9 @@ export class ProviderModelModal extends Modal {
     if (providerId === "custom") {
       this.renderCustomForm(form);
     } else {
+      if (providerId === "openai-codex") {
+        this.renderCodexOAuth(form);
+      }
       if (apiProviderApiKeyRequired(providerId)) {
         this.renderApiKeyField(form);
       }
@@ -245,7 +284,7 @@ export class ProviderModelModal extends Modal {
     });
     applyAmicroButton(save, { variant: "primary", motion: "complete" });
     save.dataset.idleLabel = this.options.copy.providers.saveAndUse;
-    save.disabled = this.saving;
+    save.disabled = this.saving || !this.codexSaveReady();
     save.onclick = () => {
       void (async () => {
         const errors = this.validateForm();
@@ -294,7 +333,7 @@ export class ProviderModelModal extends Modal {
         } finally {
           this.saving = false;
           if (save.isConnected) {
-            save.disabled = false;
+            save.disabled = !this.codexSaveReady();
             save.textContent = save.dataset.idleLabel ?? this.options.copy.providers.saveAndUse;
           }
         }
@@ -475,12 +514,18 @@ export class ProviderModelModal extends Modal {
       this.restoreComboboxTriggerFocus(this.providerTriggerId);
       return;
     }
+    if (this.providerId === "openai-codex") {
+      this.cancelCodexLogin();
+    }
     const replacement = createApiProviderConfig(providerId, this.draft.id);
     this.draft = { ...replacement, apiKey: "" };
     this.apiKeyInput = "";
     this.customProtocolEnabled = false;
     this.preflight.reset();
     this.startInitialModelPreflight();
+    if (providerId === "openai-codex") {
+      void this.loadCodexAuthStatus();
+    }
     this.restoreComboboxTriggerFocus(this.providerTriggerId);
   }
 
@@ -533,6 +578,268 @@ export class ProviderModelModal extends Modal {
         : this.options.copy.providers.hideKey);
     };
     this.renderFieldError(field, "apiKey");
+  }
+
+  private renderCodexOAuth(container: HTMLElement): void {
+    const card = container.createDiv({
+      cls: `codex-provider-oauth-card is-${this.codexAuthStatus.state}`
+    });
+    const copy = card.createDiv({ cls: "codex-provider-oauth-copy" });
+    copy.createDiv({
+      cls: "codex-provider-oauth-title",
+      text: this.label("OpenAI 浏览器授权", "OpenAI browser authorization")
+    });
+    copy.createDiv({
+      cls: "codex-provider-oauth-description",
+      text: this.codexAuthStatus.state === "connected"
+        ? this.label("已连接 OpenAI Codex。", "OpenAI Codex is connected.")
+        : this.codexAuthStatus.state === "expired"
+          ? this.label(
+              "已连接；下次请求会安全刷新授权。",
+              "Connected; authorization refreshes safely on the next request."
+            )
+          : this.label(
+              "通过浏览器连接 ChatGPT 账户；EchoInk 不会显示访问令牌。",
+              "Connect a ChatGPT account in your browser. EchoInk never displays access tokens."
+            )
+    });
+
+    const actions = card.createDiv({ cls: "codex-provider-oauth-actions" });
+    const connected = this.codexAuthStatus.state !== "disconnected";
+    if (connected) {
+      const logout = actions.createEl("button", {
+        text: this.label("退出登录", "Log out"),
+        attr: {
+          type: "button",
+          "data-modal-focus-key": "codex-oauth-logout"
+        }
+      });
+      logout.disabled = this.codexAuthLoading;
+      logout.onclick = () => void this.logoutCodex();
+    } else if (!this.codexLoginController) {
+      const login = actions.createEl("button", {
+        cls: "mod-cta",
+        text: this.codexAuthLoading
+          ? this.label("正在读取…", "Loading…")
+          : this.label("使用 OpenAI 登录", "Sign in with OpenAI"),
+        attr: {
+          type: "button",
+          "data-modal-focus-key": "codex-oauth-login"
+        }
+      });
+      login.disabled = this.codexAuthLoading || !this.options.codexOAuth;
+      login.onclick = () => void this.startCodexLogin();
+    }
+
+    if (this.codexAuthUrl) {
+      const reopen = actions.createEl("button", {
+        text: this.label("重新打开登录页面", "Reopen login page"),
+        attr: {
+          type: "button",
+          "data-modal-focus-key": "codex-oauth-reopen"
+        }
+      });
+      reopen.onclick = () => {
+        void this.options.codexOAuth?.openExternal(this.codexAuthUrl);
+      };
+    }
+
+    if (this.codexLoginController) {
+      const manual = card.createDiv({ cls: "codex-provider-oauth-manual" });
+      const inputId = this.controlId("oauth");
+      manual.createEl("label", {
+        text: this.label(
+          "浏览器没有自动完成时，粘贴回调地址或授权码",
+          "If the browser does not finish automatically, paste the redirect URL or authorization code"
+        ),
+        attr: { for: inputId }
+      });
+      const input = manual.createEl("input", {
+        cls: "codex-provider-modal-input",
+        attr: {
+          id: inputId,
+          type: "text",
+          value: this.codexManualCode,
+          autocomplete: "off",
+          "data-modal-focus-key": "codex-oauth-manual"
+        }
+      });
+      input.oninput = () => {
+        this.codexManualCode = input.value;
+      };
+      const manualActions = manual.createDiv({
+        cls: "codex-provider-oauth-manual-actions"
+      });
+      const finish = manualActions.createEl("button", {
+        cls: "mod-cta",
+        text: this.label("完成授权", "Complete authorization"),
+        attr: { type: "button" }
+      });
+      finish.disabled = !this.codexManualCode.trim();
+      input.oninput = () => {
+        this.codexManualCode = input.value;
+        finish.disabled = !this.codexManualCode.trim();
+      };
+      finish.onclick = () => this.finishCodexManualCode();
+      const cancel = manualActions.createEl("button", {
+        text: this.label("停止", "Stop"),
+        attr: { type: "button" }
+      });
+      cancel.onclick = () => {
+        this.cancelCodexLogin();
+        this.render();
+      };
+    }
+
+    if (this.codexAuthError) {
+      card.createDiv({
+        cls: "codex-provider-field-error",
+        text: this.codexAuthError,
+        attr: { role: "alert" }
+      });
+    }
+  }
+
+  private async loadCodexAuthStatus(): Promise<void> {
+    if (!this.options.codexOAuth || this.codexAuthLoading) return;
+    this.codexAuthLoading = true;
+    this.render();
+    try {
+      this.codexAuthStatus = await this.options.codexOAuth.status();
+      this.codexAuthError = "";
+    } catch {
+      this.codexAuthStatus = { state: "disconnected" };
+      this.codexAuthError = this.label(
+        "暂时无法读取登录状态。",
+        "The sign-in status is temporarily unavailable."
+      );
+    } finally {
+      this.codexAuthLoading = false;
+      if (!this.closed) this.render();
+    }
+  }
+
+  private async startCodexLogin(): Promise<void> {
+    const service = this.options.codexOAuth;
+    if (!service || this.codexLoginController) return;
+    const controller = new AbortController();
+    this.codexLoginController = controller;
+    this.codexManualCode = "";
+    this.codexAuthUrl = "";
+    this.codexAuthError = "";
+    this.render();
+    const interaction: AuthInteraction = {
+      signal: controller.signal,
+      notify: (event) => this.handleCodexAuthEvent(event),
+      prompt: async (prompt) => await this.handleCodexAuthPrompt(prompt)
+    };
+    try {
+      this.codexAuthStatus = await service.login(interaction);
+      this.codexAuthUrl = "";
+      this.codexAuthError = "";
+      this.announce(this.label("OpenAI Codex 已连接。", "OpenAI Codex connected."));
+    } catch {
+      if (!controller.signal.aborted) {
+        this.codexAuthError = this.label(
+          "OpenAI 授权未完成，请重试。",
+          "OpenAI authorization did not finish. Try again."
+        );
+      }
+    } finally {
+      this.codexLoginController = null;
+      this.codexManualCode = "";
+      this.codexManualResolve = null;
+      this.codexManualReject = null;
+      if (!this.closed) this.render();
+    }
+  }
+
+  private handleCodexAuthEvent(event: AuthEvent): void {
+    if (event.type !== "auth_url") return;
+    this.codexAuthUrl = event.url;
+    void this.options.codexOAuth?.openExternal(event.url)
+      .then((opened) => {
+        if (!opened) {
+          this.codexAuthError = this.label(
+            "浏览器未能自动打开，请使用“重新打开登录页面”。",
+            "The browser could not open automatically. Use “Reopen login page”."
+          );
+        }
+        if (!this.closed) this.render();
+      })
+      .catch(() => {
+        this.codexAuthError = this.label(
+          "浏览器未能自动打开，请使用“重新打开登录页面”。",
+          "The browser could not open automatically. Use “Reopen login page”."
+        );
+        if (!this.closed) this.render();
+      });
+    if (!this.closed) this.render();
+  }
+
+  private async handleCodexAuthPrompt(prompt: AuthPrompt): Promise<string> {
+    if (prompt.type === "select") return "browser";
+    if (prompt.type !== "manual_code") {
+      throw new Error("codex_oauth_prompt_unsupported");
+    }
+    return await new Promise<string>((resolve, reject) => {
+      if (prompt.signal?.aborted) {
+        reject(new Error("codex_oauth_prompt_cancelled"));
+        return;
+      }
+      this.codexManualResolve = resolve;
+      this.codexManualReject = reject;
+      prompt.signal?.addEventListener("abort", () => {
+        this.codexManualResolve = null;
+        this.codexManualReject = null;
+        reject(new Error("codex_oauth_prompt_cancelled"));
+      }, { once: true });
+      if (!this.closed) this.render();
+    });
+  }
+
+  private finishCodexManualCode(): void {
+    const value = this.codexManualCode.trim();
+    if (!value || !this.codexManualResolve) return;
+    const resolve = this.codexManualResolve;
+    this.codexManualResolve = null;
+    this.codexManualReject = null;
+    resolve(value);
+  }
+
+  private cancelCodexLogin(): void {
+    this.codexLoginController?.abort();
+    this.codexLoginController = null;
+    this.codexManualCode = "";
+    this.codexManualReject?.(new Error("codex_oauth_login_cancelled"));
+    this.codexManualResolve = null;
+    this.codexManualReject = null;
+  }
+
+  private async logoutCodex(): Promise<void> {
+    if (!this.options.codexOAuth || this.codexAuthLoading) return;
+    this.codexAuthLoading = true;
+    this.render();
+    try {
+      await this.options.codexOAuth.logout();
+      this.codexAuthStatus = { state: "disconnected" };
+      this.codexAuthUrl = "";
+      this.codexAuthError = "";
+      this.announce(this.label("已退出 OpenAI Codex。", "Logged out of OpenAI Codex."));
+    } catch {
+      this.codexAuthError = this.label(
+        "退出登录失败，请重试。",
+        "Log out failed. Try again."
+      );
+    } finally {
+      this.codexAuthLoading = false;
+      if (!this.closed) this.render();
+    }
+  }
+
+  private codexSaveReady(): boolean {
+    return this.providerId !== "openai-codex"
+      || this.codexAuthStatus.state !== "disconnected";
   }
 
   private renderPresetModelField(
@@ -822,6 +1129,15 @@ export class ProviderModelModal extends Modal {
         return this.options.copy.providers.connectionAvailable;
       }
       if (state.connectionFailure) {
+        if (
+          state.connectionFailure === "auth"
+          && this.providerId === "openai-codex"
+        ) {
+          return this.label(
+            "OpenAI Codex 授权已失效，请重新登录。",
+            "OpenAI Codex authorization expired. Sign in again."
+          );
+        }
         return this.options.copy.providers.connectionFailures[
           state.connectionFailure
         ];
@@ -1393,6 +1709,7 @@ export class ProviderModelModal extends Modal {
       providerId: this.providerId,
       runtimeProviderId: this.draft.runtimeProviderId,
       apiProtocol: this.draft.apiProtocol,
+      authMode: this.draft.authMode,
       baseUrl: this.draft.baseUrl,
       modelId: this.draft.model,
       apiKey: this.apiKeyInput,
@@ -1553,6 +1870,7 @@ export function renderProviderIdentity(
 }
 
 function protocolPill(protocol: ApiProviderProtocol, zh: boolean): string {
+  if (protocol === "openai-codex-responses") return "Codex Responses";
   if (protocol === "anthropic-messages") return "Anthropic Messages API";
   if (protocol === "openai-responses") return "OpenAI Responses API";
   return zh ? "OpenAI 兼容 API" : "OpenAI-compatible API";

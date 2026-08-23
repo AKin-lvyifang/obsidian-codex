@@ -207,6 +207,7 @@ import {
 export interface PiProductionPluginHost {
   readonly app: App;
   readonly settings: CodexForObsidianSettings;
+  resolveOpenAICodexAccessToken(): Promise<string>;
   getVaultPath(): string;
   getPluginDataDirName(): string;
   persistPiNativeSettings(): Promise<void>;
@@ -1178,7 +1179,8 @@ async function createProductionAgentSession(input: {
   const controlledStream = new PiProviderProtocolTransport({
     authorityId: binding.authorityId,
     storeSetId: binding.pluginData.rootBindingDigest,
-    readApiKey: () => preparedProvider.readApiKey(),
+    resolveAuthToken: async () =>
+      await preparedProvider.resolveAuthToken(),
     ...(isLoopbackApiProviderUrl(configured.baseUrl)
       ? {
         dispatcher: new PiProviderProtocolDispatcher({
@@ -1534,7 +1536,7 @@ async function preparePiProductionProvider(input: {
   configured: ReturnType<typeof resolveProvider>;
   binding: VerifiedPiRuntimeBinding;
   controlledConfig: PiProviderRuntimeConfigPort;
-  readApiKey: () => string;
+  resolveAuthToken: () => Promise<string>;
   provider: NonNullable<Awaited<ReturnType<PiProviderRuntimeConfigPort["read"]>>>;
 }> {
   const configured = resolveProvider(input.plugin.settings);
@@ -1554,7 +1556,12 @@ async function preparePiProductionProvider(input: {
   const controlledConfig: PiProviderRuntimeConfigPort = Object.freeze({
     read: async () => providerRuntimeConfig(readCurrent())
   });
-  const readApiKey = (): string => readCurrent().apiKey;
+  const resolveAuthToken = async (): Promise<string> => {
+    const current = readCurrent();
+    return current.authMode === "oauth"
+      ? await input.plugin.resolveOpenAICodexAccessToken()
+      : current.apiKey;
+  };
   const provider = await controlledConfig.read();
   if (!provider) {
     throw new PiProductionConfigurationError(
@@ -1562,7 +1569,13 @@ async function preparePiProductionProvider(input: {
       "Provider 配置不可用。"
     );
   }
-  return { configured, binding, controlledConfig, readApiKey, provider };
+  return {
+    configured,
+    binding,
+    controlledConfig,
+    resolveAuthToken,
+    provider
+  };
 }
 
 function providerRuntimeConfig(
@@ -1571,6 +1584,7 @@ function providerRuntimeConfig(
   return Object.freeze({
     providerId: configured.providerId,
     apiProtocol: configured.apiProtocol,
+    authMode: configured.authMode,
     baseUrl: configured.baseUrl,
     modelRef: configured.modelRef
   });
@@ -1774,7 +1788,11 @@ function sameResolvedProvider(
   right: ReturnType<typeof resolveProvider>
 ): boolean {
   return left.provider.id === right.provider.id
-    && left.apiKey === right.apiKey
+    && (
+      left.authMode === "oauth"
+      || left.apiKey === right.apiKey
+    )
+    && left.authMode === right.authMode
     && left.providerId === right.providerId
     && left.apiProtocol === right.apiProtocol
     && left.baseUrl === right.baseUrl
@@ -1868,6 +1886,7 @@ function resolveProvider(
   provider: ApiProviderConfig;
   providerId: string;
   apiProtocol: ApiProviderProtocol;
+  authMode: ApiProviderConfig["authMode"];
   baseUrl: string;
   modelRef: string;
   apiKey: string;
@@ -1894,6 +1913,19 @@ function resolveProvider(
     productProviderId
   );
   const apiKey = provider.apiKey.trim();
+  const authMode = provider.authMode;
+  if (
+    authMode === "oauth"
+    && (
+      productProviderId !== "openai-codex"
+      || provider.apiProtocol !== "openai-codex-responses"
+    )
+  ) {
+    throw new PiProductionConfigurationError(
+      "provider_unsupported",
+      "当前 Provider 的 OAuth 配置无效。"
+    );
+  }
   if (apiKeyRequired && !apiKey) {
     throw new PiProductionConfigurationError(
       "provider_api_key_missing",
@@ -1913,7 +1945,8 @@ function resolveProvider(
     );
   }
   if (
-    !apiKeyRequired
+    authMode === "api-key"
+    && !apiKeyRequired
     && (
       productProviderId !== "ollama"
       || !isLoopbackApiProviderUrl(baseUrl)
@@ -1958,6 +1991,7 @@ function resolveProvider(
     provider,
     providerId,
     apiProtocol: provider.apiProtocol,
+    authMode,
     baseUrl,
     modelRef,
     apiKey,

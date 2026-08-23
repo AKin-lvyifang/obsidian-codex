@@ -482,6 +482,31 @@ function assertDurableBranchRebuildsExistingUiCardsAndHidesReasoning(): void {
   assert.ok(view.messages.some((message) => message.text === "Provider fixture failure" && message.status === "failed"));
   assert.deepEqual(view.provisionalMessageIds, []);
   assert.deepEqual(view.pendingToolCallIds, []);
+
+  const reloginEntries = entries.map((entry) =>
+    entry.id === "assistant-error"
+      ? messageEntry("assistant-error", "branch-summary-1", 7, {
+          role: "assistant",
+          content: [],
+          stopReason: "error",
+          errorMessage: "provider_oauth_relogin_required",
+          timestamp: 7
+        })
+      : entry
+  );
+  const reloginView = projector.projectSessionBranch({
+    piSessionId: "session-A",
+    activeLeafId: "assistant-error",
+    entries: reloginEntries,
+    runState: "failed",
+    productRunId: "run-1",
+    runIdentities: [],
+    now: 8
+  });
+  assert.ok(reloginView.messages.some((message) =>
+    message.status === "failed"
+    && message.text === "OpenAI Codex 授权已失效，请在设置中重新登录。"
+  ));
 }
 
 function assertLiveEventsMergeUntilTheProductSettlementBoundary(): void {

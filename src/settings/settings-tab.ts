@@ -48,7 +48,7 @@ import { filterWorkspaceResourceRows } from "../core/workspace-resource-filter";
 import {
   DEFAULT_SETTINGS,
   activateApiProvider,
-  apiProviderHasUsableApiKey,
+  apiProviderHasUsableCredential,
   applyApiProviderModelPreset,
   createApiProviderConfig,
   getActiveApiProvider,
@@ -122,6 +122,7 @@ import {
   onboardingCoachmarkCopy,
   type EchoInkOnboardingStep
 } from "./onboarding";
+import { openExternalInElectron } from "../core/electron";
 
 type PersonalMemoryControlState = Awaited<
   ReturnType<CodexForObsidianPlugin["getEchoInkPersonalMemoryState"]>
@@ -1440,7 +1441,10 @@ export class CodexSettingTab extends PluginSettingTab {
     });
     const runGroup = createSettingsGroup(runSection);
     const availableProviders = this.plugin.settings.apiProviders.filter(
-      apiProviderHasUsableApiKey
+      (provider) => apiProviderHasUsableCredential(
+        provider,
+        this.plugin.settings.openAICodexCredential
+      )
     );
     const modelSetting = applySettingsRow(new Setting(runGroup)
       .setName(zh ? "EchoInk 当前模型" : "Current EchoInk model")
@@ -1455,19 +1459,26 @@ export class CodexSettingTab extends PluginSettingTab {
             : (zh ? "无可用模型" : "No available models"));
         }
         for (const provider of this.plugin.settings.apiProviders) {
-          const apiKeyReady = apiProviderHasUsableApiKey(provider);
+          const credentialReady = apiProviderHasUsableCredential(
+            provider,
+            this.plugin.settings.openAICodexCredential
+          );
           const modelLabel = getApiProviderModelPreset(
             normalizeApiProviderId(provider.providerId, provider.baseUrl, provider.name),
             provider.model
           )?.displayName ?? provider.model;
           dropdown.addOption(
             provider.id,
-            `${provider.name} · ${modelLabel}${apiKeyReady ? "" : (zh ? "（需重新保存 API Key）" : " (API key required)")}`
+            `${provider.name} · ${modelLabel}${credentialReady ? "" : (
+              provider.authMode === "oauth"
+                ? (zh ? "（需要登录）" : " (sign-in required)")
+                : (zh ? "（需重新保存 API Key）" : " (API key required)")
+            )}`
           );
           const option = Array.from(dropdown.selectEl.options).find(
             (item) => item.value === provider.id
           );
-          if (option && !apiKeyReady) option.disabled = true;
+          if (option && !credentialReady) option.disabled = true;
         }
         dropdown
           .setValue(availableProviders.length === 0
@@ -1477,14 +1488,20 @@ export class CodexSettingTab extends PluginSettingTab {
             const target = this.plugin.settings.apiProviders.find(
               (provider) => provider.id === providerId
             );
-            if (!target || !apiProviderHasUsableApiKey(target)) return;
+            if (!target || !apiProviderHasUsableCredential(
+              target,
+              this.plugin.settings.openAICodexCredential
+            )) return;
             try {
               await this.plugin.activateApiProviderSettings((settings) => {
                 const candidate = settings.apiProviders.find(
                   (provider) => provider.id === providerId
                 );
-                if (!candidate || !apiProviderHasUsableApiKey(candidate)) {
-                  throw new Error("Provider API Key unavailable");
+                if (!candidate || !apiProviderHasUsableCredential(
+                  candidate,
+                  settings.openAICodexCredential
+                )) {
+                  throw new Error("Provider authentication unavailable");
                 }
                 activateApiProvider(settings, candidate);
               });
@@ -2656,8 +2673,8 @@ export class CodexSettingTab extends PluginSettingTab {
     const wrapper = createSettingsPage(container, {
       title: label("模型", "Models"),
       description: label(
-        "添加并管理 EchoInk 使用的 Provider、API Key 和模型。",
-        "Add and manage the providers, API keys, and models used by EchoInk."
+        "添加并管理 EchoInk 使用的 Provider、OpenAI 授权和模型。",
+        "Add and manage the providers, OpenAI authorization, and models used by EchoInk."
       )
     });
     wrapper.addClass("codex-provider-model-manager");
@@ -2673,8 +2690,8 @@ export class CodexSettingTab extends PluginSettingTab {
     addCopy.createDiv({
       cls: "codex-provider-add-description",
       text: label(
-        "配置 Provider、API Key 和模型。API Key 直接保存在当前 Vault 的插件设置中。",
-        "Configure a provider, API key, and model. The API key is stored directly in this Vault's plugin settings."
+        "API Key 或 OpenAI OAuth 都直接保存在当前 Vault 的插件设置中。",
+        "API keys and OpenAI OAuth are stored directly in this Vault's plugin settings."
       )
     });
     const addButton = addSection.createEl("button", {
@@ -2733,16 +2750,22 @@ export class CodexSettingTab extends PluginSettingTab {
         text: saved.name,
         attr: {
           tabindex: "0",
-          "aria-label": this.plugin.settings.settingsLanguage === "en"
-            ? `${saved.name}. Provider endpoint: ${saved.baseUrl}`
-            : `${saved.name}。Provider 地址：${saved.baseUrl}`
+          "aria-label": providerId === "openai-codex"
+            ? (this.plugin.settings.settingsLanguage === "en"
+              ? `${saved.name}. OpenAI OAuth.`
+              : `${saved.name}。OpenAI OAuth。`)
+            : this.plugin.settings.settingsLanguage === "en"
+              ? `${saved.name}. Provider endpoint: ${saved.baseUrl}`
+              : `${saved.name}。Provider 地址：${saved.baseUrl}`
         }
       });
-      savedProvider.createSpan({
-        cls: "codex-provider-url-tooltip",
-        text: saved.baseUrl,
-        attr: { "aria-hidden": "true" }
-      });
+      if (providerId !== "openai-codex") {
+        savedProvider.createSpan({
+          cls: "codex-provider-url-tooltip",
+          text: saved.baseUrl,
+          attr: { "aria-hidden": "true" }
+        });
+      }
 
       const rowMeta = row.createDiv({ cls: "codex-provider-saved-meta" });
       if (saved.modelSelection === "auto") {
@@ -2752,12 +2775,23 @@ export class CodexSettingTab extends PluginSettingTab {
         });
       }
       const apiKeyRequired = apiProviderApiKeyRequired(providerId);
-      const apiKeyReady = apiProviderHasUsableApiKey(saved);
-      const apiKeyState = !apiKeyRequired
-        ? "not-required"
-        : apiKeyReady
-          ? "ready"
-          : "missing";
+      const credentialReady = apiProviderHasUsableCredential(
+        saved,
+        this.plugin.settings.openAICodexCredential
+      );
+      const credentialState = saved.authMode === "oauth"
+        ? credentialReady ? "oauth-ready" : "oauth-missing"
+        : !apiKeyRequired
+          ? "not-required"
+          : credentialReady
+            ? "ready"
+            : "missing";
+      if (providerId === "openai-codex") {
+        rowMeta.createSpan({
+          cls: "codex-provider-beta-pill",
+          text: "Beta"
+        });
+      }
       if (saved.id === active?.id) {
         rowMeta.createSpan({
           cls: "codex-provider-active-badge",
@@ -2765,10 +2799,14 @@ export class CodexSettingTab extends PluginSettingTab {
         });
       }
       rowMeta.createSpan({
-        cls: `codex-provider-credential-badge is-${apiKeyState}`,
-        text: apiKeyState === "not-required"
+        cls: `codex-provider-credential-badge is-${credentialState}`,
+        text: credentialState === "oauth-ready"
+          ? label("OpenAI 已连接", "OpenAI connected")
+          : credentialState === "oauth-missing"
+            ? label("需要 OpenAI 登录", "OpenAI sign-in required")
+          : credentialState === "not-required"
           ? label("无需 API Key", "No API key required")
-          : apiKeyState === "ready"
+          : credentialState === "ready"
             ? label("API Key 已填写", "API key configured")
             : label("未配置 API Key", "API key missing")
       });
@@ -2844,6 +2882,16 @@ export class CodexSettingTab extends PluginSettingTab {
         testConnection: async (draft) =>
           await this.plugin.testPiProviderConnection(draft)
       },
+      codexOAuth: {
+        status: async () =>
+          await this.plugin.getOpenAICodexAuthStatus(),
+        login: async (interaction) =>
+          await this.plugin.loginOpenAICodex(interaction),
+        logout: async () =>
+          await this.plugin.logoutOpenAICodex(),
+        openExternal: async (url) =>
+          await openExternalInElectron(url)
+      },
       save: async (draft, apiKey, connectionVerified) =>
         await this.saveAndActivateProviderModel(
           draft,
@@ -2874,6 +2922,7 @@ export class CodexSettingTab extends PluginSettingTab {
       draft.name = preset.name;
       draft.baseUrl = preset.baseUrl;
       draft.apiProtocol = preset.apiProtocol;
+      draft.authMode = preset.authMode;
       if (draft.modelSelection === "auto") {
         draft.model = preset.model;
       }
@@ -2896,7 +2945,20 @@ export class CodexSettingTab extends PluginSettingTab {
       draft.model,
       ...draft.models
     ].map((model) => model.trim()).filter(Boolean)));
-    draft.apiKey = apiKey || draftInput.apiKey.trim();
+    draft.apiKey = draft.authMode === "oauth"
+      ? ""
+      : apiKey || draftInput.apiKey.trim();
+    if (
+      draft.authMode === "oauth"
+      && !this.plugin.settings.openAICodexCredential
+    ) {
+      return {
+        saved: false,
+        message: this.plugin.settings.settingsLanguage === "en"
+          ? "Sign in with OpenAI before saving this model."
+          : "请先使用 OpenAI 登录，再保存该模型。"
+      };
+    }
     if (!draft.apiKey && apiProviderApiKeyRequired(providerId)) {
       return { saved: false, message: this.copy.providers.missingKey };
     }
@@ -2967,7 +3029,10 @@ export class CodexSettingTab extends PluginSettingTab {
     if (!accepted) return;
     const wasActive = this.plugin.settings.activeApiProviderId === providerId;
     const fallback = this.plugin.settings.apiProviders.find(
-      (item) => item.id !== providerId && apiProviderHasUsableApiKey(item)
+      (item) => item.id !== providerId && apiProviderHasUsableCredential(
+        item,
+        this.plugin.settings.openAICodexCredential
+      )
     ) ?? null;
     try {
       await this.plugin.activateApiProviderSettings((settings) => {

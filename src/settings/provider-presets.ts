@@ -1,4 +1,5 @@
 export const API_PROVIDER_IDS = [
+  "openai-codex",
   "glm",
   "kimi",
   "minimax",
@@ -16,6 +17,7 @@ export const API_PROVIDER_IDS = [
 export type ApiProviderId = typeof API_PROVIDER_IDS[number];
 
 export const API_PROVIDER_PROTOCOLS = [
+  "openai-codex-responses",
   "openai-responses",
   "openai-completions",
   "anthropic-messages"
@@ -23,6 +25,8 @@ export const API_PROVIDER_PROTOCOLS = [
 
 export type ApiProviderProtocol =
   typeof API_PROVIDER_PROTOCOLS[number];
+
+export type ApiProviderAuthMode = "api-key" | "oauth";
 
 const KIMI_K2_CONTEXT_WINDOW = 262_144;
 const KIMI_MAX_OUTPUT_RESERVE = 65_536;
@@ -43,7 +47,7 @@ export interface ApiProviderModelPreset {
 
 export interface ApiProviderPreset {
   readonly id: Extract<ApiProviderId,
-    "glm" | "kimi" | "minimax" | "deepseek" | "ollama" | "custom">;
+    "openai-codex" | "glm" | "kimi" | "minimax" | "deepseek" | "ollama" | "custom">;
   readonly name: string;
   readonly runtimeProviderId: string;
   readonly baseUrl: string;
@@ -51,6 +55,7 @@ export interface ApiProviderPreset {
   readonly model: string;
   readonly models: readonly ApiProviderModelPreset[];
   readonly apiProtocol: ApiProviderProtocol;
+  readonly authMode: ApiProviderAuthMode;
   readonly apiKeyRequired: boolean;
   readonly modelDiscovery: "supported" | "provider_dependent";
 }
@@ -64,6 +69,34 @@ export interface ApiProviderPreset {
  */
 export const API_PROVIDER_PRESETS: readonly ApiProviderPreset[] =
   Object.freeze([
+    preset({
+      id: "openai-codex",
+      name: "OpenAI Codex Beta",
+      runtimeProviderId: "openai-codex",
+      baseUrl: "https://chatgpt.com/backend-api",
+      docsUrl: "https://developers.openai.com/codex/",
+      apiProtocol: "openai-codex-responses",
+      authMode: "oauth",
+      apiKeyRequired: false,
+      modelDiscovery: "supported",
+      models: [
+        model(
+          "gpt-5.3-codex-spark",
+          128_000,
+          128_000,
+          true,
+          false,
+          true,
+          "GPT-5.3 Codex Spark"
+        ),
+        model("gpt-5.4", 272_000, 128_000, true, true, true, "GPT-5.4"),
+        model("gpt-5.4-mini", 272_000, 128_000, true, true, true, "GPT-5.4 mini"),
+        model("gpt-5.5", 272_000, 128_000, true, true, true, "GPT-5.5"),
+        model("gpt-5.6-luna", 272_000, 128_000, true, true, true, "GPT-5.6 Luna"),
+        model("gpt-5.6-sol", 272_000, 128_000, true, true, true, "GPT-5.6 Sol"),
+        model("gpt-5.6-terra", 272_000, 128_000, true, true, true, "GPT-5.6 Terra")
+      ]
+    }),
     preset({
       id: "glm",
       name: "智谱开放平台 / GLM API",
@@ -194,6 +227,12 @@ export function apiProviderApiKeyRequired(
   return getApiProviderPreset(providerId).apiKeyRequired;
 }
 
+export function apiProviderAuthMode(
+  providerId: ApiProviderId
+): ApiProviderAuthMode {
+  return getApiProviderPreset(providerId).authMode;
+}
+
 export function normalizeApiProviderId(
   value: unknown,
   baseUrl = "",
@@ -207,6 +246,11 @@ export function normalizeApiProviderId(
   }
   const normalizedBaseUrl = baseUrl.toLowerCase();
   const normalizedName = name.trim().toLowerCase();
+  if (
+    normalizedBaseUrl.includes("chatgpt.com/backend-api")
+    || normalizedName === "openai codex"
+    || normalizedName === "openai codex beta"
+  ) return "openai-codex";
   if (
     normalizedBaseUrl.includes("127.0.0.1:11434")
     || normalizedBaseUrl.includes("localhost:11434")
@@ -275,6 +319,8 @@ export function normalizeApiProviderBaseUrl(
   let path = parsed.pathname.replace(/\/+$/u, "");
   if (apiProtocol === "openai-responses") {
     path = path.replace(/\/responses$/u, "");
+  } else if (apiProtocol === "openai-codex-responses") {
+    path = path.replace(/\/codex(?:\/responses)?$/u, "");
   } else if (apiProtocol === "openai-completions") {
     path = path.replace(/\/chat\/completions$/u, "");
   } else {
@@ -301,6 +347,9 @@ export function apiProviderRequestUrl(
   if (apiProtocol === "openai-responses") {
     return `${normalized}/responses`;
   }
+  if (apiProtocol === "openai-codex-responses") {
+    return `${normalized}/codex/responses`;
+  }
   if (apiProtocol === "anthropic-messages") {
     return `${normalized}/v1/messages`;
   }
@@ -323,9 +372,13 @@ export function openAiCompatibleChatCompletionsUrl(
   return apiProviderRequestUrl(baseUrl, "openai-completions");
 }
 
-function preset(input: Omit<ApiProviderPreset, "model">): ApiProviderPreset {
+function preset(
+  input: Omit<ApiProviderPreset, "model" | "authMode">
+  & Partial<Pick<ApiProviderPreset, "authMode">>
+): ApiProviderPreset {
   return Object.freeze({
     ...input,
+    authMode: input.authMode ?? "api-key",
     model: input.models[0]?.id ?? "",
     models: Object.freeze([...input.models])
   });

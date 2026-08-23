@@ -1,5 +1,7 @@
 import type { CodexModel, CodexPluginInfo, CodexSkill, McpServerStatus, PermissionMode, ProcessEventKind, ProcessFileRef, ReasoningEffort, ServiceTierChoice, TokenUsage, UiMode } from "../types/app-server";
+import type { OAuthCredential } from "@earendil-works/pi-ai";
 import {
+  apiProviderAuthMode,
   apiProviderApiKeyRequired,
   apiProviderMaxOutputReserve,
   getApiProviderPreset,
@@ -9,6 +11,7 @@ import {
   normalizeApiProviderProtocol,
   normalizeApiProviderBaseUrl,
   type ApiProviderId,
+  type ApiProviderAuthMode,
   type ApiProviderProtocol
 } from "./provider-presets";
 import {
@@ -252,6 +255,7 @@ export interface ApiProviderConfig {
   providerId?: ApiProviderId;
   runtimeProviderId: string;
   apiProtocol: ApiProviderProtocol;
+  authMode: ApiProviderAuthMode;
   name: string;
   baseUrl: string;
   model: string;
@@ -296,6 +300,7 @@ export interface CodexForObsidianSettings {
   providerMode: ProviderMode;
   activeApiProviderId: string;
   apiProviders: ApiProviderConfig[];
+  openAICodexCredential: OAuthCredential | null;
   defaultModel: string;
   defaultReasoning: ReasoningEffort;
   defaultServiceTier: ServiceTierChoice;
@@ -333,6 +338,7 @@ export const DEFAULT_SETTINGS: CodexForObsidianSettings = {
   providerMode: "custom-api",
   activeApiProviderId: "",
   apiProviders: [createDefaultApiProvider()],
+  openAICodexCredential: null,
   defaultModel: "",
   defaultReasoning: "high",
   defaultServiceTier: "fast",
@@ -436,6 +442,9 @@ export function normalizeSettingsData(input: unknown): { settings: CodexForObsid
     customWelcomeSubtitle: normalizeWelcomeLine(
       data?.customWelcomeSubtitle,
       DEFAULT_ECHOINK_WELCOME_SUBTITLE
+    ),
+    openAICodexCredential: normalizeOpenAICodexCredential(
+      data?.openAICodexCredential
     ),
     setup: normalizeSetupSettings(data?.setup),
     memory: normalizeMemorySettings(data?.memory),
@@ -589,8 +598,25 @@ export function apiProviderHasUsableApiKey(provider: ApiProviderConfig): boolean
     provider.baseUrl,
     provider.name
   );
-  return !apiProviderApiKeyRequired(providerId)
-    || Boolean(provider.apiKey.trim());
+  return provider.authMode === "api-key"
+    && (
+      !apiProviderApiKeyRequired(providerId)
+      || Boolean(provider.apiKey.trim())
+    );
+}
+
+export function apiProviderHasUsableCredential(
+  provider: ApiProviderConfig,
+  openAICodexCredential: OAuthCredential | null
+): boolean {
+  return provider.authMode === "oauth"
+    ? normalizeApiProviderId(
+        provider.providerId,
+        provider.baseUrl,
+        provider.name
+      ) === "openai-codex"
+      && openAICodexCredential !== null
+    : apiProviderHasUsableApiKey(provider);
 }
 
 export function applyApiProviderPreset(
@@ -607,6 +633,7 @@ export function applyApiProviderPreset(
   provider.providerId = preset.id;
   provider.runtimeProviderId = preset.runtimeProviderId;
   provider.apiProtocol = preset.apiProtocol;
+  provider.authMode = preset.authMode;
   provider.name = preset.name;
   provider.baseUrl = preset.baseUrl;
   provider.model = preset.model;
@@ -634,6 +661,7 @@ export function createApiProviderConfig(
     providerId: preset.id,
     runtimeProviderId: preset.runtimeProviderId,
     apiProtocol: preset.apiProtocol,
+    authMode: preset.authMode,
     name: preset.name,
     baseUrl: preset.baseUrl,
     model: preset.model,
@@ -805,6 +833,7 @@ export function validateApiProvider(provider: Pick<ApiProviderConfig,
   | "model"
   | "apiKey"
   | "apiProtocol"
+  | "authMode"
   | "runtimeProviderId"
   | "contextWindow"
   | "maxOutputTokens"
@@ -817,6 +846,9 @@ export function validateApiProvider(provider: Pick<ApiProviderConfig,
     provider.baseUrl,
     provider.name
   );
+  if (provider.authMode !== apiProviderAuthMode(providerId)) {
+    errors.push(language === "en" ? "Authentication mode is invalid" : "认证方式无效");
+  }
   if (!provider.name.trim()) errors.push(language === "en" ? "Name is required" : "名称不能为空");
   if (!provider.baseUrl.trim()) errors.push(language === "en" ? "Base URL is required" : "Base URL 不能为空");
   if (provider.baseUrl.trim()) {
@@ -1625,11 +1657,28 @@ function normalizeNonNegativeNumber(value: unknown): number {
   return number;
 }
 
-function normalizeApiProviderSelection(settings: Pick<CodexForObsidianSettings, "providerMode" | "activeApiProviderId" | "apiProviders">): void {
+function normalizeApiProviderSelection(settings: Pick<
+  CodexForObsidianSettings,
+  | "providerMode"
+  | "activeApiProviderId"
+  | "apiProviders"
+  | "openAICodexCredential"
+>): void {
   const active = getActiveApiProvider(settings);
   settings.providerMode = "custom-api";
-  if (active && apiProviderHasUsableApiKey(active)) return;
-  const first = settings.apiProviders.find(apiProviderHasUsableApiKey);
+  if (
+    active
+    && apiProviderHasUsableCredential(
+      active,
+      settings.openAICodexCredential
+    )
+  ) return;
+  const first = settings.apiProviders.find((provider) =>
+    apiProviderHasUsableCredential(
+      provider,
+      settings.openAICodexCredential
+    )
+  );
   settings.activeApiProviderId = first?.id ?? "";
 }
 
@@ -1677,10 +1726,13 @@ function normalizeApiProviders(value: unknown): ApiProviderConfig[] {
             ? providerId
             : preset.runtimeProviderId
       ),
-      apiProtocol: normalizeApiProviderProtocol(
-        record.apiProtocol,
-        providerId
-      ),
+      apiProtocol: providerId === "custom"
+        || providerId === "openai"
+        || providerId === "anthropic"
+        || providerId === "qwen"
+        ? normalizeApiProviderProtocol(record.apiProtocol, providerId)
+        : preset.apiProtocol,
+      authMode: apiProviderAuthMode(providerId),
       name: name || preset.name,
       baseUrl: baseUrl || preset.baseUrl,
       model: selectedModel,
@@ -1711,7 +1763,9 @@ function normalizeApiProviders(value: unknown): ApiProviderConfig[] {
         providerId,
         modelPreset
       }),
-      apiKey: typeof record.apiKey === "string"
+      apiKey: apiProviderAuthMode(providerId) === "oauth"
+        ? ""
+        : typeof record.apiKey === "string"
         ? record.apiKey.trim()
         : "",
       ...(Object.keys(queryParams).length ? { queryParams } : {})
@@ -1747,6 +1801,7 @@ function createDefaultApiProvider(): ApiProviderConfig {
     providerId: preset.id,
     runtimeProviderId: preset.runtimeProviderId,
     apiProtocol: preset.apiProtocol,
+    authMode: preset.authMode,
     name: preset.name,
     baseUrl: preset.baseUrl,
     model: preset.model,
@@ -1758,6 +1813,33 @@ function createDefaultApiProvider(): ApiProviderConfig {
     contextWindow: modelPreset.contextWindow,
     maxOutputTokens: modelPreset.maxOutputTokens,
     apiKey: ""
+  };
+}
+
+function normalizeOpenAICodexCredential(
+  value: unknown
+): OAuthCredential | null {
+  const record = settingsRecord(value);
+  if (
+    record?.type !== "oauth"
+    || typeof record.access !== "string"
+    || !record.access.trim()
+    || typeof record.refresh !== "string"
+    || !record.refresh.trim()
+    || typeof record.expires !== "number"
+    || !Number.isFinite(record.expires)
+    || record.expires <= 0
+  ) return null;
+  const accountId = typeof record.accountId === "string"
+    && record.accountId.trim()
+    ? record.accountId.trim()
+    : undefined;
+  return {
+    type: "oauth",
+    access: record.access.trim(),
+    refresh: record.refresh.trim(),
+    expires: record.expires,
+    ...(accountId ? { accountId } : {})
   };
 }
 

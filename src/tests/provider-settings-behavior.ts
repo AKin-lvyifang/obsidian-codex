@@ -1,7 +1,11 @@
 import * as assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { App, openTestModals } from "obsidian";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type {
+  AssistantMessage,
+  ProviderStreams,
+  StreamOptions
+} from "@earendil-works/pi-ai";
 import {
   activateApiProvider,
   applyApiProviderModelPreset,
@@ -19,7 +23,14 @@ import type {
   PiProviderModelListResult
 } from "../plugin/pi-provider-configuration-service";
 import { PiProviderConfigurationService } from "../plugin/pi-provider-configuration-service";
-import type { PiProviderProtocolDispatcher } from "../harness/pi/pi-provider-protocol-adapter";
+import {
+  createOpenAICodexSseAdapter,
+  PiProviderProtocolTransport,
+  type PiProviderProtocolDispatcher
+} from "../harness/pi/pi-provider-protocol-adapter";
+import {
+  createPiProviderModelDefinition
+} from "../harness/pi/production-pi-model-resolver";
 import {
   ProviderPreflightSession,
   providerPreflightApiKeyReady
@@ -113,6 +124,11 @@ import {
 import { renderCodexHeader, updateCodexHeaderIdentity } from "../ui/codex-view/header";
 import { mountEchoInkOnboardingCoachmark } from "../ui/onboarding-coachmark";
 import { KNOWLEDGE_INITIALIZATION_ROOTS } from "../knowledge-base/initializer";
+import {
+  logoutOpenAICodexAfterRuntimeSuspension,
+  OpenAICodexOAuthService,
+  OpenAICodexSettingsCredentialStore
+} from "../plugin/openai-codex-oauth-service";
 
 export async function runProviderSettingsBehaviorTests(): Promise<void> {
   assertSettingsV50MigrationContract();
@@ -127,11 +143,15 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   await assertPersistedProviderRollbackPreservesQueuedSettingsSave();
   await assertSettingsPersistenceReadbackOutcomes();
   await assertProviderApiKeyPersistenceLifecycle();
+  await assertOpenAICodexCredentialStoreContract();
+  await assertOpenAICodexLogoutSuspendsRuntime();
   await runApiProviderActivationServiceTests();
   await runEditorTranslationServiceTests();
   runEditorTranslationSelectionTests();
   await assertProviderTextGenerationCompletionContract();
   assertPresetRequestMappings();
+  assertOpenAICodexSseAdapterContract();
+  await assertProviderAuthResolutionFailureContract();
   assertProviderTooltipBehavior();
   assertSavedModelLifecycle();
   assertNewProductGenerationKeepsConfigurationButDropsLegacyHistory();
@@ -146,6 +166,7 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   await assertResourceScanErrorsClearAcrossTabs();
   assertProviderBadgeReflowCssContract();
   await assertSavedBindingPreflightLifecycle();
+  await assertOpenAICodexModalLifecycle();
   await assertProviderModelModalPreflightLifecycle();
   await assertProviderApiKeyEditLifecycle();
   await assertProviderModalModelAccessibleNameIncludesValue();
@@ -580,6 +601,7 @@ async function assertProviderTextGenerationCompletionContract(): Promise<void> {
     providerId: "deepseek",
     runtimeProviderId: "deepseek",
     apiProtocol: "openai-completions",
+    authMode: "api-key",
     baseUrl: "https://api.deepseek.com",
     modelId: "deepseek-chat",
     apiKey: "fixture-key",
@@ -979,6 +1001,129 @@ async function assertProviderApiKeyPersistenceLifecycle(): Promise<void> {
     editingSettings.apiProviders[0]?.apiKey,
     "replacement-provider-api-key"
   );
+}
+
+async function assertOpenAICodexCredentialStoreContract(): Promise<void> {
+  const settings = structuredClone(DEFAULT_SETTINGS);
+  const persistedStates: Array<string | null> = [];
+  const host = {
+    settings,
+    saveSettings: async () => {
+      persistedStates.push(
+        settings.openAICodexCredential?.access ?? null
+      );
+    }
+  };
+  const store = new OpenAICodexSettingsCredentialStore(host);
+  const firstGate = deferred<void>();
+  const first = store.modify("openai-codex", async (current) => {
+    assert.equal(current, undefined);
+    await firstGate.promise;
+    return codexCredentialFixture("first");
+  });
+  let secondStarted = false;
+  const second = store.modify("openai-codex", async (current) => {
+    secondStarted = true;
+    assert.equal(current?.type, "oauth");
+    assert.equal(current?.access, "fixture-access-first");
+    return codexCredentialFixture("rotated");
+  });
+  await flushProviderModalTasks();
+  assert.equal(secondStarted, false);
+  firstGate.resolve();
+  await Promise.all([first, second]);
+  assert.deepEqual(persistedStates, [
+    "fixture-access-first",
+    "fixture-access-rotated"
+  ]);
+  assert.equal(
+    settings.openAICodexCredential?.refresh,
+    "fixture-refresh-rotated"
+  );
+  assert.deepEqual(await store.list(), [{
+    providerId: "openai-codex",
+    type: "oauth"
+  }]);
+
+  const oauth = new OpenAICodexOAuthService(host);
+  assert.equal((await oauth.status()).state, "connected");
+  assert.equal(
+    await oauth.resolveAccessToken(),
+    "fixture-access-rotated"
+  );
+  await oauth.logout();
+  assert.equal(settings.openAICodexCredential, null);
+  assert.equal((await oauth.status()).state, "disconnected");
+  await assert.rejects(
+    oauth.resolveAccessToken(),
+    /OpenAI Codex 授权已失效，请在设置中重新登录/u
+  );
+
+  settings.openAICodexCredential = {
+    ...codexCredentialFixture("expired"),
+    expires: 1
+  };
+  assert.equal(
+    (await new OpenAICodexOAuthService(host).status()).state,
+    "expired"
+  );
+
+  const beforeFailure = structuredClone(settings.openAICodexCredential);
+  const failingStore = new OpenAICodexSettingsCredentialStore({
+    settings,
+    saveSettings: async () => {
+      throw new Error("fixture-persist-failed");
+    }
+  });
+  await assert.rejects(
+    failingStore.modify("openai-codex", async () =>
+      codexCredentialFixture("not-persisted")
+    ),
+    /codex_oauth_credential_persist_failed/u
+  );
+  assert.deepEqual(settings.openAICodexCredential, beforeFailure);
+}
+
+function codexCredentialFixture(suffix: string) {
+  return {
+    type: "oauth" as const,
+    access: `fixture-access-${suffix}`,
+    refresh: `fixture-refresh-${suffix}`,
+    expires: Date.now() + 60_000,
+    accountId: `fixture-account-${suffix}`
+  };
+}
+
+async function assertOpenAICodexLogoutSuspendsRuntime(): Promise<void> {
+  const order: string[] = [];
+  await logoutOpenAICodexAfterRuntimeSuspension({
+    active: true,
+    suspendRuntime: async () => {
+      order.push("runtime-suspended");
+    },
+    logout: async () => {
+      order.push("credential-deleted");
+    }
+  });
+  assert.deepEqual(order, [
+    "runtime-suspended",
+    "credential-deleted"
+  ]);
+
+  let logoutCalled = false;
+  await assert.rejects(
+    logoutOpenAICodexAfterRuntimeSuspension({
+      active: true,
+      suspendRuntime: async () => {
+        throw new Error("fixture-runtime-shutdown-failed");
+      },
+      logout: async () => {
+        logoutCalled = true;
+      }
+    }),
+    /fixture-runtime-shutdown-failed/u
+  );
+  assert.equal(logoutCalled, false);
 }
 
 async function assertSettingsPersistenceReadbackOutcomes(): Promise<void> {
@@ -1591,6 +1736,37 @@ function assertSettingsV50MigrationContract(): void {
     }).settings;
     assert.equal(available.activeApiProviderId, configured.id);
     assert.equal(available.apiProviders[0]?.apiKey, configured.apiKey);
+    assert.equal(available.apiProviders[0]?.authMode, "api-key");
+  });
+
+  check("v49 adds explicit Codex OAuth without weakening API-key Providers", () => {
+    const apiKeyProvider = createApiProviderConfig("deepseek", "api-key-v49");
+    apiKeyProvider.apiKey = "fixture-provider-key";
+    const codexProvider = {
+      ...createApiProviderConfig("openai-codex", "codex-v49"),
+      authMode: undefined,
+      apiProtocol: "openai-completions",
+      apiKey: "must-not-be-used-as-codex-auth"
+    };
+    const normalized = normalizeSettingsData({
+      ...structuredClone(DEFAULT_SETTINGS),
+      settingsVersion: 49,
+      activeApiProviderId: apiKeyProvider.id,
+      apiProviders: [apiKeyProvider, codexProvider]
+    }).settings;
+    assert.equal(normalized.apiProviders[0]?.authMode, "api-key");
+    assert.equal(
+      normalized.apiProviders[0]?.apiKey,
+      "fixture-provider-key"
+    );
+    assert.equal(normalized.apiProviders[1]?.authMode, "oauth");
+    assert.equal(
+      normalized.apiProviders[1]?.apiProtocol,
+      "openai-codex-responses"
+    );
+    assert.equal(normalized.apiProviders[1]?.apiKey, "");
+    assert.equal(normalized.openAICodexCredential, null);
+    assert.equal(normalized.activeApiProviderId, apiKeyProvider.id);
   });
 
   check("v48 drops retired Knowledge scheduling state but preserves Review scheduling", () => {
@@ -3930,6 +4106,88 @@ function assertPresetRequestMappings(): void {
   }
 }
 
+function assertOpenAICodexSseAdapterContract(): void {
+  const captured: StreamOptions[] = [];
+  const upstream: ProviderStreams = {
+    stream: (_model, _context, options) => {
+      captured.push(options ?? {});
+      return {} as never;
+    },
+    streamSimple: (_model, _context, options) => {
+      captured.push(options ?? {});
+      return {} as never;
+    }
+  };
+  const adapter = createOpenAICodexSseAdapter(upstream);
+  adapter.stream({} as never, {} as never, {
+    transport: "websocket"
+  });
+  adapter.streamSimple({} as never, {} as never, {
+    transport: "auto"
+  });
+  assert.deepEqual(
+    captured.map((options) => options.transport),
+    ["sse", "sse"]
+  );
+}
+
+async function assertProviderAuthResolutionFailureContract(): Promise<void> {
+  const failureCode = async (
+    authMode: "api-key" | "oauth"
+  ): Promise<string | undefined> => {
+    const oauth = authMode === "oauth";
+    const model = createPiProviderModelDefinition({
+      providerId: oauth ? "openai-codex" : "deepseek",
+      apiProtocol: oauth
+        ? "openai-codex-responses"
+        : "openai-completions",
+      baseUrl: oauth
+        ? "https://chatgpt.com/backend-api"
+        : "https://api.deepseek.com",
+      modelRef: oauth ? "gpt-5.6-sol" : "deepseek-v4-flash"
+    });
+    const transport = new PiProviderProtocolTransport({
+      authorityId: "fixture-authority",
+      storeSetId: "fixture-store-set",
+      resolveAuthToken: async () => {
+        throw new Error("fixture-auth-resolution-failed");
+      }
+    });
+    const stream = await transport.stream({
+      runId: "fixture-run",
+      conversationId: "fixture-conversation",
+      turnId: "fixture-turn",
+      correlationId: "fixture-correlation",
+      provider: {
+        providerId: model.provider,
+        apiProtocol: model.api,
+        authMode,
+        baseUrl: model.baseUrl,
+        modelRef: model.id
+      },
+      model,
+      context: { messages: [], tools: [] },
+      options: {
+        maxTokens: 32,
+        temperature: 0,
+        cacheRetention: "none",
+        maxRetries: 0,
+        timeoutMs: 1_000
+      }
+    });
+    return (await stream.result()).errorMessage;
+  };
+
+  assert.equal(
+    await failureCode("oauth"),
+    "provider_oauth_relogin_required"
+  );
+  assert.equal(
+    await failureCode("api-key"),
+    "provider_api_key_missing"
+  );
+}
+
 function assertProviderTooltipBehavior(): void {
   assert.equal(
     providerTooltipBaseUrl("deepseek", "https://ignored.example.com"),
@@ -3940,6 +4198,10 @@ function assertProviderTooltipBehavior(): void {
     "https://custom.example.com/v1"
   );
   assert.equal(providerTooltipBaseUrl("custom", "   "), "");
+  assert.equal(
+    providerTooltipBaseUrl("openai-codex", "https://ignored.example.com"),
+    ""
+  );
 }
 
 function assertSavedModelLifecycle(): void {
@@ -3965,6 +4227,7 @@ async function assertSavedBindingPreflightLifecycle(): Promise<void> {
     providerId: "deepseek",
     runtimeProviderId: provider.runtimeProviderId,
     apiProtocol: provider.apiProtocol,
+    authMode: provider.authMode,
     baseUrl: provider.baseUrl,
     modelId: provider.model,
     apiKey: "",
@@ -4056,6 +4319,102 @@ async function assertSavedBindingPreflightLifecycle(): Promise<void> {
     "connection:loading",
     "connection:available"
   ]);
+}
+
+async function assertOpenAICodexModalLifecycle(): Promise<void> {
+  installProviderModalDomFixture();
+  const provider = createApiProviderConfig(
+    "openai-codex",
+    "codex-oauth-modal"
+  );
+  const openedUrls: string[] = [];
+  const modal = new ProviderModelModal({
+    app: new App(),
+    draft: provider,
+    editing: false,
+    language: "en",
+    copy: settingsCopy("en"),
+    preflight: {
+      listModels: async () => ({
+        status: "available",
+        models: provider.models
+      }),
+      testConnection: async () => ({
+        status: "failed",
+        failure: "auth"
+      })
+    },
+    codexOAuth: {
+      status: async () => ({ state: "disconnected" }),
+      openExternal: async (url) => {
+        openedUrls.push(url);
+        return true;
+      },
+      login: async (interaction) => {
+        const method = await interaction.prompt({
+          type: "select",
+          message: "fixture",
+          options: [{ id: "browser", label: "Browser" }]
+        });
+        assert.equal(method, "browser");
+        interaction.notify({
+          type: "auth_url",
+          url: "https://auth.openai.com/fixture"
+        });
+        const code = await interaction.prompt({
+          type: "manual_code",
+          message: "fixture"
+        });
+        assert.equal(code, "fixture-authorization-code");
+        return { state: "connected" };
+      },
+      logout: async () => undefined
+    },
+    save: async () => ({ saved: true })
+  });
+  modal.open();
+  await flushProviderModalTasks();
+  assert.match(modal.contentEl.textContent, /Beta/u);
+  assert.match(modal.contentEl.textContent, /OpenAI browser authorization/u);
+  assert.doesNotMatch(modal.contentEl.textContent, /API Key/u);
+  assert.equal(
+    modal.titleEl.querySelector(".codex-provider-protocol-pill"),
+    null
+  );
+  assert.match(modal.contentEl.textContent, /gpt-5\.6-sol/u);
+
+  const login = Array.from(modal.contentEl.querySelectorAll("button"))
+    .find((button) => button.textContent === "Sign in with OpenAI");
+  assert.ok(login);
+  login.click();
+  await flushProviderModalTasks();
+  assert.deepEqual(openedUrls, ["https://auth.openai.com/fixture"]);
+  const manual = modal.contentEl.querySelector<HTMLInputElement>(
+    '[data-modal-focus-key="codex-oauth-manual"]'
+  );
+  assert.ok(manual);
+  manual.value = "fixture-authorization-code";
+  manual.oninput?.(new Event("input"));
+  const finish = Array.from(modal.contentEl.querySelectorAll("button"))
+    .find((button) => button.textContent === "Complete authorization");
+  assert.ok(finish);
+  assert.equal(finish.disabled, false);
+  finish.click();
+  await flushProviderModalTasks();
+  assert.match(modal.contentEl.textContent, /OpenAI Codex is connected/u);
+  assert.ok(Array.from(modal.contentEl.querySelectorAll("button"))
+    .some((button) => button.textContent === "Log out"));
+  const testConnection = Array.from(
+    modal.contentEl.querySelectorAll("button")
+  ).find((button) => button.textContent === "Test connection");
+  assert.ok(testConnection);
+  testConnection.click();
+  await flushProviderModalTasks();
+  assert.match(
+    modal.contentEl.textContent,
+    /OpenAI Codex authorization expired\. Sign in again\./u
+  );
+  modal.close();
 }
 
 async function assertProviderModelModalPreflightLifecycle(): Promise<void> {

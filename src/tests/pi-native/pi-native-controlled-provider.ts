@@ -160,6 +160,7 @@ function providerModel(): Model<Api> {
   return createPiProviderModelDefinition({
     providerId: "custom",
     apiProtocol: "openai-completions",
+    authMode: "api-key",
     baseUrl: "https://fixture.example/v1",
     modelRef: "fixture/model"
   });
