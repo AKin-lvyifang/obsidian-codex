@@ -2,7 +2,7 @@
  * user-profile-state.ts — durable user profile truth source.
  *
  * Stored at `.echoink/shared-user/user-profile-state.json`
- * (schema `echoink.user-profile.v1`, 人格系统重构草案 §8).
+ * (schema `echoink.user-profile.v2`, 人格系统重构草案 §8).
  *
  * USER.md 是该状态的纯文本投影，只包含稳定、当前有效且有一级 Memory 来源的画像。
  * 二级事实不能进入 USER 投影。
@@ -25,6 +25,10 @@ export const USER_PROFILE_ITEM_HARD_MAX_CHARS = 120 as const;
 export const USER_PROFILE_PROJECTION_TARGET_CHARS = 2_000 as const;
 export const USER_PROFILE_WRITE_HARD_MAX_CHARS = 8_000 as const;
 export const USER_PROFILE_LEGACY_READ_MAX_CHARS = 16_000 as const;
+
+function normalizedProfileClaimValue(text: string): string {
+  return text.normalize("NFKC").replaceAll(/\s+/gu, " ").trim().toLowerCase();
+}
 
 export interface UserProfileSlotDefinition {
   readonly section: UserProfileSection;
@@ -153,6 +157,107 @@ export const USER_PROFILE_STATE_RELATIVE_PATH = path.posix.join(
  */
 export const USER_OBSERVED_MIN_SOURCES = 3 as const;
 
+export type UserProfileStateInspection =
+  | Readonly<{ kind: "missing" }>
+  | Readonly<{ kind: "v2"; state: UserProfileState }>
+  | Readonly<{ kind: "v1"; state: UserProfileState }>
+  | Readonly<{ kind: "invalid"; reason: string }>;
+
+const LEGACY_USER_PROFILE_STATE_SCHEMA = "echoink.user-profile.v1" as const;
+
+/** Inspect and deterministically map v1 without ever filtering unknown keys. */
+export async function inspectUserProfileStateFile(
+  filePath: string
+): Promise<UserProfileStateInspection> {
+  let raw: Record<string, unknown> | null;
+  try {
+    raw = await cognitiveReadJsonOrNull<Record<string, unknown>>(filePath);
+  } catch {
+    return Object.freeze({ kind: "invalid", reason: "unparseable_json" });
+  }
+  if (!raw) return Object.freeze({ kind: "missing" });
+  if (raw.schema === USER_PROFILE_STATE_SCHEMA) {
+    const state = parseUserProfileState(raw);
+    return state
+      ? Object.freeze({ kind: "v2", state })
+      : Object.freeze({ kind: "invalid", reason: "invalid_v2" });
+  }
+  if (raw.schema !== LEGACY_USER_PROFILE_STATE_SCHEMA) {
+    return Object.freeze({ kind: "invalid", reason: "unknown_schema" });
+  }
+  const migrated = migrateLegacyUserProfileState(raw);
+  return migrated.state
+    ? Object.freeze({ kind: "v1", state: migrated.state })
+    : Object.freeze({ kind: "invalid", reason: migrated.reason ?? "invalid_v1" });
+}
+
+function migrateLegacyUserProfileState(
+  raw: Record<string, unknown>
+): Readonly<{ state: UserProfileState | null; reason?: string }> {
+  if (!Array.isArray(raw.items) || !Array.isArray(raw.processedSources)) {
+    return Object.freeze({ state: null, reason: "legacy_shape_invalid" });
+  }
+  const mappedItems: Record<string, unknown>[] = [];
+  const seenSlots = new Set<string>();
+  for (const value of raw.items) {
+    if (!value || typeof value !== "object") {
+      return Object.freeze({ state: null, reason: "legacy_item_invalid" });
+    }
+    const item = value as Record<string, unknown>;
+    const section = item.section;
+    if (section !== "identity" && section !== "preference" && section !== "collaboration") {
+      return Object.freeze({ state: null, reason: "legacy_section_invalid" });
+    }
+    const rawKey = typeof item.profileKey === "string" ? item.profileKey.trim() : "";
+    const slot = mapLegacyProfileSlot(section, rawKey);
+    if (!slot) return Object.freeze({ state: null, reason: "legacy_profile_key_unmappable" });
+    if (!Array.isArray(item.sourceMemoryIds)
+      || item.sourceMemoryIds.some((id) => typeof id !== "string")) {
+      return Object.freeze({ state: null, reason: "legacy_sources_invalid" });
+    }
+    const basisSlot = item.basis === "observed_memory" ? "observed" : "explicit";
+    const slotKey = `${slot.profileKey}\u0000${basisSlot}`;
+    if (seenSlots.has(slotKey)) {
+      return Object.freeze({ state: null, reason: "legacy_duplicate_slot" });
+    }
+    seenSlots.add(slotKey);
+    mappedItems.push({ ...item, section: slot.section, profileKey: slot.profileKey });
+  }
+  if (raw.processedSources.some((value) =>
+    !value || typeof value !== "object"
+    || typeof (value as Record<string, unknown>).memoryId !== "string"
+    || typeof (value as Record<string, unknown>).memoryRevision !== "number")) {
+    return Object.freeze({ state: null, reason: "legacy_processed_sources_invalid" });
+  }
+  const state = parseUserProfileState({
+    ...raw,
+    schema: USER_PROFILE_STATE_SCHEMA,
+    items: mappedItems
+  });
+  if (!state
+    || state.items.length !== mappedItems.length
+    || state.processedSources.length !== raw.processedSources.length) {
+    return Object.freeze({ state: null, reason: "legacy_migration_would_drop_data" });
+  }
+  return Object.freeze({ state });
+}
+
+function mapLegacyProfileSlot(
+  section: UserProfileSection,
+  rawKey: string
+): UserProfileSlotDefinition | null {
+  const direct = profileSlotDefinition(rawKey);
+  if (direct?.section === section) return direct;
+  const wrappedPrefix = `${section}:`;
+  if (rawKey.startsWith(wrappedPrefix)) {
+    const wrapped = profileSlotDefinition(rawKey.slice(wrappedPrefix.length));
+    if (wrapped?.section === section) return wrapped;
+  }
+  return USER_PROFILE_SLOTS.find((slot) =>
+    slot.section === section && slot.labelZh === rawKey
+  ) ?? null;
+}
+
 export class UserProfileStateStore {
   readonly filePath: string;
 
@@ -163,7 +268,9 @@ export class UserProfileStateStore {
   async read(): Promise<UserProfileState | null> {
     const raw = await cognitiveReadJsonOrNull<Record<string, unknown>>(this.filePath);
     if (!raw) return null;
-    return parseUserProfileState(raw);
+    const parsed = parseUserProfileState(raw);
+    if (!parsed) throw new Error("user_profile_state_invalid:unsupported_or_damaged");
+    return parsed;
   }
 }
 
@@ -216,24 +323,38 @@ export function applyDreamProfileUpdate(
     const slot = profileSlotDefinition(key);
     if (!slot || slot.section !== incoming.section) continue;
     const basisSlot = incoming.basis === "observed_memory" ? "observed" : "explicit";
+    const claimValue = normalizedProfileClaimValue(text);
     const existingIndex = items.findIndex((item) =>
       item.profileKey === key
       && (item.basis === "observed_memory" ? "observed" : "explicit") === basisSlot
     );
     if (existingIndex >= 0) {
       const existing = items[existingIndex];
-      const accumulateObserved = basisSlot === "observed" && existing.status === "current";
-      const sourceMemoryIds = accumulateObserved
+      const sameObservedClaim = basisSlot === "observed"
+        && existing.status === "current"
+        && normalizedProfileClaimValue(existing.text) === claimValue;
+      if (basisSlot === "observed"
+        && existing.status === "current"
+        && existing.sourceMemoryIds.length >= USER_OBSERVED_MIN_SOURCES
+        && !sameObservedClaim) {
+        // A promoted observed value stays supported by its existing valid
+        // sources. One contradictory observation neither votes for it nor
+        // replaces it; only source reconciliation/reprocessing or explicit
+        // truth may retire or hide the established value.
+        continue;
+      }
+      const sourceMemoryIds = sameObservedClaim
         ? uniqueTail([...existing.sourceMemoryIds, incoming.sourceMemoryId], 3)
         : [incoming.sourceMemoryId];
       items[existingIndex] = Object.freeze({
         ...existing,
         section: slot.section,
         profileKey: slot.profileKey,
-        // The closed slot is the aggregation identity. Keep one stable
-        // observed formulation while independent sources accumulate; an
-        // explicit fact or a newly reactivated slot replaces it immediately.
-        text: accumulateObserved ? existing.text : text,
+        // Each closed slot has at most one observed candidate. Only the same
+        // bounded normalized claim can accumulate independent sources; a
+        // contradictory claim resets the candidate to one source so values
+        // can never pool votes. Raw contradictory evidence stays in Memory.
+        text: sameObservedClaim ? existing.text : text,
         basis: incoming.basis === "observed_memory" ? "observed_memory" : "explicit_memory",
         status: "current",
         sourceMemoryIds: Object.freeze(sourceMemoryIds),
@@ -265,13 +386,16 @@ export function applyDreamProfileUpdate(
       processedAt: input.now
     }));
   }
+  const boundedProcessedSources = boundProcessedSources(
+    [...processedMap.values()],
+    items
+  );
 
   return Object.freeze({
     schema: USER_PROFILE_STATE_SCHEMA,
     revision,
     items: Object.freeze(items),
-    processedSources: Object.freeze([...processedMap.values()]
-      .sort((left, right) => left.memoryId.localeCompare(right.memoryId))),
+    processedSources: Object.freeze(boundedProcessedSources),
     legacyUserMigration: input.legacyUserMigration !== undefined
       ? input.legacyUserMigration
       : previous.legacyUserMigration,
@@ -318,8 +442,9 @@ export function reconcileProfileSources(
       }));
     }
   }
-  const processedSources = previous.processedSources.filter(
-    (source) => validMemoryIds.has(source.memoryId)
+  const processedSources = boundProcessedSources(
+    previous.processedSources.filter((source) => validMemoryIds.has(source.memoryId)),
+    items
   );
   if (processedSources.length !== previous.processedSources.length) changed = true;
   if (!changed) return previous;
@@ -390,12 +515,14 @@ export function revokeReprocessedProfileSources(
       }));
     }
   }
+  const processedSources = boundProcessedSources(previous.processedSources, items);
+  if (processedSources.length !== previous.processedSources.length) changed = true;
   if (!changed) return previous;
   return Object.freeze({
     schema: USER_PROFILE_STATE_SCHEMA,
     revision,
     items: Object.freeze(items),
-    processedSources: previous.processedSources,
+    processedSources: Object.freeze(processedSources),
     legacyUserMigration: previous.legacyUserMigration,
     lastProjectedUserHash: previous.lastProjectedUserHash,
     updatedAt: now
@@ -452,7 +579,7 @@ export function parseUserProfileState(raw: Record<string, unknown>): UserProfile
     if (!existing || item.revision > existing.revision) itemBySlot.set(slotKey, item);
   }
   const items = [...itemBySlot.values()];
-  const processedSources = Array.isArray(raw.processedSources)
+  const parsedProcessedSources = Array.isArray(raw.processedSources)
     ? raw.processedSources
         .filter((source): source is Record<string, unknown> =>
           Boolean(source) && typeof source === "object"
@@ -464,6 +591,7 @@ export function parseUserProfileState(raw: Record<string, unknown>): UserProfile
           processedAt: typeof source.processedAt === "number" ? source.processedAt : 0
         }))
     : [];
+  const processedSources = boundProcessedSources(parsedProcessedSources, items);
   const migration = raw.legacyUserMigration === "pending" || raw.legacyUserMigration === "done"
     ? raw.legacyUserMigration
     : null;
@@ -484,4 +612,16 @@ function uniqueTail(values: readonly string[], limit: number): string[] {
     if (!unique.includes(value)) unique.push(value);
   }
   return unique.slice(-limit);
+}
+
+function boundProcessedSources(
+  processedSources: readonly ProcessedProfileSource[],
+  items: readonly UserProfileItem[]
+): ProcessedProfileSource[] {
+  const referenced = new Set(items
+    .filter((item) => item.status === "current")
+    .flatMap((item) => item.sourceMemoryIds));
+  return processedSources
+    .filter((source) => referenced.has(source.memoryId))
+    .sort((left, right) => left.memoryId.localeCompare(right.memoryId));
 }

@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFile, rm, writeFile } from "node:fs/promises";
+import path from "node:path";
 import {
   PI_PERSONAL_MEMORY_TOOL_IDS,
   PI_PERSONAL_MEMORY_TOOL_SCHEMAS,
@@ -19,6 +21,8 @@ export async function runPersonalMemoryToolContractScenarios(): Promise<void> {
   await scenarioTrustedEntryAndProvenanceAuthorization();
   await scenarioRevisionIsRequiredAndStaleWritesFail();
   await scenarioConcurrentWritersUseCas();
+  await scenarioExternalPrimaryTruthWinsWithoutWatchers();
+  await scenarioRepositoryDisposeStopsExternalWatchers();
   await scenarioOversizedReadFailsExplicitly();
   console.log("PASS P3 Memory Tool contract scenarios (partial automated coverage)");
 }
@@ -52,6 +56,7 @@ function assertOpenAiCompatibleMemoryToolSchemas(): void {
   assert.match(String(writeProperties.recallWhen.description ?? ""), /create.*supersede.*必填/iu);
   assert.match(String(schemas.memory_write.description ?? ""), /recallWhen.*必填/iu);
   assert.match(String(schemas.memory_search.description ?? ""), /exhausted=false.*nextCursor/iu);
+  assert.equal(writeProperties.text.maxLength, 120);
 }
 
 async function scenarioOversizedReadFailsExplicitly(): Promise<void> {
@@ -119,11 +124,48 @@ async function scenarioRuntimeIdentityIsNotModelControlled(): Promise<void> {
   }));
   assert.throws(() => normalizePiPersonalMemoryToolArguments("memory_write", {
     operation: "profile_update",
-    profile: "user",
-    content: "# USER\n",
+    profileKey: "preference.unknown",
+    text: "用户偏好中文",
     basis: "explicit",
     contentOrigin: "user_statement",
     evidenceQuote: "请更新我的资料。"
+  }));
+  const boundedProfileText = "甲".repeat(120);
+  assert.deepEqual(normalizePiPersonalMemoryToolArguments("memory_write", {
+    operation: "profile_update",
+    profileKey: "preference.language",
+    text: boundedProfileText,
+    basis: "explicit",
+    contentOrigin: "user_statement",
+    evidenceQuote: "请更新我的资料。",
+    expectedRevision: 3
+  }), {
+    operation: "profile_update",
+    profileKey: "preference.language",
+    text: boundedProfileText,
+    basis: "explicit",
+    contentOrigin: "user_statement",
+    evidenceQuote: "请更新我的资料。",
+    expectedRevision: 3
+  });
+  assert.throws(() => normalizePiPersonalMemoryToolArguments("memory_write", {
+    operation: "profile_update",
+    profileKey: "preference.language",
+    text: "甲".repeat(121),
+    basis: "explicit",
+    contentOrigin: "user_statement",
+    evidenceQuote: "请更新我的资料。",
+    expectedRevision: 3
+  }));
+  assert.throws(() => normalizePiPersonalMemoryToolArguments("memory_write", {
+    operation: "profile_update",
+    profileKey: "preference.language",
+    text: "用户偏好中文",
+    content: "旧的 16000/24000 字段路径不得继续存在",
+    basis: "explicit",
+    contentOrigin: "user_statement",
+    evidenceQuote: "请更新我的资料。",
+    expectedRevision: 3
   }));
   assert.throws(() => normalizePiPersonalMemoryToolArguments("memory_write", {
     operation: "forget",
@@ -380,6 +422,222 @@ async function scenarioConcurrentWritersUseCas(): Promise<void> {
     assert.ok(rejected?.reason instanceof PersonalMemoryAccessError);
     assert.equal(rejected.reason.code, "revision_conflict");
   });
+}
+
+async function scenarioExternalPrimaryTruthWinsWithoutWatchers(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    const created = await fixture.repository.write({
+      operation: "create",
+      kind: "view",
+      title: "外部编辑后再替换",
+      content: "缓存中的旧正文。",
+      recallWhen: "验证外部编辑优先级时",
+      basis: "explicit"
+    }, fixture.runtime());
+    const file = path.join(fixture.repository.layout.root, created.record!.file);
+    await writeRecordBody(file, "磁盘上的新正文，不能被旧缓存覆盖。");
+
+    await assert.rejects(fixture.repository.write({
+      operation: "supersede",
+      targetId: created.record!.id,
+      title: "不应成功的替换",
+      content: "不应覆盖磁盘正文。",
+      recallWhen: "不应生效",
+      basis: "explicit",
+      reason: "陈旧 revision",
+      expectedRevision: created.revision
+    }, fixture.runtime()), isRevisionConflict);
+
+    const reconciled = await fixture.repository.read(created.record!.id, fixture.runtime());
+    assert.equal(reconciled.revision, created.revision + 1);
+    assert.equal(reconciled.record.content, "磁盘上的新正文，不能被旧缓存覆盖。");
+    assert.match(reconciled.record.source, /^user-edit:\/\/personal-memory\//u);
+  }, { watchExternalChanges: false });
+
+  await withPersonalMemoryFixture(async (fixture) => {
+    const created = await fixture.repository.write({
+      operation: "create",
+      kind: "task",
+      title: "外部删除后再关闭",
+      content: "这条记录会从磁盘删除。",
+      recallWhen: "验证外部删除优先级时",
+      basis: "explicit"
+    }, fixture.runtime());
+    const file = path.join(fixture.repository.layout.root, created.record!.file);
+    await rm(file);
+
+    await assert.rejects(fixture.repository.write({
+      operation: "close",
+      targetId: created.record!.id,
+      reason: "陈旧缓存不得复活删除记录",
+      expectedRevision: created.revision
+    }, fixture.runtime()), isRevisionConflict);
+
+    const reconciled = await fixture.repository.inspect();
+    assert.equal(reconciled.revision, created.revision + 1);
+    assert.equal(reconciled.records.some((record) => record.id === created.record!.id), false);
+  }, { watchExternalChanges: false });
+
+  await withPersonalMemoryFixture(async (fixture) => {
+    const created = await fixture.repository.write({
+      operation: "create",
+      kind: "fact",
+      title: "外部编辑后忘记",
+      content: "缓存中的旧事实。",
+      recallWhen: "验证忘记备份时",
+      basis: "explicit"
+    }, fixture.runtime());
+    const file = path.join(fixture.repository.layout.root, created.record!.file);
+    await writeRecordBody(file, "外部修正后的事实必须进入忘记备份。");
+
+    await assert.rejects(
+      fixture.repository.forgetFromUserControl(
+        created.record!.id,
+        "先用陈旧 revision 尝试",
+        created.revision
+      ),
+      isRevisionConflict
+    );
+    const reconciled = await fixture.repository.inspect();
+    const forgotten = await fixture.repository.forgetFromUserControl(
+      created.record!.id,
+      "确认忘记外部修正后的事实",
+      reconciled.revision
+    );
+    const afterForget = await fixture.repository.inspect();
+    const tombstone = afterForget.tombstones.find((item) => item.recordId === forgotten.forgottenId);
+    assert.ok(tombstone);
+    assert.match(
+      await readFile(path.join(fixture.repository.layout.root, tombstone.backupFile), "utf8"),
+      /外部修正后的事实必须进入忘记备份/u
+    );
+  }, { watchExternalChanges: false });
+
+  await withPersonalMemoryFixture(async (fixture) => {
+    const created = await fixture.repository.write({
+      operation: "create",
+      kind: "decision",
+      title: "外部编辑后界面修正",
+      content: "缓存中的旧决定。",
+      recallWhen: "验证界面修正冲突时",
+      basis: "explicit"
+    }, fixture.runtime());
+    const file = path.join(fixture.repository.layout.root, created.record!.file);
+    await writeRecordBody(file, "外部修正后的决定必须保留。");
+
+    await assert.rejects(fixture.repository.supersedeFromUserCorrection({
+      targetId: created.record!.id,
+      title: "界面生成的新决定",
+      content: "不应覆盖外部正文。",
+      recallWhen: "不应生效",
+      reason: "陈旧界面预览",
+      expectedRevision: created.revision
+    }), isRevisionConflict);
+
+    const reconciled = await fixture.repository.read(created.record!.id, fixture.runtime());
+    assert.equal(reconciled.record.content, "外部修正后的决定必须保留。");
+  }, { watchExternalChanges: false });
+
+  await withPersonalMemoryFixture(async (fixture) => {
+    const edited = await fixture.repository.write({
+      operation: "create",
+      kind: "episode",
+      title: "导出中的外部编辑",
+      content: "导出前的旧正文。",
+      recallWhen: "验证导出磁盘真源时",
+      basis: "explicit"
+    }, fixture.runtime());
+    const deleted = await fixture.repository.write({
+      operation: "create",
+      kind: "fact",
+      title: "导出前已从磁盘删除",
+      content: "这条记录不应进入导出。",
+      recallWhen: "验证导出排除删除时",
+      basis: "explicit"
+    }, fixture.runtime());
+    await writeRecordBody(
+      path.join(fixture.repository.layout.root, edited.record!.file),
+      "导出必须包含这段磁盘新正文。"
+    );
+    await rm(path.join(fixture.repository.layout.root, deleted.record!.file));
+
+    const exported = await fixture.repository.exportMemory();
+    const exportText = await readFile(exported.path, "utf8");
+    assert.match(exportText, /导出必须包含这段磁盘新正文/u);
+    assert.doesNotMatch(exportText, /导出前已从磁盘删除/u);
+    const reconciled = await fixture.repository.inspect();
+    assert.equal(reconciled.records.some((record) => record.id === deleted.record!.id), false);
+  }, { watchExternalChanges: false });
+
+  console.log("PASS P1 primary mutations and export reconcile disk truth without watchers");
+}
+
+async function scenarioRepositoryDisposeStopsExternalWatchers(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    const created = await fixture.repository.write({
+      operation: "create",
+      kind: "fact",
+      title: "dispose watcher 验证",
+      content: "关闭前正文。",
+      recallWhen: "验证插件卸载后监听生命周期时",
+      basis: "explicit"
+    }, fixture.runtime());
+    let repository = fixture.repository;
+    for (let index = 0; index < 3; index += 1) {
+      await repository.dispose();
+      const before = await Promise.all([
+        readFile(repository.layout.manifest, "utf8"),
+        readFile(repository.layout.audit, "utf8"),
+        readFile(repository.layout.searchIndex, "utf8")
+      ]);
+      await writeFile(repository.layout.agent, `# 卸载后的 AGENT 外部编辑 ${index}\n`, "utf8");
+      await writeFile(repository.layout.user, `# 卸载后的 USER 外部编辑 ${index}\n`, "utf8");
+      await writeRecordBody(
+        path.join(repository.layout.root, created.record!.file),
+        `卸载后的一级 Memory 外部编辑 ${index}。`
+      );
+      await Promise.all([
+        repository.handleExternalChange({
+          event: "change",
+          relativePath: "agents/echoink/AGENT.md"
+        }),
+        repository.handleExternalChange({
+          event: "change",
+          relativePath: "shared-user/USER.md"
+        }),
+        repository.handleExternalChange({
+          event: "change",
+          relativePath: created.record!.file
+        })
+      ]);
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      const after = await Promise.all([
+        readFile(repository.layout.manifest, "utf8"),
+        readFile(repository.layout.audit, "utf8"),
+        readFile(repository.layout.searchIndex, "utf8")
+      ]);
+      assert.deepEqual(after, before,
+        "disposed and previously reloaded repositories cannot mutate derived state");
+      if (index < 2) repository = await fixture.reopen();
+    }
+
+    await assert.rejects(
+      fixture.repository.exportMemory(),
+      /Repository is disposed/u
+    );
+  });
+  console.log("PASS P1 repository dispose stops watcher mutations across repeated reloads");
+}
+
+async function writeRecordBody(file: string, content: string): Promise<void> {
+  const current = await readFile(file, "utf8");
+  const closingFrontmatter = current.indexOf("\n---\n", 4);
+  assert.ok(closingFrontmatter > 0, "fixture record must contain closing frontmatter");
+  await writeFile(file, `${current.slice(0, closingFrontmatter + 5)}\n${content.trim()}\n`, "utf8");
+}
+
+function isRevisionConflict(error: unknown): boolean {
+  return error instanceof PersonalMemoryAccessError && error.code === "revision_conflict";
 }
 
 function createSecurity(

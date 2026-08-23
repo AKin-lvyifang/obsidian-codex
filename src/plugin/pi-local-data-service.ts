@@ -155,6 +155,10 @@ export class PiLocalDataService {
     );
   }
 
+  async dispose(): Promise<void> {
+    await this.personalMemory.dispose();
+  }
+
   async listConversations(
     statuses?: readonly PiConversationCatalogStatus[]
   ): Promise<Readonly<PiConversationCatalogEntry>[]> {

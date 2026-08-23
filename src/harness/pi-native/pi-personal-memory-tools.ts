@@ -20,6 +20,11 @@ import {
   PersonalMemoryAccessError,
   PersonalMemoryRepository
 } from "../memory/personal-memory-repository";
+import {
+  isUserProfileKey,
+  PROFILE_KEY_MAX_CHARS,
+  USER_PROFILE_ITEM_HARD_MAX_CHARS
+} from "../memory/user-profile-state";
 import type { PiVaultAdditionalToolSecurityPort } from "./pi-vault-tool-security-extension";
 
 export const PI_PERSONAL_MEMORY_TOOL_IDS = [
@@ -199,7 +204,8 @@ export const PI_PERSONAL_MEMORY_TOOL_SCHEMAS: Readonly<Record<PiPersonalMemoryTo
     remindAt: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
     reason: Type.Optional(Type.String({ minLength: 1, maxLength: 2_000 })),
     expectedRevision: Type.Optional(Type.Integer({ minimum: 0 })),
-    profile: Type.Optional(Type.Literal("user"))
+    profileKey: Type.Optional(Type.String({ minLength: 1, maxLength: PROFILE_KEY_MAX_CHARS })),
+    text: Type.Optional(Type.String({ minLength: 1, maxLength: USER_PROFILE_ITEM_HARD_MAX_CHARS }))
   }, {
     additionalProperties: false,
     description: "更新长期 Memory；create 与 supersede 的 recallWhen 必填，其他操作不得提供。"
@@ -471,12 +477,15 @@ function normalizeWrite(input: Readonly<Record<string, unknown>>): Readonly<Memo
     });
   }
   if (operation === "profile_update") {
-    requireExactKeys(input, ["operation", "profile", "content", "basis", "contentOrigin", "evidenceQuote", "expectedRevision"]);
-    if (input.profile !== "user" || input.basis !== "explicit") throw new Error("memory_write_profile_invalid");
+    requireExactKeys(input, ["operation", "profileKey", "text", "basis", "contentOrigin", "evidenceQuote", "expectedRevision"]);
+    const profileKey = requireString(input.profileKey, PROFILE_KEY_MAX_CHARS);
+    if (!isUserProfileKey(profileKey) || input.basis !== "explicit") {
+      throw new Error("memory_write_profile_invalid");
+    }
     return Object.freeze({
       operation,
-      profile: "user",
-      content: requireString(input.content, 16_000),
+      profileKey,
+      text: requireString(input.text, USER_PROFILE_ITEM_HARD_MAX_CHARS),
       basis: "explicit",
       contentOrigin: requireOrigin(input.contentOrigin),
       evidenceQuote: requireString(input.evidenceQuote, 2_000),
@@ -524,11 +533,12 @@ function authorizedWriteArguments(
   } = argumentsValue;
   if (argumentsValue.operation === "profile_update") {
     return Object.freeze({
-      ...rest,
       operation: "profile_update" as const,
-      profile: "user" as const,
+      profileKey: argumentsValue.profileKey,
+      text: argumentsValue.text,
       basis: "explicit" as const,
-      contentOrigin: decision.contentOrigin
+      contentOrigin: decision.contentOrigin,
+      expectedRevision: argumentsValue.expectedRevision
     });
   }
   return Object.freeze({

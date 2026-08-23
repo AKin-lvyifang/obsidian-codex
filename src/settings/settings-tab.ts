@@ -2223,7 +2223,7 @@ export class CodexSettingTab extends PluginSettingTab {
         void (async () => {
           try {
             const system = await this.plugin.getCognitiveSystem();
-            await system.deleteSecondaryFact(fact.id);
+            await system.deleteSecondaryFact(fact.parentId, fact.id, fact.revision);
             new Notice(zh ? "联想线索已删除" : "Association clue deleted");
             onMutated();
           } catch (error) {
@@ -2303,13 +2303,13 @@ export class CodexSettingTab extends PluginSettingTab {
       void (async () => {
         try {
           const system = await this.plugin.getCognitiveSystem();
-          await system.updateSecondaryFact(fact.id, {
+          await system.updateSecondaryFact(fact.parentId, fact.id, {
             title: titleInput.value,
             content: contentArea.value,
             recallWhen: recallInput.value,
             matchTerms: termsInput.value.split(/[,，]/u).map((term) => term.trim()).filter(Boolean),
             reason: reasonInput.value.trim()
-          });
+          }, fact.revision);
           new Notice(zh ? "联想线索已更新" : "Association clue updated");
           onMutated();
         } catch (error) {

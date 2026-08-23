@@ -101,8 +101,8 @@ export type PersonalMemoryWriteRequest =
     }>
   | Readonly<{
       operation: "profile_update";
-      profile: "user";
-      content: string;
+      profileKey: string;
+      text: string;
       basis: "explicit";
       contentOrigin?: PersonalMemoryContentOrigin;
       expectedRevision?: number;
@@ -371,4 +371,4 @@ export const DREAM_STATE_SCHEMA = "echoink.dream.v1" as const;
 export const PERSONALITY_STATE_SCHEMA = "echoink.personality.v2" as const;
 /** 旧人格状态 schema（tempo/energy/… 六维）；仅用于迁移识别与备份。 */
 export const PERSONALITY_STATE_SCHEMA_V1 = "echoink.personality.v1" as const;
-export const USER_PROFILE_STATE_SCHEMA = "echoink.user-profile.v1" as const;
+export const USER_PROFILE_STATE_SCHEMA = "echoink.user-profile.v2" as const;

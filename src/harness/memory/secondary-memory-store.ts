@@ -43,6 +43,7 @@ import { mkdir, readdir, readFile } from "node:fs/promises";
 
 const MS_PER_DAY = 86_400_000;
 const SAFE_SECONDARY_ID = /^[a-zA-Z0-9_-]{3,96}$/u;
+const FATAL_UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 
 export const SECONDARY_MEMORY_DIRNAME = "secondary";
 
@@ -162,6 +163,31 @@ class SecondaryOversizedRecordError extends Error {
   }
 }
 
+class SecondaryIdentityError extends Error {
+  constructor(message: string) {
+    super(`association_clue_identity_invalid:${message}`);
+    this.name = "SecondaryIdentityError";
+  }
+}
+
+function assertSecondaryPathIdentity(
+  record: SecondaryMemoryRecord,
+  parentDirectory: string,
+  fileId: string
+): void {
+  if (record.parentId !== parentDirectory || record.id !== fileId) {
+    throw new SecondaryIdentityError(`${parentDirectory}/${fileId}`);
+  }
+}
+
+function assertUniqueSecondaryIds(records: readonly SecondaryMemoryRecord[]): void {
+  const seen = new Set<string>();
+  for (const record of records) {
+    if (seen.has(record.id)) throw new SecondaryIdentityError(`duplicate-id:${record.id}`);
+    seen.add(record.id);
+  }
+}
+
 export function parseSecondaryRecord(text: string, file: string): SecondaryMemoryRecord {
   return parseSecondaryRecordInternal(text, file, false).record;
 }
@@ -255,6 +281,20 @@ function parseSecondaryRecordInternal(
   const matchTermsRaw = fields.get("match_terms");
   if (!Array.isArray(matchTermsRaw) || matchTermsRaw.length === 0) {
     throw new Error(`Secondary record ${file} match_terms is invalid`);
+  }
+  // Validate the complete raw array before any count/length repair. Otherwise
+  // a damaged sixth value could be sliced away and the file rewritten as if
+  // it only had a benign legacy overflow.
+  for (const rawTerm of matchTermsRaw) {
+    if (typeof rawTerm !== "string") {
+      throw new Error(`Secondary record ${file} match_terms is invalid`);
+    }
+    const structural = rawTerm.normalize("NFKC").trim();
+    if (!structural
+      || /^\p{Script=Han}$/u.test(structural)
+      || /^[\s\p{P}\p{S}]+$/u.test(structural)) {
+      throw new Error(`Secondary record ${file} match_terms is invalid`);
+    }
   }
   let rawTerms = matchTermsRaw;
   if (rawTerms.length > SECONDARY_MAX_MATCH_TERMS) {
@@ -358,26 +398,35 @@ export class SecondaryMemoryStore {
         for (const fileEntry of fileEntries.sort((left, right) => left.name.localeCompare(right.name))) {
           if (!fileEntry.isFile() || !fileEntry.name.endsWith(".md")) continue;
           const target = path.join(parentDir, fileEntry.name);
-          const relative = secondaryRelativePath(parentEntry.name, fileEntry.name.replace(/\.md$/u, ""));
+          const fileId = fileEntry.name.replace(/\.md$/u, "");
+          const relative = secondaryRelativePath(parentEntry.name, fileId);
           let text = "";
+          let originalBytes: Uint8Array | null = null;
           try {
-            text = await readFile(target, "utf8");
-            records.push(parseSecondaryRecord(text, relative));
+            originalBytes = await readFile(target);
+            text = FATAL_UTF8_DECODER.decode(originalBytes);
+            const record = parseSecondaryRecord(text, relative);
+            assertSecondaryPathIdentity(record, parentEntry.name, fileId);
+            records.push(record);
           } catch (error) {
+            if (error instanceof SecondaryIdentityError) throw error;
             if (error instanceof SecondaryOversizedRecordError) {
               try {
                 const repaired = parseSecondaryRecordInternal(text, relative, true);
                 if (!repaired.repaired) throw error;
-                const hash = createHash("sha256").update(text).digest("hex").slice(0, 16);
+                assertSecondaryPathIdentity(repaired.record, parentEntry.name, fileId);
+                if (!originalBytes) throw error;
+                const hash = createHash("sha256").update(originalBytes).digest("hex").slice(0, 16);
                 const backup = path.join(
                   this.backupDirectory,
                   `${repaired.record.parentId}-${repaired.record.id}-${hash}.md`
                 );
                 // Backup must durably land before deterministic replacement.
-                await cognitiveAtomicWrite(backup, text);
+                await cognitiveAtomicWrite(backup, originalBytes);
                 await cognitiveAtomicWrite(target, serializeSecondaryRecord(repaired.record));
                 records.push(repaired.record);
-              } catch {
+              } catch (repairError) {
+                if (repairError instanceof SecondaryIdentityError) throw repairError;
                 // Structural damage is never guessed, rewritten or deleted.
               }
             }
@@ -388,6 +437,7 @@ export class SecondaryMemoryStore {
       }
     }
     records.sort((left, right) => left.parentId.localeCompare(right.parentId) || left.id.localeCompare(right.id));
+    assertUniqueSecondaryIds(records);
     this.cache = Object.freeze(records);
     return this.cache;
   }
@@ -400,6 +450,7 @@ export class SecondaryMemoryStore {
 
   /** Update the in-memory cache after a transaction committed new files. */
   setCache(records: readonly SecondaryMemoryRecord[]): void {
+    assertUniqueSecondaryIds(records);
     this.cache = Object.freeze([...records].sort(
       (left, right) => left.parentId.localeCompare(right.parentId) || left.id.localeCompare(right.id)
     ));

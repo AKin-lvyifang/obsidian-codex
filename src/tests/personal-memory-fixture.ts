@@ -18,19 +18,26 @@ export interface PersonalMemoryFixture {
 }
 
 export async function withPersonalMemoryFixture<T>(
-  callback: (fixture: Readonly<PersonalMemoryFixture>) => Promise<T>
+  callback: (fixture: Readonly<PersonalMemoryFixture>) => Promise<T>,
+  options: Readonly<{ watchExternalChanges?: boolean }> = {}
 ): Promise<T> {
   const vaultPath = await mkdtemp(path.join(tmpdir(), "echoink-personal-memory-"));
   const vaultId = `vault-${path.basename(vaultPath)}`;
   let timestamp = 1_800_000_000_000;
   let identifier = 0;
+  const repositories = new Set<PersonalMemoryRepository>();
   const now = () => ++timestamp;
-  const createRepository = () => new PersonalMemoryRepository({
-    vaultPath,
-    vaultId,
-    now,
-    idFactory: () => `mem_fixture_${++identifier}`
-  });
+  const createRepository = () => {
+    const created = new PersonalMemoryRepository({
+      vaultPath,
+      vaultId,
+      now,
+      idFactory: () => `mem_fixture_${++identifier}`,
+      watchExternalChanges: options.watchExternalChanges
+    });
+    repositories.add(created);
+    return created;
+  };
   const repository = createRepository();
   await repository.initialize();
   const fixture: PersonalMemoryFixture = {
@@ -58,6 +65,7 @@ export async function withPersonalMemoryFixture<T>(
   try {
     return await callback(fixture);
   } finally {
+    await Promise.all([...repositories].map(async (candidate) => await candidate.dispose()));
     // macOS APFS 上 node fs.rm(recursive) 偶发 ENOTEMPTY（目录项在
     // readdir/rmdir 间隙短暂重现）。测试进程内没有并发写者；带退避重试。
     for (let attempt = 0; attempt < 6; attempt += 1) {

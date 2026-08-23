@@ -199,8 +199,12 @@ export default class CodexForObsidianPlugin extends Plugin {
   private async performUnload(): Promise<void> {
     this.clearEchoInkOnboardingWorkspaceCoachmark(false);
     this.onboardingRibbonAnchor = null;
-    this.cognitiveSystem?.dispose();
+    const cognitive = this.cognitiveSystem
+      ?? await this.cognitiveSystemFlight?.catch(() => null)
+      ?? null;
+    await cognitive?.dispose();
     this.cognitiveSystem = null;
+    this.cognitiveSystemFlight = null;
     await this.knowledgeBase?.unload();
     this.review?.unload();
     await this.cancelAllPiConversationActivations();
@@ -208,6 +212,12 @@ export default class CodexForObsidianPlugin extends Plugin {
     this.piActivatedConversationId = null;
     this.piRunConversations.clear();
     await this.persistPiNativeSettings();
+    const localData = this.piLocalData
+      ?? await this.piLocalDataFlight?.catch(() => null)
+      ?? null;
+    await localData?.dispose();
+    this.piLocalData = null;
+    this.piLocalDataFlight = null;
     await closeMcpBrokerConnectionPool();
   }
 

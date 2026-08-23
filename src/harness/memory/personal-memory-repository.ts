@@ -30,7 +30,12 @@ import {
   type SecondaryMatchView,
   type SecondaryMemoryRecord
 } from "./personal-memory-contracts";
-import { applySecondaryHit, indexableSecondaryRecords, serializeSecondaryRecord } from "./secondary-memory-store";
+import {
+  applySecondaryHit,
+  indexableSecondaryRecords,
+  normalizeAssociationClueFields,
+  serializeSecondaryRecord
+} from "./secondary-memory-store";
 import {
   buildSearchIndexV3,
   indexChecksum,
@@ -43,9 +48,16 @@ import {
   type SecondaryCatalogEntry
 } from "./search-index-v3";
 import {
+  applyDreamProfileUpdate,
+  emptyUserProfileState,
+  profileSlotDefinition,
+  USER_PROFILE_ITEM_HARD_MAX_CHARS,
   USER_PROFILE_LEGACY_READ_MAX_CHARS,
-  USER_PROFILE_WRITE_HARD_MAX_CHARS
+  USER_PROFILE_WRITE_HARD_MAX_CHARS,
+  userProfileStateJson,
+  UserProfileStateStore
 } from "./user-profile-state";
+import { renderUserMarkdown } from "./cognitive-projection";
 
 const MAX_PROFILE_CHARS = USER_PROFILE_LEGACY_READ_MAX_CHARS;
 const MAX_OVERVIEW_CHARS = 20_000;
@@ -104,6 +116,19 @@ export interface PersonalMemoryRepositoryOptions {
     recordId: string;
     revision: number;
   }>) => void;
+  /** Test-only deterministic barrier for external watcher callbacks. */
+  readonly watchExternalChanges?: boolean;
+}
+
+interface CognitiveUpdateInput {
+  readonly agentContent?: string;
+  readonly userContent?: string;
+  readonly secondaryRecords: readonly SecondaryMemoryRecord[];
+  readonly extraChanges: readonly Readonly<{ relativePath: string; content?: string }>[];
+  readonly detail: string;
+  readonly expectedMemoryRevision?: number;
+  readonly expectedAgentIdentityRevision?: number;
+  readonly expectedUserProjectionHash?: string;
 }
 
 export type PersonalMemoryExternalChange =
@@ -273,6 +298,8 @@ export class PersonalMemoryRepository {
   private readonly now: () => number;
   private readonly idFactory: () => string;
   private readonly failTransactionAfterChange?: (operation: string, appliedChanges: number) => boolean;
+  private readonly watchExternalChanges: boolean;
+  private disposed = false;
   private initialization: Promise<Readonly<PersonalMemoryLayout>> | null = null;
   private manifestCache: PersonalMemoryManifest | null = null;
   private recordsCache: readonly PersonalMemoryRecord[] | null = null;
@@ -287,6 +314,7 @@ export class PersonalMemoryRepository {
   >();
   private secondaryCache: readonly SecondaryMemoryRecord[] = [];
   private readonly secondaryRecordsProvider?: () => Promise<readonly SecondaryMemoryRecord[]>;
+  private secondaryRefreshProvider?: () => Promise<readonly SecondaryMemoryRecord[]>;
   private secondaryLifecycleHook?: (input: Readonly<{
     operation: "supersede" | "forget" | "restore" | "close";
     parentId: string;
@@ -307,6 +335,7 @@ export class PersonalMemoryRepository {
     this.now = options.now ?? Date.now;
     this.idFactory = options.idFactory ?? (() => `mem_${randomUUID().replaceAll("-", "")}`);
     this.failTransactionAfterChange = options.failTransactionAfterChange;
+    this.watchExternalChanges = options.watchExternalChanges ?? true;
     this.secondaryRecordsProvider = options.secondaryRecordsProvider;
     this.secondaryLifecycleHook = options.secondaryLifecycle;
     this.onMemoryCommittedHook = options.onMemoryCommitted;
@@ -396,7 +425,7 @@ export class PersonalMemoryRepository {
     await this.assertManagedTreeSafe();
     await this.reconcileMarkdownTruth();
     await this.hydrateCachesFromDisk();
-    this.startExternalWatchers();
+    if (this.watchExternalChanges) this.startExternalWatchers();
     return this.layout;
   }
 
@@ -407,6 +436,7 @@ export class PersonalMemoryRepository {
    * next access; they never block the foreground Chat path.
    */
   async handleExternalChange(input: PersonalMemoryExternalChange): Promise<void> {
+    if (this.disposed) return;
     if (input.event !== "change") {
       this.sourceDirectoryRefreshPending = true;
       return;
@@ -423,6 +453,7 @@ export class PersonalMemoryRepository {
     try {
       await this.initialization;
       await this.withMutation(async () => {
+        if (this.disposed) return;
         if (relativePath === "agents/echoink/AGENT.md"
           || relativePath === "shared-user/USER.md") {
           await this.refreshKnownFixedFile(relativePath);
@@ -436,6 +467,7 @@ export class PersonalMemoryRepository {
   }
 
   private async consumePendingSourceDirectoryRefresh(): Promise<void> {
+    if (this.disposed) return;
     if (this.sourceDirectoryRefreshRunning) {
       await this.sourceDirectoryRefreshRunning;
       return;
@@ -457,7 +489,7 @@ export class PersonalMemoryRepository {
   }
 
   private startExternalWatchers(): void {
-    if (this.externalWatchers.length > 0) return;
+    if (this.disposed || this.externalWatchers.length > 0) return;
     const watchDirectory = (
       directory: string,
       toRelativePath: (filename: string) => string | null,
@@ -465,6 +497,7 @@ export class PersonalMemoryRepository {
     ): void => {
       try {
         const watcher = watch(directory, { persistent: false, encoding: "utf8" }, (event, filename) => {
+          if (this.disposed) return;
           if (typeof filename !== "string" || !filename) {
             this.sourceDirectoryRefreshPending = true;
             return;
@@ -472,7 +505,7 @@ export class PersonalMemoryRepository {
           const relativePath = toRelativePath(filename);
           if (!relativePath) return;
           void this.isExpectedInternalWatchEcho(relativePath).then((internalEcho) => {
-            if (internalEcho) return;
+            if (this.disposed || internalEcho) return;
             if (event === "rename" && renameNeedsSourceScan) {
               this.sourceDirectoryRefreshPending = true;
               return;
@@ -483,6 +516,7 @@ export class PersonalMemoryRepository {
           });
         });
         watcher.on("error", () => {
+          if (this.disposed) return;
           this.sourceDirectoryRefreshPending = true;
         });
         watcher.unref();
@@ -508,6 +542,16 @@ export class PersonalMemoryRepository {
       filename === "AGENT.md" ? "agents/echoink/AGENT.md" : null, false);
     watchDirectory(this.layout.sharedUser, (filename) =>
       filename === "USER.md" ? "shared-user/USER.md" : null, false);
+  }
+
+  /** Permanently stop this Repository instance and drain its current lane. */
+  async dispose(): Promise<void> {
+    if (this.disposed) return;
+    this.disposed = true;
+    for (const watcher of this.externalWatchers.splice(0)) watcher.close();
+    this.sourceDirectoryRefreshPending = false;
+    this.internalWatchExpectations.clear();
+    await mutationLanes.get(this.layout.root)?.catch(() => undefined);
   }
 
   private isKnownExternalPath(relativePath: string): boolean {
@@ -703,6 +747,11 @@ export class PersonalMemoryRepository {
     return await this.withMutation(async () => {
       await this.assertManagedTreeSafe();
       await this.refreshPrimaryCachesBeforeWrite();
+      if (request.operation === "supersede"
+        || request.operation === "close"
+        || request.operation === "forget") {
+        await this.reconcilePrimaryTargetsBeforeMutation([request.targetId]);
+      }
       const manifest = await this.readManifest();
       const records = await this.readAllRecords(manifest);
       if (request.operation === "create") {
@@ -947,25 +996,39 @@ export class PersonalMemoryRepository {
       selectedIds.add(id);
     }
     // A secondary match counts as "decisive" when its parent would NOT have
-    // made the candidate set on primary-memory scores alone. Simulate that set:
-    // rank EVERY current catalog entry by primary score (score > 0 required)
-    // and keep the same candidate count as this turn requested.
-    const cutoff = requestedIds.length;
-    const primaryOnlyCandidateSet = new Set(index.catalog
+    // made the candidate set on primary-memory scores alone. Re-run the exact
+    // production selector over a primary-only ranking: candidate count is not
+    // a valid proxy because the token-budget selector can skip one oversized
+    // record and still admit smaller records that follow it.
+    const primaryOnlyCandidates = Object.freeze(index.catalog
       .filter((record) => record.status === "current")
       .map((record) => ({
-        id: record.id,
-        date: record.date,
+        record,
         primaryScore: scorePrimaryEntry(record, query, queryTokenSet)
       }))
-      .filter((entry) => browseAll || (queryTokens.length > 0 && entry.primaryScore > 0))
+      .filter(({ primaryScore }) => browseAll || (queryTokens.length > 0 && primaryScore > 0))
       .sort((left, right) =>
         right.primaryScore - left.primaryScore
-        || right.date.localeCompare(left.date)
-        || left.id.localeCompare(right.id)
+        || right.record.date.localeCompare(left.record.date)
+        || left.record.id.localeCompare(right.record.id)
       )
-      .slice(0, cutoff)
-      .map((entry) => entry.id));
+      .map(({ record, primaryScore }) => Object.freeze({
+        id: record.id,
+        kind: record.kind,
+        status: record.status,
+        title: record.title,
+        recallWhen: record.recallWhen,
+        summary: record.summary,
+        date: record.date,
+        basis: record.basis,
+        sourceSummary: record.sourceSummary,
+        ...(record.scope ? { scope: record.scope } : {}),
+        score: primaryScore
+      })));
+    const primaryOnlyRequestedIds = selectCandidateIds
+      ? [...selectCandidateIds(primaryOnlyCandidates)]
+      : primaryOnlyCandidates.slice(0, MAX_SEARCH_LIMIT).map((candidate) => candidate.id);
+    const primaryOnlyCandidateSet = new Set(primaryOnlyRequestedIds);
     const pendingSecondaryHits: Array<Readonly<{ secondaryId: string; parentId: string }>> = [];
     const decisiveSecondaryId = new Map<string, string>();
     for (const id of requestedIds) {
@@ -1142,76 +1205,171 @@ export class PersonalMemoryRepository {
    * AGENT.md / USER.md projections land together with the manifest revision
    * and the derived Search Index v3.
    */
-  async applyCognitiveUpdate(input: Readonly<{
-    agentContent?: string;
-    userContent?: string;
-    secondaryRecords: readonly SecondaryMemoryRecord[];
-    /** content === undefined deletes the file inside the transaction. */
-    extraChanges: readonly Readonly<{ relativePath: string; content?: string }>[];
-    detail: string;
-    /** Optional global Memory CAS used by Dream after Provider work. */
-    expectedMemoryRevision?: number;
-    /**
-     * Round 6 修复四（身份 CAS）：写入方必须携带它决策时读到的身份 revision。
-     * 事务在生成任何变更前、在串行 mutation lane 内用磁盘真实 revision 比对：
-     * 不一致 → 以稳定的 identity_revision_conflict 拒绝，绝不用旧名称/旧头像
-     * 静默覆盖并发写入。文件缺失按 revision 0；文件损坏拒绝写入。
-    */
-    expectedAgentIdentityRevision?: number;
-  }>): Promise<Readonly<{ revision: number }>> {
+  async applyCognitiveUpdate(
+    input: Readonly<CognitiveUpdateInput>
+  ): Promise<Readonly<{ revision: number }>> {
     // Reject oversized USER.md output before initialization or mutation-lane
     // entry so no transaction can begin with an invalid new projection.
     const normalizedUserContent = input.userContent === undefined
       ? undefined
       : normalizeUserProfileWrite(input.userContent, "USER.md projection");
     await this.initialize();
+    return await this.withMutation(async () =>
+      await this.applyCognitiveUpdateInMutation(input, normalizedUserContent)
+    );
+  }
+
+  /**
+   * User-facing association clue edit/delete. The disk refresh, target CAS,
+   * read-modify-write and derived-index commit all run in the shared mutation
+   * lane so a later writer cannot rebuild state from an older full snapshot.
+   */
+  async applySecondaryUserMutation(input: Readonly<{
+    operation: "edit" | "delete";
+    parentId: string;
+    secondaryId: string;
+    expectedRevision: number;
+    edits?: Readonly<{
+      title?: string;
+      content?: string;
+      recallWhen?: string;
+      matchTerms?: readonly string[];
+      reason?: string;
+    }>;
+  }>): Promise<Readonly<{ revision: number; record?: SecondaryMemoryRecord }>> {
+    const parentId = assertSafeId(input.parentId);
+    const secondaryId = assertSafeId(input.secondaryId);
+    if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1) {
+      throw new PersonalMemoryAccessError(
+        "invalid_request",
+        "Secondary fact expectedRevision must be a positive safe integer"
+      );
+    }
+    await this.initialize();
     return await this.withMutation(async () => {
       await this.assertManagedTreeSafe();
-      if (input.expectedAgentIdentityRevision !== undefined) {
-        const diskRevision = await this.readAgentIdentityRevisionFromDisk();
-        if (diskRevision !== input.expectedAgentIdentityRevision) {
-          throw new PersonalMemoryAccessError(
-            "revision_conflict",
-            `identity_revision_conflict: expected ${input.expectedAgentIdentityRevision}, disk ${diskRevision}`
-          );
-        }
+      const all = [...(this.secondaryRefreshProvider
+        ? await this.secondaryRefreshProvider()
+        : this.secondaryCache)];
+      const position = all.findIndex((record) =>
+        record.parentId === parentId
+          && record.id === secondaryId
+          && record.status === "current"
+      );
+      if (position < 0) {
+        throw new PersonalMemoryAccessError(
+          "revision_conflict",
+          `Secondary fact ${secondaryId} not found; secondary revision conflict`
+        );
       }
-      const manifest = await this.readManifest();
-      assertExpectedRevision(manifest, input.expectedMemoryRevision);
-      await this.assertFixedFilesMatchManifest(manifest);
-      const records = await this.readAllRecords(manifest);
-      const targetRevision = manifest.revision + 1;
-      const next = cloneManifest(manifest);
-      next.revision = targetRevision;
-      next.updatedAt = this.now();
-      const extra: TransactionChange[] = [...input.extraChanges];
-      if (input.agentContent !== undefined) {
-        const normalized = input.agentContent.endsWith("\n") ? input.agentContent : `${input.agentContent}\n`;
-        next.fixedFileHashes = {
-          ...(next.fixedFileHashes ?? { agent: "", user: "" }),
-          agent: contentHash(normalized)
-        };
-        extra.push({ relativePath: path.relative(this.layout.root, this.layout.agent), content: normalized });
+      const current = all[position];
+      if (current.revision !== input.expectedRevision) {
+        throw new PersonalMemoryAccessError(
+          "revision_conflict",
+          `secondary_revision_conflict: expected ${input.expectedRevision}, disk ${current.revision}`
+        );
       }
-      if (normalizedUserContent !== undefined) {
-        const normalized = normalizedUserContent;
-        next.fixedFileHashes = {
-          ...(next.fixedFileHashes ?? { agent: "", user: "" }),
-          user: contentHash(normalized)
-        };
-        extra.push({ relativePath: path.relative(this.layout.root, this.layout.user), content: normalized });
+
+      let record: SecondaryMemoryRecord | undefined;
+      let change: Readonly<{ relativePath: string; content?: string }>;
+      if (input.operation === "delete") {
+        all.splice(position, 1);
+        change = Object.freeze({ relativePath: current.file });
+      } else {
+        const edits = input.edits ?? {};
+        const normalized = normalizeAssociationClueFields({
+          title: edits.title ?? current.title,
+          content: edits.content ?? current.content,
+          recallWhen: edits.recallWhen ?? current.recallWhen,
+          matchTerms: edits.matchTerms ?? current.matchTerms,
+          relation: current.relation,
+          reason: edits.reason ?? current.reason,
+          supportLevel: current.supportLevel,
+          evidence: current.evidence
+        });
+        record = Object.freeze({
+          ...current,
+          ...normalized,
+          basis: "user_edited_inference" as const,
+          revision: current.revision + 1,
+          updatedAt: this.now()
+        });
+        all[position] = record;
+        change = Object.freeze({
+          relativePath: record.file,
+          content: serializeSecondaryRecord(record)
+        });
       }
-      // 事务成功前不改缓存：用局部快照构造索引与事务内容。
-      const changes = await this.stateChanges(next, records, extra, {
-        type: "cognitive_update",
-        revision: targetRevision,
-        at: this.now(),
-        detail: cleanOptional(input.detail, "detail", 500) ?? ""
-      }, input.secondaryRecords);
-      await this.runTransaction("cognitive-update", manifest.revision, targetRevision, changes);
-      this.commitSecondaryCache(input.secondaryRecords);
-      return Object.freeze({ revision: targetRevision });
+
+      const result = await this.applyCognitiveUpdateInMutation({
+        secondaryRecords: all,
+        extraChanges: [change],
+        detail: `secondary-user-${input.operation}:${secondaryId}`
+      });
+      return Object.freeze({ revision: result.revision, ...(record ? { record } : {}) });
     });
+  }
+
+  private async applyCognitiveUpdateInMutation(
+    input: Readonly<CognitiveUpdateInput>,
+    normalizedUserContent: string | undefined = undefined
+  ): Promise<Readonly<{ revision: number }>> {
+    await this.assertManagedTreeSafe();
+    if (input.expectedAgentIdentityRevision !== undefined) {
+      const diskRevision = await this.readAgentIdentityRevisionFromDisk();
+      if (diskRevision !== input.expectedAgentIdentityRevision) {
+        throw new PersonalMemoryAccessError(
+          "revision_conflict",
+          `identity_revision_conflict: expected ${input.expectedAgentIdentityRevision}, disk ${diskRevision}`
+        );
+      }
+    }
+    const manifest = await this.readManifest();
+    assertExpectedRevision(manifest, input.expectedMemoryRevision);
+    await this.assertFixedFilesMatchManifest(manifest);
+    if (input.expectedUserProjectionHash !== undefined) {
+      const diskUserHash = contentHash(await readFile(this.layout.user, "utf8"));
+      if (diskUserHash !== input.expectedUserProjectionHash) {
+        throw new PersonalMemoryAccessError(
+          "revision_conflict",
+          "USER.md projection conflict: disk content changed after projection planning"
+        );
+      }
+    }
+    const records = await this.readAllRecords(manifest);
+    const targetRevision = manifest.revision + 1;
+    const next = cloneManifest(manifest);
+    next.revision = targetRevision;
+    next.updatedAt = this.now();
+    const extra: TransactionChange[] = [...input.extraChanges];
+    if (input.agentContent !== undefined) {
+      const normalized = input.agentContent.endsWith("\n") ? input.agentContent : `${input.agentContent}\n`;
+      next.fixedFileHashes = {
+        ...(next.fixedFileHashes ?? { agent: "", user: "" }),
+        agent: contentHash(normalized)
+      };
+      extra.push({ relativePath: path.relative(this.layout.root, this.layout.agent), content: normalized });
+    }
+    if (normalizedUserContent !== undefined) {
+      next.fixedFileHashes = {
+        ...(next.fixedFileHashes ?? { agent: "", user: "" }),
+        user: contentHash(normalizedUserContent)
+      };
+      extra.push({
+        relativePath: path.relative(this.layout.root, this.layout.user),
+        content: normalizedUserContent
+      });
+    }
+    // 事务成功前不改缓存：用局部快照构造索引与事务内容。
+    const changes = await this.stateChanges(next, records, extra, {
+      type: "cognitive_update",
+      revision: targetRevision,
+      at: this.now(),
+      detail: cleanOptional(input.detail, "detail", 500) ?? ""
+    }, input.secondaryRecords);
+    await this.runTransaction("cognitive-update", manifest.revision, targetRevision, changes);
+    this.commitSecondaryCache(input.secondaryRecords);
+    return Object.freeze({ revision: targetRevision });
   }
 
   /**
@@ -1259,7 +1417,9 @@ export class PersonalMemoryRepository {
       const updatedRecords: SecondaryMemoryRecord[] = [];
       for (const hit of hits) {
         const position = cache.findIndex(
-          (record) => record.id === hit.secondaryId && record.status === "current"
+          (record) => record.id === hit.secondaryId
+            && record.parentId === hit.parentId
+            && record.status === "current"
         );
         if (position < 0) continue;
         const updated = applySecondaryHit(cache[position], now);
@@ -1335,6 +1495,13 @@ export class PersonalMemoryRepository {
     changedFiles: readonly Readonly<{ relativePath: string; content: string }>[];
   }>>): void {
     this.secondaryLifecycleHook = handler;
+  }
+
+  /** Read every secondary record from disk while holding the Repository lane. */
+  setSecondaryRefreshProvider(
+    provider: () => Promise<readonly SecondaryMemoryRecord[]>
+  ): void {
+    this.secondaryRefreshProvider = provider;
   }
 
   /**
@@ -1544,6 +1711,8 @@ export class PersonalMemoryRepository {
     await this.initialize();
     return await this.withMutation(async () => {
       await this.assertManagedTreeSafe();
+      await this.refreshPrimaryCachesBeforeWrite();
+      await this.reconcilePrimaryTargetsBeforeMutation([recordId]);
       const manifest = await this.readManifest();
       assertExpectedRevision(manifest, expectedRevision);
       const records = await this.readAllRecords(manifest);
@@ -1568,6 +1737,8 @@ export class PersonalMemoryRepository {
     await this.initialize();
     return await this.withMutation(async () => {
       await this.assertManagedTreeSafe();
+      await this.refreshPrimaryCachesBeforeWrite();
+      await this.reconcilePrimaryTargetsBeforeMutation([input.targetId]);
       const manifest = await this.readManifest();
       assertExpectedRevision(manifest, input.expectedRevision);
       const records = await this.readAllRecords(manifest);
@@ -1610,6 +1781,8 @@ export class PersonalMemoryRepository {
     await this.initialize();
     return await this.withMutation(async () => {
       await this.assertManagedTreeSafe();
+      await this.refreshPrimaryCachesBeforeWrite();
+      await this.refreshPrimarySourceDirectories();
       const manifest = await this.readManifest();
       const records = await this.readAllRecords(manifest);
       const timestamp = new Date(this.now()).toISOString().replaceAll(/[:.]/gu, "-");
@@ -1638,6 +1811,8 @@ export class PersonalMemoryRepository {
     await this.initialize();
     return await this.withMutation(async () => {
       await this.assertManagedTreeSafe();
+      await this.refreshPrimaryCachesBeforeWrite();
+      await this.refreshPrimarySourceDirectories();
       const manifest = await this.readManifest();
       assertExpectedRevision(manifest, expectedRevision);
       if (manifest.records.some((record) => record.id === safeId)) {
@@ -1836,28 +2011,103 @@ export class PersonalMemoryRepository {
     if (!["user_edit", "user_statement", "confirmed_change"].includes(origin)) {
       throw new PersonalMemoryAccessError("invalid_request", "USER.md requires an explicit stable user update");
     }
-    const normalizedContent = normalizeUserProfileWrite(request.content, "profile content");
+    validateWriteContent("fact", "explicit", origin, runtime.explicitlyAuthorized === true);
+    const slot = profileSlotDefinition(request.profileKey);
+    if (!slot) {
+      throw new PersonalMemoryAccessError("invalid_request", "profileKey must use the closed user profile taxonomy");
+    }
+    const text = cleanRequired(request.text, "profile text", USER_PROFILE_ITEM_HARD_MAX_CHARS);
+    const now = this.now();
+    const diskUser = await readFile(this.layout.user, "utf8");
+    const diskUserHash = contentHash(diskUser);
+    const profileStore = new UserProfileStateStore(this.layout.root);
+    let previousProfile = (await profileStore.read()) ?? emptyUserProfileState(now);
+    if (previousProfile.revision === 0 && previousProfile.legacyUserMigration === null) {
+      if (diskUserHash !== contentHash(defaultUserProfile())) {
+        throw new PersonalMemoryAccessError(
+          "revision_conflict",
+          "USER.md projection conflict: custom content has no managed projection baseline"
+        );
+      }
+      previousProfile = Object.freeze({
+        ...previousProfile,
+        revision: 1,
+        legacyUserMigration: "done" as const,
+        lastProjectedUserHash: diskUserHash,
+        updatedAt: now
+      });
+    } else if (previousProfile.lastProjectedUserHash !== diskUserHash) {
+      throw new PersonalMemoryAccessError(
+        "revision_conflict",
+        "USER.md projection conflict: disk content differs from the last managed projection"
+      );
+    }
     const targetRevision = manifest.revision + 1;
+    const record = this.newRecord({
+      kind: "fact",
+      title: `用户画像：${slot.labelZh}`,
+      content: text,
+      recallWhen: `需要了解用户的${slot.labelZh}时`,
+      basis: "explicit",
+      contentOrigin: origin,
+      targetRevision,
+      source: runtimeSource(runtime),
+      reason: "profile_update"
+    });
+    if (manifest.records.some((item) => item.id === record.id)) {
+      throw new PersonalMemoryAccessError("revision_conflict", `Memory id ${record.id} already exists`);
+    }
+    let nextProfile = applyDreamProfileUpdate(previousProfile, {
+      items: [{
+        section: slot.section,
+        profileKey: slot.profileKey,
+        text,
+        basis: "explicit_memory",
+        sourceMemoryId: record.id
+      }],
+      processedSources: [{ memoryId: record.id, memoryRevision: targetRevision }],
+      now,
+      legacyUserMigration: "done"
+    });
+    const projectedUser = normalizeUserProfileWrite(
+      renderUserMarkdown(nextProfile),
+      "USER.md projection"
+    );
+    nextProfile = Object.freeze({
+      ...nextProfile,
+      lastProjectedUserHash: contentHash(projectedUser)
+    });
     const next = cloneManifest(manifest);
     next.revision = targetRevision;
-    next.updatedAt = this.now();
+    next.updatedAt = now;
+    next.records.push(recordMetadata(record));
     next.fixedFileHashes = {
       agent: manifest.fixedFileHashes!.agent,
-      user: contentHash(normalizedContent)
+      user: contentHash(projectedUser)
     };
-    const changes = await this.stateChanges(next, records, [{
-      relativePath: path.relative(this.layout.root, this.layout.user),
-      content: normalizedContent
-    }], {
+    const allRecords = [...records, record];
+    const changes = await this.stateChanges(next, allRecords, [
+      { relativePath: record.file, content: serializeRecord(record) },
+      {
+        relativePath: path.relative(this.layout.root, this.layout.userProfileState),
+        content: userProfileStateJson(nextProfile)
+      },
+      {
+        relativePath: path.relative(this.layout.root, this.layout.user),
+        content: projectedUser
+      }
+    ], {
       type: "profile_updated",
       revision: targetRevision,
-      at: this.now(),
+      at: now,
       profile: "user",
+      recordId: record.id,
       source: runtimeSource(runtime),
       ...runtimeAuditLink(runtime)
     });
     await this.runTransaction("profile-update", manifest.revision, targetRevision, changes);
-    return Object.freeze({ revision: targetRevision, profile: "user" });
+    this.notifyMemoryCommitted("create", record.id, targetRevision);
+    return Object.freeze({ revision: targetRevision, profile: "user", record });
   }
 
   private async forgetRecord(
@@ -1996,6 +2246,16 @@ export class PersonalMemoryRepository {
     this.recordsCache = freezeRecords(records);
     this.searchIndexCache = null;
     this.fixedContextCache = null;
+  }
+
+  private async reconcilePrimaryTargetsBeforeMutation(
+    targetIds: readonly string[]
+  ): Promise<void> {
+    for (const targetId of targetIds) {
+      const manifest = await this.readManifest();
+      const metadata = manifest.records.find((record) => record.id === targetId);
+      if (metadata) await this.refreshKnownPrimaryRecord(metadata.file);
+    }
   }
 
   private async refreshKnownFixedFile(
@@ -2955,7 +3215,15 @@ export class PersonalMemoryRepository {
 
   private async withMutation<T>(callback: () => Promise<T>): Promise<T> {
     const previous = mutationLanes.get(this.layout.root) ?? Promise.resolve();
-    const current = previous.catch(() => undefined).then(callback);
+    const current = previous.catch(() => undefined).then(async () => {
+      if (this.disposed) {
+        throw new PersonalMemoryAccessError(
+          "invalid_request",
+          "Personal Memory Repository is disposed"
+        );
+      }
+      return await callback();
+    });
     mutationLanes.set(this.layout.root, current);
     try {
       return await current;

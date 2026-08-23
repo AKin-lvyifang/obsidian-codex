@@ -510,14 +510,18 @@ function findValidHistoricalObserved(
   isValidSource: (memoryId: string) => boolean
 ): PersonalityTraitRecord | undefined {
   return [...history]
-    .reverse()
-    .find((entry) =>
+    .filter((entry) =>
       entry.dimension === dimension
       && entry.basis === "observed"
       && entry.status === "superseded"
       && entry.id !== skipRecordId
       && entry.sourceMemoryIds.some((id) => isValidSource(id))
-    );
+    )
+    .sort((left, right) =>
+      right.updatedAt - left.updatedAt
+      || right.revision - left.revision
+      || left.id.localeCompare(right.id)
+    )[0];
 }
 
 /** 共用恢复逻辑：只保留仍有效的 sourceMemoryIds，revision/updatedAt 取本轮值。 */
@@ -569,6 +573,20 @@ export function revokeReprocessedPersonalitySources(
   );
   if (candidates.length !== previous.candidates.length) changed = true;
 
+  // Reprocessing invalidates that Memory's prior-revision evidence
+  // permanently, not only for this call's fallback filter. Keep the bounded
+  // historical records but remove the stale source ID from every candidate so
+  // a later source-loss round cannot revive it after reprocessedIds is gone.
+  const history: PersonalityTraitRecord[] = previous.history.map((record) => {
+    const remaining = record.sourceMemoryIds.filter((id) => !reprocessedIds.has(id));
+    if (remaining.length === record.sourceMemoryIds.length) return record;
+    changed = true;
+    return Object.freeze({
+      ...record,
+      sourceMemoryIds: Object.freeze(remaining)
+    });
+  });
+
   // 2. Learned requirements: drop the reprocessed sources; retire when empty.
   const revision = previous.revision + 1;
   const learnedRequirements: AgentRequirementRecord[] = [];
@@ -605,7 +623,6 @@ export function revokeReprocessedPersonalitySources(
   const isValidSource = (memoryId: string): boolean =>
     !reprocessedIds.has(memoryId)
     && (validMemoryIds === undefined || validMemoryIds.has(memoryId));
-  const history: PersonalityTraitRecord[] = [...previous.history];
   const observed: Record<TraitDimension, PersonalityTraitRecord | null> = { ...previous.observed };
   for (const dimension of TRAIT_DIMENSIONS) {
     const record = observed[dimension];
@@ -625,6 +642,7 @@ export function revokeReprocessedPersonalitySources(
     history.push({
       ...record,
       status: "superseded",
+      sourceMemoryIds: Object.freeze(alive),
       updatedAt: now,
       revision,
       reason: "source_reprocessed"
@@ -779,9 +797,14 @@ export function renderableRequirements(
 export function parsePersonalityStateV2(raw: Record<string, unknown>): PersonalityState | null {
   if (raw.schema !== PERSONALITY_STATE_SCHEMA) return null;
   if (typeof raw.revision !== "number" || !Number.isSafeInteger(raw.revision)) return null;
-  const explicit = parseTraitSlots(raw.explicit);
-  const observed = parseTraitSlots(raw.observed);
+  const templateId = parseTemplateId(raw.templateId);
+  if (templateId === undefined) return null;
+  const explicit = parseTraitSlots(raw.explicit, "explicit");
+  const observed = parseTraitSlots(raw.observed, "observed");
   if (!explicit || !observed) return null;
+  if (templateId && TRAIT_DIMENSIONS.some((dimension) => explicit[dimension] === null)) {
+    return null;
+  }
   if (!Array.isArray(raw.history)
     || !Array.isArray(raw.candidates)
     || !Array.isArray(raw.learnedRequirements)
@@ -790,13 +813,17 @@ export function parsePersonalityStateV2(raw: Record<string, unknown>): Personali
   const candidates = raw.candidates.map(parseCandidate);
   const learnedRequirements = raw.learnedRequirements.map(parseRequirement);
   if (history.some((record) => record === null)
+    || (history as Array<PersonalityTraitRecord | null>).some(
+      (record) => record !== null && record.status !== "superseded"
+    )
     || candidates.some((candidate) => candidate === null)
     || learnedRequirements.some((requirement) => requirement === null)) return null;
   const processedSources: ProcessedMemorySource[] = [];
   for (const source of raw.processedSources) {
     if (!source || typeof source !== "object"
       || typeof (source as Record<string, unknown>).memoryId !== "string"
-      || typeof (source as Record<string, unknown>).memoryRevision !== "number") return null;
+      || !isNonNegativeSafeInteger((source as Record<string, unknown>).memoryRevision)
+      || !isFiniteNumberOrUndefined((source as Record<string, unknown>).processedAt)) return null;
     const record = source as Record<string, unknown>;
     processedSources.push(Object.freeze({
       memoryId: record.memoryId as string,
@@ -807,7 +834,7 @@ export function parsePersonalityStateV2(raw: Record<string, unknown>): Personali
   return Object.freeze({
     schema: PERSONALITY_STATE_SCHEMA,
     revision: raw.revision,
-    templateId: typeof raw.templateId === "string" ? raw.templateId : null,
+    templateId,
     explicit,
     observed,
     history: Object.freeze(pruneHistory(history as PersonalityTraitRecord[])),
@@ -846,19 +873,33 @@ export function parseRecoverablePersonalityStateV2(
     || !Array.isArray(raw.learnedRequirements)
     || !Array.isArray(raw.processedSources)) return null;
 
+  const templateId = parseTemplateId(raw.templateId);
+  if (templateId === undefined) return null;
+
   const explicitRaw = raw.explicit as Record<string, unknown>;
   const observedRaw = raw.observed as Record<string, unknown>;
+  if (!hasOnlyTraitSlotKeys(explicitRaw) || !hasOnlyTraitSlotKeys(observedRaw)) return null;
   const explicit = {} as Record<TraitDimension, PersonalityTraitRecord | null>;
   const observed = {} as Record<TraitDimension, PersonalityTraitRecord | null>;
   const damaged = new Set<TraitDimension>();
   for (const dimension of TRAIT_DIMENSIONS) {
-    const parseSlot = (value: unknown): PersonalityTraitRecord | null | undefined => {
+    const parseSlot = (
+      value: unknown,
+      basis: PersonalityTraitBasis
+    ): PersonalityTraitRecord | null | undefined => {
       if (value === null || value === undefined) return null;
-      return parseTraitRecord(value) ?? undefined;
+      const parsed = parseTraitRecord(value);
+      return parsed
+        && parsed.dimension === dimension
+        && parsed.basis === basis
+        && parsed.status === "current"
+        ? parsed
+        : undefined;
     };
-    const parsedExplicit = parseSlot(explicitRaw[dimension]);
-    const parsedObserved = parseSlot(observedRaw[dimension]);
+    const parsedExplicit = parseSlot(explicitRaw[dimension], "explicit");
+    const parsedObserved = parseSlot(observedRaw[dimension], "observed");
     if (parsedExplicit === undefined || parsedObserved === undefined) damaged.add(dimension);
+    if (templateId && parsedExplicit === null) damaged.add(dimension);
     explicit[dimension] = parsedExplicit ?? null;
     observed[dimension] = parsedObserved ?? null;
   }
@@ -868,7 +909,7 @@ export function parseRecoverablePersonalityStateV2(
     const dimension = rawTraitDimension(item);
     if (!dimension) return null;
     const parsed = parseTraitRecord(item);
-    if (!parsed) damaged.add(dimension);
+    if (!parsed || parsed.status !== "superseded") damaged.add(dimension);
     else history.push(parsed);
   }
   const candidates: TraitCandidateRecord[] = [];
@@ -887,7 +928,9 @@ export function parseRecoverablePersonalityStateV2(
   for (const item of raw.processedSources) {
     if (!item || typeof item !== "object") return null;
     const source = item as Record<string, unknown>;
-    if (typeof source.memoryId !== "string" || typeof source.memoryRevision !== "number") {
+    if (typeof source.memoryId !== "string"
+      || !isNonNegativeSafeInteger(source.memoryRevision)
+      || !isFiniteNumberOrUndefined(source.processedAt)) {
       return null;
     }
     processedSources.push(Object.freeze({
@@ -926,7 +969,7 @@ export function parseRecoverablePersonalityStateV2(
   const state: PersonalityState = Object.freeze({
     schema: PERSONALITY_STATE_SCHEMA,
     revision: raw.revision,
-    templateId: typeof raw.templateId === "string" ? raw.templateId : null,
+    templateId,
     explicit: Object.freeze(explicit),
     observed: Object.freeze(observed),
     history: Object.freeze(pruneHistory(history.filter((item) => !damaged.has(item.dimension)))),
@@ -953,10 +996,12 @@ function emptyTraitSlots(): Readonly<Record<TraitDimension, PersonalityTraitReco
 }
 
 function parseTraitSlots(
-  raw: unknown
+  raw: unknown,
+  expectedBasis: PersonalityTraitBasis
 ): Readonly<Record<TraitDimension, PersonalityTraitRecord | null>> | null {
-  if (!raw || typeof raw !== "object") return null;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const record = raw as Record<string, unknown>;
+  if (!hasOnlyTraitSlotKeys(record)) return null;
   const slots = {} as Record<TraitDimension, PersonalityTraitRecord | null>;
   for (const dimension of TRAIT_DIMENSIONS) slots[dimension] = null;
   for (const dimension of TRAIT_DIMENSIONS) {
@@ -966,7 +1011,10 @@ function parseTraitSlots(
       continue;
     }
     const parsed = parseTraitRecord(value);
-    if (!parsed) return null;
+    if (!parsed
+      || parsed.dimension !== dimension
+      || parsed.basis !== expectedBasis
+      || parsed.status !== "current") return null;
     slots[dimension] = parsed;
   }
   return Object.freeze(slots);
@@ -1000,22 +1048,27 @@ function parseTraitRecord(raw: unknown): PersonalityTraitRecord | null {
   if (!TRAIT_DIMENSIONS.includes(record.dimension as TraitDimension)) return null;
   if (record.basis !== "explicit" && record.basis !== "observed") return null;
   if (record.status !== "current" && record.status !== "superseded") return null;
-  if (typeof record.score !== "number") return null;
+  if (typeof record.score !== "number"
+    || !Number.isFinite(record.score)
+    || !Array.isArray(record.sourceMemoryIds)
+    || !record.sourceMemoryIds.every((id) => typeof id === "string" && id.length > 0)
+    || typeof record.evidence !== "string"
+    || typeof record.createdAt !== "number"
+    || !Number.isFinite(record.createdAt)
+    || typeof record.updatedAt !== "number"
+    || !Number.isFinite(record.updatedAt)
+    || !isNonNegativeSafeInteger(record.revision)) return null;
   return Object.freeze({
     id: record.id,
     dimension: record.dimension as TraitDimension,
     basis: record.basis as PersonalityTraitBasis,
     status: record.status as "current" | "superseded",
     score: clampTraitScore(record.score),
-    sourceMemoryIds: Object.freeze(
-      Array.isArray(record.sourceMemoryIds)
-        ? record.sourceMemoryIds.filter((id): id is string => typeof id === "string")
-        : []
-    ),
-    evidence: typeof record.evidence === "string" ? record.evidence : "",
-    createdAt: typeof record.createdAt === "number" ? record.createdAt : 0,
-    updatedAt: typeof record.updatedAt === "number" ? record.updatedAt : 0,
-    revision: typeof record.revision === "number" ? record.revision : 0,
+    sourceMemoryIds: Object.freeze([...(record.sourceMemoryIds as string[])]),
+    evidence: record.evidence as string,
+    createdAt: record.createdAt as number,
+    updatedAt: record.updatedAt as number,
+    revision: record.revision as number,
     ...(typeof record.reason === "string" ? { reason: record.reason } : {})
   });
 }
@@ -1042,21 +1095,39 @@ function parseCandidate(raw: unknown): TraitCandidateRecord | null {
 function parseRequirement(raw: unknown): AgentRequirementRecord | null {
   if (!raw || typeof raw !== "object") return null;
   const record = raw as Record<string, unknown>;
-  if (typeof record.id !== "string" || typeof record.text !== "string") return null;
-  const basis = record.basis === "observed_memory" ? "observed_memory" : "explicit_memory";
+  if (typeof record.id !== "string"
+    || typeof record.text !== "string"
+    || (record.basis !== "observed_memory" && record.basis !== "explicit_memory")
+    || (record.status !== "current" && record.status !== "superseded")
+    || !Array.isArray(record.sourceMemoryIds)
+    || !record.sourceMemoryIds.every((id) => typeof id === "string" && id.length > 0)
+    || !isNonNegativeSafeInteger(record.revision)) return null;
   return Object.freeze({
     id: record.id,
     text: record.text,
-    basis: basis as AgentRequirementBasis,
-    status: record.status === "superseded" ? "superseded" : "current",
-    sourceMemoryIds: Object.freeze(
-      Array.isArray(record.sourceMemoryIds)
-        ? record.sourceMemoryIds.filter((id): id is string => typeof id === "string")
-        : []
-    ),
-    revision: typeof record.revision === "number" ? record.revision : 0,
+    basis: record.basis as AgentRequirementBasis,
+    status: record.status as "current" | "superseded",
+    sourceMemoryIds: Object.freeze([...(record.sourceMemoryIds as string[])]),
+    revision: record.revision as number,
     ...(typeof record.reason === "string" ? { reason: record.reason } : {})
   });
+}
+
+function parseTemplateId(raw: unknown): string | null | undefined {
+  if (raw === null) return null;
+  return typeof raw === "string" && getPersonalityTemplate(raw) ? raw : undefined;
+}
+
+function hasOnlyTraitSlotKeys(raw: Record<string, unknown>): boolean {
+  return Object.keys(raw).every((key) => TRAIT_DIMENSIONS.includes(key as TraitDimension));
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isFiniteNumberOrUndefined(value: unknown): boolean {
+  return value === undefined || (typeof value === "number" && Number.isFinite(value));
 }
 
 function pruneHistory(history: PersonalityTraitRecord[]): PersonalityTraitRecord[] {

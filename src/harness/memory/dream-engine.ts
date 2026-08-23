@@ -54,10 +54,10 @@ import {
 import {
   applyDreamProfileUpdate,
   computeReprocessedProfileMemoryIds,
+  emptyUserProfileState,
   reconcileProfileSources,
   revokeReprocessedProfileSources,
   isUserProfileKey,
-  isProfileItemRenderable,
   profileKeyPromptCatalog,
   USER_PROFILE_ITEM_HARD_MAX_CHARS,
   USER_PROFILE_ITEM_RECOMMENDED_MAX_CHARS,
@@ -131,6 +131,8 @@ export interface DreamRepositoryPort {
     expectedMemoryRevision: number;
     /** Round 6 修复四（身份 CAS）：决策时读到的身份 revision。 */
     expectedAgentIdentityRevision?: number;
+    /** USER.md content hash observed before Provider work began. */
+    expectedUserProjectionHash?: string;
   }>): Promise<Readonly<{ revision: number }>>;
   writeSystemMemory(input: Readonly<{
     kind: PersonalMemoryRecord["kind"];
@@ -307,6 +309,7 @@ export class DreamEngine {
             ...workingProfile,
             revision: workingProfile.revision + 1,
             legacyUserMigration: "done" as const,
+            lastProjectedUserHash: userHash,
             updatedAt: startedAt
           });
           migrationEnqueue.push(alreadyMigrated.id);
@@ -326,6 +329,7 @@ export class DreamEngine {
             ...workingProfile,
             revision: workingProfile.revision + 1,
             legacyUserMigration: "done" as const,
+            lastProjectedUserHash: userHash,
             updatedAt: startedAt
           });
           migrationEnqueue.push(migrated.id);
@@ -528,12 +532,9 @@ export class DreamEngine {
         agentUpdated = true;
       }
     }
-    const renderableItems = nextProfile.items.filter((item) => isProfileItemRenderable(item));
     const migrationDone = nextProfile.legacyUserMigration === "done";
-    const projectionAllowed = trustedOversizedUser || ((renderableItems.length > 0
-      || nextProfile.lastProjectedUserHash === userHash
-      || !userIsCustom)
-      && (!userIsCustom || migrationDone));
+    const projectionAllowed = trustedOversizedUser
+      || (migrationDone && nextProfile.lastProjectedUserHash === userHash);
     if ((nextProfile !== profileState || trustedOversizedUser) && projectionAllowed) {
       const rendered = renderUserMarkdown(nextProfile);
       if (rendered !== fixedFiles.user) {
@@ -630,6 +631,7 @@ export class DreamEngine {
           extraChanges,
           expectedMemoryRevision,
           expectedAgentIdentityRevision: expectedIdentityRevision,
+          ...(userContent ? { expectedUserProjectionHash: userHash } : {}),
           detail: `dream: processed=${processedMemoryIds.length} facts=+${factsCreated}/~${factsReused}/-${factsRetired} decayed=${decayed}${migrationError ? ` migration_error=${migrationError}` : ""}`
         });
         committed = true;
@@ -719,15 +721,7 @@ export class DreamEngine {
   }
 
   private emptyProfile(now: number): UserProfileState {
-    return {
-      schema: "echoink.user-profile.v1",
-      revision: 0,
-      items: Object.freeze([]),
-      processedSources: Object.freeze([]),
-      legacyUserMigration: null,
-      lastProjectedUserHash: "",
-      updatedAt: now
-    } as UserProfileState;
+    return emptyUserProfileState(now);
   }
 
   /**

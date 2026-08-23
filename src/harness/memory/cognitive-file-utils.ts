@@ -18,10 +18,17 @@ export async function cognitivePathExists(target: string): Promise<boolean> {
   }
 }
 
-export async function cognitiveAtomicWrite(target: string, content: string): Promise<void> {
+export async function cognitiveAtomicWrite(
+  target: string,
+  content: string | Uint8Array
+): Promise<void> {
   await mkdir(path.dirname(target), { recursive: true });
   const temporary = path.join(path.dirname(target), `.${path.basename(target)}.${randomUUID()}.tmp`);
-  await writeFile(temporary, content, { encoding: "utf8", mode: 0o600 });
+  await writeFile(
+    temporary,
+    content,
+    typeof content === "string" ? { encoding: "utf8", mode: 0o600 } : { mode: 0o600 }
+  );
   await rename(temporary, target);
 }
 

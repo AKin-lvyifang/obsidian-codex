@@ -27,7 +27,11 @@ import {
   type RecoverablePersonalityState
 } from "./personality-state";
 import { cognitiveReadJsonOrNull, newCognitiveId } from "./cognitive-file-utils";
-import { UserProfileStateStore } from "./user-profile-state";
+import {
+  inspectUserProfileStateFile,
+  userProfileStateJson,
+  UserProfileStateStore
+} from "./user-profile-state";
 import {
   DREAM_STATE_RELATIVE_PATH,
   DreamStateStore,
@@ -36,7 +40,6 @@ import {
 } from "./dream-state";
 import { cognitiveJsonText } from "./cognitive-file-utils";
 import {
-  normalizeAssociationClueFields,
   SecondaryMemoryStore,
   serializeSecondaryRecord
 } from "./secondary-memory-store";
@@ -114,6 +117,8 @@ class RepositoryDreamPort implements DreamRepositoryPort {
     expectedMemoryRevision: number;
     /** Round 6 修复四（身份 CAS）：决策时读到的身份 revision。 */
     expectedAgentIdentityRevision?: number;
+    /** USER.md content hash observed before Provider work began. */
+    expectedUserProjectionHash?: string;
   }>): Promise<Readonly<{ revision: number }>> {
     return await this.repository.applyCognitiveUpdate(input);
   }
@@ -193,6 +198,10 @@ export class CognitiveSystem {
     const secondaryStore = new SecondaryMemoryStore(options.repository.layout.history);
     options.repository.setSecondaryRecords(await secondaryStore.loadAll());
     const layout = await options.repository.initialize();
+    // The product initializes PersonalMemoryRepository before constructing the
+    // cognitive system. In that startup order initialize() is already a no-op,
+    // so synchronously reconcile the derived index after mounting disk clues.
+    await options.repository.ensureSecondaryIndexFresh();
     const root = layout.root;
     const personalityStore = new PersonalityStateStore(root);
     const profileStore = new UserProfileStateStore(root);
@@ -246,6 +255,25 @@ export class CognitiveSystem {
       }
     }
 
+    const profileInspection = await inspectUserProfileStateFile(profileStore.filePath);
+    if (profileInspection.kind === "invalid") {
+      throw new Error(`user_profile_state_invalid:${profileInspection.reason}`);
+    }
+    if (profileInspection.kind === "v1") {
+      try {
+        await options.repository.applyCognitiveUpdate({
+          secondaryRecords: await secondaryStore.loadAll(),
+          extraChanges: [{
+            relativePath: "shared-user/user-profile-state.json",
+            content: userProfileStateJson(profileInspection.state)
+          }],
+          detail: "user-profile-v1-to-v2-migration"
+        });
+      } catch {
+        throw new Error("user_profile_migration_blocked:transaction_failed");
+      }
+    }
+
     const engine = new DreamEngine({
       repository: new RepositoryDreamPort(options.repository),
       personalityStore,
@@ -279,6 +307,9 @@ export class CognitiveSystem {
 
     options.repository.setSecondaryLifecycleHandler(async (input) =>
       await system.handleSecondaryLifecycle(input.operation, input.parentId)
+    );
+    options.repository.setSecondaryRefreshProvider(async () =>
+      await secondaryStore.refresh()
     );
     options.repository.setMemoryCommittedHook((event) => {
       void system.enqueueForDream([event.recordId]).catch(() => {});
@@ -559,53 +590,38 @@ export class CognitiveSystem {
   }
 
   /** User edits a secondary fact locally (no Provider). */
-  async updateSecondaryFact(secondaryId: string, edits: Readonly<{
+  async updateSecondaryFact(parentId: string, secondaryId: string, edits: Readonly<{
     title?: string;
     content?: string;
     recallWhen?: string;
     matchTerms?: readonly string[];
     reason?: string;
-  }>): Promise<Readonly<{ revision: number; record: SecondaryMemoryRecord }>> {
-    const all = [...(await this.secondaryStore.loadAll())];
-    const position = all.findIndex((record) => record.id === secondaryId && record.status === "current");
-    if (position < 0) throw new Error(`Secondary fact ${secondaryId} not found`);
-    const current = all[position];
-    const normalized = normalizeAssociationClueFields({
-      title: edits.title ?? current.title,
-      content: edits.content ?? current.content,
-      recallWhen: edits.recallWhen ?? current.recallWhen,
-      matchTerms: edits.matchTerms ?? current.matchTerms,
-      relation: current.relation,
-      reason: edits.reason ?? current.reason,
-      supportLevel: current.supportLevel,
-      evidence: current.evidence
+  }>, expectedRevision: number): Promise<Readonly<{
+    revision: number;
+    record: SecondaryMemoryRecord;
+  }>> {
+    const result = await this.repository.applySecondaryUserMutation({
+      operation: "edit",
+      parentId,
+      secondaryId,
+      expectedRevision,
+      edits
     });
-    const updated: SecondaryMemoryRecord = Object.freeze({
-      ...current,
-      ...normalized,
-      basis: "user_edited_inference",
-      revision: current.revision + 1,
-      updatedAt: this.now()
-    });
-    all[position] = updated;
-    const result = await this.repository.applyCognitiveUpdate({
-      secondaryRecords: all,
-      extraChanges: [{ relativePath: updated.file, content: serializeSecondaryRecord(updated) }],
-      detail: `secondary-user-edit:${secondaryId}`
-    });
-    return Object.freeze({ revision: result.revision, record: updated });
+    if (!result.record) throw new Error("secondary_edit_missing_result");
+    return Object.freeze({ revision: result.revision, record: result.record });
   }
 
   /** User deletes a secondary fact locally (file removed in the transaction). */
-  async deleteSecondaryFact(secondaryId: string): Promise<Readonly<{ revision: number }>> {
-    const all = [...(await this.secondaryStore.loadAll())];
-    const position = all.findIndex((record) => record.id === secondaryId && record.status === "current");
-    if (position < 0) throw new Error(`Secondary fact ${secondaryId} not found`);
-    const removed = all.splice(position, 1)[0];
-    const result = await this.repository.applyCognitiveUpdate({
-      secondaryRecords: all,
-      extraChanges: [{ relativePath: removed.file }],
-      detail: `secondary-user-delete:${secondaryId}`
+  async deleteSecondaryFact(
+    parentId: string,
+    secondaryId: string,
+    expectedRevision: number
+  ): Promise<Readonly<{ revision: number }>> {
+    const result = await this.repository.applySecondaryUserMutation({
+      operation: "delete",
+      parentId,
+      secondaryId,
+      expectedRevision
     });
     return Object.freeze({ revision: result.revision });
   }
@@ -622,8 +638,9 @@ export class CognitiveSystem {
     return await this.scheduler.forceRun();
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
     this.scheduler.dispose();
+    await this.repository.dispose();
   }
 
   /** 串行合并连续/并发入队，防止互相覆盖。 */
