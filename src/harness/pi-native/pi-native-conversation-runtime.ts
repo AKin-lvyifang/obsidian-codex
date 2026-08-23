@@ -1867,7 +1867,8 @@ export class PiNativeConversationRuntime {
           || run.productRunId !== input.productRunId
           || ask?.kind !== "ask"
         ) return;
-        ask.personalMemorySources = freezePersonalMemorySourceReferences(
+        ask.personalMemorySources = mergePersonalMemorySourceReferences(
+          ask.personalMemorySources,
           input.sources
         );
       },
@@ -2147,6 +2148,11 @@ export class PiNativeConversationRuntime {
             await this.emitRuntimeEvent(active, execution, event);
           }
           ask.bufferedAssistantEvents.length = 0;
+          const personalMemorySources = mergePersonalMemorySourceReferences(
+            ask.personalMemorySources,
+            collectSuccessfulAskPersonalMemoryToolSources(runEntries)
+          );
+          ask.personalMemorySources = personalMemorySources;
           await this.options.knowledge?.recordUsage?.({
             event: {
               sourceEventId: stableId(
@@ -2167,7 +2173,7 @@ export class PiNativeConversationRuntime {
               ),
               workflow: "ask",
               producedPaths: [],
-              personalMemorySources: ask.personalMemorySources.map(
+              personalMemorySources: personalMemorySources.map(
                 (source) => ({ ...source })
               )
             },
@@ -3584,6 +3590,111 @@ function freezePersonalMemorySourceReferences(
     unique.set(id, Object.freeze({ id, title }));
   }
   return Object.freeze([...unique.values()]);
+}
+
+function mergePersonalMemorySourceReferences(
+  ...groups: readonly (readonly Readonly<PersonalMemorySourceReference>[])[]
+): readonly Readonly<PersonalMemorySourceReference>[] {
+  return freezePersonalMemorySourceReferences(groups.flat());
+}
+
+/**
+ * Collects display-only primary Memory metadata from successful read Tool
+ * Results already committed to this `/ask` run's Pi Branch. The Branch check
+ * deliberately excludes candidates, failed calls, cancelled turns, and raw
+ * repository values that never reached the model context.
+ */
+export function collectSuccessfulAskPersonalMemoryToolSources(
+  entries: readonly SessionEntry[]
+): readonly Readonly<PersonalMemorySourceReference>[] {
+  const sources: PersonalMemorySourceReference[] = [];
+  for (const entry of entries) {
+    if (
+      entry.type !== "message"
+      || entry.message.role !== "toolResult"
+      || entry.message.isError
+      || (
+        entry.message.toolName !== "memory_search"
+        && entry.message.toolName !== "memory_read"
+      )
+    ) continue;
+    const recordIds = completedPersonalMemoryToolRecordIds(
+      entry.message.details,
+      entry.message.toolName
+    );
+    if (recordIds.length === 0) continue;
+    sources.push(...personalMemorySourcesFromToolResult(
+      entry.message.toolName,
+      entry.message.content,
+      recordIds
+    ));
+  }
+  return freezePersonalMemorySourceReferences(sources);
+}
+
+function completedPersonalMemoryToolRecordIds(
+  value: unknown,
+  toolName: "memory_search" | "memory_read"
+): readonly string[] {
+  const details = safeRecord(value);
+  if (
+    details?.source !== "echoink-personal-memory"
+    || details.schemaVersion !== 1
+    || details.toolId !== toolName
+    || details.status !== "completed"
+    || !Array.isArray(details.recordIds)
+  ) return [];
+  const ids = new Set<string>();
+  for (const value of details.recordIds) {
+    if (typeof value !== "string" || !value.trim()) continue;
+    ids.add(value.trim());
+  }
+  return [...ids];
+}
+
+function personalMemorySourcesFromToolResult(
+  toolName: "memory_search" | "memory_read",
+  content: unknown,
+  recordIds: readonly string[]
+): PersonalMemorySourceReference[] {
+  const payload = personalMemoryToolResultPayload(toolName, content);
+  if (!payload) return [];
+  const candidates = toolName === "memory_search"
+    ? Array.isArray(payload.items) ? payload.items : []
+    : [payload.record];
+  const allowedIds = new Set(recordIds);
+  const sources: PersonalMemorySourceReference[] = [];
+  for (const candidate of candidates) {
+    const record = safeRecord(candidate);
+    const id = typeof record?.id === "string" ? record.id.trim() : "";
+    const title = typeof record?.title === "string" ? record.title.trim() : "";
+    if (!id || !title || !allowedIds.has(id)) continue;
+    sources.push({ id, title });
+  }
+  return sources;
+}
+
+function personalMemoryToolResultPayload(
+  toolName: "memory_search" | "memory_read",
+  content: unknown
+): Readonly<Record<string, unknown>> | null {
+  if (!Array.isArray(content)) return null;
+  const text = content
+    .flatMap((part) => {
+      const value = safeRecord(part);
+      return value?.type === "text" && typeof value.text === "string"
+        ? [value.text]
+        : [];
+    })
+    .join("");
+  const prefix = `<echoink_memory_result tool="${toolName}" trust="untrusted-background">\n`;
+  const suffix = "\n</echoink_memory_result>";
+  if (!text.startsWith(prefix) || !text.endsWith(suffix)) return null;
+  try {
+    return safeRecord(JSON.parse(text.slice(prefix.length, -suffix.length)));
+  } catch {
+    return null;
+  }
 }
 
 function mergeKnowledgeReferences(

@@ -213,6 +213,15 @@ export function knowledgeBaseMaintainReportItemPath(item: KnowledgeBaseMaintainR
   return /\.(?:md|markdown|txt)$/i.test(legacyTitle) ? legacyTitle : undefined;
 }
 
+/** Empty source metadata can mean an older event did not persist it. */
+export function personalMemorySourceCountLabel(count: number): string {
+  return count > 0 ? `${count} 条 Personal Memory` : "Personal Memory 来源";
+}
+
+export function personalMemorySourceEmptyStateLabel(): string {
+  return "未记录可展示的 Personal Memory 来源。";
+}
+
 export class CodexMessageListRenderer {
   private virtualSessionId = "";
   private virtualRowHeights = new Map<string, number>();
@@ -1169,7 +1178,7 @@ export class CodexMessageListRenderer {
       });
       counts.createSpan({
         cls: "codex-kb-source-count",
-        text: `${usage.personalMemorySources.length} 条 Personal Memory`
+        text: personalMemorySourceCountLabel(usage.personalMemorySources.length)
       });
       const body = details.createDiv({ cls: "codex-kb-citations-body" });
       const vaultGroup = this.renderKnowledgeUsageGroup(body, "Vault 参考");
@@ -1191,7 +1200,7 @@ export class CodexMessageListRenderer {
       } else {
         memoryGroup.createDiv({
           cls: "codex-kb-no-evidence",
-          text: "本轮未注入 Personal Memory。"
+          text: personalMemorySourceEmptyStateLabel()
         });
       }
       return;

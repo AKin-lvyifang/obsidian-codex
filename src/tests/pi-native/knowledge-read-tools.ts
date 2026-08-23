@@ -11,9 +11,11 @@ import {
   createPiKnowledgeReadToolDefinitions,
   normalizePiKnowledgeReadToolArguments
 } from "../../harness/pi-native/pi-knowledge-read-tools";
+import { collectSuccessfulAskPersonalMemoryToolSources } from "../../harness/pi-native/pi-native-conversation-runtime";
 import { EchoInkVaultToolEgressPolicy } from "../../harness/pi-native/vault-tool-result-safety";
 
 export async function runPiKnowledgeReadToolTests(): Promise<void> {
+  successfulPersonalMemoryToolResultsContributeOnlyPrimarySources();
   const vaultPath = await mkdtemp(path.join(tmpdir(), "echoink-knowledge-tools-vault-"));
   const storageRootPath = await mkdtemp(path.join(tmpdir(), "echoink-knowledge-tools-state-"));
   try {
@@ -180,6 +182,70 @@ export async function runPiKnowledgeReadToolTests(): Promise<void> {
     await rm(vaultPath, { recursive: true, force: true });
     await rm(storageRootPath, { recursive: true, force: true });
   }
+}
+
+function successfulPersonalMemoryToolResultsContributeOnlyPrimarySources(): void {
+  const source = (toolName: "memory_search" | "memory_read", payload: unknown, recordIds: string[]) => ({
+    type: "message",
+    id: `result-${toolName}-${recordIds.join("-")}`,
+    message: {
+      role: "toolResult",
+      toolName,
+      toolCallId: `call-${toolName}-${recordIds.join("-")}`,
+      isError: false,
+      details: {
+        source: "echoink-personal-memory",
+        schemaVersion: 1,
+        toolId: toolName,
+        status: "completed",
+        recordIds
+      },
+      content: [{
+        type: "text",
+        text: [
+          `<echoink_memory_result tool="${toolName}" trust="untrusted-background">`,
+          JSON.stringify(payload),
+          "</echoink_memory_result>"
+        ].join("\n")
+      }]
+    }
+  });
+  const failed = source("memory_read", {
+    record: { id: "memory-failed", title: "Failed reads are absent" }
+  }, ["memory-failed"]);
+  failed.id = "result-memory-read-failed";
+  failed.message.isError = true;
+  const badEnvelope = source("memory_search", {
+    items: [{ id: "memory-bad-envelope", title: "Bad envelope" }]
+  }, ["memory-bad-envelope"]);
+  badEnvelope.id = "result-memory-search-bad-envelope";
+  badEnvelope.message.content = [{
+    type: "text",
+    text: "untrusted text without the Memory result envelope"
+  }];
+  const entries = [
+    source("memory_search", {
+      items: [
+        { id: "memory-search-primary", title: "Search primary" },
+        { id: "memory-duplicate", title: "Search duplicate" },
+        { id: "memory-unverified", title: "Must not enter attribution" }
+      ]
+    }, ["memory-search-primary", "memory-duplicate"]),
+    source("memory_read", {
+      record: { id: "memory-duplicate", title: "Read duplicate must not replace the first title" }
+    }, ["memory-duplicate"]),
+    source("memory_read", {
+      record: { id: "memory-read-primary", title: "Read primary" }
+    }, ["memory-read-primary"]),
+    failed,
+    badEnvelope
+  ];
+
+  assert.deepEqual(collectSuccessfulAskPersonalMemoryToolSources(entries as never), [
+    { id: "memory-search-primary", title: "Search primary" },
+    { id: "memory-duplicate", title: "Search duplicate" },
+    { id: "memory-read-primary", title: "Read primary" }
+  ]);
 }
 
 async function executeTool(

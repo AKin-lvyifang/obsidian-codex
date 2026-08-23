@@ -13,7 +13,11 @@ import { compactBrandedModelLabel } from "../../ui/codex-view/composer";
 import { buildActiveEchoInkResourceCatalog } from "../../resources/registry";
 import { splitMessageTableRow } from "../../ui/render-message";
 import { copyAnswerMarkdown } from "../../ui/codex-view/answer-copy";
-import { piConversationDeriveActionLabel } from "../../ui/codex-view/message-list";
+import {
+  personalMemorySourceCountLabel,
+  personalMemorySourceEmptyStateLabel,
+  piConversationDeriveActionLabel
+} from "../../ui/codex-view/message-list";
 import type { QueuedTurnItem } from "../../ui/turn-queue";
 
 export async function runPiNativeTurnRunnerTests(): Promise<void> {
@@ -21,10 +25,23 @@ export async function runPiNativeTurnRunnerTests(): Promise<void> {
   composerModelLabelsOnlyRemoveKnownBrandPrefixes();
   globalMemoryModeOverridesEverySubmit();
   tableRowsKeepVaultNoteAliasesInsideOneCell();
+  emptyPersonalMemorySourceDisplayDoesNotClaimInjection();
   await messageActionContractsStayTruthful();
   await agentSettlementOnlyFinalizesPiChatTurn();
   await disabledOrStaleSkillCannotStartTurn();
   await maintainScopeIsResolvedBeforeProviderSubmit();
+}
+
+function emptyPersonalMemorySourceDisplayDoesNotClaimInjection(): void {
+  assert.equal(personalMemorySourceCountLabel(0), "Personal Memory 来源");
+  assert.equal(
+    personalMemorySourceEmptyStateLabel(),
+    "未记录可展示的 Personal Memory 来源。"
+  );
+  assert.doesNotMatch(
+    `${personalMemorySourceCountLabel(0)} ${personalMemorySourceEmptyStateLabel()}`,
+    /(?:0 条|未注入)/u
+  );
 }
 
 async function maintainScopeIsResolvedBeforeProviderSubmit(): Promise<void> {
