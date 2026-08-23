@@ -9142,6 +9142,20 @@ body.theme-light .codex-container {
   stroke-width: 2;
 }
 
+.codex-title-icon-codex.has-image {
+  overflow: hidden;
+  border-radius: 50%;
+  background: var(--background-secondary);
+}
+
+.codex-title-avatar {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  object-fit: cover;
+}
+
 .codex-header-actions {
   flex-wrap: nowrap;
 }

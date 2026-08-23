@@ -19,6 +19,10 @@ await esbuild.build({
   entryPoints: ["src/tests/provider-settings-behavior.ts"],
   absWorkingDir: rootDir,
   bundle: true,
+  loader: {
+    ".md": "text",
+    ".webp": "dataurl"
+  },
   platform: "node",
   target: "node22",
   format: "esm",

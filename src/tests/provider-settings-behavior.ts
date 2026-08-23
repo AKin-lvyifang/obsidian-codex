@@ -107,7 +107,7 @@ import {
   prepareEchoInkOnboardingTutorial,
   shouldAutoStartEchoInkOnboarding
 } from "../settings/onboarding";
-import { renderCodexHeader } from "../ui/codex-view/header";
+import { renderCodexHeader, updateCodexHeaderIdentity } from "../ui/codex-view/header";
 import { mountEchoInkOnboardingCoachmark } from "../ui/onboarding-coachmark";
 import { KNOWLEDGE_INITIALIZATION_ROOTS } from "../knowledge-base/initializer";
 
@@ -115,6 +115,7 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   assertSettingsV50MigrationContract();
   assertOnboardingTruthContract();
   assertFiveStepOnboardingEntrypoints();
+  assertCodexHeaderIdentityContract();
   await assertOnboardingCoachmarkAccessibilityContract();
   await assertOnboardingDoesNotLockSettingsNavigation();
   await assertManualOnboardingReopenIsRemoved();
@@ -1986,6 +1987,43 @@ function assertFiveStepOnboardingEntrypoints(): void {
     /稍后设置|Set up later|dismissLabel/u
   );
   console.log("PASS settings: onboarding starts from ribbon and sidebar settings gear");
+}
+
+function assertCodexHeaderIdentityContract(): void {
+  installProviderModalDomFixture();
+  const root = providerModalTestDocument.createElement("div");
+  const avatarUrl = "data:image/webp;base64,UkVE";
+  renderCodexHeader(root as never, {
+    onOpenWorkspaceResources: () => undefined,
+    onOpenSettings: () => undefined
+  }, {
+    displayName: "小墨",
+    avatarUrl
+  });
+
+  const label = root.querySelector<ProviderModalTestElement>(".codex-title-text");
+  const icon = root.querySelector<ProviderModalTestElement>(".codex-title-icon-codex");
+  const avatar = root.querySelector<ProviderModalTestElement>(".codex-title-avatar");
+  assert.equal(label?.textContent, "小墨");
+  assert.equal(avatar?.getAttribute("src"), avatarUrl);
+  assert.equal(icon?.hasClass("has-image"), true);
+
+  updateCodexHeaderIdentity(root as never, { displayName: "   ", avatarUrl: null });
+  assert.equal(label?.textContent, "EchoInk");
+  assert.equal(root.querySelector(".codex-title-avatar"), null);
+  assert.equal(icon?.hasClass("has-image"), false);
+
+  updateCodexHeaderIdentity(root as never, { displayName: "新名字", avatarUrl });
+  assert.equal(label?.textContent, "新名字");
+  assert.equal(
+    root.querySelector<ProviderModalTestElement>(".codex-title-avatar")?.getAttribute("src"),
+    avatarUrl
+  );
+
+  const css = readFileSync("styles.css", "utf8");
+  assert.match(css, /\.codex-title-icon-codex\.has-image\s*\{[^}]*border-radius:\s*50%/u);
+  assert.match(css, /\.codex-title-avatar\s*\{[^}]*object-fit:\s*cover/u);
+  console.log("PASS settings: sidebar header follows cached Agent identity");
 }
 
 async function assertOnboardingCoachmarkAccessibilityContract(): Promise<void> {

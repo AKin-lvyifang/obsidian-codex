@@ -55,7 +55,7 @@ export function renderViewShell(host: CodexViewShellHost): void {
         })
         .catch(() => host.openPluginSettings());
     }
-  });
+  }, host.plugin.getEchoInkAgentIdentityView());
   host.registerDomEvent(document, "click", (event) => {
     const target = event.target instanceof Node ? event.target : null;
     if (!target) return;

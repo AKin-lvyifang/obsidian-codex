@@ -44,6 +44,10 @@ await esbuild.build({
     loader: "ts"
   },
   bundle: true,
+  loader: {
+    ".md": "text",
+    ".webp": "dataurl"
+  },
   platform: "node",
   target: "node22",
   format: "esm",

@@ -1082,6 +1082,9 @@ export default class CodexForObsidianPlugin extends Plugin {
         });
         system.startDreamScheduler();
         this.cognitiveSystem = system;
+        // 插件重载时侧栏可能先于 CognitiveSystem 缓存就绪。身份读完后主动
+        // 刷新一次，避免已有自定义名称/头像一直停在默认 EchoInk + bot。
+        this.getCodexView()?.refreshPersonalizationUi();
         return system;
       })();
       // Round 6 修复三：失败 flight 不得永久缓存——迁移失败 / 人格文件损坏

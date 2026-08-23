@@ -7,6 +7,7 @@ import {
   buildKnowledgeInitializationGuideTemplate,
   isKnowledgeInitializationRole,
   KnowledgeBaseInitializer,
+  KNOWLEDGE_INITIALIZATION_GUIDE_ASSET_PATHS,
   KNOWLEDGE_INITIALIZATION_GUIDE_PATH,
   KNOWLEDGE_INITIALIZATION_MARKDOWN_ROLES,
   KNOWLEDGE_INITIALIZATION_ROOTS,
@@ -35,6 +36,8 @@ export async function runKnowledgeInitializationTests(): Promise<void> {
   assertKnowledgeInitializationRecoveryDerivation();
   await assertProviderOrModelChangeRequiresNewPreview();
   await assertInitializationDoesNotGenerateLegacyRulesFile();
+  await assertGeneratedGuideIncludesOfflineAssets();
+  await assertManagedLegacyGuideRefreshIsSafe();
   await assertRecommendedArchivesOrdinaryFilesAndOnlyExtractsMarkdown();
   await assertZeroQueuePreservesUserFilesAndSkipsProvider();
   await assertSerialBatchSizes();
@@ -42,6 +45,7 @@ export async function runKnowledgeInitializationTests(): Promise<void> {
   await assertVerifiedMoveAndSourceChangePause();
   await assertConflictCancellationAndProviderRecoveryStops();
   await assertGuideConflictPreservesUserFile();
+  await assertGuideAssetConflictPreservesUserFile();
   await assertPriorGeneratedGuideIsReusableAfterNewPreview();
   await assertRestartPausesWithoutProviderReplay();
 }
@@ -201,6 +205,58 @@ async function assertInitializationDoesNotGenerateLegacyRulesFile(): Promise<voi
       "fresh initialization must not generate the retired LLM-WIKI rules file"
     );
     assert.ok(host.read(KNOWLEDGE_INITIALIZATION_GUIDE_PATH));
+  }, null);
+}
+
+async function assertGeneratedGuideIncludesOfflineAssets(): Promise<void> {
+  await withHost(async (host) => {
+    const initializer = new KnowledgeBaseInitializer(host);
+    await initializer.initialize();
+    await initializer.startPreview("recommended");
+    await initializer.confirm();
+    const completed = await waitForTerminal(initializer);
+    assert.equal(completed.status, "initialized");
+
+    const guide = host.read(KNOWLEDGE_INITIALIZATION_GUIDE_PATH) ?? "";
+    assert.match(guide, /template: echoink-knowledge-guide-v2/u);
+    assert.match(guide, /日常怎么整理知识/u);
+    assert.match(guide, /五类长期记忆/u);
+    assert.match(guide, /人格会影响什么/u);
+    for (const assetPath of KNOWLEDGE_INITIALIZATION_GUIDE_ASSET_PATHS) {
+      assert.match(guide, new RegExp(assetPath.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
+      assert.ok(
+        (host.readBinary(assetPath)?.byteLength ?? 0) > 10_000,
+        `guide asset must be written as real offline image bytes: ${assetPath}`
+      );
+    }
+  }, null);
+}
+
+async function assertManagedLegacyGuideRefreshIsSafe(): Promise<void> {
+  const created = "2026-08-20T08:30";
+  const legacyGuide = buildLegacyGuideFixture(created);
+  await withHost(async (host) => {
+    host.addFile(KNOWLEDGE_INITIALIZATION_GUIDE_PATH, legacyGuide);
+    const initializer = new KnowledgeBaseInitializer(host);
+    await initializer.initialize();
+    assert.equal(await initializer.refreshManagedGuide(), true);
+    const refreshed = host.read(KNOWLEDGE_INITIALIZATION_GUIDE_PATH) ?? "";
+    assert.match(refreshed, new RegExp(`created: ${created}`, "u"));
+    assert.match(refreshed, /template: echoink-knowledge-guide-v2/u);
+    assert.match(refreshed, /日常怎么整理知识/u);
+    for (const assetPath of KNOWLEDGE_INITIALIZATION_GUIDE_ASSET_PATHS) {
+      assert.ok((host.readBinary(assetPath)?.byteLength ?? 0) > 10_000);
+    }
+  }, null);
+
+  await withHost(async (host) => {
+    const editedGuide = `${legacyGuide}\n用户补充的一行。\n`;
+    host.addFile(KNOWLEDGE_INITIALIZATION_GUIDE_PATH, editedGuide);
+    const initializer = new KnowledgeBaseInitializer(host);
+    await initializer.initialize();
+    assert.equal(await initializer.refreshManagedGuide(), false);
+    assert.equal(host.read(KNOWLEDGE_INITIALIZATION_GUIDE_PATH), editedGuide);
+    assert.equal(host.binaryFiles.size, 0);
   }, null);
 }
 
@@ -664,6 +720,23 @@ async function assertGuideConflictPreservesUserFile(): Promise<void> {
   }, null);
 }
 
+async function assertGuideAssetConflictPreservesUserFile(): Promise<void> {
+  await withHost(async (host) => {
+    const conflictPath = KNOWLEDGE_INITIALIZATION_GUIDE_ASSET_PATHS[0];
+    const userBytes = Uint8Array.from([1, 2, 3, 4]);
+    host.addBinary(conflictPath, userBytes);
+    const initializer = new KnowledgeBaseInitializer(host);
+    await initializer.initialize();
+    await initializer.startPreview("recommended");
+    await initializer.confirm();
+    const blocked = await waitForTerminal(initializer);
+    assert.equal(blocked.status, "blocked_conflict");
+    assert.deepEqual(host.readBinary(conflictPath), userBytes);
+    assert.equal(host.read(KNOWLEDGE_INITIALIZATION_GUIDE_PATH), null);
+    assert.equal(host.initializedJob, null);
+  }, null);
+}
+
 async function assertPriorGeneratedGuideIsReusableAfterNewPreview(): Promise<void> {
   await withHost(async (host) => {
     const priorGuide = buildKnowledgeInitializationGuideTemplate(
@@ -989,6 +1062,7 @@ async function withHost(
 class MemoryKnowledgeInitializationHost implements KnowledgeInitializationHost {
   readonly vaultRootPath = "/virtual/vault";
   readonly files = new Map<string, string>();
+  readonly binaryFiles = new Map<string, Uint8Array>();
   readonly folders = new Set<string>();
   readonly batchCalls: string[][] = [];
   readonly batchConversationIds: string[] = [];
@@ -1037,15 +1111,33 @@ class MemoryKnowledgeInitializationHost implements KnowledgeInitializationHost {
     this.files.set(relativePath, content);
   }
 
+  addBinary(relativePath: string, content: Uint8Array): void {
+    this.binaryFiles.set(relativePath, Uint8Array.from(content));
+  }
+
   read(relativePath: string): string | null {
     return this.files.get(relativePath) ?? null;
   }
 
+  readBinary(relativePath: string): Uint8Array | null {
+    const content = this.binaryFiles.get(relativePath);
+    return content ? Uint8Array.from(content) : null;
+  }
+
   async listVaultFiles(): Promise<readonly KnowledgeInitializationVaultFile[]> {
-    return [...this.files.entries()].sort(([left], [right]) => left.localeCompare(right))
-      .map(([filePath, content]) => ({
+    const entries = [
+      ...[...this.files.entries()].map(([filePath, content]) => ({
+        filePath,
+        size: Buffer.byteLength(content)
+      })),
+      ...[...this.binaryFiles.entries()].map(([filePath, content]) => ({
+        filePath,
+        size: content.byteLength
+      }))
+    ].sort((left, right) => left.filePath.localeCompare(right.filePath));
+    return entries.map(({ filePath, size }) => ({
         path: filePath,
-        size: Buffer.byteLength(content),
+        size,
         mtime: 100,
         extension: path.posix.extname(filePath).slice(1),
         symbolicLink: false
@@ -1058,18 +1150,22 @@ class MemoryKnowledgeInitializationHost implements KnowledgeInitializationHost {
 
   async readFileHash(relativePath: string): Promise<string | null> {
     const content = this.read(relativePath);
-    return content === null ? null : hash(content);
+    if (content !== null) return hash(content);
+    const binary = this.binaryFiles.get(relativePath);
+    return binary ? hashBytes(binary) : null;
   }
 
   async pathExists(relativePath: string): Promise<boolean> {
     if (this.failPathExists) throw new Error("injected pathExists failure");
-    return this.files.has(relativePath) || this.folders.has(relativePath);
+    return this.files.has(relativePath)
+      || this.binaryFiles.has(relativePath)
+      || this.folders.has(relativePath);
   }
 
   async pathKind(relativePath: string): Promise<"missing" | "folder" | "other"> {
     if (this.failPathExists) throw new Error("injected pathKind failure");
     if (this.folders.has(relativePath)) return "folder";
-    if (this.files.has(relativePath)) return "other";
+    if (this.files.has(relativePath) || this.binaryFiles.has(relativePath)) return "other";
     return "missing";
   }
 
@@ -1080,6 +1176,7 @@ class MemoryKnowledgeInitializationHost implements KnowledgeInitializationHost {
       || relativePath === "."
       || this.folders.has(relativePath)
       || this.files.has(relativePath)
+      || this.binaryFiles.has(relativePath)
     ) {
       throw new Error("Folder already exists.");
     }
@@ -1087,12 +1184,25 @@ class MemoryKnowledgeInitializationHost implements KnowledgeInitializationHost {
   }
 
   async createText(relativePath: string, content: string): Promise<void> {
-    if (this.files.has(relativePath)) throw new Error("already_exists");
+    if (this.files.has(relativePath) || this.binaryFiles.has(relativePath)) {
+      throw new Error("already_exists");
+    }
     const parentFolder = knowledgeInitializationParentFolder(relativePath);
     if (parentFolder && !await this.pathExists(parentFolder)) {
       await this.createFolder(parentFolder);
     }
     this.files.set(relativePath, content);
+  }
+
+  async createBinary(relativePath: string, content: ArrayBuffer): Promise<void> {
+    if (this.files.has(relativePath) || this.binaryFiles.has(relativePath)) {
+      throw new Error("already_exists");
+    }
+    const parentFolder = knowledgeInitializationParentFolder(relativePath);
+    if (parentFolder && !await this.pathExists(parentFolder)) {
+      await this.createFolder(parentFolder);
+    }
+    this.binaryFiles.set(relativePath, Uint8Array.from(new Uint8Array(content)));
   }
 
   async updateText(relativePath: string, expectedContentHash: string, content: string): Promise<void> {
@@ -1166,6 +1276,24 @@ class MemoryKnowledgeInitializationHost implements KnowledgeInitializationHost {
 
 function hash(content: string): string {
   return `sha256:${createHash("sha256").update(content).digest("hex")}`;
+}
+
+function hashBytes(content: Uint8Array): string {
+  return `sha256:${createHash("sha256").update(content).digest("hex")}`;
+}
+
+function buildLegacyGuideFixture(created: string): string {
+  return [
+    "---", `created: ${created}`, "type: echoink-knowledge-guide", "---", "",
+    "# 开始使用 EchoInk 知识库", "",
+    "EchoInk 使用十个固定顶层目录：`raw`、`wiki`、`projects`、`outputs`、`inbox`、`journal`、`work`、`archive`、`templates`、`assets`。",
+    "", "## 核心流程", "",
+    "1. 把未经提炼的 Markdown 放在 `raw/`。",
+    "2. 在普通 EchoInk 会话中使用 `/maintain`，让 Agent 提炼并安全写入 `wiki/` 或 `projects/`。",
+    "3. 使用 `/ask` 从 Wiki、Projects 与 Raw 中检索和回答。",
+    "4. 新增资料后，在设置页点击“整理新增笔记”进行增量维护。", "",
+    "> 非 Markdown 文件和附件保持原位；EchoInk 不会覆盖或删除你的既有笔记。", ""
+  ].join("\n");
 }
 
 /** 从 host 的 privateRootPath（真实临时磁盘）读取私有文件。 */

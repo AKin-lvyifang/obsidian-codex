@@ -1,9 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
+import knowledgeGuideBody from "./assets/guide/knowledge-guide.zh-CN.md";
+import knowledgeFlowImageDataUrl from "./assets/guide/knowledge-flow-v1.webp";
+import memoryPersonalityImageDataUrl from "./assets/guide/memory-personality-v1.webp";
 
 export const KNOWLEDGE_BASE_TEMPLATE_VERSION = "onboarding-v1";
 export const KNOWLEDGE_INITIALIZATION_GUIDE_PATH = "wiki/开始使用 EchoInk 知识库.md";
+export const KNOWLEDGE_INITIALIZATION_GUIDE_ASSET_PATHS = Object.freeze([
+  "assets/echoink-guide/knowledge-flow-v1.webp",
+  "assets/echoink-guide/memory-personality-v1.webp"
+] as const);
 export const KNOWLEDGE_INITIALIZATION_INDEX_PATH = "wiki/index.md";
 export const KNOWLEDGE_INITIALIZATION_TRACKER_PATH = "outputs/.ingest-tracker.md";
 export const KNOWLEDGE_INITIALIZATION_ROOTS = Object.freeze([
@@ -170,6 +177,7 @@ export interface KnowledgeInitializationHost {
   pathKind(relativePath: string): Promise<KnowledgeBasePathKind>;
   createFolder(relativePath: string): Promise<void>;
   createText(relativePath: string, content: string): Promise<void>;
+  createBinary(relativePath: string, content: ArrayBuffer): Promise<void>;
   updateText(relativePath: string, expectedContentHash: string, content: string): Promise<void>;
   moveFile(sourcePath: string, targetPath: string, expectedContentHash: string): Promise<void>;
   currentProvider(): KnowledgeInitializationProviderSnapshot | null;
@@ -204,6 +212,18 @@ const FIXED_ROOTS = new Set<string>(KNOWLEDGE_INITIALIZATION_ROOTS);
 // reads, generates, repairs, or otherwise manages LLM-WIKI.md.
 const EXCLUDED_FILENAMES = new Set(["llm-wiki.md", "agents.md"]);
 
+interface KnowledgeInitializationGuideAsset {
+  readonly path: typeof KNOWLEDGE_INITIALIZATION_GUIDE_ASSET_PATHS[number];
+  readonly content: ArrayBuffer;
+  readonly contentHash: string;
+}
+
+const KNOWLEDGE_INITIALIZATION_GUIDE_ASSETS:
+readonly KnowledgeInitializationGuideAsset[] = Object.freeze([
+  guideAsset(KNOWLEDGE_INITIALIZATION_GUIDE_ASSET_PATHS[0], knowledgeFlowImageDataUrl),
+  guideAsset(KNOWLEDGE_INITIALIZATION_GUIDE_ASSET_PATHS[1], memoryPersonalityImageDataUrl)
+]);
+
 export class KnowledgeBaseInitializer {
   private job: KnowledgeInitializationJob | null = null;
   private runFlight: Promise<void> | null = null;
@@ -219,6 +239,28 @@ export class KnowledgeBaseInitializer {
       this.job.recoveryAction = "请检查冻结计划后点击继续；不会自动重跑 Provider。";
       await this.persistJob(this.job);
     }
+  }
+
+  /**
+   * 插件升级时安全刷新 EchoInk 自己生成、且从未被用户修改的指南。
+   * 不创建初始化作业，不移动文件，不调用 Provider；任一内容冲突即跳过。
+   */
+  async refreshManagedGuide(): Promise<boolean> {
+    const existingGuide = await this.host.readText(KNOWLEDGE_INITIALIZATION_GUIDE_PATH);
+    if (!existingGuide || !isReusableEchoInkKnowledgeGuide(existingGuide)) return false;
+    const createdAt = echoInkKnowledgeGuideCreatedAt(existingGuide);
+    if (!createdAt) return false;
+    const assets = await this.provisionGuideAssets();
+    if (assets.status !== "ready") return false;
+    const expectedGuide = buildKnowledgeInitializationGuideTemplate(createdAt);
+    if (existingGuide !== expectedGuide) {
+      await this.host.updateText(
+        KNOWLEDGE_INITIALIZATION_GUIDE_PATH,
+        sha256(existingGuide),
+        expectedGuide
+      );
+    }
+    return await this.host.readText(KNOWLEDGE_INITIALIZATION_GUIDE_PATH) === expectedGuide;
   }
 
   snapshot(): Readonly<KnowledgeInitializationJob> | null {
@@ -735,8 +777,20 @@ export class KnowledgeBaseInitializer {
         "请保留并重命名现有文件，或移开冲突文件后再继续；EchoInk 不会覆盖它。");
       return;
     }
+    if (!await this.ensureGuideAssets(job, signal)) return;
     if (existingGuide === null) {
       await this.host.createText(KNOWLEDGE_INITIALIZATION_GUIDE_PATH, expectedGuide);
+    } else if (
+      existingGuide !== expectedGuide
+      && !existingGuide.includes("\ntemplate: echoink-knowledge-guide-v2\n")
+    ) {
+      // 只更新逐字匹配 EchoInk 历史模板的旧指南。用户改过哪怕一个字，
+      // 上面的冲突保护都会暂停，不会用新版指南覆盖用户内容。
+      await this.host.updateText(
+        KNOWLEDGE_INITIALIZATION_GUIDE_PATH,
+        sha256(existingGuide),
+        expectedGuide
+      );
     }
     assertJobActive(job, signal);
     await this.ensureIndexMarker(now);
@@ -745,17 +799,22 @@ export class KnowledgeBaseInitializer {
     assertJobActive(job, signal);
     await this.createTextIfMissing(KNOWLEDGE_INITIALIZATION_TRACKER_PATH, buildTrackerTemplate(now));
     assertJobActive(job, signal);
-    const [guide, index] = await Promise.all([
+    const [guide, index, assetHashes] = await Promise.all([
       this.host.readText(KNOWLEDGE_INITIALIZATION_GUIDE_PATH),
-      this.host.readText(KNOWLEDGE_INITIALIZATION_INDEX_PATH)
+      this.host.readText(KNOWLEDGE_INITIALIZATION_INDEX_PATH),
+      Promise.all(KNOWLEDGE_INITIALIZATION_GUIDE_ASSETS.map(
+        (asset) => this.host.readFileHash(asset.path)
+      ))
     ]);
     if (
       (guide !== expectedGuide && (guide === null || !isReusableEchoInkKnowledgeGuide(guide)))
       || !index?.includes(INDEX_MARKER_START)
       || !index.includes(INDEX_MARKER_END)
+      || assetHashes.some((hash, index) =>
+        hash !== KNOWLEDGE_INITIALIZATION_GUIDE_ASSETS[index]?.contentHash)
     ) {
-      await this.pause(job, "write_uncertain", "指南或 Wiki 索引写入后 Readback 未确认。",
-        "检查指南与 marker block 后再点击继续。");
+      await this.pause(job, "write_uncertain", "指南、配图或 Wiki 索引写入后没有确认完整。",
+        "检查指南、配图与 Wiki 索引后再点击继续。");
       return;
     }
     assertJobActive(job, signal);
@@ -771,6 +830,62 @@ export class KnowledgeBaseInitializer {
       throw new DOMException("初始化已停止", "AbortError");
     }
     await this.host.markInitialized(cloneJob(job));
+  }
+
+  private async ensureGuideAssets(
+    job: KnowledgeInitializationJob,
+    signal: AbortSignal
+  ): Promise<boolean> {
+    const result = await this.provisionGuideAssets(() => assertJobActive(job, signal));
+    if (result.status === "ready") return true;
+    if (result.status === "conflict") {
+      await this.pause(
+        job,
+        "blocked_conflict",
+        `指南配图目标已存在：${result.path}`,
+        "请保留并重命名现有文件，或移开冲突文件后再继续；EchoInk 不会覆盖它。"
+      );
+      return false;
+    }
+    await this.pause(
+      job,
+      "write_uncertain",
+      "指南配图写入后没有确认完整。",
+      "检查 assets/echoink-guide 中的文件后再点击继续。"
+    );
+    return false;
+  }
+
+  private async provisionGuideAssets(
+    beforeWrite: () => void = () => undefined
+  ): Promise<
+    | Readonly<{ status: "ready" }>
+    | Readonly<{ status: "conflict"; path: string }>
+    | Readonly<{ status: "write_uncertain" }>
+  > {
+    const states = await Promise.all(KNOWLEDGE_INITIALIZATION_GUIDE_ASSETS.map(async (asset) => ({
+      asset,
+      kind: await this.host.pathKind(asset.path),
+      contentHash: await this.host.readFileHash(asset.path)
+    })));
+    for (const state of states) {
+      if (state.kind === "missing" || state.contentHash === state.asset.contentHash) continue;
+      return Object.freeze({ status: "conflict" as const, path: state.asset.path });
+    }
+    for (const state of states) {
+      if (state.kind !== "missing") continue;
+      beforeWrite();
+      await this.host.createBinary(state.asset.path, state.asset.content.slice(0));
+    }
+    beforeWrite();
+    const readback = await Promise.all(KNOWLEDGE_INITIALIZATION_GUIDE_ASSETS.map(
+      (asset) => this.host.readFileHash(asset.path)
+    ));
+    if (readback.some((hash, index) =>
+      hash !== KNOWLEDGE_INITIALIZATION_GUIDE_ASSETS[index]?.contentHash)) {
+      return Object.freeze({ status: "write_uncertain" as const });
+    }
+    return Object.freeze({ status: "ready" as const });
   }
 
   private async createTextIfMissing(relativePath: string, content: string): Promise<void> {
@@ -1112,7 +1227,36 @@ function sha256(value: string): string {
   return `sha256:${createHash("sha256").update(value, "utf8").digest("hex")}`;
 }
 
+function guideAsset(
+  assetPath: typeof KNOWLEDGE_INITIALIZATION_GUIDE_ASSET_PATHS[number],
+  dataUrl: string
+): KnowledgeInitializationGuideAsset {
+  const prefix = "data:image/webp;base64,";
+  if (!dataUrl.startsWith(prefix)) {
+    throw new Error(`EchoInk guide asset is not an embedded WebP: ${assetPath}`);
+  }
+  const content = Uint8Array.from(Buffer.from(dataUrl.slice(prefix.length), "base64")).buffer;
+  return Object.freeze({
+    path: assetPath,
+    content,
+    contentHash: `sha256:${createHash("sha256").update(Buffer.from(content)).digest("hex")}`
+  });
+}
+
 export function buildKnowledgeInitializationGuideTemplate(now: Date): string {
+  return [
+    "---",
+    `created: ${formatDateTime(now)}`,
+    "type: echoink-knowledge-guide",
+    "template: echoink-knowledge-guide-v2",
+    "---",
+    "",
+    knowledgeGuideBody.trim(),
+    ""
+  ].join("\n");
+}
+
+function buildLegacyKnowledgeInitializationGuideTemplate(now: Date): string {
   return [
     "---", `created: ${formatDateTime(now)}`, "type: echoink-knowledge-guide", "---", "",
     "# 开始使用 EchoInk 知识库", "",
@@ -1126,14 +1270,22 @@ export function buildKnowledgeInitializationGuideTemplate(now: Date): string {
   ].join("\n");
 }
 
-function isReusableEchoInkKnowledgeGuide(content: string): boolean {
-  const created = /^---\ncreated: (\d{4}-\d{2}-\d{2}T\d{2}:\d{2})\ntype: echoink-knowledge-guide\n---\n/u
+function echoInkKnowledgeGuideCreatedAt(content: string): Date | null {
+  const created = /^---\ncreated: (\d{4}-\d{2}-\d{2}T\d{2}:\d{2})\ntype: echoink-knowledge-guide\n(?:template: echoink-knowledge-guide-v2\n)?---\n/u
     .exec(content)?.[1];
-  if (!created) return false;
+  if (!created) return null;
   const createdAt = new Date(`${created}:00.000Z`);
-  return !Number.isNaN(createdAt.getTime())
-    && formatDateTime(createdAt) === created
-    && content === buildKnowledgeInitializationGuideTemplate(createdAt);
+  return !Number.isNaN(createdAt.getTime()) && formatDateTime(createdAt) === created
+    ? createdAt
+    : null;
+}
+
+function isReusableEchoInkKnowledgeGuide(content: string): boolean {
+  const createdAt = echoInkKnowledgeGuideCreatedAt(content);
+  return createdAt !== null && (
+    content === buildKnowledgeInitializationGuideTemplate(createdAt)
+    || content === buildLegacyKnowledgeInitializationGuideTemplate(createdAt)
+  );
 }
 
 function buildWikiIndexMarkerBlock(now: Date): string {

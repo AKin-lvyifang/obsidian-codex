@@ -118,6 +118,7 @@ import {
   type CodexTurnLifecycleHost
 } from "./codex-view/turn-lifecycle";
 import { renderViewShell, type CodexViewShellHost } from "./codex-view/view-shell";
+import { updateCodexHeaderIdentity } from "./codex-view/header";
 import { closeComposerParameterMenu } from "./codex-view/menus";
 import {
   activateSession as activateSessionAction,
@@ -254,6 +255,12 @@ export class CodexView extends ItemView {
   }
 
   refreshPersonalizationUi(): void {
+    if (this.rootEl) {
+      updateCodexHeaderIdentity(
+        this.rootEl,
+        this.plugin.getEchoInkAgentIdentityView()
+      );
+    }
     this.renderMessages({ preserveScroll: true });
   }
 

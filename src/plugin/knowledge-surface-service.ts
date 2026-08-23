@@ -50,6 +50,20 @@ export class EchoInkKnowledgeSurfaceService {
       createKnowledgeInitializationHost(plugin)
     );
     this.initializerReady = this.initializer.initialize();
+    // 插件 onload 早于 Vault 文件索引完全就绪；等 Obsidian layoutReady 后
+    // 再读取并升级旧指南，否则 getFileByPath 可能暂时返回 null 而被跳过。
+    plugin.app.workspace.onLayoutReady(() => {
+      void this.initializerReady.then(async () => {
+        try {
+          await this.initializer.refreshManagedGuide();
+        } catch (error) {
+          // 指南升级是可选维护，不得阻断知识库设置与既有初始化恢复链。
+          console.error("EchoInk managed knowledge guide refresh failed", error);
+        }
+      }).catch((error) => {
+        console.error("EchoInk knowledge initializer failed before guide refresh", error);
+      });
+    });
   }
 
   get isRunning(): boolean {
@@ -237,6 +251,15 @@ function createKnowledgeInitializationHost(
         throw new Error(`目标已存在：${normalized}`);
       }
       await plugin.app.vault.create(normalized, content);
+    },
+    async createBinary(relativePath: string, content: ArrayBuffer): Promise<void> {
+      const normalized = normalizePath(relativePath);
+      const parentFolder = knowledgeInitializationParentFolder(normalized);
+      if (parentFolder) await ensureFolder(parentFolder);
+      if (plugin.app.vault.getAbstractFileByPath(normalized)) {
+        throw new Error(`目标已存在：${normalized}`);
+      }
+      await plugin.app.vault.createBinary(normalized, content);
     },
     async updateText(relativePath: string, expectedContentHash: string, content: string): Promise<void> {
       const file = requireVaultFile(plugin, relativePath);
