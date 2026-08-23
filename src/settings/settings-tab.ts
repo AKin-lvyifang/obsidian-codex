@@ -4162,7 +4162,7 @@ const SETTINGS_PANEL_ID = "echoink-settings-panel";
 const SETTINGS_TITLE_ID = "echoink-settings-title";
 const RESOURCE_PANEL_ID = "echoink-resource-panel";
 const RESOURCE_TITLE_ID = "echoink-resource-title";
-const SETTINGS_TAB_ICON_ANIMATION_WINDOW_MS = 900;
+const SETTINGS_TAB_ICON_ANIMATION_WINDOW_MS = 1_250;
 
 const SETTINGS_TABS: Array<{
   id: VisibleSettingsTab;
@@ -4170,8 +4170,8 @@ const SETTINGS_TABS: Array<{
 }> = [
   { id: "general", icon: "settings" },
   { id: "providers", icon: "key-round" },
-  { id: "resources", icon: "blocks" },
-  { id: "knowledgeBase", icon: "book-open" },
+  { id: "resources", icon: "layout-list" },
+  { id: "knowledgeBase", icon: "book-open-check" },
   { id: "review", icon: "clipboard-check" }
 ];
 

@@ -198,8 +198,8 @@ async function assertAnimatedSettingsTabIcons(): Promise<void> {
   const expected = [
     ["general", "settings"],
     ["providers", "key-round"],
-    ["resources", "blocks"],
-    ["knowledgeBase", "book-open"],
+    ["resources", "layout-list"],
+    ["knowledgeBase", "book-open-check"],
     ["review", "clipboard-check"]
   ] as const;
   const icons = tab.containerEl.querySelectorAll<ProviderModalTestElement>(
@@ -213,7 +213,28 @@ async function assertAnimatedSettingsTabIcons(): Promise<void> {
     );
     assert.equal(icons[index]?.getAttribute("data-animated-icon"), iconName);
     assert.equal(icons[index]?.hasClass("is-animating"), false);
+    const svg = icons[index]?.querySelector("svg");
+    assert.ok(svg, `${iconName} renders its own layered SVG`);
+    assert.equal(svg.getAttribute("data-animateicons-source"), "lucide");
+    assert.equal(svg.getAttribute("data-animateicons-icon"), iconName);
   });
+  const iconFor = (tabId: string) => tab.containerEl
+    .querySelector(`[data-settings-tab="${tabId}"]`)
+    ?.querySelector<ProviderModalTestElement>(".codex-settings-tab-icon");
+  assert.equal(iconFor("general")?.querySelectorAll('[data-part="settings-spark"]').length, 5);
+  assert.ok(iconFor("general")?.querySelector('[data-part="settings-gear-draw"]'));
+  assert.ok(iconFor("general")?.querySelector('[data-part="settings-core-draw"]'));
+  assert.ok(iconFor("providers")?.querySelector('[data-part="key-path"]'));
+  assert.ok(iconFor("providers")?.querySelector('[data-part="key-bite"]'));
+  assert.ok(iconFor("providers")?.querySelector('[data-part="key-head"]'));
+  assert.equal(iconFor("resources")?.querySelectorAll('[data-part="layout-box"]').length, 2);
+  assert.equal(iconFor("resources")?.querySelectorAll('[data-part="layout-line"]').length, 4);
+  assert.ok(iconFor("knowledgeBase")?.querySelector('[data-part="book-spine"]'));
+  assert.ok(iconFor("knowledgeBase")?.querySelector('[data-part="book-body"]'));
+  assert.ok(iconFor("knowledgeBase")?.querySelector('[data-part="book-check"]'));
+  assert.ok(iconFor("review")?.querySelector('[data-part="clipboard-clip"]'));
+  assert.ok(iconFor("review")?.querySelector('[data-part="clipboard-body"]'));
+  assert.ok(iconFor("review")?.querySelector('[data-part="clipboard-check"]'));
 
   const providers = tab.containerEl.querySelector<ProviderModalTestElement>(
     '[data-settings-tab="providers"]'
@@ -251,7 +272,7 @@ async function assertAnimatedSettingsTabIcons(): Promise<void> {
   );
   mutableTab.settingsTabIconAnimation = {
     tabId: "review",
-    startedAtMs: Date.now() - 1_000
+    startedAtMs: Date.now() - 1_300
   };
   mutableTab.renderSettingsContent();
   assert.equal(
@@ -277,7 +298,25 @@ async function assertAnimatedSettingsTabIcons(): Promise<void> {
   );
 
   const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
-  for (const keyframe of ["settings", "key", "blocks", "book", "clipboard", "check"]) {
+  for (const keyframe of [
+    "settings-motion",
+    "settings-gear-draw",
+    "settings-core-draw",
+    "settings-spark",
+    "key-motion",
+    "key-path",
+    "key-bite",
+    "key-head",
+    "layout-box",
+    "layout-line",
+    "book-motion",
+    "book-spine",
+    "book-body",
+    "book-check",
+    "clipboard-body",
+    "clipboard-clip",
+    "clipboard-check"
+  ]) {
     assert.match(css, new RegExp(`@keyframes echoink-tab-icon-${keyframe}\\b`, "u"));
   }
   assert.match(
@@ -2145,7 +2184,8 @@ async function assertOnboardingCoachmarkAccessibilityContract(): Promise<void> {
 
   const css = readFileSync("styles.css", "utf8");
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.echoink-onboarding-coachmark\s*\{[\s\S]*?animation:\s*none/u);
-  assert.match(css, /\.echoink-onboarding-coachmark \.echoink-onboarding-action\s*\{[^}]*width:\s*144px;[^}]*min-height:\s*40px;/u);
+  assert.match(css, /\.echoink-onboarding-coachmark \.echoink-onboarding-action\s*\{[^}]*width:\s*auto;[^}]*min-width:\s*0;[^}]*max-width:\s*100%;[^}]*min-height:\s*40px;[^}]*padding:\s*0 11px;/u);
+  assert.doesNotMatch(css, /\.echoink-onboarding-coachmark \.echoink-onboarding-action\s*\{\s*width:\s*100%;/u);
   assert.match(css, /\.echoink-onboarding-action-label-window\s*\{[^}]*height:\s*18px;[^}]*overflow:\s*hidden/u);
   assert.match(css, /\.echoink-onboarding-action-label::after\s*\{[^}]*content:\s*attr\(data-label\)/u);
   assert.match(css, /\.echoink-onboarding-action:is\(:hover, :focus-visible\) \.echoink-onboarding-action-icon\s*\{[^}]*rotate\(45deg\)/u);

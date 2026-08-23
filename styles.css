@@ -1386,10 +1386,11 @@ button.codex-user-message-copy {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  width: 144px;
-  min-width: 144px;
+  width: auto;
+  min-width: 0;
+  max-width: 100%;
   min-height: 40px;
-  padding: 0 14px;
+  padding: 0 11px;
 }
 
 .echoink-onboarding-action-label-window {
@@ -1448,12 +1449,11 @@ button.codex-user-message-copy {
   }
 
   .echoink-onboarding-actions {
-    align-items: stretch;
+    align-items: flex-end;
   }
 
   .echoink-onboarding-coachmark .echoink-onboarding-action {
-    width: 100%;
-    min-width: 0;
+    width: auto;
   }
 }
 
@@ -3090,123 +3090,270 @@ body.theme-light .codex-code-wrapper pre {
   justify-content: center;
 }
 
-.codex-settings-tab-icon.is-animating svg {
+/* Native-DOM ports of the matching Animate Icons Lucide layers (MIT).
+   Each selected icon replays its source component's part-by-part timeline. */
+.codex-settings-tab-icon [data-part] {
   transform-box: fill-box;
+}
+
+.codex-settings-tab-icon [data-part="settings-motion"],
+.codex-settings-tab-icon [data-part="key-motion"],
+.codex-settings-tab-icon [data-part="book-body"],
+.codex-settings-tab-icon [data-part="clipboard-body"],
+.codex-settings-tab-icon [data-part="clipboard-clip"] {
   transform-origin: center;
 }
 
-/* Motion adapted from the matching Animate Icons Lucide components (MIT).
-   The selected icon moves once; its idle glyph remains Obsidian's Lucide SVG. */
-.codex-settings-tab-icon.is-animating[data-animated-icon="settings"] svg {
-  animation: echoink-tab-icon-settings 760ms ease-in-out;
+.codex-settings-tab-icon [data-part="settings-gear-draw"],
+.codex-settings-tab-icon [data-part="settings-core-draw"] {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+}
+
+.codex-settings-tab-icon [data-part="settings-core-draw"],
+.codex-settings-tab-icon [data-part="settings-spark"],
+.codex-settings-tab-icon [data-part="key-head"],
+.codex-settings-tab-icon [data-part="layout-box"],
+.codex-settings-tab-icon [data-part="clipboard-check"] {
+  transform-origin: center;
+}
+
+.codex-settings-tab-icon [data-part="settings-spark"] {
+  opacity: 0;
+  transform: scale(0.6);
+}
+
+.codex-settings-tab-icon [data-part="layout-line"] {
+  transform-origin: left center;
+}
+
+.codex-settings-tab-icon [data-part="book-spine"],
+.codex-settings-tab-icon [data-part="book-check"],
+.codex-settings-tab-icon [data-part="clipboard-check"] {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 0;
+}
+
+.codex-settings-tab-icon.is-animating [data-part="settings-motion"] {
+  animation: echoink-tab-icon-settings-motion 900ms ease-in-out both;
   animation-delay: var(--echoink-tab-icon-delay, 0ms);
 }
 
-.codex-settings-tab-icon.is-animating[data-animated-icon="settings"] svg circle:last-of-type {
-  transform-box: fill-box;
-  transform-origin: center;
-  animation: echoink-tab-icon-core 520ms ease-in-out 150ms;
-  animation-delay: calc(var(--echoink-tab-icon-delay, 0ms) + 150ms);
+.codex-settings-tab-icon.is-animating [data-part="settings-gear-draw"] {
+  animation: echoink-tab-icon-settings-gear-draw 700ms ease-in-out both;
+  animation-delay: calc(var(--echoink-tab-icon-delay, 0ms) + 60ms);
 }
 
-.codex-settings-tab-icon.is-animating[data-animated-icon="key-round"] svg {
-  animation: echoink-tab-icon-key 760ms ease-in-out;
-  animation-delay: var(--echoink-tab-icon-delay, 0ms);
-}
-
-.codex-settings-tab-icon.is-animating[data-animated-icon="key-round"] svg circle:last-of-type {
-  transform-box: fill-box;
-  transform-origin: center;
-  animation: echoink-tab-icon-key-head 460ms ease-in-out 260ms;
+.codex-settings-tab-icon.is-animating [data-part="settings-core-draw"] {
+  animation: echoink-tab-icon-settings-core-draw 600ms ease-in-out both;
   animation-delay: calc(var(--echoink-tab-icon-delay, 0ms) + 260ms);
 }
 
-.codex-settings-tab-icon.is-animating[data-animated-icon="blocks"] svg {
-  animation: echoink-tab-icon-blocks 820ms ease-in-out;
+.codex-settings-tab-icon.is-animating [data-part="settings-spark"] {
+  animation: echoink-tab-icon-settings-spark 350ms ease-out both;
+}
+
+.codex-settings-tab-icon.is-animating [data-part="settings-spark"][data-index="0"] {
+  animation-delay: calc(var(--echoink-tab-icon-delay, 0ms) + 180ms);
+}
+
+.codex-settings-tab-icon.is-animating [data-part="settings-spark"][data-index="1"] {
+  animation-delay: calc(var(--echoink-tab-icon-delay, 0ms) + 260ms);
+}
+
+.codex-settings-tab-icon.is-animating [data-part="settings-spark"][data-index="2"] {
+  animation-delay: calc(var(--echoink-tab-icon-delay, 0ms) + 340ms);
+}
+
+.codex-settings-tab-icon.is-animating [data-part="settings-spark"][data-index="3"] {
+  animation-delay: calc(var(--echoink-tab-icon-delay, 0ms) + 420ms);
+}
+
+.codex-settings-tab-icon.is-animating [data-part="settings-spark"][data-index="4"] {
+  animation-delay: calc(var(--echoink-tab-icon-delay, 0ms) + 500ms);
+}
+
+.codex-settings-tab-icon.is-animating [data-part="key-motion"] {
+  animation: echoink-tab-icon-key-motion 700ms ease-in-out both;
   animation-delay: var(--echoink-tab-icon-delay, 0ms);
 }
 
-.codex-settings-tab-icon.is-animating[data-animated-icon="blocks"] svg rect:last-of-type {
+.codex-settings-tab-icon.is-animating [data-part="key-path"] {
+  animation: echoink-tab-icon-key-path 800ms ease-in-out both;
+  animation-delay: var(--echoink-tab-icon-delay, 0ms);
+}
+
+.codex-settings-tab-icon.is-animating [data-part="key-head"] {
+  animation: echoink-tab-icon-key-head 600ms ease-in-out both;
+  animation-delay: calc(var(--echoink-tab-icon-delay, 0ms) + 450ms);
+}
+
+.codex-settings-tab-icon.is-animating [data-part="key-bite"] {
+  animation: echoink-tab-icon-key-bite 450ms ease-in-out both;
+  animation-delay: calc(var(--echoink-tab-icon-delay, 0ms) + 550ms);
+}
+
+.codex-settings-tab-icon.is-animating [data-part="layout-box"] {
+  animation: echoink-tab-icon-layout-box 350ms ease-out both;
+}
+
+.codex-settings-tab-icon.is-animating [data-part="layout-box"][data-index="0"] {
+  animation-delay: var(--echoink-tab-icon-delay, 0ms);
+}
+
+.codex-settings-tab-icon.is-animating [data-part="layout-box"][data-index="1"] {
+  animation-delay: calc(var(--echoink-tab-icon-delay, 0ms) + 80ms);
+}
+
+.codex-settings-tab-icon.is-animating [data-part="layout-line"] {
+  animation: echoink-tab-icon-layout-line 300ms ease-out both;
+}
+
+.codex-settings-tab-icon.is-animating [data-part="layout-line"][data-index="0"] {
+  animation-delay: calc(var(--echoink-tab-icon-delay, 0ms) + 150ms);
+}
+
+.codex-settings-tab-icon.is-animating [data-part="layout-line"][data-index="1"] {
+  animation-delay: calc(var(--echoink-tab-icon-delay, 0ms) + 220ms);
+}
+
+.codex-settings-tab-icon.is-animating [data-part="layout-line"][data-index="2"] {
+  animation-delay: calc(var(--echoink-tab-icon-delay, 0ms) + 290ms);
+}
+
+.codex-settings-tab-icon.is-animating [data-part="layout-line"][data-index="3"] {
+  animation-delay: calc(var(--echoink-tab-icon-delay, 0ms) + 360ms);
+}
+
+.codex-settings-tab-icon.is-animating[data-animated-icon="book-open-check"] svg {
   transform-box: fill-box;
   transform-origin: center;
-  animation: echoink-tab-icon-block 640ms ease-in-out 90ms;
-  animation-delay: calc(var(--echoink-tab-icon-delay, 0ms) + 90ms);
-}
-
-.codex-settings-tab-icon.is-animating[data-animated-icon="book-open"] svg {
-  animation: echoink-tab-icon-book 760ms ease-in-out;
+  animation: echoink-tab-icon-book-motion 900ms ease-in-out both;
   animation-delay: var(--echoink-tab-icon-delay, 0ms);
 }
 
-.codex-settings-tab-icon.is-animating[data-animated-icon="clipboard-check"] svg {
-  animation: echoink-tab-icon-clipboard 720ms ease-in-out;
+.codex-settings-tab-icon.is-animating [data-part="book-spine"] {
+  animation: echoink-tab-icon-book-spine 600ms ease-in-out both;
   animation-delay: var(--echoink-tab-icon-delay, 0ms);
 }
 
-.codex-settings-tab-icon.is-animating[data-animated-icon="clipboard-check"] svg path:last-of-type {
-  stroke-dasharray: 12;
-  transform-box: fill-box;
-  transform-origin: center;
-  animation: echoink-tab-icon-check 500ms ease-out 120ms both;
-  animation-delay: calc(var(--echoink-tab-icon-delay, 0ms) + 120ms);
+.codex-settings-tab-icon.is-animating [data-part="book-body"] {
+  animation: echoink-tab-icon-book-body 800ms ease-out both;
+  animation-delay: calc(var(--echoink-tab-icon-delay, 0ms) + 150ms);
 }
 
-@keyframes echoink-tab-icon-settings {
+.codex-settings-tab-icon.is-animating [data-part="book-check"] {
+  animation: echoink-tab-icon-book-check 700ms ease-out both;
+  animation-delay: calc(var(--echoink-tab-icon-delay, 0ms) + 250ms);
+}
+
+.codex-settings-tab-icon.is-animating [data-part="clipboard-body"] {
+  animation: echoink-tab-icon-clipboard-body 1s ease-in-out both;
+  animation-delay: var(--echoink-tab-icon-delay, 0ms);
+}
+
+.codex-settings-tab-icon.is-animating [data-part="clipboard-clip"] {
+  animation: echoink-tab-icon-clipboard-clip 1s ease-in-out both;
+  animation-delay: calc(var(--echoink-tab-icon-delay, 0ms) + 200ms);
+}
+
+.codex-settings-tab-icon.is-animating [data-part="clipboard-check"] {
+  animation: echoink-tab-icon-clipboard-check 550ms ease-out both;
+  animation-delay: calc(var(--echoink-tab-icon-delay, 0ms) + 350ms);
+}
+
+@keyframes echoink-tab-icon-settings-motion {
   0%, 100% { transform: translateY(0) rotate(0) scale(1); }
-  48% { transform: translateY(-0.8px) rotate(16deg) scale(1.06); }
+  50% { transform: translateY(-0.8px) rotate(16deg) scale(1.06); }
 }
 
-@keyframes echoink-tab-icon-core {
-  0%, 100% { transform: scale(1); }
-  52% { transform: scale(1.14); }
+@keyframes echoink-tab-icon-settings-gear-draw {
+  from { stroke-dashoffset: 1; }
+  to { stroke-dashoffset: 0; }
 }
 
-@keyframes echoink-tab-icon-key {
-  0%, 100% { transform: translate(0, 0) rotate(0) scale(1); }
-  30% { transform: translate(0, 0) rotate(-3deg) scale(1.02); }
-  68% { transform: translate(1.2px, -0.6px) rotate(3deg) scale(1.04); }
+@keyframes echoink-tab-icon-settings-core-draw {
+  0% { stroke-dashoffset: 1; transform: scale(1); }
+  55% { transform: scale(1.08); }
+  100% { stroke-dashoffset: 0; transform: scale(1); }
+}
+
+@keyframes echoink-tab-icon-settings-spark {
+  0% { opacity: 0; transform: scale(0.6); }
+  50% { opacity: 1; transform: scale(1.25); }
+  100% { opacity: 0; transform: scale(1); }
+}
+
+@keyframes echoink-tab-icon-key-motion {
+  0%, 100% { transform: rotate(0) scale(1); }
+  33% { transform: rotate(-2deg) scale(1.02); }
+  66% { transform: rotate(2deg) scale(1.02); }
+}
+
+@keyframes echoink-tab-icon-key-path {
+  0% { opacity: 0.4; stroke-dashoffset: 140; }
+  100% { opacity: 1; stroke-dashoffset: 0; }
 }
 
 @keyframes echoink-tab-icon-key-head {
   0%, 100% { transform: rotate(0) scale(1); }
-  35% { transform: rotate(-8deg) scale(1.14); }
-  70% { transform: rotate(8deg) scale(1.06); }
+  33% { transform: rotate(-8deg) scale(1.12); }
+  66% { transform: rotate(8deg) scale(1); }
 }
 
-@keyframes echoink-tab-icon-blocks {
+@keyframes echoink-tab-icon-key-bite {
+  0%, 100% { transform: translate(0, 0); }
+  50% { transform: translate(1.2px, -0.6px); }
+}
+
+@keyframes echoink-tab-icon-layout-box {
+  0% { opacity: 0.6; transform: scale(0.85); }
+  60% { opacity: 1; transform: scale(1.05); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+@keyframes echoink-tab-icon-layout-line {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+
+@keyframes echoink-tab-icon-book-motion {
   0%, 100% { transform: rotate(0) scale(1); }
-  32% { transform: rotate(-2deg) scale(1.05); }
-  66% { transform: rotate(2deg) scale(0.95); }
+  33% { transform: rotate(-2deg) scale(1.06); }
+  66% { transform: rotate(2deg) scale(0.97); }
 }
 
-@keyframes echoink-tab-icon-block {
+@keyframes echoink-tab-icon-book-spine {
+  from { stroke-dashoffset: 1; }
+  to { stroke-dashoffset: 0; }
+}
+
+@keyframes echoink-tab-icon-book-body {
   0%, 100% { transform: scale(1); }
-  40% { transform: scale(1.18); }
-  72% { transform: scale(0.92); }
+  33% { transform: scale(1.05); }
+  66% { transform: scale(0.98); }
 }
 
-@keyframes echoink-tab-icon-book {
-  0%, 100% { transform: rotate(0) scale(1, 1); }
-  32% { transform: rotate(-2deg) scale(1.06, 1.03); }
-  68% { transform: rotate(2deg) scale(0.97, 1); }
+@keyframes echoink-tab-icon-book-check {
+  from { stroke-dashoffset: 1; }
+  to { stroke-dashoffset: 0; }
 }
 
-@keyframes echoink-tab-icon-clipboard {
-  0%, 100% { transform: translateY(0) scale(1); }
-  48% { transform: translateY(-2px) scale(1.04); }
+@keyframes echoink-tab-icon-clipboard-body {
+  0% { stroke-dashoffset: 240; transform: translateY(0); }
+  50% { stroke-dashoffset: 120; transform: translateY(-2px); }
+  100% { stroke-dashoffset: 0; transform: translateY(0); }
 }
 
-@keyframes echoink-tab-icon-check {
-  0% {
-    opacity: 0.35;
-    stroke-dashoffset: 12;
-    transform: scale(0.88);
-  }
-  100% {
-    opacity: 1;
-    stroke-dashoffset: 0;
-    transform: scale(1);
-  }
+@keyframes echoink-tab-icon-clipboard-clip {
+  0% { stroke-dashoffset: 60; transform: translateY(0); }
+  50% { stroke-dashoffset: 30; transform: translateY(-2px); }
+  100% { stroke-dashoffset: 0; transform: translateY(0); }
+}
+
+@keyframes echoink-tab-icon-clipboard-check {
+  0% { opacity: 0.4; stroke-dashoffset: 1; transform: scale(0.9); }
+  100% { opacity: 1; stroke-dashoffset: 0; transform: scale(1); }
 }
 
 .codex-settings-tab-label {
