@@ -76,6 +76,7 @@ import {
   ResourceMutationError,
   SettingsPersistenceError,
   restoreApiProviderSettings,
+  settingsForDataSave,
   snapshotApiProviderSettings
 } from "../plugin/settings-store";
 import { AgentIdentityModal } from "../ui/agent-identity-modal";
@@ -142,6 +143,7 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   assertProviderScopedRollbackPreservesConcurrentSettings();
   await assertPersistedProviderRollbackPreservesQueuedSettingsSave();
   await assertSettingsPersistenceReadbackOutcomes();
+  assertConversationSettingsDiscardMessageBodies();
   await assertProviderApiKeyPersistenceLifecycle();
   await assertOpenAICodexCredentialStoreContract();
   await assertOpenAICodexLogoutSuspendsRuntime();
@@ -929,6 +931,39 @@ async function assertPersistedProviderRollbackPreservesQueuedSettingsSave(): Pro
   assert.equal(persisted.settingsLanguage, "en");
   assert.equal(persisted.customWelcomeEnabled, true);
   assert.equal(persisted.customWelcomeTitle, "Concurrent title");
+}
+
+function assertConversationSettingsDiscardMessageBodies(): void {
+  const settings = structuredClone(DEFAULT_SETTINGS);
+  settings.sessions = [{
+    id: "conversation-persistence-shell",
+    title: "Persistence shell",
+    piSessionId: "pi-conversation-persistence-shell",
+    bodyAuthority: "pi_session_only",
+    cwd: "/disposable-vault",
+    messages: [{
+      id: "durable-message-body",
+      role: "assistant",
+      text: "This message must remain in the Pi Session, not settings.",
+      createdAt: 1
+    }],
+    createdAt: 1,
+    updatedAt: 2
+  }];
+  settings.activeSessionId = "conversation-persistence-shell";
+
+  const persisted = settingsForDataSave(settings);
+  assert.equal(persisted.activeSessionId, settings.activeSessionId);
+  assert.deepEqual(persisted.sessions[0]?.messages, []);
+  assert.equal(
+    settings.sessions[0]?.messages[0]?.id,
+    "durable-message-body",
+    "persisting the settings shell must not mutate the live active body"
+  );
+  assert.doesNotMatch(
+    JSON.stringify(persisted),
+    /This message must remain in the Pi Session/u
+  );
 }
 
 async function assertProviderApiKeyPersistenceLifecycle(): Promise<void> {

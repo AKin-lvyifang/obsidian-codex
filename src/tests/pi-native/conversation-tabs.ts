@@ -5,19 +5,93 @@ import {
   buildCodexSessionNavigatorModel,
   clampSessionTrackScrollLeft,
   minimallyRevealSessionTrackOffset,
+  nextSessionPickerVisibleCount,
   nextHiddenSessionTrackOffset,
   previousHiddenSessionTrackOffset,
+  retainSessionTabUiStateIds,
   sessionTrackMouseDragExceededThreshold,
   sessionTrackOverflowState,
-  shouldSuppressSessionTrackClick
+  shouldSuppressSessionTrackClick,
+  visibleSessionPickerRows
 } from "../../ui/codex-view/tabs";
 
 export async function runPiConversationTabsTests(): Promise<void> {
   stableNumberedTabsIgnoreUpdatedAtWhileThePickerRemainsRecentFirst();
+  tabUiStateUsesBoundedLeastRecentlyUsedEviction();
+  sessionPickerLoadsTheFullCatalogInBatches();
   trackNavigationReportsBothBoundariesAndMovesInBothDirections();
   redrawOffsetsClampAndOnlyRevealAClippedSelectedTab();
   mouseDragThresholdSuppressesOnlyTheReleaseClick();
   fullConversationPickerDoesNotOwnArchivedState();
+}
+
+function tabUiStateUsesBoundedLeastRecentlyUsedEviction(): void {
+  const sessions = Array.from({ length: 45 }, (_value, index) =>
+    session(`tab-${index}`, `Tab ${index}`, index, index)
+  );
+  const first = retainSessionTabUiStateIds(sessions, [], "tab-0");
+  assert.equal(first.length, 40);
+  assert.ok(first.includes("tab-0"));
+  assert.equal(first.includes("tab-5"), false);
+  assert.deepEqual(
+    sessions.map((session) => session.id),
+    Array.from({ length: 45 }, (_value, index) => `tab-${index}`),
+    "Tab eviction must not delete or reorder durable conversation shells"
+  );
+
+  const next = retainSessionTabUiStateIds(
+    sessions,
+    first,
+    "tab-5",
+    "tab-4"
+  );
+  assert.equal(next.length, 40);
+  assert.ok(next.includes("tab-5"));
+  assert.ok(next.includes("tab-4"));
+  assert.equal(next.includes("tab-6"), false);
+  assert.equal(next.includes("tab-7"), false);
+}
+
+function sessionPickerLoadsTheFullCatalogInBatches(): void {
+  const sessions = Array.from({ length: 120 }, (_value, index) =>
+    session(`conversation-${index}`, `会话 ${index}`, index, index)
+  );
+  const firstBatch = visibleSessionPickerRows(sessions, 50);
+  assert.equal(firstBatch.length, 50);
+  assert.equal(firstBatch.at(-1)?.id, "conversation-49");
+
+  const secondCount = nextSessionPickerVisibleCount(50, sessions.length);
+  const secondBatch = visibleSessionPickerRows(sessions, secondCount);
+  assert.equal(secondCount, 100);
+  assert.equal(secondBatch.length, 100);
+  assert.equal(secondBatch.at(-1)?.id, "conversation-99");
+
+  const finalCount = nextSessionPickerVisibleCount(secondCount, sessions.length);
+  assert.equal(finalCount, sessions.length);
+  assert.equal(
+    visibleSessionPickerRows(sessions, finalCount).at(-1)?.id,
+    "conversation-119"
+  );
+
+  const searched = buildCodexSessionNavigatorModel(
+    sessions,
+    "",
+    "",
+    "会话 119"
+  );
+  assert.deepEqual(searched.chatSessions.map((session) => session.id), [
+    "conversation-119"
+  ]);
+  assert.equal(
+    searched.chatSessions[0],
+    sessions[119],
+    "rows from later batches must retain the original catalog session identity"
+  );
+  assert.equal(
+    searched.chatCount,
+    sessions.length,
+    "search must filter the full durable catalog, not only the first batch"
+  );
 }
 
 function fullConversationPickerDoesNotOwnArchivedState(): void {

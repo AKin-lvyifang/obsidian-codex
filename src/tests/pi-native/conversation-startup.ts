@@ -12,6 +12,8 @@ import {
 export async function runPiConversationStartupTests(): Promise<void> {
   await createsOneCurrentConversationForAnEmptyProductGeneration();
   await reusesTheCurrentConversationWhenOneExists();
+  await releasesHistoricalBodiesAndReloadsThemOnSelection();
+  await keepsAnInFlightConversationBodyWhileAnotherSessionIsActive();
   await rendersLocalHistoryBeforeSettingsPersistenceCompletes();
   await rapidSelectionIsNotBlockedByEarlierSettingsPersistence();
   await lateEarlierProjectionCannotReplaceTheLatestSelection();
@@ -100,6 +102,66 @@ async function reusesTheCurrentConversationWhenOneExists(): Promise<void> {
   assert.equal(result.created, false);
   assert.equal(result.session, existing);
   assert.equal(creates, 0);
+}
+
+async function releasesHistoricalBodiesAndReloadsThemOnSelection(): Promise<void> {
+  const current = storedSession("conversation-residency-current");
+  const historical = storedSession("conversation-residency-historical");
+  current.messages = [{ id: "stale-current" } as StoredSession["messages"][number]];
+  historical.messages = [{ id: "stale-historical" } as StoredSession["messages"][number]];
+  const host = conversationHost({
+    sessions: [current, historical],
+    activeSessionId: current.id,
+    switchPiConversation: async (_previous, next) => conversationProjection(
+      next === current.id ? current : historical,
+      `durable-${next}`
+    ),
+    saveSettings: async () => undefined,
+    rendered: []
+  });
+
+  await activateSession(host, historical);
+  assert.equal(current.messages.length, 0);
+  assert.equal(historical.messages[0]?.id, `durable-${historical.id}`);
+
+  await activateSession(host, current);
+  assert.equal(historical.messages.length, 0);
+  assert.equal(
+    current.messages[0]?.id,
+    `durable-${current.id}`,
+    "reopening a released history shell must reload its durable projection"
+  );
+}
+
+async function keepsAnInFlightConversationBodyWhileAnotherSessionIsActive(): Promise<void> {
+  const running = storedSession("conversation-residency-running");
+  const active = storedSession("conversation-residency-active");
+  running.messages = [{ id: "running-body" } as StoredSession["messages"][number]];
+  const host = conversationHost({
+    sessions: [running, active],
+    activeSessionId: running.id,
+    switchPiConversation: async (_previous, next) => conversationProjection(
+      next === running.id ? running : active,
+      `durable-${next}`
+    ),
+    saveSettings: async () => undefined,
+    rendered: []
+  });
+  host.running = true;
+  host.activeRunSessionId = running.id;
+
+  await activateSession(host, active);
+  assert.equal(
+    running.messages[0]?.id,
+    "running-body",
+    "a running session must retain its body after the active tab changes"
+  );
+  assert.equal(active.messages[0]?.id, `durable-${active.id}`);
+
+  host.running = false;
+  host.activeRunSessionId = "";
+  await activateSession(host, running);
+  assert.equal(active.messages.length, 0);
 }
 
 async function rendersLocalHistoryBeforeSettingsPersistenceCompletes():

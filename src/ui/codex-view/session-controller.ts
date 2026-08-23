@@ -53,6 +53,7 @@ const conversationSelectionTargets = new WeakMap<
 
 export function renderTabsView(host: CodexSessionHost): void {
   ensureSession(host);
+  releaseInactiveConversationBodies(host);
   renderCodexTabs(
     host.tabBarEl,
     host.plugin.settings.sessions,
@@ -136,6 +137,7 @@ export async function refreshPiConversationShells(
   );
   host.plugin.settings.sessions = chatShells;
   selectActiveConversationSession(host.plugin.settings);
+  releaseInactiveConversationBodies(host);
   if (before !== conversationShellFingerprint(host)) {
     await persistPiConversationShells(host);
   }
@@ -201,6 +203,7 @@ async function activateSessionInTransitionLane(
     }
     applyPiConversationProjectionToShell(host, session, projection);
     host.plugin.settings.activeSessionId = session.id;
+    releaseInactiveConversationBodies(host);
     host.updateInputPlaceholder();
     renderConversationShellChange(host);
     return { status: "selected" };
@@ -214,6 +217,7 @@ async function activateSessionInTransitionLane(
       return { status: "stale" };
     }
     host.plugin.settings.activeSessionId = session.id;
+    releaseInactiveConversationBodies(host);
     host.updateInputPlaceholder();
     renderConversationShellChange(host);
     return { status: "selected", error };
@@ -553,11 +557,32 @@ function defaultRecordMutationConfirm(
 function renderConversationShellChange(
   host: CodexSessionHost
 ): void {
+  releaseInactiveConversationBodies(host);
   host.resetVirtualWindow();
   host.renderTabs();
   host.renderMessages({ forceBottom: true });
   host.renderToolbar();
   host.updateInputPlaceholder();
+}
+
+/**
+ * Pi Session JSONL is the durable authority for every conversation body.
+ * Keep only the currently open shell and an in-flight run resident so a long
+ * history cannot retain every projected message array in the UI process.
+ */
+function releaseInactiveConversationBodies(host: CodexSessionHost): void {
+  const retainedSessionIds = new Set<string>();
+  if (host.plugin.settings.activeSessionId) {
+    retainedSessionIds.add(host.plugin.settings.activeSessionId);
+  }
+  if (host.running && host.activeRunSessionId) {
+    retainedSessionIds.add(host.activeRunSessionId);
+  }
+  for (const session of host.plugin.settings.sessions) {
+    if (!retainedSessionIds.has(session.id) && session.messages.length > 0) {
+      session.messages = [];
+    }
+  }
 }
 
 function deletableSessions(host: CodexSessionHost, sessionIds: string[]): StoredSession[] {

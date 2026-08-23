@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import { readdir } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import * as path from "node:path";
 import type {
   PiConversationCatalogEntry,
@@ -57,6 +57,27 @@ interface ProductRunDocumentV1 {
   run: PiProductRunRecord;
 }
 
+/**
+ * The ProductRun files remain authoritative. This index contains only the
+ * identifiers needed to narrow a lookup or a per-conversation list without
+ * parsing every durable run document again.
+ */
+interface ProductRunMetadataIndexEntry {
+  productRunId: string;
+  conversationId: string;
+  createdAt: number;
+}
+
+interface CachedProductRun {
+  run: PiProductRunRecord;
+  fileStamp: string;
+}
+
+interface LoadedProductRunFile {
+  run: PiProductRunRecord;
+  fileStamp: string;
+}
+
 export interface PiConversationCatalogBindingReader {
   get(
     conversationId: string
@@ -97,6 +118,13 @@ export class FileProductRunStore {
   private readonly layout: PiNativeVaultFileLayout;
   private readonly catalog: PiConversationCatalogBindingReader;
   private readonly now: () => number;
+  private readonly metadataById = new Map<
+    string,
+    ProductRunMetadataIndexEntry
+  >();
+  private readonly runIdsByConversation = new Map<string, Set<string>>();
+  private readonly runCache = new Map<string, CachedProductRun>();
+  private initialization: Promise<void> | null = null;
 
   constructor(options: FileProductRunStoreOptions) {
     this.vaultId = requireNonEmptyString(options.vaultId, "vaultId");
@@ -112,14 +140,32 @@ export class FileProductRunStore {
   }
 
   async initialize(): Promise<void> {
-    await serializePiNativeFileWrite(this.storageRootPath, async () => {
-      await ensurePiNativeVaultFileLayout(this.layout);
-    });
+    if (!this.initialization) {
+      const initialization = serializePiNativeFileWrite(
+        this.storageRootPath,
+        async () => {
+          await ensurePiNativeVaultFileLayout(this.layout);
+          await this.rebuildMetadataIndex();
+        }
+      );
+      this.initialization = initialization;
+      try {
+        await initialization;
+      } catch (error) {
+        if (this.initialization === initialization) {
+          this.initialization = null;
+        }
+        throw error;
+      }
+      return;
+    }
+    await this.initialization;
   }
 
   async create(
     input: Readonly<PiProductRunRecord>
   ): Promise<Readonly<PiProductRunRecord>> {
+    await this.ensureMetadataIndex();
     const candidate = normalizeProductRun(input);
     return await serializePiNativeFileWrite(
       this.storageRootPath,
@@ -152,6 +198,7 @@ export class FileProductRunStore {
     productRunId: string,
     update: Readonly<PiProductRunUpdate>
   ): Promise<Readonly<PiProductRunRecord>> {
+    await this.ensureMetadataIndex();
     const normalizedRunId = requireNonEmptyString(
       productRunId,
       "productRunId"
@@ -205,58 +252,54 @@ export class FileProductRunStore {
   async read(
     productRunId: string
   ): Promise<Readonly<PiProductRunRecord> | null> {
+    await this.ensureMetadataIndex();
     const normalizedRunId = requireNonEmptyString(
       productRunId,
       "productRunId"
     );
-    const value = await readJsonFileIfPresent(
+    const indexed = this.metadataById.get(normalizedRunId);
+    if (indexed) return await this.readIndexedRun(indexed);
+
+    // A file created outside this process may not be present in the warm
+    // index yet. Probe only its deterministic path; never rescan every file
+    // for a point lookup.
+    const loaded = await this.loadProductRunFile(
       this.runFilePath(normalizedRunId),
       `ProductRun ${normalizedRunId}`
     );
-    if (value === null) return null;
-    const document = parseProductRunDocument(value, this.vaultId);
-    if (document.run.productRunId !== normalizedRunId) {
+    if (!loaded) return null;
+    if (loaded.run.productRunId !== normalizedRunId) {
       throw new PiNativeFileStoreError(
         "store-corrupt",
         `ProductRun ${normalizedRunId} 的文件名与记录身份不匹配`
       );
     }
-    return cloneProductRun(document.run);
+    this.rememberRun(loaded);
+    return cloneProductRun(loaded.run);
   }
 
   async list(
     conversationId?: string
   ): Promise<Readonly<PiProductRunRecord>[]> {
+    await this.ensureMetadataIndex();
     const normalizedConversationId = conversationId === undefined
       ? undefined
       : requireNonEmptyString(conversationId, "conversationId");
-    let names: string[];
-    try {
-      names = await readdir(this.rootPath);
-    } catch (error) {
-      if (isNodeErrorWithCode(error, "ENOENT")) return [];
-      throw error;
-    }
+    await this.synchronizeMetadataIndex();
+    const indexed = normalizedConversationId === undefined
+      ? [...this.metadataById.values()]
+      : [...(this.runIdsByConversation.get(normalizedConversationId) ?? [])]
+        .map((productRunId) => this.metadataById.get(productRunId))
+        .filter((entry): entry is ProductRunMetadataIndexEntry => Boolean(entry));
     const runs: PiProductRunRecord[] = [];
-    for (const name of names.sort()) {
-      if (!name.endsWith(".json")) continue;
-      const value = await readJsonFileIfPresent(
-        path.join(this.rootPath, name),
-        `ProductRun file ${name}`
-      );
-      if (value === null) continue;
-      const document = parseProductRunDocument(value, this.vaultId);
-      if (name !== `${stablePathToken(document.run.productRunId)}.json`) {
-        throw new PiNativeFileStoreError(
-          "store-corrupt",
-          `ProductRun file ${name} 的文件名与记录身份不匹配`
-        );
-      }
+    for (const entry of indexed.sort(compareProductRunIndexEntries)) {
+      const run = await this.readIndexedRun(entry);
+      if (!run) continue;
       if (
         normalizedConversationId === undefined
-        || document.run.conversationId === normalizedConversationId
+        || run.conversationId === normalizedConversationId
       ) {
-        runs.push(cloneProductRun(document.run));
+        runs.push(run);
       }
     }
     return runs.sort((left, right) =>
@@ -269,6 +312,193 @@ export class FileProductRunStore {
     return path.join(
       this.rootPath,
       `${stablePathToken(productRunId)}.json`
+    );
+  }
+
+  private async ensureMetadataIndex(): Promise<void> {
+    await this.initialize();
+  }
+
+  private async rebuildMetadataIndex(): Promise<void> {
+    let names: string[];
+    try {
+      names = await readdir(this.rootPath);
+    } catch (error) {
+      if (isNodeErrorWithCode(error, "ENOENT")) {
+        this.metadataById.clear();
+        this.runIdsByConversation.clear();
+        this.runCache.clear();
+        return;
+      }
+      throw error;
+    }
+    const loadedRuns: LoadedProductRunFile[] = [];
+    for (const name of names.sort()) {
+      if (!name.endsWith(".json")) continue;
+      const loaded = await this.loadProductRunFile(
+        path.join(this.rootPath, name),
+        `ProductRun file ${name}`
+      );
+      if (!loaded) continue;
+      this.assertFileNameMatchesRun(name, loaded.run);
+      loadedRuns.push(loaded);
+    }
+    this.metadataById.clear();
+    this.runIdsByConversation.clear();
+    this.runCache.clear();
+    for (const loaded of loadedRuns) {
+      this.indexRun(loaded.run);
+    }
+  }
+
+  /**
+   * Discover only added or removed files between warm calls. Existing files
+   * keep their metadata entry; `readIndexedRun` checks their stamp before a
+   * cached body is reused.
+   */
+  private async synchronizeMetadataIndex(): Promise<void> {
+    let names: string[];
+    try {
+      names = await readdir(this.rootPath);
+    } catch (error) {
+      if (isNodeErrorWithCode(error, "ENOENT")) {
+        this.metadataById.clear();
+        this.runIdsByConversation.clear();
+        this.runCache.clear();
+        return;
+      }
+      throw error;
+    }
+    const jsonNames = names.filter((name) => name.endsWith(".json"));
+    const existingNames = new Set(jsonNames);
+    for (const productRunId of [...this.metadataById.keys()]) {
+      if (!existingNames.has(this.runFileName(productRunId))) {
+        this.removeIndexedRun(productRunId);
+      }
+    }
+    const knownNames = new Set(
+      [...this.metadataById.keys()].map((productRunId) =>
+        this.runFileName(productRunId)
+      )
+    );
+    for (const name of jsonNames.sort()) {
+      if (knownNames.has(name)) continue;
+      const loaded = await this.loadProductRunFile(
+        path.join(this.rootPath, name),
+        `ProductRun file ${name}`
+      );
+      if (!loaded) continue;
+      this.assertFileNameMatchesRun(name, loaded.run);
+      this.rememberRun(loaded);
+    }
+  }
+
+  private async readIndexedRun(
+    entry: ProductRunMetadataIndexEntry
+  ): Promise<PiProductRunRecord | null> {
+    const loaded = await this.loadProductRunFile(
+      this.runFilePath(entry.productRunId),
+      `ProductRun ${entry.productRunId}`,
+      this.runCache.get(entry.productRunId)
+    );
+    if (!loaded) {
+      this.removeIndexedRun(entry.productRunId);
+      return null;
+    }
+    if (loaded.run.productRunId !== entry.productRunId) {
+      throw new PiNativeFileStoreError(
+        "store-corrupt",
+        `ProductRun ${entry.productRunId} 的文件名与记录身份不匹配`
+      );
+    }
+    this.rememberRun(loaded);
+    return cloneProductRun(loaded.run);
+  }
+
+  private async loadProductRunFile(
+    filePath: string,
+    label: string,
+    cached?: CachedProductRun
+  ): Promise<LoadedProductRunFile | null> {
+    let fileStamp: string;
+    try {
+      fileStamp = await productRunFileStamp(filePath);
+    } catch (error) {
+      if (isNodeErrorWithCode(error, "ENOENT")) return null;
+      throw error;
+    }
+    if (cached?.fileStamp === fileStamp) {
+      return {
+        run: cloneProductRun(cached.run),
+        fileStamp
+      };
+    }
+    const value = await readJsonFileIfPresent(filePath, label);
+    if (value === null) return null;
+    return {
+      run: parseProductRunDocument(value, this.vaultId).run,
+      fileStamp
+    };
+  }
+
+  private rememberRun(loaded: LoadedProductRunFile): void {
+    this.indexRun(loaded.run);
+    this.runCache.set(loaded.run.productRunId, {
+      run: cloneProductRun(loaded.run),
+      fileStamp: loaded.fileStamp
+    });
+  }
+
+  private indexRun(run: PiProductRunRecord): void {
+    const next: ProductRunMetadataIndexEntry = {
+      productRunId: run.productRunId,
+      conversationId: run.conversationId,
+      createdAt: run.createdAt
+    };
+    const previous = this.metadataById.get(run.productRunId);
+    if (previous && previous.conversationId !== next.conversationId) {
+      const previousIds = this.runIdsByConversation.get(
+        previous.conversationId
+      );
+      previousIds?.delete(run.productRunId);
+      if (previousIds?.size === 0) {
+        this.runIdsByConversation.delete(previous.conversationId);
+      }
+    }
+    this.metadataById.set(run.productRunId, next);
+    const conversationIds = this.runIdsByConversation.get(next.conversationId)
+      ?? new Set<string>();
+    conversationIds.add(run.productRunId);
+    this.runIdsByConversation.set(next.conversationId, conversationIds);
+  }
+
+  private removeIndexedRun(productRunId: string): void {
+    const previous = this.metadataById.get(productRunId);
+    if (previous) {
+      const conversationIds = this.runIdsByConversation.get(
+        previous.conversationId
+      );
+      conversationIds?.delete(productRunId);
+      if (conversationIds?.size === 0) {
+        this.runIdsByConversation.delete(previous.conversationId);
+      }
+    }
+    this.metadataById.delete(productRunId);
+    this.runCache.delete(productRunId);
+  }
+
+  private runFileName(productRunId: string): string {
+    return `${stablePathToken(productRunId)}.json`;
+  }
+
+  private assertFileNameMatchesRun(
+    name: string,
+    run: PiProductRunRecord
+  ): void {
+    if (name === this.runFileName(run.productRunId)) return;
+    throw new PiNativeFileStoreError(
+      "store-corrupt",
+      `ProductRun file ${name} 的文件名与记录身份不匹配`
     );
   }
 
@@ -314,8 +544,28 @@ export class FileProductRunStore {
         `ProductRun ${run.productRunId} 语义回读不一致`
       );
     }
+    const fileStamp = await productRunFileStamp(this.runFilePath(
+      run.productRunId
+    ));
+    this.rememberRun({
+      run: readback.run,
+      fileStamp
+    });
     return readback.run;
   }
+}
+
+function compareProductRunIndexEntries(
+  left: ProductRunMetadataIndexEntry,
+  right: ProductRunMetadataIndexEntry
+): number {
+  return left.createdAt - right.createdAt
+    || left.productRunId.localeCompare(right.productRunId);
+}
+
+async function productRunFileStamp(filePath: string): Promise<string> {
+  const details = await stat(filePath);
+  return [details.mtimeMs, details.ctimeMs, details.size].join(":");
 }
 
 function parseProductRunDocument(

@@ -25,6 +25,9 @@ interface CodexSessionNavigatorState {
   query: string;
   selectedIds: Set<string>;
   focusedIndex: number;
+  /** Least-recently-used to most-recently-used compact Tab UI state. */
+  tabUiStateIds: string[];
+  visibleSessionCount: number;
   trackRovingSessionId: string;
   backwardFocused: boolean;
   forwardFocused: boolean;
@@ -68,8 +71,73 @@ interface SessionTrackMouseDrag {
 
 const SESSION_TRACK_MOUSE_DRAG_THRESHOLD = 6;
 const SESSION_TRACK_CLICK_SUPPRESSION_MS = 250;
+export const MAX_SESSION_TAB_UI_STATES = 40;
+export const SESSION_PICKER_BATCH_SIZE = 50;
 
 const navigatorStates = new WeakMap<HTMLElement, CodexSessionNavigatorState>();
+
+/**
+ * Retain presentation state for at most the recent Tab budget. The durable
+ * session catalog is never changed here; callers use the result only to
+ * decide which compact Tab controls to render.
+ */
+export function retainSessionTabUiStateIds(
+  sessions: readonly Pick<StoredSession, "id" | "createdAt" | "updatedAt">[],
+  previousIds: readonly string[],
+  activeSessionId: string,
+  runningSessionId = "",
+  maximum = MAX_SESSION_TAB_UI_STATES
+): string[] {
+  const liveIds = new Set(sessions.map((session) => session.id));
+  const limit = Math.max(1, Math.floor(maximum));
+  let retained = [...new Set(previousIds.filter((id) => liveIds.has(id)))];
+  if (retained.length === 0 && sessions.length > 0) {
+    retained = [...sessions]
+      .sort(compareSessionUseAscending)
+      .slice(-limit)
+      .map((session) => session.id);
+  }
+  for (const sessionId of [runningSessionId, activeSessionId]) {
+    if (!sessionId || !liveIds.has(sessionId)) continue;
+    retained = retained.filter((id) => id !== sessionId);
+    retained.push(sessionId);
+  }
+  const protectedIds = new Set(
+    [activeSessionId, runningSessionId].filter((id) => liveIds.has(id))
+  );
+  while (retained.length > limit) {
+    const evictedIndex = retained.findIndex((id) => !protectedIds.has(id));
+    if (evictedIndex < 0) break;
+    retained.splice(evictedIndex, 1);
+  }
+  return retained;
+}
+
+export function visibleSessionPickerRows<T>(
+  sessions: readonly T[],
+  requestedCount: number
+): T[] {
+  const normalizedCount = Number.isFinite(requestedCount)
+    ? Math.max(SESSION_PICKER_BATCH_SIZE, Math.floor(requestedCount))
+    : SESSION_PICKER_BATCH_SIZE;
+  return sessions.slice(0, Math.min(sessions.length, normalizedCount));
+}
+
+export function nextSessionPickerVisibleCount(
+  requestedCount: number,
+  totalCount: number
+): number {
+  const total = Number.isFinite(totalCount)
+    ? Math.max(0, Math.floor(totalCount))
+    : 0;
+  const visibleCount = Number.isFinite(requestedCount)
+    ? Math.max(SESSION_PICKER_BATCH_SIZE, Math.floor(requestedCount))
+    : SESSION_PICKER_BATCH_SIZE;
+  return Math.min(
+    total,
+    visibleCount + SESSION_PICKER_BATCH_SIZE
+  );
+}
 
 export function buildCodexSessionNavigatorModel(
   sessions: StoredSession[],
@@ -94,6 +162,15 @@ export function buildCodexSessionNavigatorModel(
     chatCount: sessions.length,
     runningSessionId
   };
+}
+
+function compareSessionUseAscending(
+  left: Pick<StoredSession, "id" | "createdAt" | "updatedAt">,
+  right: Pick<StoredSession, "id" | "createdAt" | "updatedAt">
+): number {
+  return left.updatedAt - right.updatedAt
+    || left.createdAt - right.createdAt
+    || left.id.localeCompare(right.id, "zh-CN");
 }
 
 export function formatSessionUpdatedAt(updatedAt: number, now = Date.now()): string {
@@ -269,18 +346,31 @@ export function renderCodexTabs(
   const renderGeneration = state.renderGeneration + 1;
   state.renderGeneration = renderGeneration;
   const allModel = buildCodexSessionNavigatorModel(sessions, activeSessionId, runningSessionId);
-  const validIds = new Set(allModel.tabSessions.map((session) => session.id));
-  state.selectedIds = new Set([...state.selectedIds].filter((sessionId) => validIds.has(sessionId) && sessionId !== runningSessionId));
+  state.tabUiStateIds = retainSessionTabUiStateIds(
+    sessions,
+    state.tabUiStateIds,
+    activeSessionId,
+    runningSessionId
+  );
+  const retainedTabIds = new Set(state.tabUiStateIds);
+  allModel.tabSessions = allModel.tabSessions.filter((session) =>
+    retainedTabIds.has(session.id)
+  );
+  const validSessionIds = new Set(sessions.map((session) => session.id));
+  const validTabIds = new Set(allModel.tabSessions.map((session) => session.id));
+  state.selectedIds = new Set([...state.selectedIds].filter((sessionId) =>
+    validSessionIds.has(sessionId) && sessionId !== runningSessionId
+  ));
   const activeChanged = state.lastActiveSessionId !== activeSessionId;
   state.lastActiveSessionId = activeSessionId;
   if (
-    !validIds.has(state.trackRovingSessionId)
+    !validTabIds.has(state.trackRovingSessionId)
     || (
       activeChanged
       && state.pendingFocusRequest?.target.kind !== "session"
     )
   ) {
-    state.trackRovingSessionId = validIds.has(activeSessionId)
+    state.trackRovingSessionId = validTabIds.has(activeSessionId)
       ? activeSessionId
       : allModel.tabSessions[0]?.id ?? "";
   }
@@ -293,6 +383,7 @@ export function renderCodexTabs(
     runningSessionId
   );
   const activate = (session: StoredSession) => {
+    markSessionTabUiStateUsed(state, session.id);
     state.trackRovingSessionId = session.id;
     callbacks.onActivate(session);
     state.open = false;
@@ -725,7 +816,14 @@ function renderSessionPicker(
     const selectableIds = model.chatSessions.filter((session) => session.id !== runningSessionId).map((session) => session.id);
     const selectableSet = new Set(selectableIds);
     state.selectedIds = new Set([...state.selectedIds].filter((sessionId) => selectableSet.has(sessionId)));
-    state.focusedIndex = Math.min(Math.max(0, state.focusedIndex), Math.max(0, model.chatSessions.length - 1));
+    const visibleSessions = visibleSessionPickerRows(
+      model.chatSessions,
+      state.visibleSessionCount
+    );
+    state.focusedIndex = Math.min(
+      Math.max(0, state.focusedIndex),
+      Math.max(0, visibleSessions.length - 1)
+    );
 
     const sectionHeading = body.createDiv({ cls: "codex-session-section-heading" });
     sectionHeading.createDiv({ cls: "codex-session-section-label", text: "最近会话" });
@@ -750,7 +848,7 @@ function renderSessionPicker(
         "aria-multiselectable": state.managing ? "true" : "false"
       }
     });
-    for (const [index, session] of model.chatSessions.entries()) {
+    for (const [index, session] of visibleSessions.entries()) {
       const running = session.id === runningSessionId;
       const active = session.id === activeSessionId;
       const selected = state.selectedIds.has(session.id);
@@ -847,12 +945,32 @@ function renderSessionPicker(
       };
     }
 
-    if (model.chatSessions.length === 0) {
+    if (visibleSessions.length === 0) {
       const empty = list.createDiv({ cls: "codex-session-empty" });
       const emptyIcon = empty.createSpan();
       setIcon(emptyIcon, "search");
       empty.createDiv({ cls: "codex-session-empty-title", text: "没有找到会话" });
       empty.createDiv({ cls: "codex-session-empty-copy", text: "换一个关键词试试" });
+    }
+
+    if (visibleSessions.length < model.chatSessions.length) {
+      const remaining = model.chatSessions.length - visibleSessions.length;
+      const batchSize = Math.min(SESSION_PICKER_BATCH_SIZE, remaining);
+      const loadMore = footer.createEl("button", {
+        cls: "codex-session-load-more",
+        text: `加载更多 ${batchSize} 条（剩余 ${remaining}）`,
+        attr: {
+          type: "button",
+          "aria-label": `加载更多会话，剩余 ${remaining} 条`
+        }
+      });
+      loadMore.onclick = () => {
+        state.visibleSessionCount = nextSessionPickerVisibleCount(
+          state.visibleSessionCount,
+          model.chatSessions.length
+        );
+        renderBody();
+      };
     }
 
     if (state.managing) {
@@ -896,6 +1014,7 @@ function renderSessionPicker(
         state.query = "";
         searchInput.value = "";
         state.focusedIndex = 0;
+        state.visibleSessionCount = SESSION_PICKER_BATCH_SIZE;
         renderBody();
       } else if (state.managing) {
         state.managing = false;
@@ -910,7 +1029,21 @@ function renderSessionPicker(
       if (!model.chatSessions.length) return;
       event.preventDefault();
       const direction = event.key === "ArrowDown" ? 1 : -1;
-      state.focusedIndex = Math.min(model.chatSessions.length - 1, Math.max(0, state.focusedIndex + direction));
+      const nextIndex = Math.min(
+        model.chatSessions.length - 1,
+        Math.max(0, state.focusedIndex + direction)
+      );
+      const visibleCount = visibleSessionPickerRows(
+        model.chatSessions,
+        state.visibleSessionCount
+      ).length;
+      if (nextIndex >= visibleCount) {
+        state.visibleSessionCount = nextSessionPickerVisibleCount(
+          state.visibleSessionCount,
+          model.chatSessions.length
+        );
+      }
+      state.focusedIndex = nextIndex;
       renderBody();
       focusedRow?.scrollIntoView({ block: "nearest" });
       return;
@@ -930,6 +1063,7 @@ function renderSessionPicker(
   searchInput.oninput = () => {
     state.query = searchInput.value;
     state.focusedIndex = 0;
+    state.visibleSessionCount = SESSION_PICKER_BATCH_SIZE;
     renderBody();
   };
   searchHint.onclick = () => searchInput.focus();
@@ -949,6 +1083,8 @@ function navigatorStateFor(container: HTMLElement): CodexSessionNavigatorState {
     query: "",
     selectedIds: new Set(),
     focusedIndex: 0,
+    tabUiStateIds: [],
+    visibleSessionCount: SESSION_PICKER_BATCH_SIZE,
     trackRovingSessionId: "",
     backwardFocused: false,
     forwardFocused: false,
@@ -962,6 +1098,17 @@ function navigatorStateFor(container: HTMLElement): CodexSessionNavigatorState {
   };
   navigatorStates.set(container, state);
   return state;
+}
+
+function markSessionTabUiStateUsed(
+  state: CodexSessionNavigatorState,
+  sessionId: string
+): void {
+  if (!sessionId) return;
+  state.tabUiStateIds = [
+    ...state.tabUiStateIds.filter((id) => id !== sessionId),
+    sessionId
+  ];
 }
 
 function handleSessionTabKeyDown(
@@ -1291,6 +1438,7 @@ function toggleSessionPicker(state: CodexSessionNavigatorState, rerender: () => 
     state.query = "";
     state.selectedIds.clear();
     state.focusedIndex = 0;
+    state.visibleSessionCount = SESSION_PICKER_BATCH_SIZE;
   }
   rerender();
 }
@@ -1301,6 +1449,7 @@ function closeSessionPicker(state: CodexSessionNavigatorState, rerender: () => v
   state.query = "";
   state.selectedIds.clear();
   state.focusedIndex = 0;
+  state.visibleSessionCount = SESSION_PICKER_BATCH_SIZE;
   rerender();
 }
 
