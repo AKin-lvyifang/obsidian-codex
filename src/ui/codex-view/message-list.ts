@@ -17,7 +17,7 @@ import { calculateVirtualWindow, isNearVirtualBottom, scrollTopForVirtualBottom 
 import { extractKnowledgeBaseResultTitle } from "../knowledge-base-result-title";
 import type { KnowledgeBaseMaintainReportPayload, KnowledgeBaseMaintainReportSectionItem, KnowledgeBaseMessageUiPayload, KnowledgeBaseRunPayload } from "../../knowledge-base/maintain-report-card";
 import { formatMessageHeaderTime } from "../message-time";
-import { openImageOverlay, renderRichText } from "../render-message";
+import { openImageOverlay, renderPreformattedVaultNoteText, renderRichText } from "../render-message";
 import { buildActionTimeline, isActionTimelineItem, type ActionGroupKind, type ActionItemViewModel } from "./action-timeline";
 import { buildAgentTurnProjection, formatAgentTurnDuration, isAgentAnswerMessage, isAgentProcessItemType, type CompletedAgentTurn } from "./agent-turn-process";
 import { copyAnswerMarkdown } from "./answer-copy";
@@ -1729,7 +1729,7 @@ export class CodexMessageListRenderer {
     const content = text?.trim() ? text : PROCESS_CONTENT_UNAVAILABLE_TEXT;
     if (artifact) {
       const env = this.requireEnv();
-      renderRichText(env.app, env.component, channel, content);
+      renderPreformattedVaultNoteText(env.app, env.component, channel, content);
     } else {
       this.renderPlainTextBlock(channel, content);
     }

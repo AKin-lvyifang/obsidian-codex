@@ -25,6 +25,7 @@ class FakeElement {
   readonly dataset: Record<string, string> = {};
   readonly listeners = new Map<string, TestEventHandler>();
   children: FakeElement[] = [];
+  content: Array<string | FakeElement> = [];
   className = "";
   disabled = false;
   open = false;
@@ -47,11 +48,15 @@ class FakeElement {
     const child = new FakeElement(tag);
     child.parent = this;
     if (options.cls) child.className = options.cls;
-    if (options.text !== undefined) child.textContent = options.text;
+    if (options.text !== undefined) {
+      child.textContent = options.text;
+      child.content.push(options.text);
+    }
     for (const [name, value] of Object.entries(options.attr ?? {})) {
       child.setAttribute(name, value);
     }
     this.children.push(child);
+    this.content.push(child);
     return child;
   }
 
@@ -68,25 +73,31 @@ class FakeElement {
       if (!(node instanceof FakeElement)) continue;
       node.parent = this;
       this.children.push(node);
+      this.content.push(node);
     }
   }
 
   appendText(text: string): void {
     this.textContent += text;
+    this.content.push(text);
   }
 
   empty(): void {
     this.children = [];
+    this.content = [];
     this.textContent = "";
   }
 
   remove(): void {
     if (!this.parent) return;
     this.parent.children = this.parent.children.filter((child) => child !== this);
+    this.parent.content = this.parent.content.filter((item) => item !== this);
     this.parent = null;
   }
 
   setText(text: string): void {
+    this.children = [];
+    this.content = [text];
     this.textContent = text;
   }
 
@@ -130,6 +141,24 @@ class FakeElement {
     visit(this);
     return matches;
   }
+
+  findAllByTag(tag: string): FakeElement[] {
+    const matches: FakeElement[] = [];
+    const visit = (node: FakeElement): void => {
+      for (const child of node.children) {
+        if (child.tag === tag) matches.push(child);
+        visit(child);
+      }
+    };
+    visit(this);
+    return matches;
+  }
+}
+
+function renderedText(element: FakeElement): string {
+  return element.content
+    .map((item) => typeof item === "string" ? item : renderedText(item))
+    .join("");
 }
 
 interface TestContext {
@@ -310,6 +339,23 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     assert.equal(reasoningRoot!.tag, "details");
     assert.equal(reasoningRoot!.open, true);
 
+    const processOutput = [
+      "{",
+      "  \"status\": \"ok\",",
+      "  \"note\": \"[[outputs/Result.md|结果别名]]\",",
+      "  \"items\": [",
+      "    \"alpha\",",
+      "",
+      "    \"beta\"",
+      "  ]",
+      "}",
+      "",
+      "[info] phase=done",
+      "  detail: indentation stays",
+      "",
+      "$ printf \"done\\n\"",
+      "done"
+    ].join("\n");
     const processMessage = renderMessage(renderer, {
       id: "tool-1",
       role: "tool",
@@ -320,12 +366,24 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       processInputAvailability: "provided",
       processInput: "生成笔记",
       processOutputAvailability: "provided",
-      processOutput: "已生成 [[outputs/Result.md|结果别名]]",
+      processOutput,
       createdAt: 1_700_000_003_000
     }, { showAgentFooter: false, showAgentHeader: false, processExpanded: true });
     assert.ok(processMessage.findByClass("codex-smooth-ai-tool-call"));
     assert.ok(processMessage.findByClass("codex-smooth-ai-artifact"));
-    const artifactLink = processMessage.findByClass("codex-message-note-link");
+    const artifactRoot = processMessage.findByClass("codex-smooth-ai-artifact");
+    assert.ok(artifactRoot);
+    const outputBlocks = artifactRoot!.findAllByTag("pre");
+    assert.equal(outputBlocks.length, 1, "artifact/process output stays in one preformatted block");
+    assert.equal(
+      renderedText(outputBlocks[0]),
+      processOutput.replace("[[outputs/Result.md|结果别名]]", "Result"),
+      "preformatted output preserves every non-note character and replaces only the resolved note span"
+    );
+    assert.equal(artifactRoot!.findAllByTag("p").length, 0, "process output must not create Markdown paragraphs");
+    assert.equal(artifactRoot!.findAllByClass("codex-message-spacer").length, 0,
+      "process output must not create Markdown spacers");
+    const artifactLink = artifactRoot!.findByClass("codex-message-note-link");
     assert.ok(artifactLink, "artifact/process output must keep rich Vault-note rendering");
     assert.equal(artifactLink!.textContent, "Result");
     await clickRegistered(artifactLink!);

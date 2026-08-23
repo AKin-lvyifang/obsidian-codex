@@ -45,6 +45,12 @@ export function renderRichText(app: App, component: Component, container: HTMLEl
   }
 }
 
+export function renderPreformattedVaultNoteText(app: App, component: Component, container: HTMLElement, text: string): void {
+  container.empty();
+  const pre = container.createEl("pre", { cls: "codex-process-fulltext" });
+  renderLinkedText(app, component, pre, text);
+}
+
 function renderLine(app: App, component: Component, container: HTMLElement, line: string): void {
   const trimmed = line.trim();
   if (/^>\s+/.test(trimmed)) {
