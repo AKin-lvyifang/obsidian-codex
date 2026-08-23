@@ -463,6 +463,10 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
   assert.equal(await turn, "completed");
   assert.equal(projectionReads, 2, "formal settlement must perform final durable readback");
   assert.equal(session.messages.at(-1)?.status, "completed");
+  assert.equal(session.messages.at(-1)?.askSourceAttribution, true);
+  assert.deepEqual(session.messages.at(-1)?.personalMemorySources, [
+    { id: "memory-turn-runner", title: "Turn runner Memory" }
+  ]);
   assert.equal(composerCleared, true, "durable user entry must clear the submitted draft");
   assert.equal(releasedRunId, "product-run-turn-runner");
   assert.equal(
@@ -551,7 +555,15 @@ function durableProjection(
         runId: "product-run-turn-runner",
         turnId: "product-run-turn-runner",
         createdAt: 3,
-        ...(assistantStatus === "completed" ? { completedAt: 8 } : {})
+        ...(assistantStatus === "completed"
+          ? {
+              completedAt: 8,
+              askSourceAttribution: true as const,
+              personalMemorySources: [
+                { id: "memory-turn-runner", title: "Turn runner Memory" }
+              ]
+            }
+          : {})
       }
     ],
     diagnostics: [],

@@ -2,6 +2,12 @@ import * as assert from "node:assert/strict";
 import type { PiChatRuntimeEvent } from "../../harness/pi-native/contracts";
 import { KNOWLEDGE_MAINTENANCE_RESULT_SCHEMA } from "../../knowledge-base/knowledge-maintenance-result";
 import {
+  decorationsForBranch,
+  knowledgeReferenceEntryDetails,
+  knowledgeUsageMessageData,
+  type KnowledgeUsageEvent
+} from "../../knowledge-base/usage";
+import {
   PiChatUiProjector,
   type PiChatUiToolApprovalView,
   type PiChatUiToolReceiptView,
@@ -10,6 +16,7 @@ import {
 } from "../../harness/pi-native/pi-chat-ui-projector";
 
 export async function runPiChatUiProjectorTests(): Promise<void> {
+  assertAskSourceAttributionDecorationsAreTruthfulAndIsolated();
   assertDurableBranchRebuildsExistingUiCardsAndHidesReasoning();
   assertLiveEventsMergeUntilTheProductSettlementBoundary();
   assertKnowledgeProgressAndToolPayloadsStayPrivate();
@@ -21,6 +28,133 @@ export async function runPiChatUiProjectorTests(): Promise<void> {
   assertPhaseTwoWriteTerminalStatesRemainDistinct();
   assertSessionRunAndBranchScopesDoNotCross();
   assertInterruptedReadbackNeverPretendsTheRunCompleted();
+}
+
+function assertAskSourceAttributionDecorationsAreTruthfulAndIsolated(): void {
+  const reference = {
+    referenceId: "vault-source-a",
+    vaultRelativePath: "wiki/source-a.md",
+    title: "Vault Source A",
+    excerpt: "实际注入的 Vault 片段",
+    contentRevision: `sha256:${"a".repeat(64)}`,
+    lineStart: 1,
+    lineEnd: 1
+  };
+  const sources = [
+    { id: "memory-a", title: "一级 Memory A" },
+    { id: "memory-a", title: "重复项不能覆盖首个标题" },
+    { id: "memory-b", title: "一级 Memory B" }
+  ];
+  const entries = [
+    {
+      type: "custom_message",
+      id: "ask-resource-source-attribution",
+      details: knowledgeReferenceEntryDetails([reference])
+    },
+    messageEntry("assistant-source-attribution", "ask-resource-source-attribution", 2, {
+      role: "assistant",
+      content: "公开回答"
+    })
+  ];
+  const usage: KnowledgeUsageEvent = {
+    sourceEventId: "usage-source-attribution",
+    vaultId: "vault-source-attribution",
+    conversationId: "conversation-source-attribution",
+    piSessionId: "session-source-attribution",
+    piEntryId: "assistant-source-attribution",
+    productRunId: "run-source-attribution",
+    referenceIds: [reference.referenceId],
+    workflow: "ask",
+    producedPaths: [],
+    personalMemorySources: sources
+  };
+  const decorations = decorationsForBranch(entries, [usage]);
+  sources[0]!.title = "外部变化不能影响来源快照";
+  assert.deepEqual(decorations, [{
+    piSessionId: "session-source-attribution",
+    entryId: "assistant-source-attribution",
+    knowledgeReferences: [reference],
+    askSourceAttribution: true,
+    personalMemorySources: [
+      { id: "memory-a", title: "一级 Memory A" },
+      { id: "memory-b", title: "一级 Memory B" }
+    ]
+  }]);
+
+  const projector = new PiChatUiProjector();
+  const projected = projector.projectSessionBranch({
+    piSessionId: "session-source-attribution",
+    activeLeafId: "assistant-source-attribution",
+    entries,
+    runState: "completed",
+    productRunId: "run-source-attribution",
+    now: 3
+  });
+  const decorated = projector.decorate(projected, decorations);
+  const answer = decorated.messages.find((message) => message.text === "公开回答");
+  assert.equal(answer?.askSourceAttribution, true);
+  assert.deepEqual(answer?.personalMemorySources, [
+    { id: "memory-a", title: "一级 Memory A" },
+    { id: "memory-b", title: "一级 Memory B" }
+  ]);
+  assert.deepEqual(knowledgeUsageMessageData(answer), {
+    askSourceAttribution: true,
+    references: [reference],
+    producedPaths: [],
+    personalMemorySources: [
+      { id: "memory-a", title: "一级 Memory A" },
+      { id: "memory-b", title: "一级 Memory B" }
+    ]
+  });
+
+  const mutableDecorationSources = decorations[0]?.personalMemorySources as Array<{
+    id: string;
+    title: string;
+  }>;
+  mutableDecorationSources.push({ id: "memory-late", title: "不得穿透投影" });
+  assert.equal(answer?.personalMemorySources?.length, 2);
+
+  const emptyUsage: KnowledgeUsageEvent = {
+    sourceEventId: "usage-source-attribution-empty",
+    vaultId: "vault-source-attribution",
+    conversationId: "conversation-source-attribution",
+    piSessionId: "session-source-attribution-empty",
+    piEntryId: "assistant-source-attribution-empty",
+    productRunId: "run-source-attribution-empty",
+    referenceIds: [],
+    workflow: "ask",
+    producedPaths: [],
+    personalMemorySources: []
+  };
+  const emptyDecorations = decorationsForBranch([
+    messageEntry("assistant-source-attribution-empty", null, 4, {
+      role: "assistant",
+      content: "没有来源的公开回答"
+    })
+  ], [emptyUsage]);
+  assert.deepEqual(emptyDecorations, [{
+    piSessionId: "session-source-attribution-empty",
+    entryId: "assistant-source-attribution-empty",
+    askSourceAttribution: true,
+    personalMemorySources: []
+  }]);
+
+  const legacyAskUsage = { ...emptyUsage } as KnowledgeUsageEvent;
+  delete legacyAskUsage.personalMemorySources;
+  assert.deepEqual(
+    decorationsForBranch([
+      messageEntry("assistant-source-attribution-empty", null, 4, {
+        role: "assistant",
+        content: "旧版来源事件"
+      })
+    ], [legacyAskUsage]),
+    [{
+      piSessionId: "session-source-attribution-empty",
+      entryId: "assistant-source-attribution-empty",
+      askSourceAttribution: true,
+      personalMemorySources: []
+    }]
+  );
 }
 
 function assertKnowledgeMaintenanceResultCardIsLiveDurableAndStrict(): void {

@@ -1,6 +1,9 @@
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { PiContextLedger } from "./pi-context-budget";
-import type { ChatMessage } from "../../settings/settings";
+import type {
+  ChatMessage,
+  PersonalMemorySourceReference
+} from "../../settings/settings";
 import type { KnowledgeMaintenanceResultEnvelope } from "../../knowledge-base/knowledge-maintenance-result";
 import type {
   EchoInkTaskPlanSnapshot
@@ -206,6 +209,8 @@ export interface PiKnowledgeUsageEvent {
   readonly referenceIds: readonly string[];
   readonly workflow: "normal_read" | "ask" | "maintain";
   readonly producedPaths: readonly string[];
+  /** Present only for `/ask`; contains no Memory body or retrieval clues. */
+  readonly personalMemorySources?: readonly Readonly<PersonalMemorySourceReference>[];
 }
 
 /** Read-only Phase 3 domain seam used by the Pi-native runtime. */

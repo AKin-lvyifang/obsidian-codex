@@ -138,6 +138,7 @@ import {
   selectActiveConversationSession,
   type ApiProviderConfig,
   type CodexForObsidianSettings,
+  type PersonalMemorySourceReference,
   type StoredSession
 } from "../settings/settings";
 import {
@@ -536,11 +537,19 @@ export function createProductionPiKnowledgeRuntime(input: Readonly<{
           });
     },
     async recordUsage(request) {
+      const { personalMemorySources, ...event } = request.event;
       await input.usage.record({
         event: {
-          ...request.event,
-          referenceIds: [...request.event.referenceIds],
-          producedPaths: [...request.event.producedPaths]
+          ...event,
+          referenceIds: [...event.referenceIds],
+          producedPaths: [...event.producedPaths],
+          ...(personalMemorySources === undefined
+            ? {}
+            : {
+                personalMemorySources: personalMemorySources.map(
+                  (source) => ({ ...source })
+                )
+              })
         },
         entries: request.entries
       });
@@ -715,6 +724,10 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
       elapsedMs: number;
     }>;
   }>): void | Promise<void>;
+  onAskPersonalMemorySourcesInjected?(input: Readonly<{
+    productRunId: string;
+    sources: readonly Readonly<PersonalMemorySourceReference>[];
+  }>): void | Promise<void>;
   personalMemoryAvailable?: boolean;
   personalMemoryLearningEnabled?: boolean | (() => boolean);
   contextLedger?: Pick<
@@ -735,8 +748,15 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
       // Pi persists before_agent_start messages. Stage request-only context
       // here, then deliver it through the non-persistent context event below.
       let transientTurnContext: AgentMessage | null = null;
+      let transientAskPersonalMemorySources: Readonly<{
+        productRunId: string;
+        sources: readonly Readonly<PersonalMemorySourceReference>[];
+      }> | null = null;
+      let transientAskPersonalMemorySourcesReported = false;
       pi.on("before_agent_start", async (event) => {
         transientTurnContext = null;
+        transientAskPersonalMemorySources = null;
+        transientAskPersonalMemorySourcesReported = false;
         input.contextLedger?.captureTransientContextMessages([]);
         input.contextLedger?.capturePersonalMemoryAccess({
           mode: "not_applicable",
@@ -862,6 +882,12 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
             ...(recallObservation ? { recall: recallObservation } : {})
           });
           transientTurnContext = buildPersonalMemoryContextMessage(fixed);
+          if (turn?.kind === "ask") {
+            transientAskPersonalMemorySources = Object.freeze({
+              productRunId: memoryTurn.productRunId,
+              sources: primaryPersonalMemorySources(fixed)
+            });
+          }
         }
         if (turn?.kind === "ask") {
           return {
@@ -933,6 +959,18 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
           input.contextLedger?.captureTransientContextMessages([
             transientTurnContext
           ]);
+          if (
+            transientAskPersonalMemorySources
+            && !transientAskPersonalMemorySourcesReported
+          ) {
+            transientAskPersonalMemorySourcesReported = true;
+            await input.onAskPersonalMemorySourcesInjected?.({
+              productRunId: transientAskPersonalMemorySources.productRunId,
+              sources: transientAskPersonalMemorySources.sources.map(
+                (source) => ({ ...source })
+              )
+            });
+          }
         } else {
           input.contextLedger?.captureTransientContextMessages([]);
         }
@@ -975,6 +1013,19 @@ function maintenanceScopeProviderPrompt(
 function isPiTransientPersonalMemoryContext(message: AgentMessage): boolean {
   return message.role === "custom"
     && message.customType === PI_PERSONAL_MEMORY_CONTEXT_CUSTOM_TYPE;
+}
+
+function primaryPersonalMemorySources(fixed: Readonly<{
+  recall?: PersonalMemoryPreparedTurnContext["recall"];
+}>): readonly Readonly<PersonalMemorySourceReference>[] {
+  const unique = new Map<string, Readonly<PersonalMemorySourceReference>>();
+  for (const candidate of fixed.recall?.candidates ?? []) {
+    const id = candidate.id.trim();
+    const title = candidate.title.trim();
+    if (!id || !title || unique.has(id)) continue;
+    unique.set(id, Object.freeze({ id, title }));
+  }
+  return Object.freeze([...unique.values()]);
 }
 
 function buildPersonalMemoryContextMessage(fixed: Readonly<{
@@ -1400,6 +1451,8 @@ async function createProductionAgentSession(input: {
     ),
     onPersonalMemoryRecallProgress: (progress) =>
       input.input.reportMemoryRecallProgress?.(progress),
+    onAskPersonalMemorySourcesInjected: (snapshot) =>
+      input.input.reportAskPersonalMemorySources?.(snapshot),
     personalMemoryAvailable: configured.toolCalling,
     personalMemoryLearningEnabled: () => input.plugin.settings.memory.enabled,
     contextLedger

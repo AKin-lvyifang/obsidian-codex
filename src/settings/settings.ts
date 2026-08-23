@@ -40,6 +40,12 @@ export interface StoredAttachment {
   path: string;
 }
 
+/** Minimal display metadata for a primary Personal Memory injected this turn. */
+export interface PersonalMemorySourceReference {
+  id: string;
+  title: string;
+}
+
 export interface DiffFileSummary {
   path: string;
   previousPath?: string;
@@ -118,6 +124,10 @@ export interface ChatMessage {
   processOutputAvailability?: "provided" | "empty" | "unavailable";
   diffSummary?: DiffSummary;
   citations?: KnowledgeBaseCitationSummary;
+  /** True only when a settled `/ask` source snapshot was projected. */
+  askSourceAttribution?: true;
+  /** Display-only primary Memory ids and titles; never Memory bodies or prompts. */
+  personalMemorySources?: readonly PersonalMemorySourceReference[];
   knowledgeBaseUi?: KnowledgeBaseMessageUiPayload;
   attachments?: StoredAttachment[];
   files?: ProcessFileRef[];

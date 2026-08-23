@@ -632,6 +632,13 @@ function clonePiChatMessages(messages: readonly ChatMessage[]): ChatMessage[] {
     ...(message.files
       ? { files: message.files.map((file) => ({ ...file })) }
       : {}),
+    ...(message.personalMemorySources
+      ? {
+          personalMemorySources: message.personalMemorySources.map(
+            (source) => ({ ...source })
+          )
+        }
+      : {}),
     ...(message.taskPlan
       ? {
         taskPlan: {

@@ -176,6 +176,8 @@ export interface PiChatUiMessageDecoration {
   readonly files?: ChatMessage["files"];
   readonly knowledgeReferences?: readonly KnowledgeReference[];
   readonly knowledgeProducedPaths?: readonly string[];
+  readonly askSourceAttribution?: ChatMessage["askSourceAttribution"];
+  readonly personalMemorySources?: ChatMessage["personalMemorySources"];
 }
 
 interface BranchProjectionContext {
@@ -473,7 +475,14 @@ export class PiChatUiProjector {
           : { knowledgeReferences: decoration.knowledgeReferences.map((reference) => ({ ...reference })) }),
         ...(decoration.knowledgeProducedPaths === undefined
           ? {}
-          : { knowledgeProducedPaths: [...decoration.knowledgeProducedPaths] })
+          : { knowledgeProducedPaths: [...decoration.knowledgeProducedPaths] }),
+        ...(decoration.askSourceAttribution === true
+          ? {
+              askSourceAttribution: true as const,
+              personalMemorySources: (decoration.personalMemorySources ?? [])
+                .map((source) => ({ ...source }))
+            }
+          : {})
       };
     });
     return view;
@@ -1883,6 +1892,13 @@ function cloneView(current: Readonly<PiChatUiViewModel>): PiChatUiViewModel {
 function cloneProjectedMessage(message: Readonly<ChatMessage>): ChatMessage {
   return {
     ...message,
+    ...(message.personalMemorySources
+      ? {
+          personalMemorySources: message.personalMemorySources.map(
+            (source) => ({ ...source })
+          )
+        }
+      : {}),
     ...(message.taskPlan
       ? {
         taskPlan: {

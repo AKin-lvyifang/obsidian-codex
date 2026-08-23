@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { mkdir, readdir } from "node:fs/promises";
 import * as path from "node:path";
 import type { KnowledgeReference } from "./types";
+import type { PersonalMemorySourceReference } from "../settings/settings";
 import {
   PI_NATIVE_FILE_SCHEMA_VERSION,
   PiNativeFileStoreError,
@@ -34,6 +35,8 @@ export interface KnowledgeUsageEvent {
   referenceIds: string[];
   workflow: KnowledgeUsageWorkflow;
   producedPaths: string[];
+  /** Present only for `/ask`; never includes Memory body or recall clues. */
+  personalMemorySources?: PersonalMemorySourceReference[];
 }
 
 export interface KnowledgeReferenceEntryDetailsV1 {
@@ -59,11 +62,16 @@ export interface KnowledgeUsageMessageDecoration {
   readonly toolCallId?: string;
   readonly knowledgeReferences?: readonly KnowledgeReference[];
   readonly knowledgeProducedPaths?: readonly string[];
+  /** Enables truthful empty-state rendering for a settled `/ask` answer. */
+  readonly askSourceAttribution?: true;
+  readonly personalMemorySources?: readonly PersonalMemorySourceReference[];
 }
 
 export interface KnowledgeUsageMessageData {
+  readonly askSourceAttribution: boolean;
   readonly references: readonly KnowledgeReference[];
   readonly producedPaths: readonly string[];
+  readonly personalMemorySources: readonly PersonalMemorySourceReference[];
 }
 
 export interface FileKnowledgeUsageStoreOptions {
@@ -92,8 +100,11 @@ const EVENT_KEYS = [
   "productRunId",
   "referenceIds",
   "workflow",
-  "producedPaths"
+  "producedPaths",
+  "personalMemorySources"
 ] as const;
+
+const LEGACY_EVENT_KEYS = EVENT_KEYS.slice(0, -1);
 
 const REFERENCE_KEYS = [
   "referenceId",
@@ -104,6 +115,8 @@ const REFERENCE_KEYS = [
   "lineStart",
   "lineEnd"
 ] as const;
+
+const PERSONAL_MEMORY_SOURCE_KEYS = ["id", "title"] as const;
 
 const WORKFLOWS = new Set<KnowledgeUsageWorkflow>([
   "normal_read",
@@ -281,6 +294,8 @@ export function decorationsForBranch(
     toolCallId?: string;
     references: Map<string, KnowledgeReference>;
     producedPaths: string[];
+    askSourceAttribution: boolean;
+    personalMemorySources: Map<string, PersonalMemorySourceReference>;
   }>();
 
   for (const rawEvent of usage) {
@@ -306,7 +321,9 @@ export function decorationsForBranch(
       piSessionId: event.piSessionId,
       ...(toolCallId ? { toolCallId } : { entryId: target.id }),
       references: new Map<string, KnowledgeReference>(),
-      producedPaths: []
+      producedPaths: [],
+      askSourceAttribution: false,
+      personalMemorySources: new Map<string, PersonalMemorySourceReference>()
     };
     for (const reference of references) {
       if (reference) current.references.set(reference.referenceId, reference);
@@ -315,6 +332,14 @@ export function decorationsForBranch(
       ...current.producedPaths,
       ...event.producedPaths
     ]);
+    if (event.workflow === "ask") {
+      current.askSourceAttribution = true;
+      for (const source of event.personalMemorySources ?? []) {
+        if (!current.personalMemorySources.has(source.id)) {
+          current.personalMemorySources.set(source.id, clonePersonalMemorySource(source));
+        }
+      }
+    }
     grouped.set(key, current);
   }
 
@@ -327,13 +352,28 @@ export function decorationsForBranch(
       : {}),
     ...(item.producedPaths.length
       ? { knowledgeProducedPaths: [...item.producedPaths] }
+      : {}),
+    ...(item.askSourceAttribution
+      ? {
+          askSourceAttribution: true as const,
+          personalMemorySources: Array.from(item.personalMemorySources.values())
+            .map(clonePersonalMemorySource)
+        }
       : {})
   }));
 }
 
 export function knowledgeUsageMessageData(value: unknown): KnowledgeUsageMessageData {
-  if (!value || typeof value !== "object") return { references: [], producedPaths: [] };
+  if (!value || typeof value !== "object") {
+    return {
+      askSourceAttribution: false,
+      references: [],
+      producedPaths: [],
+      personalMemorySources: []
+    };
+  }
   const record = value as Record<string, unknown>;
+  const askSourceAttribution = record.askSourceAttribution === true;
   const references: KnowledgeReference[] = [];
   if (Array.isArray(record.knowledgeReferences)) {
     for (const candidate of record.knowledgeReferences) {
@@ -343,6 +383,18 @@ export function knowledgeUsageMessageData(value: unknown): KnowledgeUsageMessage
         ));
       } catch {
         // Malformed product metadata never becomes a visible citation.
+      }
+    }
+  }
+  const personalMemorySources: PersonalMemorySourceReference[] = [];
+  if (askSourceAttribution && Array.isArray(record.personalMemorySources)) {
+    for (const candidate of record.personalMemorySources) {
+      try {
+        personalMemorySources.push(clonePersonalMemorySource(
+          normalizePersonalMemorySource(candidate, "invalid-input")
+        ));
+      } catch {
+        // Malformed source metadata never becomes a visible Memory source.
       }
     }
   }
@@ -357,8 +409,10 @@ export function knowledgeUsageMessageData(value: unknown): KnowledgeUsageMessage
     }
   }
   return {
+    askSourceAttribution,
     references: uniqueReferences(references),
-    producedPaths: uniqueStrings(producedPaths)
+    producedPaths: uniqueStrings(producedPaths),
+    personalMemorySources: uniquePersonalMemorySources(personalMemorySources)
   };
 }
 
@@ -367,16 +421,29 @@ export function mergeKnowledgeUsageMessageData(
 ): KnowledgeUsageMessageData {
   const references = new Map<string, KnowledgeReference>();
   const producedPaths: string[] = [];
+  const personalMemorySources = new Map<string, PersonalMemorySourceReference>();
+  let askSourceAttribution = false;
   for (const value of values) {
     const data = knowledgeUsageMessageData(value);
     for (const reference of data.references) {
       references.set(reference.referenceId, reference);
     }
     producedPaths.push(...data.producedPaths);
+    if (data.askSourceAttribution) {
+      askSourceAttribution = true;
+      for (const source of data.personalMemorySources) {
+        if (!personalMemorySources.has(source.id)) {
+          personalMemorySources.set(source.id, clonePersonalMemorySource(source));
+        }
+      }
+    }
   }
   return {
+    askSourceAttribution,
     references: Array.from(references.values()),
-    producedPaths: uniqueStrings(producedPaths)
+    producedPaths: uniqueStrings(producedPaths),
+    personalMemorySources: Array.from(personalMemorySources.values())
+      .map(clonePersonalMemorySource)
   };
 }
 
@@ -437,7 +504,16 @@ function normalizeKnowledgeUsageEvent(
     throw new PiNativeFileStoreError(errorCode, "KnowledgeUsageEvent 必须是对象");
   }
   const object = value as Record<string, unknown>;
-  assertExactKeys(object, EVENT_KEYS, "KnowledgeUsageEvent", errorCode);
+  const hasPersonalMemorySources = Object.prototype.hasOwnProperty.call(
+    object,
+    "personalMemorySources"
+  );
+  assertExactKeys(
+    object,
+    hasPersonalMemorySources ? EVENT_KEYS : LEGACY_EVENT_KEYS,
+    "KnowledgeUsageEvent",
+    errorCode
+  );
   const workflow = requireUsageString(object.workflow, "workflow", errorCode) as KnowledgeUsageWorkflow;
   if (!WORKFLOWS.has(workflow)) {
     throw new PiNativeFileStoreError(errorCode, `未知 Knowledge workflow：${workflow}`);
@@ -445,7 +521,20 @@ function normalizeKnowledgeUsageEvent(
   const referenceIds = normalizeStringArray(object.referenceIds, "referenceIds", errorCode);
   const producedPaths = normalizeStringArray(object.producedPaths, "producedPaths", errorCode)
     .map((item) => normalizeVaultRelativePath(item, "producedPath"));
-  if (referenceIds.length === 0 && producedPaths.length === 0) {
+  const personalMemorySources = hasPersonalMemorySources
+    ? normalizePersonalMemorySources(object.personalMemorySources, errorCode)
+    : undefined;
+  if (workflow !== "ask" && personalMemorySources !== undefined) {
+    throw new PiNativeFileStoreError(
+      errorCode,
+      "只有 /ask 可以记录 Personal Memory 来源"
+    );
+  }
+  if (
+    workflow !== "ask"
+    && referenceIds.length === 0
+    && producedPaths.length === 0
+  ) {
     throw new PiNativeFileStoreError(
       errorCode,
       "KnowledgeUsageEvent 必须包含实际引用或产物指针"
@@ -460,7 +549,10 @@ function normalizeKnowledgeUsageEvent(
     productRunId: requireUsageString(object.productRunId, "productRunId", errorCode),
     referenceIds: uniqueStrings(referenceIds),
     workflow,
-    producedPaths: uniqueStrings(producedPaths)
+    producedPaths: uniqueStrings(producedPaths),
+    ...(personalMemorySources === undefined
+      ? {}
+      : { personalMemorySources })
   };
 }
 
@@ -511,6 +603,38 @@ function normalizeKnowledgeReference(
     contentRevision,
     lineStart: lineStart as number,
     lineEnd: lineEnd as number
+  };
+}
+
+function normalizePersonalMemorySources(
+  value: unknown,
+  errorCode: "invalid-input" | "store-corrupt"
+): PersonalMemorySourceReference[] {
+  if (!Array.isArray(value)) {
+    throw new PiNativeFileStoreError(errorCode, "personalMemorySources 必须是数组");
+  }
+  return uniquePersonalMemorySources(value.map((source) =>
+    normalizePersonalMemorySource(source, errorCode)
+  ));
+}
+
+function normalizePersonalMemorySource(
+  value: unknown,
+  errorCode: "invalid-input" | "store-corrupt"
+): PersonalMemorySourceReference {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new PiNativeFileStoreError(errorCode, "Personal Memory 来源必须是对象");
+  }
+  const object = value as Record<string, unknown>;
+  assertExactKeys(
+    object,
+    PERSONAL_MEMORY_SOURCE_KEYS,
+    "Personal Memory 来源",
+    errorCode
+  );
+  return {
+    id: requireUsageString(object.id, "Personal Memory 来源 id", errorCode),
+    title: requireUsageString(object.title, "Personal Memory 来源 title", errorCode)
   };
 }
 
@@ -577,14 +701,37 @@ function uniqueReferences(values: readonly KnowledgeReference[]): KnowledgeRefer
   return Array.from(new Map(values.map((item) => [item.referenceId, item])).values());
 }
 
+function uniquePersonalMemorySources(
+  values: readonly PersonalMemorySourceReference[]
+): PersonalMemorySourceReference[] {
+  const unique = new Map<string, PersonalMemorySourceReference>();
+  for (const item of values) {
+    if (!unique.has(item.id)) unique.set(item.id, item);
+  }
+  return Array.from(unique.values());
+}
+
 function cloneAndFreezeReference(reference: KnowledgeReference): KnowledgeReference {
   return Object.freeze({ ...reference });
+}
+
+function clonePersonalMemorySource(
+  source: PersonalMemorySourceReference
+): PersonalMemorySourceReference {
+  return Object.freeze({ ...source });
 }
 
 function cloneAndFreezeEvent(event: Readonly<KnowledgeUsageEvent>): Readonly<KnowledgeUsageEvent> {
   return Object.freeze({
     ...event,
     referenceIds: Object.freeze([...event.referenceIds]) as unknown as string[],
-    producedPaths: Object.freeze([...event.producedPaths]) as unknown as string[]
+    producedPaths: Object.freeze([...event.producedPaths]) as unknown as string[],
+    ...(event.personalMemorySources === undefined
+      ? {}
+      : {
+          personalMemorySources: Object.freeze(
+            event.personalMemorySources.map(clonePersonalMemorySource)
+          ) as unknown as PersonalMemorySourceReference[]
+        })
   });
 }

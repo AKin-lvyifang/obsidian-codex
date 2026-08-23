@@ -65,6 +65,7 @@ import type {
   PiTaskPlanTransitionRequest,
   PiTaskPlanTransitionResult
 } from "./contracts";
+import type { PersonalMemorySourceReference } from "../../settings/settings";
 import { latestPiContextLedger } from "./pi-context-budget";
 import {
   PI_KNOWLEDGE_MAINTAIN_TOOL_ID,
@@ -142,6 +143,11 @@ export interface PiNativeAgentSessionFactoryInput {
     stage: "loading" | "catalog" | "matching" | "budgeting" | "assembling";
     elapsedMs: number;
     recall?: PiMemoryRecallObservation;
+  }>): Promise<void>;
+  /** Receives only primary Memory source metadata after Pi context insertion. */
+  reportAskPersonalMemorySources?(input: Readonly<{
+    productRunId: string;
+    sources: readonly Readonly<PersonalMemorySourceReference>[];
   }>): Promise<void>;
 }
 
@@ -379,6 +385,7 @@ interface ActiveProductRun {
     | {
         kind: "ask";
         references: readonly Readonly<PiKnowledgeReference>[];
+        personalMemorySources: readonly Readonly<PersonalMemorySourceReference>[];
         bufferedAssistantEvents: PiChatRuntimeEventPayload[];
       }
     | {
@@ -1074,6 +1081,7 @@ export class PiNativeConversationRuntime {
         execution.knowledgeWorkflow = {
           kind: "ask",
           references: preflight.references,
+          personalMemorySources: Object.freeze([]),
           bufferedAssistantEvents: []
         };
         execution.knowledgeObservation = createKnowledgeObservation(
@@ -1849,6 +1857,20 @@ export class PiNativeConversationRuntime {
             ?? latestTaskPlanFromBranch(branch)
         });
       },
+      reportAskPersonalMemorySources: async (input) => {
+        const active = holder.active;
+        const run = active?.currentRun;
+        const ask = run?.knowledgeWorkflow;
+        if (
+          !active
+          || !run
+          || run.productRunId !== input.productRunId
+          || ask?.kind !== "ask"
+        ) return;
+        ask.personalMemorySources = freezePersonalMemorySourceReferences(
+          input.sources
+        );
+      },
       reportMemoryRecallProgress: async (progress) => {
         const active = holder.active;
         const run = active?.currentRun;
@@ -2125,8 +2147,7 @@ export class PiNativeConversationRuntime {
             await this.emitRuntimeEvent(active, execution, event);
           }
           ask.bufferedAssistantEvents.length = 0;
-          if (verification.references.length > 0) {
-            await this.options.knowledge?.recordUsage?.({
+          await this.options.knowledge?.recordUsage?.({
             event: {
               sourceEventId: stableId(
                 "knowledge-usage",
@@ -2145,11 +2166,13 @@ export class PiNativeConversationRuntime {
                 (reference) => reference.referenceId
               ),
               workflow: "ask",
-              producedPaths: []
+              producedPaths: [],
+              personalMemorySources: ask.personalMemorySources.map(
+                (source) => ({ ...source })
+              )
             },
             entries: active.sessionManager.getBranch()
-            });
-          }
+          });
         }
       }
 
@@ -3548,6 +3571,19 @@ function parseKnowledgeReference(value: unknown): PiKnowledgeReference | null {
     lineStart: reference.lineStart as number,
     lineEnd: reference.lineEnd as number
   });
+}
+
+function freezePersonalMemorySourceReferences(
+  sources: readonly Readonly<PersonalMemorySourceReference>[]
+): readonly Readonly<PersonalMemorySourceReference>[] {
+  const unique = new Map<string, Readonly<PersonalMemorySourceReference>>();
+  for (const source of sources) {
+    const id = source.id.trim();
+    const title = source.title.trim();
+    if (!id || !title || unique.has(id)) continue;
+    unique.set(id, Object.freeze({ id, title }));
+  }
+  return Object.freeze([...unique.values()]);
 }
 
 function mergeKnowledgeReferences(

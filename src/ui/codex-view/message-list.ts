@@ -3,6 +3,7 @@ import type {
   ChatMessage,
   DiffSummary,
   EchoInkWelcomeCopy,
+  PersonalMemorySourceReference,
   SettingsLanguage,
   StoredAttachment
 } from "../../settings/settings";
@@ -1141,7 +1142,11 @@ export class CodexMessageListRenderer {
     messageId: string,
     usage: KnowledgeUsageMessageData
   ): void {
-    if (!usage.references.length && !usage.producedPaths.length) return;
+    if (
+      !usage.askSourceAttribution
+      && !usage.references.length
+      && !usage.producedPaths.length
+    ) return;
     const stateKey = `knowledge-usage:${messageId}`;
     const details = container.createEl("details", {
       cls: "codex-kb-citations codex-knowledge-references"
@@ -1152,8 +1157,45 @@ export class CodexMessageListRenderer {
       this.requireEnv().onScheduleMeasure();
     };
     const summary = details.createEl("summary", { cls: "codex-kb-citations-summary" });
-    summary.createSpan({ cls: "codex-kb-citations-title", text: "本次引用" });
+    summary.createSpan({
+      cls: "codex-kb-citations-title",
+      text: usage.askSourceAttribution ? "本轮来源" : "本次引用"
+    });
     const counts = summary.createSpan({ cls: "codex-kb-citation-buckets" });
+    if (usage.askSourceAttribution) {
+      counts.createSpan({
+        cls: "codex-kb-source-count",
+        text: `${usage.references.length} 个 Vault 参考`
+      });
+      counts.createSpan({
+        cls: "codex-kb-source-count",
+        text: `${usage.personalMemorySources.length} 条 Personal Memory`
+      });
+      const body = details.createDiv({ cls: "codex-kb-citations-body" });
+      const vaultGroup = this.renderKnowledgeUsageGroup(body, "Vault 参考");
+      if (usage.references.length) {
+        for (const reference of usage.references) {
+          this.renderKnowledgeReferenceItem(vaultGroup, reference);
+        }
+      } else {
+        vaultGroup.createDiv({
+          cls: "codex-kb-no-evidence",
+          text: "本轮未注入 Vault 参考。"
+        });
+      }
+      const memoryGroup = this.renderKnowledgeUsageGroup(body, "Personal Memory");
+      if (usage.personalMemorySources.length) {
+        for (const source of usage.personalMemorySources) {
+          this.renderPersonalMemorySourceItem(memoryGroup, source);
+        }
+      } else {
+        memoryGroup.createDiv({
+          cls: "codex-kb-no-evidence",
+          text: "本轮未注入 Personal Memory。"
+        });
+      }
+      return;
+    }
     if (usage.references.length) {
       counts.createSpan({
         cls: "codex-kb-source-count",
@@ -1173,6 +1215,24 @@ export class CodexMessageListRenderer {
     for (const producedPath of usage.producedPaths) {
       this.renderKnowledgeProducedPath(body, producedPath);
     }
+  }
+
+  private renderKnowledgeUsageGroup(container: HTMLElement, title: string): HTMLElement {
+    const group = container.createDiv({ cls: "codex-kb-citation-group" });
+    const header = group.createDiv({ cls: "codex-kb-citation-header" });
+    header.createSpan({ cls: "codex-kb-citation-title", text: title });
+    return group;
+  }
+
+  private renderPersonalMemorySourceItem(
+    container: HTMLElement,
+    source: PersonalMemorySourceReference
+  ): void {
+    const item = container.createDiv({
+      cls: "codex-kb-citation-item codex-personal-memory-source-item"
+    });
+    const header = item.createDiv({ cls: "codex-kb-citation-header" });
+    header.createSpan({ cls: "codex-kb-citation-title", text: source.title });
   }
 
   private renderKnowledgeReferenceItem(

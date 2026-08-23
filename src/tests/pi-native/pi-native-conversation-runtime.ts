@@ -72,6 +72,7 @@ export async function runPiNativeConversationRuntimeTests(): Promise<void> {
   assertKnowledgeMaintenanceRequiresExplicitCommand();
   await assertProjectionAndCatalogManagementStayAgentSessionFree();
   await assertKnowledgeAskUsesAgentAndReadOnlyTools();
+  await assertAskSourceAttributionCapturesOnlyInjectedPrimaryMemory();
   await assertKnowledgeObservationAndProgressArePrivacySafe();
   await assertKnowledgeMaintenancePreferenceSnapshotIsTurnBound();
   await assertKnowledgeMaintenanceSettlementRequiresUniqueDurableResult();
@@ -864,6 +865,113 @@ async function assertKnowledgeAskUsesAgentAndReadOnlyTools(): Promise<void> {
       session.finishSuccessful("no_memory 模式回答。");
       assert.equal((await noMemory.result).terminalState, "completed");
       assert.deepEqual(verified, [[], []]);
+    },
+    { knowledge }
+  );
+}
+
+async function assertAskSourceAttributionCapturesOnlyInjectedPrimaryMemory(): Promise<void> {
+  const reference: PiKnowledgeReference = Object.freeze({
+    referenceId: "vault-reference-a",
+    vaultRelativePath: "wiki/attribution.md",
+    title: "Vault attribution",
+    excerpt: "实际注入的 Vault 参考",
+    contentRevision: `sha256:${"a".repeat(64)}`,
+    lineStart: 1,
+    lineEnd: 1
+  });
+  const usage: Array<Parameters<NonNullable<
+    PiKnowledgeRuntimePort["recordUsage"]
+  >>[0]> = [];
+  let askCount = 0;
+  const knowledge: PiKnowledgeRuntimePort = {
+    async retrieveAsk() {
+      const references = askCount++ === 0 ? [reference] : [];
+      return Object.freeze({
+        status: references.length ? "ready" as const : "no_evidence" as const,
+        references: Object.freeze(references),
+        providerResourceText: "attribution fixture",
+        retrieval: Object.freeze({
+          elapsedMs: 1,
+          total: 1,
+          returned: 1,
+          remaining: 0,
+          hasMore: false,
+          exhausted: true
+        })
+      });
+    },
+    async verifyAskReferences(input) {
+      return Object.freeze({
+        status: "valid" as const,
+        references: Object.freeze([...input.references])
+      });
+    },
+    async recordUsage(input) {
+      usage.push(structuredClone(input));
+    }
+  };
+  await withFixture(
+    ["run-ask-source-attribution", "run-ask-source-attribution-empty"],
+    async (fixture) => {
+      fixture.configureFactoryTools({
+        registered: ["knowledge_search", "knowledge_read", "note_read"],
+        defaults: ["knowledge_search", "knowledge_read", "note_read"],
+        planAllowed: []
+      });
+      const conversationId = "ask-source-attribution";
+      await fixture.runtime.createConversation({
+        conversationId,
+        title: "Ask source attribution",
+        cwd: fixture.root,
+        createdAt: 1
+      });
+      await fixture.runtime.activateConversation(conversationId);
+      const session = fixture.latestSession();
+      const first = await fixture.runtime.submit({
+        conversationId,
+        text: "/ask 请用已注入来源回答",
+        submittedAt: 2
+      });
+      const sources = [
+        { id: "memory-primary-a", title: "一级 Memory A" },
+        { id: "memory-primary-a", title: "重复 Memory 不应再次展示" },
+        { id: "memory-primary-b", title: "一级 Memory B" }
+      ];
+      await fixture.reportAskPersonalMemorySources({
+        productRunId: first.productRunId,
+        sources
+      });
+      sources[0]!.title = "外部突变不能进入 usage";
+      session.finishSuccessful("已完成来源归属回答。");
+      await first.result;
+
+      assert.equal(usage.length, 1);
+      assert.deepEqual(usage[0]?.event, {
+        sourceEventId: usage[0]?.event.sourceEventId,
+        vaultId: usage[0]?.event.vaultId,
+        conversationId,
+        piSessionId: usage[0]?.event.piSessionId,
+        piEntryId: usage[0]?.event.piEntryId,
+        productRunId: first.productRunId,
+        referenceIds: [reference.referenceId],
+        workflow: "ask",
+        producedPaths: [],
+        personalMemorySources: [
+          { id: "memory-primary-a", title: "一级 Memory A" },
+          { id: "memory-primary-b", title: "一级 Memory B" }
+        ]
+      });
+
+      const empty = await fixture.runtime.submit({
+        conversationId,
+        text: "/ask 本轮没有可展示来源",
+        submittedAt: 3
+      });
+      session.finishSuccessful("没有来源的回答。");
+      await empty.result;
+      assert.deepEqual(usage[1]?.event.personalMemorySources, []);
+      assert.deepEqual(usage[1]?.event.referenceIds, []);
     },
     { knowledge }
   );
@@ -2508,6 +2616,9 @@ interface RuntimeFixture {
   reportMemoryRecall(input: Parameters<NonNullable<
     PiNativeAgentSessionFactoryInput["reportMemoryRecallProgress"]
   >>[0]): Promise<void>;
+  reportAskPersonalMemorySources(input: Parameters<NonNullable<
+    PiNativeAgentSessionFactoryInput["reportAskPersonalMemorySources"]
+  >>[0]): Promise<void>;
   latestSession(): ControlledAgentSession;
 }
 
@@ -2528,6 +2639,8 @@ async function withFixture(
   let currentKnowledgeTurnReader:
     (() => Readonly<PiNativeKnowledgeTurnContext> | null) | null = null;
   let memoryRecallReporter: PiNativeAgentSessionFactoryInput["reportMemoryRecallProgress"] = undefined;
+  let askPersonalMemorySourcesReporter:
+    PiNativeAgentSessionFactoryInput["reportAskPersonalMemorySources"] = undefined;
   let nextActivationError: Error | null = null;
   let factoryWarnings: readonly string[] = [];
   let memoryToolNames: readonly string[] = [];
@@ -2558,6 +2671,7 @@ async function withFixture(
       currentMemoryTurnReader = input.currentMemoryTurnContext ?? null;
       currentKnowledgeTurnReader = input.currentKnowledgeTurnContext ?? null;
       memoryRecallReporter = input.reportMemoryRecallProgress;
+      askPersonalMemorySourcesReporter = input.reportAskPersonalMemorySources;
       if (nextActivationError) {
         const error = nextActivationError;
         nextActivationError = null;
@@ -2620,6 +2734,10 @@ async function withFixture(
       reportMemoryRecall: async (input) => {
         assert.ok(memoryRecallReporter);
         await memoryRecallReporter(input);
+      },
+      reportAskPersonalMemorySources: async (input) => {
+        assert.ok(askPersonalMemorySourcesReporter);
+        await askPersonalMemorySourcesReporter(input);
       },
       latestSession: () => {
         const session = sessions.at(-1);
