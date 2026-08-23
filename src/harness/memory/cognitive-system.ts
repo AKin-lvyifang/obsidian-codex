@@ -12,7 +12,6 @@
  * Template selection and reset run as ONE local transaction with NO Provider.
  */
 
-import path from "node:path";
 import {
   PERSONALITY_STATE_RELATIVE_PATH,
   PersonalityStateStore,
@@ -24,9 +23,10 @@ import {
   parseLegacyPersonalityStateV1,
   personalityStateJson,
   type LegacyPersonalityStateV1,
-  type PersonalityState
+  type PersonalityState,
+  type RecoverablePersonalityState
 } from "./personality-state";
-import { cognitiveReadJsonOrNull } from "./cognitive-file-utils";
+import { cognitiveReadJsonOrNull, newCognitiveId } from "./cognitive-file-utils";
 import { UserProfileStateStore } from "./user-profile-state";
 import {
   DREAM_STATE_RELATIVE_PATH,
@@ -36,6 +36,7 @@ import {
 } from "./dream-state";
 import { cognitiveJsonText } from "./cognitive-file-utils";
 import {
+  normalizeAssociationClueFields,
   SecondaryMemoryStore,
   serializeSecondaryRecord
 } from "./secondary-memory-store";
@@ -86,7 +87,7 @@ class RepositoryDreamPort implements DreamRepositoryPort {
   constructor(private readonly repository: PersonalMemoryRepository) {}
 
   async inspect(): Promise<Readonly<{ revision: number; records: readonly PersonalMemoryRecord[] }>> {
-    const state = await this.repository.readUserControlState();
+    const state = await this.repository.inspect();
     return Object.freeze({ revision: state.revision, records: state.records });
   }
 
@@ -94,9 +95,14 @@ class RepositoryDreamPort implements DreamRepositoryPort {
     return await this.repository.readVaultId();
   }
 
-  async readFixedFiles(): Promise<Readonly<{ agent: string; user: string }>> {
-    const state = await this.repository.readUserControlState();
-    return Object.freeze({ agent: state.agent, user: state.user });
+  async readFixedFiles(): Promise<Readonly<{
+    agent: string;
+    user: string;
+    userHash: string;
+    userChars: number;
+    userManifestHashMatches: boolean;
+  }>> {
+    return await this.repository.inspectCognitiveFixedFiles();
   }
 
   async applyCognitiveUpdate(input: Readonly<{
@@ -105,6 +111,7 @@ class RepositoryDreamPort implements DreamRepositoryPort {
     secondaryRecords: readonly SecondaryMemoryRecord[];
     extraChanges: readonly Readonly<{ relativePath: string; content: string }>[];
     detail: string;
+    expectedMemoryRevision: number;
     /** Round 6 修复四（身份 CAS）：决策时读到的身份 revision。 */
     expectedAgentIdentityRevision?: number;
   }>): Promise<Readonly<{ revision: number }>> {
@@ -180,15 +187,17 @@ export class CognitiveSystem {
 
   /** Build the system against an initialized repository and attach hooks. */
   static async create(options: CognitiveSystemOptions): Promise<CognitiveSystem> {
+    // One product-wide SecondaryMemoryStore. Hydrate disk records before the
+    // repository's first initialization so Search Index v3 includes clues on
+    // the first query after restart.
+    const secondaryStore = new SecondaryMemoryStore(options.repository.layout.history);
+    options.repository.setSecondaryRecords(await secondaryStore.loadAll());
     const layout = await options.repository.initialize();
     const root = layout.root;
     const personalityStore = new PersonalityStateStore(root);
     const profileStore = new UserProfileStateStore(root);
     const dreamStateStore = new DreamStateStore(root);
-    const secondaryStore = new SecondaryMemoryStore(path.join(root, "shared-user", "memory"));
     const agentIdentityStore = new AgentIdentityStateStore(root);
-
-    options.repository.setSecondaryRecords(await secondaryStore.loadAll());
     // 启动时读取一次身份（文件不存在则返回默认运行状态，不写文件），
     // 让 peek/current 快照可以同步供给 UI；不调用 Provider。
     await agentIdentityStore.read();
@@ -203,6 +212,21 @@ export class CognitiveSystem {
     const inspection = await inspectPersonalityFile(personalityStore.filePath);
     if (inspection.kind === "invalid") {
       throw new Error(`personality_state_invalid:${inspection.reason}`);
+    }
+    if (inspection.kind === "v2_recoverable") {
+      try {
+        await recoverPersonalityDimensions({
+          repository: options.repository,
+          personalityStore,
+          dreamStateStore,
+          agentIdentityStore,
+          secondaryStore,
+          recovery: inspection.recovery,
+          now: (options.now ?? Date.now)()
+        });
+      } catch {
+        throw new Error("personality_dimension_recovery_blocked:transaction_failed");
+      }
     }
     if (inspection.kind === "v1") {
       try {
@@ -546,17 +570,19 @@ export class CognitiveSystem {
     const position = all.findIndex((record) => record.id === secondaryId && record.status === "current");
     if (position < 0) throw new Error(`Secondary fact ${secondaryId} not found`);
     const current = all[position];
+    const normalized = normalizeAssociationClueFields({
+      title: edits.title ?? current.title,
+      content: edits.content ?? current.content,
+      recallWhen: edits.recallWhen ?? current.recallWhen,
+      matchTerms: edits.matchTerms ?? current.matchTerms,
+      relation: current.relation,
+      reason: edits.reason ?? current.reason,
+      supportLevel: current.supportLevel,
+      evidence: current.evidence
+    });
     const updated: SecondaryMemoryRecord = Object.freeze({
       ...current,
-      ...(edits.title !== undefined ? { title: edits.title.trim() || current.title } : {}),
-      ...(edits.content !== undefined ? { content: edits.content.trim() || current.content } : {}),
-      ...(edits.recallWhen !== undefined
-        ? { recallWhen: edits.recallWhen.trim() || current.recallWhen }
-        : {}),
-      ...(edits.matchTerms !== undefined
-        ? { matchTerms: Object.freeze(edits.matchTerms.map((term) => term.trim()).filter(Boolean).slice(0, 5)) }
-        : {}),
-      ...(edits.reason !== undefined ? { reason: edits.reason } : {}),
+      ...normalized,
       basis: "user_edited_inference",
       revision: current.revision + 1,
       updatedAt: this.now()
@@ -698,6 +724,82 @@ export function initialTemplateSelectionStatus(
     needsInitialIdentity,
     requiresFirstNaming: needsInitialIdentity
   });
+}
+
+// ---------------------------------------------------------------------------
+// Personality v2 per-dimension recovery (local transaction, NO Provider)
+// ---------------------------------------------------------------------------
+
+export async function recoverPersonalityDimensions(input: Readonly<{
+  repository: PersonalMemoryRepository;
+  personalityStore: PersonalityStateStore;
+  dreamStateStore: DreamStateStore;
+  agentIdentityStore: AgentIdentityStateStore;
+  secondaryStore: SecondaryMemoryStore;
+  recovery: RecoverablePersonalityState;
+  now: number;
+}>): Promise<void> {
+  const template = getPersonalityTemplate(input.recovery.state.templateId);
+  const explicit = { ...input.recovery.state.explicit };
+  const observed = { ...input.recovery.state.observed };
+  for (const damaged of input.recovery.damaged) {
+    observed[damaged.dimension] = null;
+    explicit[damaged.dimension] = template
+      ? Object.freeze({
+          id: newCognitiveId("trait"),
+          dimension: damaged.dimension,
+          basis: "explicit" as const,
+          status: "current" as const,
+          score: template.scores[damaged.dimension],
+          sourceMemoryIds: Object.freeze([]),
+          evidence: `损坏维度局部恢复：模板「${template.labelZh}」基线`,
+          createdAt: input.now,
+          updatedAt: input.now,
+          revision: input.recovery.state.revision + 1
+        })
+      : null;
+  }
+  const next: PersonalityState = Object.freeze({
+    ...input.recovery.state,
+    revision: input.recovery.state.revision + 1,
+    explicit: Object.freeze(explicit),
+    observed: Object.freeze(observed),
+    updatedAt: input.now
+  });
+  const dreamState = await input.dreamStateStore.read();
+  const nextDream = enqueuePendingMemoryIds(
+    Object.freeze({
+      ...dreamState,
+      revision: dreamState.revision + 1,
+      updatedAt: input.now
+    }),
+    input.recovery.requeueMemoryIds,
+    input.now
+  );
+  const identity = await input.agentIdentityStore.read();
+  const agentContent = next.templateId ? renderAgentMarkdown(next, identity) : undefined;
+  const stamp = new Date(input.now).toISOString().replace(/[:.]/g, "-");
+  await input.repository.applyCognitiveUpdate({
+    ...(agentContent ? { agentContent } : {}),
+    secondaryRecords: await input.secondaryStore.loadAll(),
+    extraChanges: [
+      ...input.recovery.damaged.map((damaged) => ({
+        relativePath: `agents/echoink/history/personality-dimension-${damaged.dimension}-${stamp}.json`,
+        content: cognitiveJsonText(damaged.raw)
+      })),
+      {
+        relativePath: PERSONALITY_STATE_RELATIVE_PATH,
+        content: personalityStateJson(next)
+      },
+      {
+        relativePath: DREAM_STATE_RELATIVE_PATH,
+        content: cognitiveJsonText(nextDream)
+      }
+    ],
+    expectedAgentIdentityRevision: identity.revision,
+    detail: `personality-dimension-recovery:${input.recovery.damaged.map((item) => item.dimension).join(",")}`
+  });
+  input.dreamStateStore.updateCache(nextDream);
 }
 
 // ---------------------------------------------------------------------------

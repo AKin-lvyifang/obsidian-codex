@@ -118,6 +118,8 @@ export type PersonalMemoryWriteRequest =
 export interface PersonalMemoryWriteResult {
   readonly revision: number;
   readonly record?: PersonalMemoryRecord;
+  /** No-write create result for retry safety or a broad-key conflict. */
+  readonly status?: "idempotent" | "possible_duplicate";
   readonly forgottenId?: string;
   readonly profile?: "user";
 }
@@ -348,6 +350,13 @@ export const SECONDARY_MAX_PER_PARENT = 10 as const;
 export const SECONDARY_MAX_CANDIDATES = 12 as const;
 /** 每条二级事实最多的匹配词数量。 */
 export const SECONDARY_MAX_MATCH_TERMS = 5 as const;
+/** 联想线索字段 schema 的唯一长度真源（Dream、领域层、磁盘与 UI 共用）。 */
+export const SECONDARY_TITLE_MAX_CHARS = 30 as const;
+export const SECONDARY_CONTENT_MAX_CHARS = 120 as const;
+export const SECONDARY_RECALL_WHEN_MAX_CHARS = 120 as const;
+export const SECONDARY_MATCH_TERM_MAX_CHARS = 40 as const;
+export const SECONDARY_REASON_MAX_CHARS = 80 as const;
+export const SECONDARY_EVIDENCE_MAX_CHARS = 120 as const;
 /** 命中一次带来的 confidence 增量。 */
 export const SECONDARY_HIT_CONFIDENCE_STEP = 0.05 as const;
 /** 未命中衰减保护期（天）。 */

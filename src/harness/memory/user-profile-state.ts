@@ -13,20 +13,75 @@ import { USER_PROFILE_STATE_SCHEMA } from "./personal-memory-contracts";
 import {
   cognitiveJsonText,
   cognitiveReadJsonOrNull,
-  newCognitiveId,
-  normalizeTextForDedupe
+  newCognitiveId
 } from "./cognitive-file-utils";
 
 export type UserProfileSection = "identity" | "preference" | "collaboration";
 export type UserProfileItemBasis = "explicit_memory" | "observed_memory" | "legacy_import";
 
 export const PROFILE_KEY_MAX_CHARS = 40;
+export const USER_PROFILE_ITEM_RECOMMENDED_MAX_CHARS = 80 as const;
+export const USER_PROFILE_ITEM_HARD_MAX_CHARS = 120 as const;
+export const USER_PROFILE_PROJECTION_TARGET_CHARS = 2_000 as const;
+export const USER_PROFILE_WRITE_HARD_MAX_CHARS = 8_000 as const;
+export const USER_PROFILE_LEGACY_READ_MAX_CHARS = 16_000 as const;
+
+export interface UserProfileSlotDefinition {
+  readonly section: UserProfileSection;
+  readonly profileKey: string;
+  readonly labelZh: string;
+  /** Larger values are projected first inside the same evidence class. */
+  readonly importance: number;
+}
+
+/**
+ * Closed profile taxonomy. Provider output must choose exactly one of these
+ * keys; arbitrary synonyms and text-derived fallback keys are rejected.
+ */
+export const USER_PROFILE_SLOTS: readonly UserProfileSlotDefinition[] = Object.freeze([
+  Object.freeze({ section: "identity", profileKey: "identity.name", labelZh: "姓名与称呼", importance: 100 }),
+  Object.freeze({ section: "identity", profileKey: "identity.pronouns", labelZh: "称谓与代词", importance: 96 }),
+  Object.freeze({ section: "identity", profileKey: "identity.role", labelZh: "职业与角色", importance: 92 }),
+  Object.freeze({ section: "identity", profileKey: "identity.organization", labelZh: "组织与团队", importance: 88 }),
+  Object.freeze({ section: "identity", profileKey: "identity.location_timezone", labelZh: "地区与时区", importance: 84 }),
+  Object.freeze({ section: "identity", profileKey: "identity.background", labelZh: "长期背景", importance: 80 }),
+
+  Object.freeze({ section: "preference", profileKey: "preference.language", labelZh: "语言", importance: 78 }),
+  Object.freeze({ section: "preference", profileKey: "preference.tone", labelZh: "语气", importance: 76 }),
+  Object.freeze({ section: "preference", profileKey: "preference.detail", labelZh: "详略", importance: 74 }),
+  Object.freeze({ section: "preference", profileKey: "preference.format", labelZh: "呈现格式", importance: 72 }),
+  Object.freeze({ section: "preference", profileKey: "preference.examples", labelZh: "示例方式", importance: 70 }),
+  Object.freeze({ section: "preference", profileKey: "preference.tools", labelZh: "工具偏好", importance: 68 }),
+  Object.freeze({ section: "preference", profileKey: "preference.workflow", labelZh: "工作流偏好", importance: 66 }),
+  Object.freeze({ section: "preference", profileKey: "preference.design", labelZh: "设计偏好", importance: 64 }),
+  Object.freeze({ section: "preference", profileKey: "preference.technology", labelZh: "技术偏好", importance: 62 }),
+  Object.freeze({ section: "preference", profileKey: "preference.interests", labelZh: "长期兴趣", importance: 60 }),
+  Object.freeze({ section: "preference", profileKey: "preference.avoidances", labelZh: "明确避好", importance: 58 }),
+  Object.freeze({ section: "preference", profileKey: "preference.accessibility", labelZh: "可访问性偏好", importance: 56 }),
+
+  Object.freeze({ section: "collaboration", profileKey: "collaboration.decision_style", labelZh: "决策方式", importance: 54 }),
+  Object.freeze({ section: "collaboration", profileKey: "collaboration.autonomy", labelZh: "自主推进", importance: 52 }),
+  Object.freeze({ section: "collaboration", profileKey: "collaboration.confirmation", labelZh: "确认边界", importance: 50 }),
+  Object.freeze({ section: "collaboration", profileKey: "collaboration.feedback", labelZh: "反馈方式", importance: 48 }),
+  Object.freeze({ section: "collaboration", profileKey: "collaboration.quality_bar", labelZh: "质量标准", importance: 46 }),
+  Object.freeze({ section: "collaboration", profileKey: "collaboration.pace", labelZh: "协作节奏", importance: 44 })
+]);
+
+const PROFILE_SLOT_BY_KEY = new Map(USER_PROFILE_SLOTS.map((slot) => [slot.profileKey, slot]));
+
+export function profileSlotDefinition(profileKey: string): UserProfileSlotDefinition | null {
+  return PROFILE_SLOT_BY_KEY.get(profileKey) ?? null;
+}
+
+export function isUserProfileKey(value: unknown): value is string {
+  return typeof value === "string" && PROFILE_SLOT_BY_KEY.has(value);
+}
 
 /**
  * 做梦 Prompt 携带的已有 profileKey 目录上限（Round 6 修复七）：
  * Prompt 只给「section:key」目录供模型复用稳定主题，绝不允许无界增长。
  */
-export const PROFILE_KEY_PROMPT_CAP = 40 as const;
+export const PROFILE_KEY_PROMPT_CAP = 24 as const;
 
 export interface ProfileKeyCatalogEntry {
   readonly section: UserProfileSection;
@@ -43,51 +98,13 @@ export interface ProfileKeyCatalogEntry {
  *   同样计入上限。
  */
 export function profileKeyPromptCatalog(
-  state: UserProfileState,
-  sameRoundEntries: readonly Readonly<{ section: UserProfileSection; profileKey: string }>[] = []
+  _state: UserProfileState,
+  _sameRoundEntries: readonly Readonly<{ section: UserProfileSection; profileKey: string }>[] = []
 ): readonly ProfileKeyCatalogEntry[] {
-  const revisionByKey = new Map<string, number>();
-  for (const item of state.items) {
-    if (item.status !== "current") continue;
-    const dedupeKey = `${item.section}\u0000${normalizeTextForDedupe(item.profileKey)}`;
-    const existing = revisionByKey.get(dedupeKey);
-    if (existing === undefined || item.revision > existing) {
-      revisionByKey.set(dedupeKey, item.revision);
-    }
-  }
-  const entries: Array<{ section: UserProfileSection; profileKey: string; revision: number }> = [];
-  for (const item of state.items) {
-    if (item.status !== "current") continue;
-    const dedupeKey = `${item.section}\u0000${normalizeTextForDedupe(item.profileKey)}`;
-    if (!revisionByKey.has(dedupeKey)) continue;
-    revisionByKey.delete(dedupeKey);
-    entries.push({ section: item.section, profileKey: item.profileKey, revision: item.revision });
-  }
-  for (const entry of sameRoundEntries) {
-    const profileKey = normalizeTextForDedupe(entry.profileKey).slice(0, PROFILE_KEY_MAX_CHARS);
-    if (!profileKey) continue;
-    const dedupeKey = `${entry.section}\u0000${profileKey}`;
-    if (entries.some((existing) =>
-      `${existing.section}\u0000${normalizeTextForDedupe(existing.profileKey)}` === dedupeKey
-    )) continue;
-    // 本轮新增 key 视为最新（revision = Infinity），裁剪时最后被丢弃。
-    entries.push({ section: entry.section, profileKey, revision: Number.POSITIVE_INFINITY });
-  }
-  entries.sort((left, right) =>
-    right.revision - left.revision
-    || left.section.localeCompare(right.section)
-    || left.profileKey.localeCompare(right.profileKey)
-  );
-  return Object.freeze(entries.slice(0, PROFILE_KEY_PROMPT_CAP).map((entry) => Object.freeze({
-    section: entry.section,
-    profileKey: entry.profileKey
+  return Object.freeze(USER_PROFILE_SLOTS.map((slot) => Object.freeze({
+    section: slot.section,
+    profileKey: slot.profileKey
   })));
-}
-
-/** 兼容旧 state / 模型未给 key：从 text 生成有界 fallback key。 */
-export function fallbackProfileKey(text: string): string {
-  const normalized = normalizeTextForDedupe(text);
-  return normalized.slice(0, PROFILE_KEY_MAX_CHARS) || "unknown";
 }
 
 export interface UserProfileItem {
@@ -100,6 +117,7 @@ export interface UserProfileItem {
   readonly status: "current" | "superseded";
   readonly sourceMemoryIds: readonly string[];
   readonly revision: number;
+  readonly updatedAt?: number;
 }
 
 export interface ProcessedProfileSource {
@@ -193,36 +211,47 @@ export function applyDreamProfileUpdate(
 
   for (const incoming of input.items) {
     const text = incoming.text.trim();
-    if (!text) continue;
-    // 按 section + 稳定主题 key 聚合近义来源（不再按整句 text 相等），
-    // 真实 Provider 的近义表述才能累计到三来源阈值。
-    const key = (incoming.profileKey && incoming.profileKey.trim())
-      ? normalizeTextForDedupe(incoming.profileKey).slice(0, PROFILE_KEY_MAX_CHARS)
-      : fallbackProfileKey(text);
-    const existing = items.find(
-      (item) => item.status === "current" && item.section === incoming.section
-        && normalizeTextForDedupe(item.profileKey) === key
+    if (!text || text.length > USER_PROFILE_ITEM_HARD_MAX_CHARS) continue;
+    const key = incoming.profileKey?.trim() ?? "";
+    const slot = profileSlotDefinition(key);
+    if (!slot || slot.section !== incoming.section) continue;
+    const basisSlot = incoming.basis === "observed_memory" ? "observed" : "explicit";
+    const existingIndex = items.findIndex((item) =>
+      item.profileKey === key
+      && (item.basis === "observed_memory" ? "observed" : "explicit") === basisSlot
     );
-    if (existing) {
-      if (!existing.sourceMemoryIds.includes(incoming.sourceMemoryId)) {
-        const index = items.indexOf(existing);
-        items[index] = {
-          ...existing,
-          sourceMemoryIds: Object.freeze([...existing.sourceMemoryIds, incoming.sourceMemoryId]),
-          revision
-        };
-      }
+    if (existingIndex >= 0) {
+      const existing = items[existingIndex];
+      const accumulateObserved = basisSlot === "observed" && existing.status === "current";
+      const sourceMemoryIds = accumulateObserved
+        ? uniqueTail([...existing.sourceMemoryIds, incoming.sourceMemoryId], 3)
+        : [incoming.sourceMemoryId];
+      items[existingIndex] = Object.freeze({
+        ...existing,
+        section: slot.section,
+        profileKey: slot.profileKey,
+        // The closed slot is the aggregation identity. Keep one stable
+        // observed formulation while independent sources accumulate; an
+        // explicit fact or a newly reactivated slot replaces it immediately.
+        text: accumulateObserved ? existing.text : text,
+        basis: incoming.basis === "observed_memory" ? "observed_memory" : "explicit_memory",
+        status: "current",
+        sourceMemoryIds: Object.freeze(sourceMemoryIds),
+        revision,
+        updatedAt: input.now
+      });
       continue;
     }
     items.push(Object.freeze({
       id: newCognitiveId("profile"),
-      section: incoming.section,
-      profileKey: key,
-      text: text.slice(0, 800),
-      basis: incoming.basis,
+      section: slot.section,
+      profileKey: slot.profileKey,
+      text,
+      basis: incoming.basis === "observed_memory" ? "observed_memory" : "explicit_memory",
       status: "current",
       sourceMemoryIds: Object.freeze([incoming.sourceMemoryId]),
-      revision
+      revision,
+      updatedAt: input.now
     }));
   }
 
@@ -376,6 +405,8 @@ export function revokeReprocessedProfileSources(
 /** Whether an observed profile item has earned the right to enter USER.md. */
 export function isProfileItemRenderable(item: UserProfileItem): boolean {
   if (item.status !== "current") return false;
+  const slot = profileSlotDefinition(item.profileKey);
+  if (!slot || slot.section !== item.section || item.sourceMemoryIds.length === 0) return false;
   if (item.basis === "observed_memory") {
     return item.sourceMemoryIds.length >= USER_OBSERVED_MIN_SOURCES;
   }
@@ -385,31 +416,42 @@ export function isProfileItemRenderable(item: UserProfileItem): boolean {
 export function parseUserProfileState(raw: Record<string, unknown>): UserProfileState | null {
   if (raw.schema !== USER_PROFILE_STATE_SCHEMA) return null;
   if (typeof raw.revision !== "number" || !Number.isSafeInteger(raw.revision)) return null;
-  const items = Array.isArray(raw.items)
+  const parsedItems = Array.isArray(raw.items)
     ? raw.items
         .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
-        .map((item) => Object.freeze({
+        .map((item) => {
+          const slot = profileSlotDefinition(typeof item.profileKey === "string" ? item.profileKey.trim() : "");
+          if (!slot) return null;
+          const text = typeof item.text === "string" ? item.text.trim() : "";
+          if (!text || text.length > USER_PROFILE_ITEM_HARD_MAX_CHARS) return null;
+          return Object.freeze({
           id: typeof item.id === "string" ? item.id : newCognitiveId("profile"),
-          section: (["identity", "preference", "collaboration"].includes(item.section as string)
-            ? item.section
-            : "preference") as UserProfileSection,
-          profileKey: typeof item.profileKey === "string" && item.profileKey.trim()
-            ? item.profileKey.trim().slice(0, PROFILE_KEY_MAX_CHARS)
-            : fallbackProfileKey(typeof item.text === "string" ? item.text : ""),
-          text: typeof item.text === "string" ? item.text : "",
+          section: slot.section,
+          profileKey: slot.profileKey,
+          text,
           basis: (item.basis === "observed_memory" || item.basis === "legacy_import"
             ? item.basis
             : "explicit_memory") as UserProfileItemBasis,
           status: item.status === "superseded" ? "superseded" as const : "current" as const,
           sourceMemoryIds: Object.freeze(
             Array.isArray(item.sourceMemoryIds)
-              ? item.sourceMemoryIds.filter((id): id is string => typeof id === "string")
+              ? uniqueTail(item.sourceMemoryIds.filter((id): id is string => typeof id === "string"), 3)
               : []
           ),
-          revision: typeof item.revision === "number" ? item.revision : 0
-        }))
-        .filter((item) => item.text.length > 0)
+          revision: typeof item.revision === "number" ? item.revision : 0,
+          updatedAt: typeof item.updatedAt === "number" ? item.updatedAt : undefined
+          });
+        })
+        .filter((item): item is NonNullable<typeof item> => item !== null)
     : [];
+  const itemBySlot = new Map<string, UserProfileItem>();
+  for (const item of parsedItems) {
+    const basisSlot = item.basis === "observed_memory" ? "observed" : "explicit";
+    const slotKey = `${item.profileKey}\u0000${basisSlot}`;
+    const existing = itemBySlot.get(slotKey);
+    if (!existing || item.revision > existing.revision) itemBySlot.set(slotKey, item);
+  }
+  const items = [...itemBySlot.values()];
   const processedSources = Array.isArray(raw.processedSources)
     ? raw.processedSources
         .filter((source): source is Record<string, unknown> =>
@@ -434,4 +476,12 @@ export function parseUserProfileState(raw: Record<string, unknown>): UserProfile
     lastProjectedUserHash: typeof raw.lastProjectedUserHash === "string" ? raw.lastProjectedUserHash : "",
     updatedAt: typeof raw.updatedAt === "number" ? raw.updatedAt : 0
   });
+}
+
+function uniqueTail(values: readonly string[], limit: number): string[] {
+  const unique: string[] = [];
+  for (const value of values) {
+    if (!unique.includes(value)) unique.push(value);
+  }
+  return unique.slice(-limit);
 }

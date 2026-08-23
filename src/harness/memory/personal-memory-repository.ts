@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { watch, type FSWatcher } from "node:fs";
 import {
   copyFile,
   lstat,
@@ -41,8 +42,12 @@ import {
   type SearchIndexV3,
   type SecondaryCatalogEntry
 } from "./search-index-v3";
+import {
+  USER_PROFILE_LEGACY_READ_MAX_CHARS,
+  USER_PROFILE_WRITE_HARD_MAX_CHARS
+} from "./user-profile-state";
 
-const MAX_PROFILE_CHARS = 16_000;
+const MAX_PROFILE_CHARS = USER_PROFILE_LEGACY_READ_MAX_CHARS;
 const MAX_OVERVIEW_CHARS = 20_000;
 const MAX_RECORD_CONTENT_CHARS = 24_000;
 const MAX_SEARCH_LIMIT = 50;
@@ -100,6 +105,10 @@ export interface PersonalMemoryRepositoryOptions {
     revision: number;
   }>) => void;
 }
+
+export type PersonalMemoryExternalChange =
+  | Readonly<{ event: "change"; relativePath: string }>
+  | Readonly<{ event: "rename" | "unknown" | "listener_error"; relativePath?: string }>;
 
 export interface PersonalMemoryRecallRuntimeContext {
   readonly vaultId: string;
@@ -264,7 +273,18 @@ export class PersonalMemoryRepository {
   private readonly now: () => number;
   private readonly idFactory: () => string;
   private readonly failTransactionAfterChange?: (operation: string, appliedChanges: number) => boolean;
-  private initializationFingerprint: string | null = null;
+  private initialization: Promise<Readonly<PersonalMemoryLayout>> | null = null;
+  private manifestCache: PersonalMemoryManifest | null = null;
+  private recordsCache: readonly PersonalMemoryRecord[] | null = null;
+  private searchIndexCache: Readonly<SearchIndex> | null = null;
+  private fixedContextCache: Readonly<{ agent: string; user: string; memory: string }> | null = null;
+  private sourceDirectoryRefreshPending = false;
+  private sourceDirectoryRefreshRunning: Promise<void> | null = null;
+  private readonly externalWatchers: FSWatcher[] = [];
+  private readonly internalWatchExpectations = new Map<
+    string,
+    Readonly<{ hash: string | null; until: number }>
+  >();
   private secondaryCache: readonly SecondaryMemoryRecord[] = [];
   private readonly secondaryRecordsProvider?: () => Promise<readonly SecondaryMemoryRecord[]>;
   private secondaryLifecycleHook?: (input: Readonly<{
@@ -325,6 +345,18 @@ export class PersonalMemoryRepository {
   }
 
   async initialize(): Promise<Readonly<PersonalMemoryLayout>> {
+    if (!this.initialization) {
+      this.initialization = this.initializeOnce().catch((error) => {
+        this.initialization = null;
+        throw error;
+      });
+    }
+    const layout = await this.initialization;
+    await this.consumePendingSourceDirectoryRefresh();
+    return layout;
+  }
+
+  private async initializeOnce(): Promise<Readonly<PersonalMemoryLayout>> {
     await mkdir(this.vaultPath, { recursive: true });
     for (const component of [
       this.layout.root,
@@ -362,11 +394,143 @@ export class PersonalMemoryRepository {
       this.secondaryCache = [...(await this.secondaryRecordsProvider())];
     }
     await this.assertManagedTreeSafe();
-    const fingerprint = await this.captureInitializationFingerprint();
-    if (fingerprint === this.initializationFingerprint) return this.layout;
     await this.reconcileMarkdownTruth();
-    this.initializationFingerprint = await this.captureInitializationFingerprint();
+    await this.hydrateCachesFromDisk();
+    this.startExternalWatchers();
     return this.layout;
+  }
+
+  /**
+   * External-edit entrypoint used by the bounded filesystem listeners and by
+   * deterministic tests. A known change refreshes one file. Rename/unknown
+   * events and listener errors merely schedule one primary-source scan for the
+   * next access; they never block the foreground Chat path.
+   */
+  async handleExternalChange(input: PersonalMemoryExternalChange): Promise<void> {
+    if (input.event !== "change") {
+      this.sourceDirectoryRefreshPending = true;
+      return;
+    }
+    const relativePath = normalizeManagedRelativePath(input.relativePath);
+    if (!this.isKnownExternalPath(relativePath)) {
+      this.sourceDirectoryRefreshPending = true;
+      return;
+    }
+    if (!this.initialization) {
+      this.sourceDirectoryRefreshPending = true;
+      return;
+    }
+    try {
+      await this.initialization;
+      await this.withMutation(async () => {
+        if (relativePath === "agents/echoink/AGENT.md"
+          || relativePath === "shared-user/USER.md") {
+          await this.refreshKnownFixedFile(relativePath);
+        } else {
+          await this.refreshKnownPrimaryRecord(relativePath);
+        }
+      });
+    } catch {
+      this.sourceDirectoryRefreshPending = true;
+    }
+  }
+
+  private async consumePendingSourceDirectoryRefresh(): Promise<void> {
+    if (this.sourceDirectoryRefreshRunning) {
+      await this.sourceDirectoryRefreshRunning;
+      return;
+    }
+    if (!this.sourceDirectoryRefreshPending) return;
+    this.sourceDirectoryRefreshPending = false;
+    const refresh = this.withMutation(async () => {
+      await this.refreshPrimarySourceDirectories();
+    }).catch(() => {
+      // Listener recovery is best effort. Keep the last known-good cache so a
+      // damaged external file or transient watcher failure never blocks Chat.
+    }).finally(() => {
+      if (this.sourceDirectoryRefreshRunning === refresh) {
+        this.sourceDirectoryRefreshRunning = null;
+      }
+    });
+    this.sourceDirectoryRefreshRunning = refresh;
+    await refresh;
+  }
+
+  private startExternalWatchers(): void {
+    if (this.externalWatchers.length > 0) return;
+    const watchDirectory = (
+      directory: string,
+      toRelativePath: (filename: string) => string | null,
+      renameNeedsSourceScan: boolean
+    ): void => {
+      try {
+        const watcher = watch(directory, { persistent: false, encoding: "utf8" }, (event, filename) => {
+          if (typeof filename !== "string" || !filename) {
+            this.sourceDirectoryRefreshPending = true;
+            return;
+          }
+          const relativePath = toRelativePath(filename);
+          if (!relativePath) return;
+          void this.isExpectedInternalWatchEcho(relativePath).then((internalEcho) => {
+            if (internalEcho) return;
+            if (event === "rename" && renameNeedsSourceScan) {
+              this.sourceDirectoryRefreshPending = true;
+              return;
+            }
+            void this.handleExternalChange({ event: "change", relativePath });
+          }).catch(() => {
+            this.sourceDirectoryRefreshPending = true;
+          });
+        });
+        watcher.on("error", () => {
+          this.sourceDirectoryRefreshPending = true;
+        });
+        watcher.unref();
+        this.externalWatchers.push(watcher);
+      } catch {
+        this.sourceDirectoryRefreshPending = true;
+      }
+    };
+
+    for (const [directory, kind] of [
+      [this.layout.facts, "facts"],
+      [this.layout.views, "views"],
+      [this.layout.decisions, "decisions"],
+      [this.layout.active, "active"],
+      [this.layout.episodes, "episodes"]
+    ] as const) {
+      watchDirectory(directory, (filename) =>
+        filename.endsWith(".md")
+          ? path.posix.join("shared-user", "memory", kind, filename)
+          : null, true);
+    }
+    watchDirectory(path.dirname(this.layout.agent), (filename) =>
+      filename === "AGENT.md" ? "agents/echoink/AGENT.md" : null, false);
+    watchDirectory(this.layout.sharedUser, (filename) =>
+      filename === "USER.md" ? "shared-user/USER.md" : null, false);
+  }
+
+  private isKnownExternalPath(relativePath: string): boolean {
+    if (relativePath === "agents/echoink/AGENT.md"
+      || relativePath === "shared-user/USER.md") return true;
+    return /^(?:shared-user\/memory\/(?:facts|views|decisions|active|episodes)\/[a-zA-Z0-9_-]{3,96}\.md)$/u
+      .test(relativePath);
+  }
+
+  private async isExpectedInternalWatchEcho(relativePath: string): Promise<boolean> {
+    const expected = this.internalWatchExpectations.get(relativePath);
+    if (!expected) return false;
+    if (Date.now() > expected.until) {
+      this.internalWatchExpectations.delete(relativePath);
+      return false;
+    }
+    const target = this.absoluteFromRelative(relativePath);
+    if (expected.hash === null) return !(await pathExists(target));
+    try {
+      return contentHash(await readFile(target, "utf8")) === expected.hash;
+    } catch {
+      return false;
+    }
   }
 
   async loadFixedContext(input: Readonly<{
@@ -538,12 +702,29 @@ export class PersonalMemoryRepository {
     await this.initialize();
     return await this.withMutation(async () => {
       await this.assertManagedTreeSafe();
+      await this.refreshPrimaryCachesBeforeWrite();
       const manifest = await this.readManifest();
+      const records = await this.readAllRecords(manifest);
+      if (request.operation === "create") {
+        validateWriteContent(
+          request.kind,
+          request.basis,
+          request.contentOrigin,
+          runtime.explicitlyAuthorized === true
+        );
+        const duplicate = this.classifyCreateDuplicate(records, request);
+        if (duplicate) {
+          return Object.freeze({
+            revision: manifest.revision,
+            record: duplicate.record,
+            status: duplicate.status
+          });
+        }
+      }
       assertExpectedRevision(manifest, request.expectedRevision);
       if (request.operation === "profile_update") {
         await this.assertFixedFilesMatchManifest(manifest);
       }
-      const records = await this.readAllRecords(manifest);
       switch (request.operation) {
         case "create":
           return await this.createRecord(manifest, records, request, runtime);
@@ -556,6 +737,28 @@ export class PersonalMemoryRepository {
         case "forget":
           return await this.forgetRecord(manifest, records, request, runtime);
       }
+    });
+  }
+
+  private classifyCreateDuplicate(
+    records: readonly PersonalMemoryRecord[],
+    request: Extract<PersonalMemoryWriteRequest, { operation: "create" }>
+  ): Readonly<{
+    status: "idempotent" | "possible_duplicate";
+    record: PersonalMemoryRecord;
+  }> | null {
+    const semantics = normalizeCreateSemantics(request);
+    const broadKey = primaryBroadKey(semantics.kind, semantics.title, semantics.scope);
+    const existing = records.find((record) =>
+      record.status === "current"
+      && primaryBroadKey(record.kind, record.title, record.scope) === broadKey
+    );
+    if (!existing) return null;
+    return Object.freeze({
+      status: sameCreateSemantics(existing, semantics)
+        ? "idempotent"
+        : "possible_duplicate",
+      record: existing
     });
   }
 
@@ -581,6 +784,7 @@ export class PersonalMemoryRepository {
   ): Promise<Readonly<PersonalMemorySearchResult>> {
     const query = cleanOptional(request.query, "query", 2_000) ?? "";
     const queryTokens = lexicalTokens(query);
+    const browseAll = query.length === 0;
     const queryTokenSet = new Set(queryTokens);
     const secondaryBest = bestSecondaryScores(index, query, queryTokenSet);
     const normalizedStatuses = [...new Set(request.statuses ?? ["current"])].sort(compareText);
@@ -618,7 +822,7 @@ export class PersonalMemoryRepository {
           score: primaryScore + (secondary?.score ?? 0)
         };
       })
-      .filter((entry) => queryTokens.length === 0 || entry.score > 0)
+      .filter((entry) => browseAll || (queryTokens.length > 0 && entry.score > 0))
       .sort((left, right) =>
         right.score - left.score
         || right.record.date.localeCompare(left.record.date)
@@ -687,6 +891,7 @@ export class PersonalMemoryRepository {
   ): Promise<Readonly<PersonalMemoryTurnSearchResult>> {
     const query = cleanOptional(rawQuery, "query", 2_000) ?? "";
     const queryTokens = lexicalTokens(query);
+    const browseAll = query.length === 0;
     const queryTokenSet = new Set(queryTokens);
     const secondaryBest = bestSecondaryScores(index, query, queryTokenSet);
     const secondaryMatches = groupSecondaryMatches(index, query, queryTokenSet);
@@ -702,7 +907,7 @@ export class PersonalMemoryRepository {
           score: primaryScore + (secondary?.score ?? 0)
         };
       })
-      .filter((entry) => queryTokens.length === 0 || entry.score > 0)
+      .filter((entry) => browseAll || (queryTokens.length > 0 && entry.score > 0))
       .sort((left, right) =>
         right.score - left.score
         || right.record.date.localeCompare(left.record.date)
@@ -753,7 +958,7 @@ export class PersonalMemoryRepository {
         date: record.date,
         primaryScore: scorePrimaryEntry(record, query, queryTokenSet)
       }))
-      .filter((entry) => queryTokens.length === 0 || entry.primaryScore > 0)
+      .filter((entry) => browseAll || (queryTokens.length > 0 && entry.primaryScore > 0))
       .sort((left, right) =>
         right.primaryScore - left.primaryScore
         || right.date.localeCompare(left.date)
@@ -844,7 +1049,7 @@ export class PersonalMemoryRepository {
       await this.assertIdentityPathsSafe();
       const [agent, user] = await Promise.all([
         readBounded(this.layout.agent, MAX_PROFILE_CHARS, "AGENT.md"),
-        readBounded(this.layout.user, MAX_PROFILE_CHARS, "USER.md")
+        readBounded(this.layout.user, USER_PROFILE_WRITE_HARD_MAX_CHARS, "USER.md")
       ]);
       return Object.freeze({
         revision: 0,
@@ -866,13 +1071,16 @@ export class PersonalMemoryRepository {
     memory: string | null;
     injectionKeys: readonly string[];
   }>> {
-    const [agent, user, memory] = await Promise.all([
-      readBounded(this.layout.agent, MAX_PROFILE_CHARS, "AGENT.md"),
-      readBounded(this.layout.user, MAX_PROFILE_CHARS, "USER.md"),
-      memoryMode === "normal"
-        ? readBounded(this.layout.memory, MAX_OVERVIEW_CHARS, "MEMORY.md")
-        : Promise.resolve(null)
-    ]);
+    const fixed = await this.currentFixedContext();
+    if (fixed.user.length > USER_PROFILE_WRITE_HARD_MAX_CHARS) {
+      throw new PersonalMemoryAccessError(
+        "revision_conflict",
+        "USER.md exceeds the 8000 character context boundary"
+      );
+    }
+    const agent = fixed.agent;
+    const user = fixed.user;
+    const memory = memoryMode === "normal" ? fixed.memory : null;
     if (
       !validFixedFileHashes(manifest.fixedFileHashes)
       || manifest.fixedFileHashes.agent !== contentHash(agent)
@@ -903,6 +1111,21 @@ export class PersonalMemoryRepository {
     });
   }
 
+  private async currentFixedContext(): Promise<Readonly<{
+    agent: string;
+    user: string;
+    memory: string;
+  }>> {
+    if (this.fixedContextCache) return this.fixedContextCache;
+    const [agent, user, memory] = await Promise.all([
+      readBounded(this.layout.agent, MAX_PROFILE_CHARS, "AGENT.md"),
+      readFile(this.layout.user, "utf8"),
+      readBounded(this.layout.memory, MAX_OVERVIEW_CHARS, "MEMORY.md")
+    ]);
+    this.fixedContextCache = Object.freeze({ agent, user, memory });
+    return this.fixedContextCache;
+  }
+
   /** Replace the secondary records snapshot used for Search Index v3 building. */
   setSecondaryRecords(records: readonly SecondaryMemoryRecord[]): void {
     this.secondaryCache = [...records];
@@ -926,14 +1149,21 @@ export class PersonalMemoryRepository {
     /** content === undefined deletes the file inside the transaction. */
     extraChanges: readonly Readonly<{ relativePath: string; content?: string }>[];
     detail: string;
+    /** Optional global Memory CAS used by Dream after Provider work. */
+    expectedMemoryRevision?: number;
     /**
      * Round 6 修复四（身份 CAS）：写入方必须携带它决策时读到的身份 revision。
      * 事务在生成任何变更前、在串行 mutation lane 内用磁盘真实 revision 比对：
      * 不一致 → 以稳定的 identity_revision_conflict 拒绝，绝不用旧名称/旧头像
      * 静默覆盖并发写入。文件缺失按 revision 0；文件损坏拒绝写入。
-     */
+    */
     expectedAgentIdentityRevision?: number;
   }>): Promise<Readonly<{ revision: number }>> {
+    // Reject oversized USER.md output before initialization or mutation-lane
+    // entry so no transaction can begin with an invalid new projection.
+    const normalizedUserContent = input.userContent === undefined
+      ? undefined
+      : normalizeUserProfileWrite(input.userContent, "USER.md projection");
     await this.initialize();
     return await this.withMutation(async () => {
       await this.assertManagedTreeSafe();
@@ -947,6 +1177,7 @@ export class PersonalMemoryRepository {
         }
       }
       const manifest = await this.readManifest();
+      assertExpectedRevision(manifest, input.expectedMemoryRevision);
       await this.assertFixedFilesMatchManifest(manifest);
       const records = await this.readAllRecords(manifest);
       const targetRevision = manifest.revision + 1;
@@ -962,8 +1193,8 @@ export class PersonalMemoryRepository {
         };
         extra.push({ relativePath: path.relative(this.layout.root, this.layout.agent), content: normalized });
       }
-      if (input.userContent !== undefined) {
-        const normalized = input.userContent.endsWith("\n") ? input.userContent : `${input.userContent}\n`;
+      if (normalizedUserContent !== undefined) {
+        const normalized = normalizedUserContent;
         next.fixedFileHashes = {
           ...(next.fixedFileHashes ?? { agent: "", user: "" }),
           user: contentHash(normalized)
@@ -1070,8 +1301,12 @@ export class PersonalMemoryRepository {
         indexableSecondaryRecords(this.secondaryCache)
       );
       const raw = await readJsonOrNull<Record<string, unknown>>(this.layout.searchIndex);
-      if (raw && (raw as { checksum?: unknown }).checksum === expected.checksum) return;
+      if (raw && (raw as { checksum?: unknown }).checksum === expected.checksum) {
+        this.searchIndexCache = freezeSearchIndex(expected);
+        return;
+      }
       await atomicWrite(this.layout.searchIndex, jsonText(expected));
+      this.searchIndexCache = freezeSearchIndex(expected);
     });
   }
 
@@ -1193,6 +1428,41 @@ export class PersonalMemoryRepository {
     });
   }
 
+  /**
+   * Dream-only fixed-file inspection. USER.md may exceed the legacy read
+   * boundary here solely so its trusted manifest hash can be checked and the
+   * original can be backed up/replaced. Callers must never place an oversized
+   * value in a Provider prompt or normal fixed-context injection.
+   */
+  async inspectCognitiveFixedFiles(): Promise<Readonly<{
+    agent: string;
+    user: string;
+    userHash: string;
+    userChars: number;
+    userManifestHashMatches: boolean;
+  }>> {
+    await this.initialize();
+    return await this.withMutation(async () => {
+      const manifest = await this.readManifest();
+      const { agent, user } = await this.currentFixedContext();
+      if (!validFixedFileHashes(manifest.fixedFileHashes)
+        || contentHash(agent) !== manifest.fixedFileHashes.agent) {
+        throw new PersonalMemoryAccessError(
+          "revision_conflict",
+          "AGENT.md changed after initialization; reload before dreaming"
+        );
+      }
+      const userHash = contentHash(user);
+      return Object.freeze({
+        agent,
+        user,
+        userHash,
+        userChars: user.length,
+        userManifestHashMatches: manifest.fixedFileHashes.user === userHash
+      });
+    });
+  }
+
   async readUserControlState(): Promise<Readonly<{
     revision: number;
     agent: string;
@@ -1202,18 +1472,22 @@ export class PersonalMemoryRepository {
     forgottenIds: readonly string[];
   }>> {
     await this.initialize();
-    const [manifest, agent, user, memory] = await Promise.all([
+    const [manifest, fixed] = await Promise.all([
       this.readManifest(),
-      readBounded(this.layout.agent, MAX_PROFILE_CHARS, "AGENT.md"),
-      readBounded(this.layout.user, MAX_PROFILE_CHARS, "USER.md"),
-      readBounded(this.layout.memory, MAX_OVERVIEW_CHARS, "MEMORY.md")
+      this.currentFixedContext()
     ]);
+    if (fixed.user.length > USER_PROFILE_WRITE_HARD_MAX_CHARS) {
+      throw new PersonalMemoryAccessError(
+        "revision_conflict",
+        "USER.md exceeds the 8000 character control boundary"
+      );
+    }
     const activeRecordIds = new Set(manifest.records.map((item) => item.id));
     return Object.freeze({
       revision: manifest.revision,
-      agent,
-      user,
-      memory,
+      agent: fixed.agent,
+      user: fixed.user,
+      memory: fixed.memory,
       records: Object.freeze(await this.readAllRecords(manifest)),
       forgottenIds: Object.freeze([...new Set(manifest.tombstones
         .map((item) => item.recordId)
@@ -1226,8 +1500,9 @@ export class PersonalMemoryRepository {
     contentValue: string,
     expectedRevision: number
   ): Promise<Readonly<{ revision: number; profile: "agent" | "user" }>> {
-    const content = cleanRequired(contentValue, `${profile} profile`, MAX_PROFILE_CHARS);
-    const normalizedContent = content.endsWith("\n") ? content : `${content}\n`;
+    const normalizedContent = profile === "user"
+      ? normalizeUserProfileWrite(contentValue, "user profile")
+      : normalizeProfileWrite(contentValue, "agent profile", MAX_PROFILE_CHARS);
     await this.initialize();
     return await this.withMutation(async () => {
       await this.assertManagedTreeSafe();
@@ -1561,8 +1836,7 @@ export class PersonalMemoryRepository {
     if (!["user_edit", "user_statement", "confirmed_change"].includes(origin)) {
       throw new PersonalMemoryAccessError("invalid_request", "USER.md requires an explicit stable user update");
     }
-    const content = cleanRequired(request.content, "profile content", MAX_PROFILE_CHARS);
-    const normalizedContent = content.endsWith("\n") ? content : `${content}\n`;
+    const normalizedContent = normalizeUserProfileWrite(request.content, "profile content");
     const targetRevision = manifest.revision + 1;
     const next = cloneManifest(manifest);
     next.revision = targetRevision;
@@ -1693,11 +1967,226 @@ export class PersonalMemoryRepository {
     });
   }
 
+  private async hydrateCachesFromDisk(): Promise<void> {
+    const manifest = await this.readManifestFromDisk();
+    const records = await this.readAllRecordsFromDisk(manifest);
+    const [agent, user, memory] = await Promise.all([
+      readBounded(this.layout.agent, MAX_PROFILE_CHARS, "AGENT.md"),
+      readFile(this.layout.user, "utf8"),
+      readBounded(this.layout.memory, MAX_OVERVIEW_CHARS, "MEMORY.md")
+    ]);
+    const index = await this.readSearchIndexFromDisk(manifest, records);
+    this.manifestCache = cloneManifest(manifest);
+    this.recordsCache = freezeRecords(records);
+    this.searchIndexCache = freezeSearchIndex(index);
+    this.fixedContextCache = Object.freeze({ agent, user, memory });
+  }
+
+  /**
+   * Multiple Repository instances for one Vault share the mutation lane but
+   * keep independent read caches. Refresh only when another instance advanced
+   * the on-disk revision so create idempotency and write CAS see current state
+   * without adding filesystem work to the normal read/recall hot path.
+   */
+  private async refreshPrimaryCachesBeforeWrite(): Promise<void> {
+    const manifest = await this.readManifestFromDisk();
+    if (this.manifestCache?.revision === manifest.revision) return;
+    const records = await this.readAllRecordsFromDisk(manifest);
+    this.manifestCache = cloneManifest(manifest);
+    this.recordsCache = freezeRecords(records);
+    this.searchIndexCache = null;
+    this.fixedContextCache = null;
+  }
+
+  private async refreshKnownFixedFile(
+    relativePath: "agents/echoink/AGENT.md" | "shared-user/USER.md"
+  ): Promise<void> {
+    const manifest = await this.readManifest();
+    const records = await this.readAllRecords(manifest);
+    const currentFixed = await this.currentFixedContext();
+    const profile = relativePath === "agents/echoink/AGENT.md" ? "agent" : "user";
+    const target = this.absoluteFromRelative(relativePath);
+    const content = profile === "agent"
+      ? await readBounded(target, MAX_PROFILE_CHARS, "AGENT.md")
+      : await readFile(target, "utf8");
+    if (profile === "user" && content.length > USER_PROFILE_WRITE_HARD_MAX_CHARS) {
+      throw new PersonalMemoryAccessError(
+        "revision_conflict",
+        "Externally edited USER.md exceeds the 8000 character write boundary"
+      );
+    }
+    if (content === currentFixed[profile]) return;
+    const targetRevision = manifest.revision + 1;
+    const next = cloneManifest(manifest);
+    next.revision = targetRevision;
+    next.updatedAt = this.now();
+    next.fixedFileHashes = {
+      ...(manifest.fixedFileHashes ?? {
+        agent: contentHash(currentFixed.agent),
+        user: contentHash(currentFixed.user)
+      }),
+      [profile]: contentHash(content)
+    };
+    const changes = await this.stateChanges(next, records, [], {
+      type: "external_markdown_reconciled",
+      revision: targetRevision,
+      at: this.now(),
+      fixedFilesChanged: true,
+      recordIds: [],
+      deletedIds: []
+    });
+    await this.runTransaction(
+      "external-fixed-file-refresh",
+      manifest.revision,
+      targetRevision,
+      changes
+    );
+    this.fixedContextCache = Object.freeze({
+      ...currentFixed,
+      [profile]: content
+    });
+  }
+
+  private async refreshKnownPrimaryRecord(relativePath: string): Promise<void> {
+    const manifest = await this.readManifest();
+    const currentRecords = await this.readAllRecords(manifest);
+    const existingMetadata = manifest.records.find((record) => record.file === relativePath);
+    const target = this.absoluteFromRelative(relativePath);
+    let parsed: PersonalMemoryRecord | null = null;
+    if (await pathExists(target)) {
+      parsed = parseRecord(await readFile(target, "utf8"), relativePath);
+      if (recordRelativePath(parsed.kind, parsed.id) !== relativePath) {
+        throw new PersonalMemoryAccessError(
+          "invalid_request",
+          `Memory ${relativePath} does not match its id and kind`
+        );
+      }
+      const duplicate = manifest.records.find((record) =>
+        record.id === parsed!.id && record.file !== relativePath
+      );
+      if (duplicate) {
+        throw new PersonalMemoryAccessError(
+          "invalid_request",
+          `Memory id ${parsed.id} is duplicated`
+        );
+      }
+      if (existingMetadata
+        && stableJson(recordMetadata(parsed)) === stableJson(normalizeManifestRecord(existingMetadata))) {
+        return;
+      }
+    } else if (!existingMetadata) {
+      return;
+    }
+
+    const targetRevision = manifest.revision + 1;
+    const external = parsed
+      ? Object.freeze({
+          ...parsed,
+          source: `user-edit://personal-memory/${encodeURIComponent(relativePath)}`,
+          basis: "explicit" as const,
+          contentOrigin: "user_edit" as const,
+          revision: targetRevision
+        })
+      : null;
+    const nextRecords = currentRecords
+      .filter((record) => record.file !== relativePath)
+      .concat(external ? [external] : [])
+      .sort((left, right) => left.id.localeCompare(right.id));
+    const next = cloneManifest(manifest);
+    next.revision = targetRevision;
+    next.updatedAt = this.now();
+    next.records = nextRecords.map(recordMetadata);
+    const changes = await this.stateChanges(
+      next,
+      nextRecords,
+      external ? [{ relativePath, content: serializeRecord(external) }] : [],
+      {
+        type: "external_markdown_reconciled",
+        revision: targetRevision,
+        at: this.now(),
+        fixedFilesChanged: false,
+        recordIds: external ? [external.id] : [],
+        deletedIds: external ? [] : [existingMetadata!.id]
+      }
+    );
+    await this.runTransaction(
+      "external-record-refresh",
+      manifest.revision,
+      targetRevision,
+      changes
+    );
+  }
+
+  private async refreshPrimarySourceDirectories(): Promise<void> {
+    const manifest = await this.readManifest();
+    const diskRecords = await this.readMarkdownRecords();
+    const currentById = new Map(manifest.records.map((record) => [record.id, record]));
+    const changed = manifest.records.length !== diskRecords.length
+      || diskRecords.some((record) => {
+        const metadata = currentById.get(record.id);
+        return !metadata
+          || stableJson(recordMetadata(record)) !== stableJson(normalizeManifestRecord(metadata));
+      });
+    if (!changed) return;
+
+    const targetRevision = manifest.revision + 1;
+    const changedRecords: PersonalMemoryRecord[] = [];
+    const reconciled = diskRecords.map((record) => {
+      const metadata = currentById.get(record.id);
+      if (metadata
+        && stableJson(recordMetadata(record)) === stableJson(normalizeManifestRecord(metadata))) {
+        return record;
+      }
+      const external: PersonalMemoryRecord = Object.freeze({
+        ...record,
+        source: `user-edit://personal-memory/${encodeURIComponent(record.file)}`,
+        basis: "explicit",
+        contentOrigin: "user_edit",
+        revision: targetRevision
+      });
+      changedRecords.push(external);
+      return external;
+    });
+    const diskIds = new Set(diskRecords.map((record) => record.id));
+    const deletedIds = manifest.records
+      .map((record) => record.id)
+      .filter((id) => !diskIds.has(id));
+    const next = cloneManifest(manifest);
+    next.revision = targetRevision;
+    next.updatedAt = this.now();
+    next.records = reconciled.map(recordMetadata).sort((left, right) => left.id.localeCompare(right.id));
+    const changes = await this.stateChanges(
+      next,
+      reconciled,
+      changedRecords.map((record) => ({
+        relativePath: record.file,
+        content: serializeRecord(record)
+      })),
+      {
+        type: "external_markdown_reconciled",
+        revision: targetRevision,
+        at: this.now(),
+        fixedFilesChanged: false,
+        recordIds: changedRecords.map((record) => record.id),
+        deletedIds
+      }
+    );
+    await this.runTransaction(
+      "external-source-directory-refresh",
+      manifest.revision,
+      targetRevision,
+      changes
+    );
+  }
+
   private async reconcileMarkdownTruth(): Promise<void> {
     await this.assertManagedTreeSafe();
     const [agent, user, markdownRecords, current] = await Promise.all([
       readBounded(this.layout.agent, MAX_PROFILE_CHARS, "AGENT.md"),
-      readBounded(this.layout.user, MAX_PROFILE_CHARS, "USER.md"),
+      // Maintenance-only raw read: an old oversized USER.md may be read once
+      // here to verify its manifest hash and enable backup/replacement. Normal
+      // context loading remains bounded and never injects this raw value.
+      readFile(this.layout.user, "utf8"),
       this.readMarkdownRecords(),
       this.readManifestForReconciliation()
     ]);
@@ -1707,6 +2196,12 @@ export class PersonalMemoryRepository {
     });
 
     if (!current) {
+      if (user.length > USER_PROFILE_WRITE_HARD_MAX_CHARS) {
+        throw new PersonalMemoryAccessError(
+          "revision_conflict",
+          "USER.md exceeds 8000 characters without a trusted manifest hash; automatic repair is blocked"
+        );
+      }
       const recovered = await this.reconstructRuntimeMetadata(markdownRecords);
       const hasExistingContent = markdownRecords.length > 0
         || agent !== defaultAgentProfile()
@@ -1752,6 +2247,13 @@ export class PersonalMemoryRepository {
     const currentById = new Map(current.records.map((record) => [record.id, record]));
     const markdownById = new Map(markdownRecords.map((record) => [record.id, record]));
     const fixedHashesKnown = validFixedFileHashes(current.fixedFileHashes);
+    if (user.length > USER_PROFILE_WRITE_HARD_MAX_CHARS
+      && (!fixedHashesKnown || current.fixedFileHashes!.user !== fixedFileHashes.user)) {
+      throw new PersonalMemoryAccessError(
+        "revision_conflict",
+        "USER.md exceeds 8000 characters and does not match the trusted manifest hash; automatic repair is blocked"
+      );
+    }
     const fixedChanged = fixedHashesKnown && (
       current.fixedFileHashes!.agent !== fixedFileHashes.agent
       || current.fixedFileHashes!.user !== fixedFileHashes.user
@@ -1975,48 +2477,6 @@ export class PersonalMemoryRepository {
     return records.sort((left, right) => left.id.localeCompare(right.id));
   }
 
-  private async captureInitializationFingerprint(): Promise<string> {
-    const observations: string[] = [];
-    const observe = async (target: string) => {
-      if (!(await pathExists(target))) {
-        observations.push(`${path.relative(this.layout.root, target)}:missing`);
-        return;
-      }
-      const stat = await lstat(target, { bigint: true });
-      observations.push([
-        path.relative(this.layout.root, target),
-        stat.isDirectory() ? "directory" : stat.isFile() ? "file" : "other",
-        stat.dev,
-        stat.ino,
-        stat.size,
-        stat.mtimeNs,
-        stat.ctimeNs
-      ].join(":"));
-    };
-    for (const target of [
-      this.layout.agent,
-      this.layout.user,
-      this.layout.memory,
-      this.layout.manifest,
-      this.layout.searchIndex,
-      this.layout.sourceMap
-    ]) await observe(target);
-    for (const directory of [
-      this.layout.facts,
-      this.layout.views,
-      this.layout.decisions,
-      this.layout.active,
-      this.layout.episodes
-    ]) {
-      await observe(directory);
-      const entries = await readdir(directory, { withFileTypes: true });
-      for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
-        await observe(path.join(directory, entry.name));
-      }
-    }
-    return contentHash(observations.join("\n"));
-  }
-
   private async assertIdentityPathsSafe(): Promise<void> {
     const vaultStat = await lstat(this.vaultPath);
     if (vaultStat.isSymbolicLink()) {
@@ -2109,6 +2569,9 @@ export class PersonalMemoryRepository {
     targetRevision: number,
     changes: readonly TransactionChange[]
   ): Promise<void> {
+    const currentManifest = await this.readManifestFromDisk();
+    assertExpectedRevision(currentManifest, baseRevision);
+    this.rememberInternalWatchExpectations(changes);
     const transactionId = `txn_${randomUUID().replaceAll("-", "")}`;
     const transactionRoot = path.join(this.layout.transactions, transactionId);
     const backupRoot = path.join(transactionRoot, "backup");
@@ -2153,10 +2616,81 @@ export class PersonalMemoryRepository {
       }
       await atomicWrite(path.join(transactionRoot, "state"), "committed\n");
       await rm(transactionRoot, { recursive: true, force: true });
+      this.applyCommittedChangesToCaches(changes);
     } catch (error) {
       if (!simulatedCrash) await this.rollbackTransaction(transactionRoot, plan);
       throw error;
     }
+  }
+
+  private rememberInternalWatchExpectations(changes: readonly TransactionChange[]): void {
+    const until = Date.now() + 2_000;
+    for (const [relativePath, expectation] of this.internalWatchExpectations) {
+      if (expectation.until < Date.now()) this.internalWatchExpectations.delete(relativePath);
+    }
+    for (const change of changes) {
+      if (!this.isKnownExternalPath(change.relativePath)) continue;
+      this.internalWatchExpectations.set(change.relativePath, Object.freeze({
+        hash: change.content === undefined ? null : contentHash(change.content),
+        until
+      }));
+    }
+  }
+
+  private applyCommittedChangesToCaches(changes: readonly TransactionChange[]): void {
+    let manifest = this.manifestCache;
+    let records = this.recordsCache ? [...this.recordsCache] : null;
+    let fixed = this.fixedContextCache ? { ...this.fixedContextCache } : null;
+    for (const change of changes) {
+      if (change.relativePath === "shared-user/.runtime/manifest.json" && change.content !== undefined) {
+        const parsed = JSON.parse(change.content) as PersonalMemoryManifest;
+        manifest = {
+          ...parsed,
+          records: parsed.records.map((record) => normalizeManifestRecord(record))
+        };
+        continue;
+      }
+      if (change.relativePath === "shared-user/.runtime/search-index.json" && change.content !== undefined) {
+        this.searchIndexCache = freezeSearchIndex(JSON.parse(change.content) as SearchIndex);
+        continue;
+      }
+      if (change.relativePath === "agents/echoink/AGENT.md" && change.content !== undefined) {
+        if (fixed) fixed.agent = change.content;
+        continue;
+      }
+      if (change.relativePath === "shared-user/USER.md" && change.content !== undefined) {
+        if (fixed) fixed.user = change.content;
+        continue;
+      }
+      if (change.relativePath === "shared-user/MEMORY.md" && change.content !== undefined) {
+        if (fixed) fixed.memory = change.content;
+        continue;
+      }
+      if (!records || !isPrimaryRecordRelativePath(change.relativePath)) continue;
+      const position = records.findIndex((record) => record.file === change.relativePath);
+      if (change.content === undefined) {
+        if (position >= 0) records.splice(position, 1);
+      } else {
+        const parsed = parseRecord(change.content, change.relativePath);
+        if (position >= 0) records[position] = parsed;
+        else records.push(parsed);
+      }
+    }
+    if (manifest) {
+      this.manifestCache = cloneManifest(manifest);
+      if (records) {
+        const manifestIds = new Set(manifest.records.map((record) => record.id));
+        records = records.filter((record) => manifestIds.has(record.id));
+        const recordsById = new Map(records.map((record) => [record.id, record]));
+        const complete = manifest.records.every((metadata) => {
+          const record = recordsById.get(metadata.id);
+          return record
+            && stableJson(recordMetadata(record)) === stableJson(normalizeManifestRecord(metadata));
+        });
+        this.recordsCache = complete ? freezeRecords(records) : null;
+      }
+    }
+    if (fixed) this.fixedContextCache = Object.freeze(fixed);
   }
 
   private async recoverPendingTransactions(): Promise<void> {
@@ -2201,6 +2735,7 @@ export class PersonalMemoryRepository {
     if (!index || stableJson(index) !== stableJson(expectedIndex)) {
       await atomicWrite(this.layout.searchIndex, jsonText(expectedIndex));
     }
+    this.searchIndexCache = freezeSearchIndex(expectedIndex);
     if (!sourceMap || stableJson(sourceMap) !== stableJson(expectedSourceMap)) {
       await atomicWrite(this.layout.sourceMap, jsonText(expectedSourceMap));
     }
@@ -2208,6 +2743,19 @@ export class PersonalMemoryRepository {
 
   private async readSearchIndexSnapshot(
     manifest: PersonalMemoryManifest
+  ): Promise<Readonly<SearchIndex>> {
+    if (this.searchIndexCache?.revision === manifest.revision) {
+      return this.searchIndexCache;
+    }
+    const records = await this.readAllRecords(manifest);
+    const index = await this.readSearchIndexFromDisk(manifest, records);
+    this.searchIndexCache = freezeSearchIndex(index);
+    return this.searchIndexCache;
+  }
+
+  private async readSearchIndexFromDisk(
+    manifest: PersonalMemoryManifest,
+    records: readonly PersonalMemoryRecord[]
   ): Promise<Readonly<SearchIndex>> {
     const raw = await readJsonOrNull<Record<string, unknown>>(this.layout.searchIndex);
     const index = raw as unknown as SearchIndex | null;
@@ -2231,7 +2779,7 @@ export class PersonalMemoryRepository {
       );
     if (needsRebuild) {
       // v2 (and stale/corrupt v3) indexes are derived artifacts: rebuild as v3.
-      return await this.rebuildSearchIndexForManifest(manifest);
+      return await this.rebuildSearchIndexForManifest(manifest, records);
     }
     const manifestIds = new Set(manifest.records.map((record) => record.id));
     if (
@@ -2239,39 +2787,34 @@ export class PersonalMemoryRepository {
       || index.catalog.some((record) => !manifestIds.has(record.id))
       || index.secondaryCatalog.some((entry) => !manifestIds.has(entry.parentId))
     ) {
-      return await this.rebuildSearchIndexForManifest(manifest);
+      return await this.rebuildSearchIndexForManifest(manifest, records);
     }
-    return Object.freeze({
-      ...index,
-      catalog: Object.freeze(index.catalog.map((record) => Object.freeze({
-        ...record,
-        routeTokens: Object.freeze([...record.routeTokens]),
-        contentTokens: Object.freeze([...record.contentTokens])
-      }))),
-      secondaryCatalog: Object.freeze(index.secondaryCatalog.map((entry) => Object.freeze({
-        ...entry,
-        matchTerms: Object.freeze([...entry.matchTerms]),
-        routeTokens: Object.freeze([...entry.routeTokens]),
-        contentTokens: Object.freeze([...entry.contentTokens])
-      }))),
-      secondaryIndex: Object.freeze(index.secondaryIndex.map((entry) => Object.freeze({ ...entry })))
-    });
+    return freezeSearchIndex(index);
   }
 
   private async rebuildSearchIndexForManifest(
-    manifest: PersonalMemoryManifest
+    manifest: PersonalMemoryManifest,
+    knownRecords?: readonly PersonalMemoryRecord[]
   ): Promise<Readonly<SearchIndex>> {
-    const records = await this.readAllRecords(manifest);
+    const records = knownRecords ?? await this.readAllRecords(manifest);
     const rebuilt = buildSearchIndexV3(
       manifest.revision,
       records.map((record) => this.catalogInput(record)),
       indexableSecondaryRecords(this.secondaryCache)
     );
     await atomicWrite(this.layout.searchIndex, jsonText(rebuilt));
-    return rebuilt;
+    this.searchIndexCache = freezeSearchIndex(rebuilt);
+    return this.searchIndexCache;
   }
 
   private async readManifest(): Promise<PersonalMemoryManifest> {
+    if (this.manifestCache) return cloneManifest(this.manifestCache);
+    const manifest = await this.readManifestFromDisk();
+    this.manifestCache = cloneManifest(manifest);
+    return cloneManifest(manifest);
+  }
+
+  private async readManifestFromDisk(): Promise<PersonalMemoryManifest> {
     const value = JSON.parse(await readFile(this.layout.manifest, "utf8")) as Partial<PersonalMemoryManifest>;
     if (value.schemaVersion !== 1 || value.vaultId !== this.vaultId || !Number.isSafeInteger(value.revision)) {
       throw new PersonalMemoryAccessError("invalid_request", "Personal Memory manifest is invalid or belongs to another Vault");
@@ -2286,12 +2829,37 @@ export class PersonalMemoryRepository {
   }
 
   private async readAllRecords(manifest: PersonalMemoryManifest): Promise<PersonalMemoryRecord[]> {
-    const records = await Promise.all(manifest.records.map(async (record) => await this.readRecord(record)));
+    if (this.recordsCache && this.manifestCache?.revision === manifest.revision) {
+      return [...this.recordsCache];
+    }
+    const records = await this.readAllRecordsFromDisk(manifest);
+    this.recordsCache = freezeRecords(records);
+    return [...this.recordsCache];
+  }
+
+  private async readAllRecordsFromDisk(manifest: PersonalMemoryManifest): Promise<PersonalMemoryRecord[]> {
+    const records = await Promise.all(
+      manifest.records.map(async (record) => await this.readRecordFromDisk(record))
+    );
     records.sort((a, b) => a.id.localeCompare(b.id));
     return records;
   }
 
   private async readRecord(metadata: ManifestRecord): Promise<PersonalMemoryRecord> {
+    if (this.recordsCache) {
+      const cached = this.recordsCache.find((record) => record.id === metadata.id);
+      if (!cached || stableJson(recordMetadata(cached)) !== stableJson(metadata)) {
+        throw new PersonalMemoryAccessError(
+          "invalid_request",
+          `Memory metadata drift detected for ${metadata.id}`
+        );
+      }
+      return cached;
+    }
+    return await this.readRecordFromDisk(metadata);
+  }
+
+  private async readRecordFromDisk(metadata: ManifestRecord): Promise<PersonalMemoryRecord> {
     const target = this.absoluteFromRelative(metadata.file);
     const parsed = parseRecord(await readFile(target, "utf8"), metadata.file);
     if (stableJson(recordMetadata(parsed)) !== stableJson(metadata)) {
@@ -2309,7 +2877,9 @@ export class PersonalMemoryRepository {
     }
     const [agent, user] = await Promise.all([
       readBounded(this.layout.agent, MAX_PROFILE_CHARS, "AGENT.md"),
-      readBounded(this.layout.user, MAX_PROFILE_CHARS, "USER.md")
+      // Hash-only maintenance read permits an already-trusted oversized legacy
+      // projection to be backed up and replaced in this transaction.
+      readFile(this.layout.user, "utf8")
     ]);
     if (
       contentHash(agent) !== manifest.fixedFileHashes.agent
@@ -2397,6 +2967,120 @@ export class PersonalMemoryRepository {
 
 function cloneManifest(manifest: PersonalMemoryManifest): PersonalMemoryManifest {
   return structuredClone(manifest);
+}
+
+interface PrimaryCreateSemantics {
+  readonly kind: PersonalMemoryKind;
+  readonly title: string;
+  readonly content: string;
+  readonly recallWhen: string;
+  readonly basis: PersonalMemoryBasis;
+  readonly contentOrigin: PersonalMemoryContentOrigin;
+  readonly scope?: string;
+  readonly asOf?: string;
+  readonly due?: string;
+  readonly remindAt?: string;
+  readonly reason?: string;
+}
+
+function normalizeCreateSemantics(
+  request: Extract<PersonalMemoryWriteRequest, { operation: "create" }>
+): PrimaryCreateSemantics {
+  const title = cleanRequired(request.title, "title", 200);
+  const scope = cleanOptional(request.scope, "scope", 240);
+  const reason = cleanOptional(request.reason, "reason", 2_000);
+  return Object.freeze({
+    kind: request.kind,
+    title,
+    content: cleanRequired(request.content, "content", MAX_RECORD_CONTENT_CHARS),
+    recallWhen: cleanRequired(request.recallWhen ?? title, "recall_when", 500),
+    basis: request.basis,
+    contentOrigin: request.contentOrigin ?? "user_statement",
+    ...(scope ? { scope } : {}),
+    ...(request.asOf ? { asOf: validateDate(request.asOf, "as_of") } : {}),
+    ...(request.due ? { due: validateDateTime(request.due, "due") } : {}),
+    ...(request.remindAt ? { remindAt: validateDateTime(request.remindAt, "remind_at") } : {}),
+    ...(reason ? { reason } : {})
+  });
+}
+
+function sameCreateSemantics(
+  record: PersonalMemoryRecord,
+  semantics: PrimaryCreateSemantics
+): boolean {
+  return stableJson({
+    kind: record.kind,
+    title: record.title,
+    content: record.content,
+    recallWhen: record.recallWhen,
+    basis: record.basis,
+    contentOrigin: record.contentOrigin ?? "user_statement",
+    scope: record.scope ?? null,
+    asOf: record.asOf ?? null,
+    due: record.due ?? null,
+    remindAt: record.remindAt ?? null,
+    reason: record.reason ?? null
+  }) === stableJson({
+    ...semantics,
+    scope: semantics.scope ?? null,
+    asOf: semantics.asOf ?? null,
+    due: semantics.due ?? null,
+    remindAt: semantics.remindAt ?? null,
+    reason: semantics.reason ?? null
+  });
+}
+
+function primaryBroadKey(
+  kind: PersonalMemoryKind,
+  title: string,
+  scope: string | undefined
+): string {
+  const normalize = (value: string): string => value
+    .normalize("NFKC")
+    .toLocaleLowerCase()
+    .replaceAll(/\s+/gu, " ")
+    .trim();
+  return `${kind}\u0000${normalize(title)}\u0000${normalize(scope ?? "")}`;
+}
+
+function freezeRecords(records: readonly PersonalMemoryRecord[]): readonly PersonalMemoryRecord[] {
+  return Object.freeze([...records]
+    .sort((left, right) => left.id.localeCompare(right.id))
+    .map((record) => Object.freeze({ ...record })));
+}
+
+function freezeSearchIndex(index: Readonly<SearchIndex>): Readonly<SearchIndex> {
+  return Object.freeze({
+    ...index,
+    catalog: Object.freeze(index.catalog.map((record) => Object.freeze({
+      ...record,
+      routeTokens: Object.freeze([...record.routeTokens]),
+      contentTokens: Object.freeze([...record.contentTokens])
+    }))),
+    secondaryCatalog: Object.freeze(index.secondaryCatalog.map((entry) => Object.freeze({
+      ...entry,
+      matchTerms: Object.freeze([...entry.matchTerms]),
+      routeTokens: Object.freeze([...entry.routeTokens]),
+      contentTokens: Object.freeze([...entry.contentTokens])
+    }))),
+    secondaryIndex: Object.freeze(index.secondaryIndex.map((entry) => Object.freeze({ ...entry })))
+  });
+}
+
+function normalizeManagedRelativePath(value: string): string {
+  if (typeof value !== "string" || !value.trim() || path.isAbsolute(value)) {
+    throw new PersonalMemoryAccessError("unsafe_path", "Memory relative path is invalid");
+  }
+  const normalized = path.posix.normalize(value.replaceAll(path.sep, path.posix.sep));
+  if (normalized === "." || normalized === ".." || normalized.startsWith("../")) {
+    throw new PersonalMemoryAccessError("unsafe_path", "Memory relative path is invalid");
+  }
+  return normalized.replace(/^\.\//u, "");
+}
+
+function isPrimaryRecordRelativePath(relativePath: string): boolean {
+  return /^shared-user\/memory\/(?:facts|views|decisions|active|episodes)\/[a-zA-Z0-9_-]{3,96}\.md$/u
+    .test(relativePath);
 }
 
 export function defaultAgentProfile(): string {
@@ -2809,6 +3493,19 @@ function cleanRequired(value: unknown, name: string, maxChars: number): string {
     throw new PersonalMemoryAccessError("invalid_request", `${name} is empty, too large, or contains control characters`);
   }
   return clean;
+}
+
+function normalizeProfileWrite(value: unknown, name: string, maxChars: number): string {
+  const clean = cleanRequired(value, name, maxChars);
+  const normalized = clean.endsWith("\n") ? clean : `${clean}\n`;
+  if (normalized.length > maxChars) {
+    throw new PersonalMemoryAccessError("invalid_request", `${name} exceeds ${maxChars} characters`);
+  }
+  return normalized;
+}
+
+function normalizeUserProfileWrite(value: unknown, name: string): string {
+  return normalizeProfileWrite(value, name, USER_PROFILE_WRITE_HARD_MAX_CHARS);
 }
 
 function cleanOptional(value: unknown, name: string, maxChars: number): string | undefined {

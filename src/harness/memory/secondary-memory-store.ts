@@ -18,10 +18,16 @@ import {
   SECONDARY_DECAY_FACTOR,
   SECONDARY_DECAY_GRACE_DAYS,
   SECONDARY_HIT_CONFIDENCE_STEP,
+  SECONDARY_CONTENT_MAX_CHARS,
+  SECONDARY_EVIDENCE_MAX_CHARS,
+  SECONDARY_MATCH_TERM_MAX_CHARS,
   SECONDARY_MAX_MATCH_TERMS,
   SECONDARY_MAX_PER_PARENT,
   SECONDARY_MEMORY_SCHEMA,
   SECONDARY_MIN_CONFIDENCE,
+  SECONDARY_REASON_MAX_CHARS,
+  SECONDARY_RECALL_WHEN_MAX_CHARS,
+  SECONDARY_TITLE_MAX_CHARS,
   isSecondaryRelation,
   isSecondarySupportLevel,
   type PersonalMemoryBasis,
@@ -32,7 +38,7 @@ import {
   type SecondaryStatus,
   type SecondarySupportLevel
 } from "./personal-memory-contracts";
-import { cognitivePathExists, newCognitiveId } from "./cognitive-file-utils";
+import { cognitiveAtomicWrite, cognitivePathExists, newCognitiveId } from "./cognitive-file-utils";
 import { mkdir, readdir, readFile } from "node:fs/promises";
 
 const MS_PER_DAY = 86_400_000;
@@ -44,24 +50,91 @@ export function secondaryRelativePath(parentId: string, secondaryId: string): st
   return path.posix.join("shared-user", "memory", SECONDARY_MEMORY_DIRNAME, parentId, `${secondaryId}.md`);
 }
 
+export interface AssociationClueFields {
+  readonly title: string;
+  readonly content: string;
+  readonly recallWhen: string;
+  readonly matchTerms: readonly string[];
+  readonly relation: SecondaryRelation;
+  readonly reason: string;
+  readonly supportLevel: SecondarySupportLevel;
+  readonly evidence: string;
+}
+
+/** One schema normalizer shared by Dream, domain writes, disk and Settings UI. */
+export function normalizeAssociationClueFields(
+  input: Readonly<AssociationClueFields>
+): AssociationClueFields {
+  const title = requireClueText(input.title, "title", SECONDARY_TITLE_MAX_CHARS);
+  const content = requireClueText(input.content, "content", SECONDARY_CONTENT_MAX_CHARS);
+  const recallWhen = requireClueText(
+    input.recallWhen,
+    "recallWhen",
+    SECONDARY_RECALL_WHEN_MAX_CHARS
+  );
+  const reason = requireClueText(input.reason, "reason", SECONDARY_REASON_MAX_CHARS, true);
+  const evidence = requireClueText(input.evidence, "evidence", SECONDARY_EVIDENCE_MAX_CHARS);
+  if (!isSecondaryRelation(input.relation)) throw new Error("association_clue_invalid:relation");
+  if (!isSecondarySupportLevel(input.supportLevel)) {
+    throw new Error("association_clue_invalid:supportLevel");
+  }
+  if (!Array.isArray(input.matchTerms)
+    || input.matchTerms.length === 0
+    || input.matchTerms.length > SECONDARY_MAX_MATCH_TERMS) {
+    throw new Error("association_clue_invalid:matchTerms");
+  }
+  const matchTerms: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of input.matchTerms) {
+    if (typeof raw !== "string") throw new Error("association_clue_invalid:matchTerms");
+    const term = normalizeMatchTerm(raw);
+    if (!term) throw new Error("association_clue_invalid:matchTerms");
+    const key = term.toLocaleLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    matchTerms.push(term);
+  }
+  if (matchTerms.length === 0) throw new Error("association_clue_invalid:matchTerms");
+  return Object.freeze({
+    title,
+    content,
+    recallWhen,
+    matchTerms: Object.freeze(matchTerms),
+    relation: input.relation,
+    reason,
+    supportLevel: input.supportLevel,
+    evidence
+  });
+}
+
+function requireClueText(value: unknown, name: string, max: number, allowEmpty = false): string {
+  if (typeof value !== "string") throw new Error(`association_clue_invalid:${name}`);
+  const text = value.trim();
+  if ((!allowEmpty && !text) || text.length > max) {
+    throw new Error(`association_clue_invalid:${name}`);
+  }
+  return text;
+}
+
 // ---------------------------------------------------------------------------
 // Markdown serialization (frontmatter style identical to primary records)
 // ---------------------------------------------------------------------------
 
 export function serializeSecondaryRecord(record: Readonly<SecondaryMemoryRecord>): string {
+  const normalized = normalizeAssociationClueFields(record);
   const fields: Array<readonly [string, string | number | readonly string[] | null]> = [
     ["schema", record.schema],
     ["id", record.id],
     ["parent_id", record.parentId],
     ["status", record.status],
     ["disabled_reason", record.disabledReason],
-    ["title", record.title],
-    ["recall_when", record.recallWhen],
-    ["match_terms", record.matchTerms],
-    ["relation", record.relation],
-    ["reason", record.reason],
-    ["support_level", record.supportLevel],
-    ["evidence", record.evidence],
+    ["title", normalized.title],
+    ["recall_when", normalized.recallWhen],
+    ["match_terms", normalized.matchTerms],
+    ["relation", normalized.relation],
+    ["reason", normalized.reason],
+    ["support_level", normalized.supportLevel],
+    ["evidence", normalized.evidence],
     ["basis", record.basis],
     ["source_memory_revision", record.sourceMemoryRevision],
     ["confidence", record.confidence],
@@ -77,12 +150,27 @@ export function serializeSecondaryRecord(record: Readonly<SecondaryMemoryRecord>
     ...fields.map(([key, value]) => `${key}: ${JSON.stringify(value)}`),
     "---",
     "",
-    record.content.trim(),
+    normalized.content,
     ""
   ].join("\n");
 }
 
+class SecondaryOversizedRecordError extends Error {
+  constructor(file: string) {
+    super(`association_clue_oversized:${file}`);
+    this.name = "SecondaryOversizedRecordError";
+  }
+}
+
 export function parseSecondaryRecord(text: string, file: string): SecondaryMemoryRecord {
+  return parseSecondaryRecordInternal(text, file, false).record;
+}
+
+function parseSecondaryRecordInternal(
+  text: string,
+  file: string,
+  repairOversized: boolean
+): { record: SecondaryMemoryRecord; repaired: boolean } {
   const lines = text.split(/\r?\n/u);
   if (lines[0] !== "---") throw new Error(`Secondary record ${file} has no frontmatter`);
   const end = lines.indexOf("---", 1);
@@ -99,12 +187,19 @@ export function parseSecondaryRecord(text: string, file: string): SecondaryMemor
       throw new Error(`Secondary record ${file} frontmatter value is invalid`);
     }
   }
-  const requireString = (key: string, max: number): string => {
+  let repaired = false;
+  const requireString = (key: string, max: number, allowEmpty = false): string => {
     const value = fields.get(key);
-    if (typeof value !== "string" || !value.trim() || value.trim().length > max) {
+    if (typeof value !== "string" || (!allowEmpty && !value.trim())) {
       throw new Error(`Secondary record ${file} field ${key} is invalid`);
     }
-    return value.trim();
+    const normalized = value.trim();
+    if (normalized.length <= max) return normalized;
+    if (!repairOversized) throw new SecondaryOversizedRecordError(file);
+    repaired = true;
+    const shortened = normalized.slice(0, max).trim();
+    if (!allowEmpty && !shortened) throw new Error(`Secondary record ${file} field ${key} is invalid`);
+    return shortened;
   };
   const requireNumber = (key: string): number => {
     const value = fields.get(key);
@@ -129,48 +224,102 @@ export function parseSecondaryRecord(text: string, file: string): SecondaryMemor
   if (fields.get("schema") !== SECONDARY_MEMORY_SCHEMA) {
     throw new Error(`Secondary record ${file} schema is invalid`);
   }
-  const status = fields.get("status") === "disabled" ? "disabled" : "current";
-  const basis = fields.get("basis") === "user_edited_inference"
-    ? "user_edited_inference"
-    : "llm_inferred";
+  const statusValue = fields.get("status");
+  if (statusValue !== "current" && statusValue !== "disabled") {
+    throw new Error(`Secondary record ${file} status is invalid`);
+  }
+  const status = statusValue as SecondaryStatus;
+  const basisValue = fields.get("basis");
+  if (basisValue !== "llm_inferred" && basisValue !== "user_edited_inference") {
+    throw new Error(`Secondary record ${file} basis is invalid`);
+  }
+  const basis = basisValue as SecondaryBasis;
   const relation = fields.get("relation");
+  if (!isSecondaryRelation(relation)) throw new Error(`Secondary record ${file} relation is invalid`);
+  const supportLevel = fields.get("support_level");
+  if (!isSecondarySupportLevel(supportLevel)) {
+    throw new Error(`Secondary record ${file} support_level is invalid`);
+  }
+  const title = requireString("title", SECONDARY_TITLE_MAX_CHARS);
+  const recallWhen = requireString("recall_when", SECONDARY_RECALL_WHEN_MAX_CHARS);
+  const reason = requireString("reason", SECONDARY_REASON_MAX_CHARS, true);
+  const evidence = requireString("evidence", SECONDARY_EVIDENCE_MAX_CHARS);
+  const rawContent = lines.slice(end + 1).join("\n").trim();
+  if (!rawContent) throw new Error(`Secondary record ${file} content is invalid`);
+  let content = rawContent;
+  if (content.length > SECONDARY_CONTENT_MAX_CHARS) {
+    if (!repairOversized) throw new SecondaryOversizedRecordError(file);
+    repaired = true;
+    content = content.slice(0, SECONDARY_CONTENT_MAX_CHARS).trim();
+  }
   const matchTermsRaw = fields.get("match_terms");
-  const matchTerms = Array.isArray(matchTermsRaw)
-    ? matchTermsRaw.filter((term): term is string => typeof term === "string" && term.trim().length > 0)
-        .map((term) => term.trim().slice(0, 40))
-        .slice(0, SECONDARY_MAX_MATCH_TERMS)
-    : [];
-  return Object.freeze({
+  if (!Array.isArray(matchTermsRaw) || matchTermsRaw.length === 0) {
+    throw new Error(`Secondary record ${file} match_terms is invalid`);
+  }
+  let rawTerms = matchTermsRaw;
+  if (rawTerms.length > SECONDARY_MAX_MATCH_TERMS) {
+    if (!repairOversized) throw new SecondaryOversizedRecordError(file);
+    repaired = true;
+    rawTerms = rawTerms.slice(0, SECONDARY_MAX_MATCH_TERMS);
+  }
+  const repairedTerms = rawTerms.map((term) => {
+    if (typeof term !== "string" || !term.trim()) {
+      throw new Error(`Secondary record ${file} match_terms is invalid`);
+    }
+    const normalized = term.trim();
+    if (normalized.length <= SECONDARY_MATCH_TERM_MAX_CHARS) return normalized;
+    if (!repairOversized) throw new SecondaryOversizedRecordError(file);
+    repaired = true;
+    return normalized.slice(0, SECONDARY_MATCH_TERM_MAX_CHARS).trim();
+  });
+  const normalizedFields = normalizeAssociationClueFields({
+    title,
+    content,
+    recallWhen,
+    matchTerms: repairedTerms,
+    relation,
+    reason,
+    supportLevel,
+    evidence
+  });
+  const confidence = requireNumber("confidence");
+  const hitCount = requireNumber("hit_count");
+  const sourceMemoryRevision = requireNumber("source_memory_revision");
+  const revision = requireNumber("revision");
+  if (confidence < 0 || confidence > 1
+    || !Number.isSafeInteger(hitCount) || hitCount < 0
+    || !Number.isSafeInteger(sourceMemoryRevision) || sourceMemoryRevision < 0
+    || !Number.isSafeInteger(revision) || revision < 1) {
+    throw new Error(`Secondary record ${file} numeric fields are invalid`);
+  }
+  const disabledReasonValue = fields.get("disabled_reason");
+  if (status === "disabled" && !isSecondaryDisabledReason(disabledReasonValue)) {
+    throw new Error(`Secondary record ${file} disabled_reason is invalid`);
+  }
+  if (status === "current" && disabledReasonValue !== null) {
+    throw new Error(`Secondary record ${file} disabled_reason is invalid`);
+  }
+  const record = Object.freeze({
     schema: SECONDARY_MEMORY_SCHEMA,
     id,
     parentId,
-    status: status as SecondaryStatus,
+    status,
     disabledReason: status === "disabled"
-      ? (isSecondaryDisabledReason(fields.get("disabled_reason"))
-          ? (fields.get("disabled_reason") as SecondaryDisabledReason)
-          : "parent_lifecycle")
+      ? disabledReasonValue as SecondaryDisabledReason
       : null,
-    title: requireString("title", 200),
-    content: lines.slice(end + 1).join("\n").trim().slice(0, 24_000),
-    recallWhen: requireString("recall_when", 500),
-    matchTerms: Object.freeze(matchTerms),
-    relation: isSecondaryRelation(relation) ? relation : "associated",
-    reason: typeof fields.get("reason") === "string" ? (fields.get("reason") as string).slice(0, 500) : "",
-    supportLevel: isSecondarySupportLevel(fields.get("support_level"))
-      ? (fields.get("support_level") as SecondarySupportLevel)
-      : "strong_inference",
-    evidence: typeof fields.get("evidence") === "string" ? (fields.get("evidence") as string).slice(0, 800) : "",
-    basis: basis as SecondaryBasis,
-    sourceMemoryRevision: requireNumber("source_memory_revision"),
-    confidence: Math.max(0, Math.min(1, requireNumber("confidence"))),
-    hitCount: Math.max(0, Math.floor(requireNumber("hit_count"))),
+    ...normalizedFields,
+    basis,
+    sourceMemoryRevision,
+    confidence,
+    hitCount,
     lastHitAt: nullableNumber("last_hit_at"),
     lastDecayAt: nullableNumber("last_decay_at"),
     createdAt: requireNumber("created_at"),
     updatedAt: requireNumber("updated_at"),
-    revision: Math.floor(requireNumber("revision")),
+    revision,
     file
   });
+  return { record, repaired };
 }
 
 // ---------------------------------------------------------------------------
@@ -179,10 +328,17 @@ export function parseSecondaryRecord(text: string, file: string): SecondaryMemor
 
 export class SecondaryMemoryStore {
   private readonly directory: string;
+  private readonly backupDirectory: string;
   private cache: readonly SecondaryMemoryRecord[] | null = null;
 
   constructor(historyRoot: string) {
     this.directory = path.join(historyRoot, SECONDARY_MEMORY_DIRNAME);
+    this.backupDirectory = path.join(
+      path.dirname(historyRoot),
+      ".runtime",
+      "backups",
+      "association-clues"
+    );
   }
 
   get rootDirectory(): string {
@@ -202,12 +358,31 @@ export class SecondaryMemoryStore {
         for (const fileEntry of fileEntries.sort((left, right) => left.name.localeCompare(right.name))) {
           if (!fileEntry.isFile() || !fileEntry.name.endsWith(".md")) continue;
           const target = path.join(parentDir, fileEntry.name);
+          const relative = secondaryRelativePath(parentEntry.name, fileEntry.name.replace(/\.md$/u, ""));
+          let text = "";
           try {
-            const text = await readFile(target, "utf8");
-            const relative = secondaryRelativePath(parentEntry.name, fileEntry.name.replace(/\.md$/u, ""));
+            text = await readFile(target, "utf8");
             records.push(parseSecondaryRecord(text, relative));
-          } catch {
-            // A damaged secondary file never blocks primary memory.
+          } catch (error) {
+            if (error instanceof SecondaryOversizedRecordError) {
+              try {
+                const repaired = parseSecondaryRecordInternal(text, relative, true);
+                if (!repaired.repaired) throw error;
+                const hash = createHash("sha256").update(text).digest("hex").slice(0, 16);
+                const backup = path.join(
+                  this.backupDirectory,
+                  `${repaired.record.parentId}-${repaired.record.id}-${hash}.md`
+                );
+                // Backup must durably land before deterministic replacement.
+                await cognitiveAtomicWrite(backup, text);
+                await cognitiveAtomicWrite(target, serializeSecondaryRecord(repaired.record));
+                records.push(repaired.record);
+              } catch {
+                // Structural damage is never guessed, rewritten or deleted.
+              }
+            }
+            // A structurally damaged clue never blocks primary Memory and its
+            // original file remains untouched.
           }
         }
       }
@@ -271,7 +446,7 @@ export interface NewSecondaryFactInput {
 /** Normalize a match term; returns null when unusable (single CJK char etc.). */
 export function normalizeMatchTerm(raw: string): string | null {
   const term = raw.normalize("NFKC").trim();
-  if (!term || term.length > 40) return null;
+  if (!term || term.length > SECONDARY_MATCH_TERM_MAX_CHARS) return null;
   // 单个汉字不能独立作为匹配词（做梦 PRD §8.2）。
   if (/^\p{Script=Han}$/u.test(term)) return null;
   if (/^[\s\p{P}\p{S}]+$/u.test(term)) return null;
@@ -281,31 +456,24 @@ export function normalizeMatchTerm(raw: string): string | null {
 export function createSecondaryRecord(input: NewSecondaryFactInput): SecondaryMemoryRecord {
   const makeId = input.idFactory ?? (() => newCognitiveId("sec"));
   const id = makeId();
-  const terms: string[] = [];
-  const seen = new Set<string>();
-  for (const raw of input.matchTerms) {
-    const term = normalizeMatchTerm(raw);
-    if (!term) continue;
-    const key = term.toLocaleLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    terms.push(term);
-    if (terms.length >= SECONDARY_MAX_MATCH_TERMS) break;
+  if (!SAFE_SECONDARY_ID.test(id) || !SAFE_SECONDARY_ID.test(input.parentId)) {
+    throw new Error("association_clue_invalid:id");
   }
+  const fields = normalizeAssociationClueFields(input);
   return Object.freeze({
     schema: SECONDARY_MEMORY_SCHEMA,
     id,
     parentId: input.parentId,
     status: "current",
     disabledReason: null,
-    title: input.title.trim().slice(0, 200),
-    content: input.content.trim().slice(0, 2_000),
-    recallWhen: (input.recallWhen.trim() || input.title.trim()).slice(0, 500),
-    matchTerms: Object.freeze(terms),
-    relation: input.relation,
-    reason: input.reason.trim().slice(0, 500),
-    supportLevel: input.supportLevel,
-    evidence: input.evidence.trim().slice(0, 800),
+    title: fields.title,
+    content: fields.content,
+    recallWhen: fields.recallWhen,
+    matchTerms: fields.matchTerms,
+    relation: fields.relation,
+    reason: fields.reason,
+    supportLevel: fields.supportLevel,
+    evidence: fields.evidence,
     basis: input.basis,
     sourceMemoryRevision: input.sourceMemoryRevision,
     confidence: Math.max(0, Math.min(1, input.confidence)),
@@ -610,21 +778,12 @@ export function reconcileSecondaryForParent(
     // 绝不 retire+新建（新建会丢失全部命中历史）。
     const replaced = wideKeyReplacement.get(entry);
     if (replaced) {
+      const fields = normalizeAssociationClueFields(entry.candidate);
       const fingerprintEqual =
         secondaryFingerprint(replaced.title, replaced.matchTerms) === entry.fingerprint;
       const updated: SecondaryMemoryRecord = Object.freeze({
         ...replaced,
-        title: entry.candidate.title.trim().slice(0, 200),
-        content: entry.candidate.content.trim().slice(0, 2_000),
-        recallWhen: (entry.candidate.recallWhen.trim() || entry.candidate.title.trim()).slice(0, 500),
-        matchTerms: Object.freeze(entry.candidate.matchTerms
-          .map((term) => normalizeMatchTerm(term))
-          .filter((term): term is string => term !== null)
-          .slice(0, SECONDARY_MAX_MATCH_TERMS)),
-        relation: entry.candidate.relation,
-        reason: entry.candidate.reason.trim().slice(0, 500),
-        supportLevel: entry.candidate.supportLevel,
-        evidence: entry.candidate.evidence.trim().slice(0, 800),
+        ...fields,
         confidence: fingerprintEqual ? replaced.confidence : entry.confidence,
         sourceMemoryRevision: input.parentRevision,
         updatedAt: input.now,

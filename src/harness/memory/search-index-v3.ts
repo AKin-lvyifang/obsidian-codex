@@ -72,7 +72,7 @@ export interface SearchIndexV3 {
 
 /**
  * Lexical tokens for matching.
- * - Latin/digit words: whole word (length >= 2; single characters are ignored).
+ * - Latin/digit words: whole token, including a single letter or digit.
  * - Han runs: every consecutive 2-character gram. A lone Han character never
  *   becomes a token by itself, so one common Chinese character can no longer
  *   pull unrelated memories into the candidate set.
@@ -86,14 +86,14 @@ export function lexicalTokens(text: string): string[] {
     if (hanRuns) {
       const nonHan = word.replace(/\p{Script=Han}+/gu, "\u0001");
       for (const part of nonHan.split("\u0001")) {
-        if (part.length >= 2) tokens.add(part);
+        if (part.length >= 1) tokens.add(part);
       }
       for (const run of hanRuns) {
         for (let index = 0; index + 2 <= run.length; index += 1) {
           tokens.add(run.slice(index, index + 2));
         }
       }
-    } else if (word.length >= 2) {
+    } else if (word.length >= 1) {
       tokens.add(word);
     }
   }
@@ -222,26 +222,25 @@ export function scorePrimaryEntry(
 ): number {
   if (!query.trim() || queryTokens.size === 0) return 0;
   const normalizedQuery = normalizeMatchText(query);
+  const hasHanPhrase = /\p{Script=Han}/u.test(normalizedQuery);
   const routeTokenSet = new Set(entry.routeTokens);
   const contentTokenSet = new Set(entry.contentTokens);
   const titleLower = normalizeMatchText(entry.title);
   const recallLower = normalizeMatchText(entry.recallWhen);
 
   let score = 0;
-  if (titleLower.includes(normalizedQuery) || recallLower.includes(normalizedQuery)) score += 3.0;
-  else if (normalizeMatchText(`${entry.title}\n${entry.recallWhen}`).includes(normalizedQuery)) score += 2.5;
+  if (hasHanPhrase && (titleLower.includes(normalizedQuery) || recallLower.includes(normalizedQuery))) {
+    score += 3.0;
+  } else if (hasHanPhrase
+    && normalizeMatchText(`${entry.title}\n${entry.recallWhen}`).includes(normalizedQuery)) {
+    score += 2.5;
+  }
 
   let matchedRoute = 0;
   let matchedContent = 0;
   for (const token of queryTokens) {
     if (routeTokenSet.has(token)) {
       score += 1.0;
-      matchedRoute += 1;
-    } else if ([...routeTokenSet].some((candidate) => candidate.startsWith(token) || token.startsWith(candidate))) {
-      score += 0.85;
-      matchedRoute += 1;
-    } else if ([...routeTokenSet].some((candidate) => candidate.includes(token) || token.includes(candidate))) {
-      score += 0.6;
       matchedRoute += 1;
     }
     if (contentTokenSet.has(token)) {
@@ -253,7 +252,7 @@ export function scorePrimaryEntry(
   // Coverage bonus: a full-phrase (all-token) match ranks above partial hits.
   const coverage = matchedRoute / queryTokens.size;
   score += coverage * 1.6;
-  if (recallLower.length >= 4 && normalizedQuery.includes(recallLower)) {
+  if (hasHanPhrase && recallLower.length >= 4 && normalizedQuery.includes(recallLower)) {
     score += 1.0;
   }
   return score;
@@ -267,20 +266,26 @@ export function scoreSecondaryEntry(
 ): number {
   if (!query.trim()) return 0;
   const normalizedQuery = normalizeMatchText(query);
-  let score = 0;
+  let matchTermScore = 0;
 
   for (const term of entry.matchTerms) {
     const normalizedTerm = normalizeMatchText(term);
     if (!normalizedTerm) continue;
-    if (normalizedTerm.length >= 2 && normalizedQuery.includes(normalizedTerm)) {
-      score += 2.4;
+    const hasHanPhrase = /\p{Script=Han}/u.test(normalizedTerm);
+    if (hasHanPhrase && normalizedTerm.length >= 2 && normalizedQuery.includes(normalizedTerm)) {
+      matchTermScore += 2.4;
       continue;
     }
     const termTokens = lexicalTokens(normalizedTerm);
     if (termTokens.length > 0 && termTokens.every((token) => queryTokens.has(token))) {
-      score += 1.8;
+      matchTermScore += 1.8;
     }
   }
+
+  // Only matchTerms may make a parent eligible. Title, recallWhen and content
+  // can refine ordering after that bridge has matched, never create a match.
+  if (matchTermScore === 0) return 0;
+  let score = matchTermScore;
 
   const routeTokenSet = new Set(entry.routeTokens);
   const contentTokenSet = new Set(entry.contentTokens);

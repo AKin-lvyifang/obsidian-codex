@@ -22,10 +22,40 @@ export async function runMemoryRecallHarnessContractScenarios(): Promise<void> {
   await scenarioRecallContextUsesTokenBudgetAndNoMemorySkips();
   await scenarioHarnessScansPastFiftyByBudget();
   await scenarioNoMemoryIdentityOnlyAndWarmSnapshotReuse();
+  await scenarioCreateIsIdempotentAndBroadConflictsDoNotWrite();
   await scenarioRecallUsesOneBoundedTurnSnapshot();
   scenarioRecallProgressReusesAndDismissesOneTemporaryMessage();
   await scenarioHotPathPreparesRecallBeforeProviderRequest();
   console.log("PASS Memory Recall Harness contract scenarios");
+}
+
+async function scenarioCreateIsIdempotentAndBroadConflictsDoNotWrite(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    const request = {
+      operation: "create" as const,
+      kind: "fact" as const,
+      title: "稳定宽 key",
+      content: "完全相同的正文",
+      recallWhen: "需要稳定事实时",
+      basis: "explicit" as const,
+      expectedRevision: 0
+    };
+    const first = await fixture.repository.write(request, fixture.runtime({ userEntryId: "idem-1" }));
+    const retry = await fixture.repository.write(request, fixture.runtime({ userEntryId: "idem-2" }));
+    assert.equal(retry.status, "idempotent");
+    assert.equal(retry.record?.id, first.record?.id);
+    assert.equal(retry.revision, first.revision, "idempotent retry performs zero writes");
+
+    const conflict = await fixture.repository.write({
+      ...request,
+      content: "同一宽 key 下的不同正文"
+    }, fixture.runtime({ userEntryId: "idem-3" }));
+    assert.equal(conflict.status, "possible_duplicate");
+    assert.equal(conflict.record?.id, first.record?.id);
+    assert.equal(conflict.revision, first.revision, "possible_duplicate performs zero writes");
+    assert.equal((await fixture.repository.inspect()).records.length, 1);
+  });
+  console.log("PASS Memory create idempotency and possible_duplicate contract");
 }
 
 async function scenarioHarnessScansPastFiftyByBudget(): Promise<void> {
@@ -156,10 +186,16 @@ async function scenarioNoMemoryIdentityOnlyAndWarmSnapshotReuse(): Promise<void>
       "外部编辑后的正文。"
     );
     await writeFile(recordPath, external, "utf8");
+    await fixture.repository.handleExternalChange({
+      event: "change",
+      relativePath: created.record!.file
+    });
     const changed = await harness.prepareTurnContext(input);
     assert.ok(changed.revision > warm.revision, "外部 Markdown 编辑必须让暖快照失效");
-    assert.ok(reconcileCalls > afterCold.reconcileCalls);
-    assert.ok(recordScans > afterCold.recordScans);
+    assert.equal(reconcileCalls, afterCold.reconcileCalls,
+      "已知文件事件不得重跑全量 reconcile");
+    assert.equal(recordScans, afterCold.recordScans,
+      "已知文件事件只刷新该文件，不扫描一级 Memory 目录");
 
     const beforeNoMemory = { reconcileCalls, recordScans, indexReads };
     const noMemory = await harness.prepareTurnContext({

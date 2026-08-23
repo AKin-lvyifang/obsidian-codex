@@ -14,6 +14,8 @@ import {
 } from "./personality-state";
 import {
   isProfileItemRenderable,
+  profileSlotDefinition,
+  USER_PROFILE_PROJECTION_TARGET_CHARS,
   type UserProfileItem,
   type UserProfileState
 } from "./user-profile-state";
@@ -85,33 +87,62 @@ export function renderAgentMarkdown(
  * 整份 USER.md 不再统一冒充「用户明确确认」。
  */
 export function renderUserMarkdown(state: UserProfileState): string {
-  const renderable = state.items.filter((item) => isProfileItemRenderable(item));
-  const identity = renderable.filter((item) => item.section === "identity");
-  const preferences = renderable.filter((item) => item.section !== "identity");
+  const renderable = projectedProfileItems(state);
+  const selected: UserProfileItem[] = [];
+  for (const item of renderable) {
+    const candidate = renderUserProjection(selected.concat(item));
+    if (candidate.length > USER_PROFILE_PROJECTION_TARGET_CHARS) break;
+    selected.push(item);
+  }
+  return renderUserProjection(selected);
+}
 
+function projectedProfileItems(state: UserProfileState): UserProfileItem[] {
+  const current = state.items.filter((item) => isProfileItemRenderable(item));
+  const explicitKeys = new Set(current
+    .filter((item) => item.basis !== "observed_memory")
+    .map((item) => item.profileKey));
+  return current
+    .filter((item) => item.basis !== "observed_memory" || !explicitKeys.has(item.profileKey))
+    .sort((left, right) => {
+      const leftObserved = left.basis === "observed_memory" ? 1 : 0;
+      const rightObserved = right.basis === "observed_memory" ? 1 : 0;
+      return leftObserved - rightObserved
+        || (profileSlotDefinition(right.profileKey)?.importance ?? 0)
+          - (profileSlotDefinition(left.profileKey)?.importance ?? 0)
+        || (right.updatedAt ?? right.revision) - (left.updatedAt ?? left.revision)
+        || left.profileKey.localeCompare(right.profileKey);
+    });
+}
+
+function renderUserProjection(items: readonly UserProfileItem[]): string {
+  const explicit = items.filter((item) => item.basis !== "observed_memory");
+  const observed = items.filter((item) => item.basis === "observed_memory");
   const lines: string[] = [
     "# USER",
     "",
-    "本文件是系统生成的用户画像投影：无标记条目来自用户明确确认的记忆；",
-    "带「系统观察」标记的条目是做梦从长期记忆中归纳的参考信息，不等于用户亲口确认。",
+    "本文件是系统生成的当前用户画像速查表。用户明确确认的内容优先；",
+    "系统观察仅来自至少三条独立有效的一级 Memory，供参考，不等于用户亲口确认。",
+    "",
+    "## 用户明确确认",
     ""
   ];
-  lines.push("## 当前稳定画像", "");
-  if (identity.length === 0) lines.push("- 尚无已确认内容。");
-  else for (const item of identity) lines.push(renderProfileItemLine(item));
-  lines.push("");
-  lines.push("## 长期偏好与合作方式", "");
-  if (preferences.length === 0) lines.push("- 尚无已确认内容。");
-  else for (const item of preferences) lines.push(renderProfileItemLine(item));
+  if (explicit.length === 0) lines.push("- 尚无已确认内容。");
+  else for (const item of explicit) lines.push(renderProfileItemLine(item));
+  if (observed.length > 0) {
+    lines.push("", "## 系统观察", "");
+    for (const item of observed) lines.push(renderProfileItemLine(item));
+  }
   lines.push("");
   return lines.join("\n");
 }
 
 function renderProfileItemLine(item: UserProfileItem): string {
+  const label = profileSlotDefinition(item.profileKey)?.labelZh ?? item.profileKey;
   if (item.basis === "observed_memory") {
-    return `- ${item.text}（系统观察，供参考）`;
+    return `- 【${label}】${item.text}（系统观察，供参考）`;
   }
-  return `- ${item.text}`;
+  return `- 【${label}】${item.text}`;
 }
 
 /**

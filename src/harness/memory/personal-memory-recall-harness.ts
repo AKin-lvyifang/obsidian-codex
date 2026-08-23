@@ -117,7 +117,11 @@ export class PersonalMemoryRecallHarness {
     }
     await input.onProgress?.("matching");
     await input.onProgress?.("budgeting");
-    const candidates = search.items.map(toRecallCandidate);
+    const candidates = fitSecondaryMatchesWithinBudget(
+      search.items.map(toRecallCandidate),
+      search.total,
+      tokenBudget
+    );
     const remaining = search.remaining;
     const exhaustive = search.exhausted;
     await input.onProgress?.("assembling", {
@@ -218,7 +222,7 @@ export function serializeRecallBlocks(input: Readonly<{
 }
 
 function secondaryFactsFor(
-  items: readonly Readonly<PersonalMemoryTurnCatalogCandidate>[]
+  items: readonly Readonly<PersonalMemoryRecallCandidate>[]
 ): PersonalMemorySecondaryInjectionFact[] {
   const seen = new Set<string>();
   const facts: PersonalMemorySecondaryInjectionFact[] = [];
@@ -241,7 +245,7 @@ function secondaryFactsFor(
  * remaining = total - injected，exhaustive = injected === total。
  */
 export function measureFinalInjectionTokens(
-  items: readonly Readonly<PersonalMemoryTurnCatalogCandidate>[],
+  items: readonly Readonly<PersonalMemoryRecallCandidate>[],
   rankedTotal?: number
 ): number {
   const total = rankedTotal ?? items.length;
@@ -258,6 +262,17 @@ export function measureFinalInjectionTokens(
   return estimatePiContextTokens(blocks.combined).tokens;
 }
 
+/** Primary records claim the budget first; association clues use only remainder. */
+export function measurePrimaryInjectionTokens(
+  items: readonly Readonly<PersonalMemoryRecallCandidate>[],
+  rankedTotal?: number
+): number {
+  return measureFinalInjectionTokens(
+    items.map((item) => stripSecondaryCandidate(toRecallCandidate(item))),
+    rankedTotal
+  );
+}
+
 function selectRecallCandidateIds(
   candidates: readonly Readonly<PersonalMemoryTurnCatalogCandidate>[],
   tokenBudget: number
@@ -265,12 +280,44 @@ function selectRecallCandidateIds(
   const selected: PersonalMemoryTurnCatalogCandidate[] = [];
   for (const item of candidates) {
     const withCandidate = [...selected, item];
-    // 与预算口径共用同一个测量函数：按「已选 + 新候选」的累计最终
-    // 区块文本测量（total = 全量候选数），避免口径漂移。
-    if (measureFinalInjectionTokens(withCandidate, candidates.length) > tokenBudget) continue;
+    // First reserve the complete primary-Memory block. Association clues are
+    // fitted only after all selected primary records have claimed their space.
+    if (measurePrimaryInjectionTokens(withCandidate, candidates.length) > tokenBudget) continue;
     selected.push(item);
   }
   return Object.freeze(selected.map((item) => item.id));
+}
+
+function fitSecondaryMatchesWithinBudget(
+  candidates: readonly Readonly<PersonalMemoryRecallCandidate>[],
+  rankedTotal: number,
+  tokenBudget: number
+): readonly Readonly<PersonalMemoryRecallCandidate>[] {
+  let fitted = candidates.map(stripSecondaryCandidate);
+  for (const [index, candidate] of candidates.entries()) {
+    for (const fact of candidate.secondaryMatches ?? []) {
+      const next = [...fitted];
+      const current = next[index];
+      next[index] = Object.freeze({
+        ...current,
+        secondaryMatches: Object.freeze([...(current.secondaryMatches ?? []), fact]),
+        ...(candidate.matchedSecondaryId === fact.id
+          ? { matchedSecondaryId: candidate.matchedSecondaryId }
+          : {})
+      });
+      if (measureFinalInjectionTokens(next, rankedTotal) <= tokenBudget) {
+        fitted = next;
+      }
+    }
+  }
+  return Object.freeze(fitted);
+}
+
+function stripSecondaryCandidate(
+  candidate: Readonly<PersonalMemoryRecallCandidate>
+): Readonly<PersonalMemoryRecallCandidate> {
+  const { matchedSecondaryId: _matched, secondaryMatches: _matches, ...primary } = candidate;
+  return Object.freeze(primary);
 }
 
 function toRecallCandidate(

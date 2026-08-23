@@ -1,9 +1,14 @@
 import { Notice, PluginSettingTab, Setting, setIcon } from "obsidian";
 import type CodexForObsidianPlugin from "../main";
 import type { PiConversationCatalogEntry } from "../harness/pi-native/contracts";
-import type {
-  PersonalMemoryKind,
-  PersonalMemoryRecord
+import {
+  SECONDARY_CONTENT_MAX_CHARS,
+  SECONDARY_MAX_MATCH_TERMS,
+  SECONDARY_REASON_MAX_CHARS,
+  SECONDARY_RECALL_WHEN_MAX_CHARS,
+  SECONDARY_TITLE_MAX_CHARS,
+  type PersonalMemoryKind,
+  type PersonalMemoryRecord
 } from "../harness/memory/personal-memory-contracts";
 import {
   currentPersonalityScores,
@@ -628,8 +633,8 @@ export class CodexSettingTab extends PluginSettingTab {
     applySettingsRow(new Setting(memoryGroup)
       .setName(zh ? "离线记忆整理（做梦）" : "Offline memory consolidation (dreaming)")
       .setDesc(zh
-        ? "开启后，Obsidian 打开期间按定时在后台复盘一级记忆：生成二级事实，并更新用户画像、人格状态与 Agent 画像。"
-        : "While Obsidian is open, periodically reviews primary memories on a timer: generates secondary facts and updates the user profile, personality state and Agent profile.")
+        ? "开启后，Obsidian 打开期间按定时在后台复盘一级记忆：生成只帮助召回、不代表用户确认的联想线索，并更新用户画像、人格状态与 Agent 画像。"
+        : "While Obsidian is open, periodically reviews primary memories: generates association clues that only aid recall and are not user-confirmed, then updates the user profile, personality state and Agent profile.")
       .addToggle((toggle) => {
         labelSettingsToggle(toggle, zh ? "离线记忆整理" : "Memory consolidation");
         toggle.setValue(this.plugin.settings.memory.dreamEnabled).onChange(async (enabled) => {
@@ -2097,13 +2102,19 @@ export class CodexSettingTab extends PluginSettingTab {
       correct.disabled = this.memoryActionRunning;
       correct.onclick = () => void this.correctPersonalMemoryRecord(record);
 
-      // --- Secondary facts (二级事实 · LLM 推理): collapsed by default ---
+      // --- Association clues: collapsed by default ---
       const secWrap = row.createDiv({ cls: "echoink-secondary-facts" });
       const secToggle = secWrap.createEl("button", {
         cls: "echoink-secondary-facts-toggle",
         attr: { type: "button" }
       });
-      secToggle.setText(zh ? "二级事实·LLM 推理（…）" : "Secondary facts · LLM inferred (…)");
+      secToggle.setText(zh ? "联想线索·AI 推断（…）" : "Association clues · AI inferred (…)");
+      secWrap.createDiv({
+        cls: "echoink-settings-feature-meta",
+        text: zh
+          ? "联想线索只帮助系统在相关话题中召回一级 Memory，不代表用户确认。"
+          : "Association clues only help recall a primary Memory; they are not user-confirmed."
+      });
       const secPanel = secWrap.createDiv({ cls: "echoink-secondary-facts-panel" });
       secPanel.addClass("is-hidden");
       let secOpen = false;
@@ -2114,14 +2125,14 @@ export class CodexSettingTab extends PluginSettingTab {
           const facts = [...(await system.listSecondaryForParent(record.id))]
             .filter((fact) => fact.status === "current");
           secToggle.setText(zh
-            ? `二级事实·LLM 推理（${facts.length}）`
-            : `Secondary facts · LLM inferred (${facts.length})`);
+            ? `联想线索·AI 推断（${facts.length}）`
+            : `Association clues · AI inferred (${facts.length})`);
           if (!secOpen) return;
           secPanel.empty();
           if (!facts.length) {
             secPanel.createDiv({
               cls: "echoink-secondary-empty",
-              text: zh ? "做梦还没有为这条记忆生成二级事实。" : "Dreaming has not generated secondary facts for this memory yet."
+              text: zh ? "做梦还没有为这条记忆生成联想线索。" : "Dreaming has not generated association clues for this memory yet."
             });
             return;
           }
@@ -2130,7 +2141,7 @@ export class CodexSettingTab extends PluginSettingTab {
           }
         } catch (error) {
           console.error("EchoInk secondary facts load failed", error);
-          secToggle.setText(zh ? "二级事实读取失败" : "Failed to load secondary facts");
+          secToggle.setText(zh ? "联想线索读取失败" : "Failed to load association clues");
         }
       };
       secToggle.onclick = () => {
@@ -2154,8 +2165,8 @@ export class CodexSettingTab extends PluginSettingTab {
     head.createSpan({
       cls: "echoink-secondary-fact-badge",
       text: fact.basis === "user_edited_inference"
-        ? (zh ? "二级事实·用户修正" : "Secondary fact · User edited")
-        : (zh ? "二级事实·LLM 推理" : "Secondary fact · LLM inferred")
+        ? (zh ? "联想线索·用户修正" : "Association clue · User edited")
+        : (zh ? "联想线索·AI 推断" : "Association clue · AI inferred")
     });
     const relationLabels: Record<string, string> = {
       category: zh ? "分类" : "category",
@@ -2171,10 +2182,10 @@ export class CodexSettingTab extends PluginSettingTab {
     head.createSpan({
       cls: "echoink-secondary-fact-badge",
       text: fact.confidence >= 0.75
-        ? (zh ? "高置信度" : "High confidence")
+        ? (zh ? "参考强度：高" : "Reference strength: high")
         : fact.confidence >= 0.6
-          ? (zh ? "中置信度" : "Medium confidence")
-          : (zh ? "低置信度" : "Low confidence")
+          ? (zh ? "参考强度：中" : "Reference strength: medium")
+          : (zh ? "参考强度：低" : "Reference strength: low")
     });
     head.createSpan({ cls: "echoink-secondary-fact-title", text: fact.title });
     factRow.createDiv({ cls: "echoink-secondary-fact-content", text: fact.content });
@@ -2201,10 +2212,10 @@ export class CodexSettingTab extends PluginSettingTab {
     deleteBtn.onclick = () => {
       void confirmModal(
         this.app,
-        zh ? "删除二级事实" : "Delete secondary fact",
+        zh ? "删除联想线索" : "Delete association clue",
         zh
-          ? `确定删除「${fact.title}」这条二级事实吗？一级记忆不受影响。`
-          : `Delete the secondary fact "${fact.title}"? The primary memory is not affected.`,
+          ? `确定删除「${fact.title}」这条联想线索吗？一级 Memory 不受影响。`
+          : `Delete the association clue "${fact.title}"? The primary Memory is not affected.`,
         zh ? "删除" : "Delete",
         zh ? "取消" : "Cancel"
       ).then((confirmed) => {
@@ -2213,7 +2224,7 @@ export class CodexSettingTab extends PluginSettingTab {
           try {
             const system = await this.plugin.getCognitiveSystem();
             await system.deleteSecondaryFact(fact.id);
-            new Notice(zh ? "二级事实已删除" : "Secondary fact deleted");
+            new Notice(zh ? "联想线索已删除" : "Association clue deleted");
             onMutated();
           } catch (error) {
             console.error("EchoInk secondary fact delete failed", error);
@@ -2233,30 +2244,48 @@ export class CodexSettingTab extends PluginSettingTab {
     factRow.empty();
     const titleInput = factRow.createEl("input", {
       cls: "echoink-secondary-edit-input",
-      attr: { type: "text", placeholder: zh ? "标题" : "Title" }
+      attr: {
+        type: "text",
+        maxlength: String(SECONDARY_TITLE_MAX_CHARS),
+        placeholder: zh ? "标题" : "Title"
+      }
     });
     titleInput.value = fact.title;
     const contentArea = factRow.createEl("textarea", {
       cls: "echoink-secondary-edit-textarea",
-      attr: { rows: "3", placeholder: zh ? "内容" : "Content" }
+      attr: {
+        rows: "3",
+        maxlength: String(SECONDARY_CONTENT_MAX_CHARS),
+        placeholder: zh ? "内容" : "Content"
+      }
     });
     contentArea.value = fact.content;
     const recallInput = factRow.createEl("input", {
       cls: "echoink-secondary-edit-input",
-      attr: { type: "text", placeholder: zh ? "何时可能想起" : "When it may be recalled" }
+      attr: {
+        type: "text",
+        maxlength: String(SECONDARY_RECALL_WHEN_MAX_CHARS),
+        placeholder: zh ? "何时可能想起" : "When it may be recalled"
+      }
     });
     recallInput.value = fact.recallWhen;
     const termsInput = factRow.createEl("input", {
       cls: "echoink-secondary-edit-input",
       attr: {
         type: "text",
-        placeholder: zh ? "联想词（用逗号分隔，最多 5 个）" : "Match terms (comma separated, max 5)"
+        placeholder: zh
+          ? `匹配词（用逗号分隔，最多 ${SECONDARY_MAX_MATCH_TERMS} 个）`
+          : `Match terms (comma separated, max ${SECONDARY_MAX_MATCH_TERMS})`
       }
     });
     termsInput.value = fact.matchTerms.join(", ");
     const reasonInput = factRow.createEl("input", {
       cls: "echoink-secondary-edit-input",
-      attr: { type: "text", placeholder: zh ? "推理依据（可选）" : "Reason (optional)" }
+      attr: {
+        type: "text",
+        maxlength: String(SECONDARY_REASON_MAX_CHARS),
+        placeholder: zh ? "推理依据（可选）" : "Reason (optional)"
+      }
     });
     reasonInput.value = fact.reason;
     const editorActions = factRow.createDiv({ cls: "echoink-secondary-fact-actions" });
@@ -2281,11 +2310,11 @@ export class CodexSettingTab extends PluginSettingTab {
             matchTerms: termsInput.value.split(/[,，]/u).map((term) => term.trim()).filter(Boolean),
             reason: reasonInput.value.trim()
           });
-          new Notice(zh ? "二级事实已更新" : "Secondary fact updated");
+          new Notice(zh ? "联想线索已更新" : "Association clue updated");
           onMutated();
         } catch (error) {
           console.error("EchoInk secondary fact edit failed", error);
-          new Notice(zh ? "保存失败，请重试" : "Save failed; please retry");
+          new Notice(zh ? "保存失败：请检查字段长度和匹配词" : "Save failed: check field lengths and match terms");
           saveBtn.removeAttribute("disabled");
         }
       })();

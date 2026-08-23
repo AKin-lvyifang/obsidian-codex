@@ -26,9 +26,15 @@
 
 import { createHash } from "node:crypto";
 import {
+  SECONDARY_CONTENT_MAX_CHARS,
+  SECONDARY_EVIDENCE_MAX_CHARS,
+  SECONDARY_MATCH_TERM_MAX_CHARS,
   SECONDARY_MAX_CANDIDATES,
   SECONDARY_MAX_MATCH_TERMS,
   SECONDARY_MAX_PER_PARENT,
+  SECONDARY_REASON_MAX_CHARS,
+  SECONDARY_RECALL_WHEN_MAX_CHARS,
+  SECONDARY_TITLE_MAX_CHARS,
   isSecondaryRelation,
   isSecondarySupportLevel,
   type PersonalMemoryRecord,
@@ -50,26 +56,28 @@ import {
   computeReprocessedProfileMemoryIds,
   reconcileProfileSources,
   revokeReprocessedProfileSources,
-  fallbackProfileKey,
+  isUserProfileKey,
   isProfileItemRenderable,
   profileKeyPromptCatalog,
-  PROFILE_KEY_MAX_CHARS,
+  USER_PROFILE_ITEM_HARD_MAX_CHARS,
+  USER_PROFILE_ITEM_RECOMMENDED_MAX_CHARS,
+  USER_PROFILE_LEGACY_READ_MAX_CHARS,
+  USER_PROFILE_WRITE_HARD_MAX_CHARS,
   type DreamProfileInput,
-  type ProfileKeyCatalogEntry,
   type UserProfileSection,
   type UserProfileState
 } from "./user-profile-state";
 import { renderAgentMarkdown, renderUserMarkdown } from "./cognitive-projection";
 import {
   applySecondaryDecay,
+  normalizeAssociationClueFields,
   reconcileSecondaryForParent,
   serializeSecondaryRecord,
   type SecondaryFactCandidate,
   type SecondaryMemoryStore
 } from "./secondary-memory-store";
 import {
-  cognitiveJsonText,
-  normalizeTextForDedupe
+  cognitiveJsonText
 } from "./cognitive-file-utils";
 import {
   AgentIdentityStateStore,
@@ -106,13 +114,21 @@ export interface DreamLlmPort {
 export interface DreamRepositoryPort {
   inspect(): Promise<Readonly<{ revision: number; records: readonly PersonalMemoryRecord[] }>>;
   readVaultId(): Promise<string>;
-  readFixedFiles(): Promise<Readonly<{ agent: string; user: string }>>;
+  readFixedFiles(): Promise<Readonly<{
+    agent: string;
+    user: string;
+    userHash: string;
+    userChars: number;
+    userManifestHashMatches: boolean;
+  }>>;
   applyCognitiveUpdate(input: Readonly<{
     agentContent?: string;
     userContent?: string;
     secondaryRecords: readonly SecondaryMemoryRecord[];
     extraChanges: readonly Readonly<{ relativePath: string; content: string }>[];
     detail: string;
+    /** Global Memory revision observed before Provider work began. */
+    expectedMemoryRevision: number;
     /** Round 6 修复四（身份 CAS）：决策时读到的身份 revision。 */
     expectedAgentIdentityRevision?: number;
   }>): Promise<Readonly<{ revision: number }>>;
@@ -226,6 +242,7 @@ export class DreamEngine {
       ? await this.deps.agentIdentityStore.read()
       : defaultAgentIdentityState();
     const inspected = await repository.inspect();
+    let expectedMemoryRevision = inspected.revision;
     const currentRecords = inspected.records.filter((record) => record.status === "current");
     const validMemoryIds = new Set(currentRecords.map((record) => record.id));
     const fixedFiles = await repository.readFixedFiles();
@@ -239,25 +256,48 @@ export class DreamEngine {
     let userUpdated = false;
     let migrationError: string | null = null;
     const migrationEnqueue: string[] = [];
+    let legacyUserBackupChange: { relativePath: string; content: string } | null = null;
 
     // --- 1. 来源对账 (Memory 来源失效回收) ---------------------------------
     let workingPersonality = reconcilePersonalitySources(personalityState, validMemoryIds, startedAt);
     let workingProfile = reconcileProfileSources(profileState, validMemoryIds, startedAt);
 
     // --- 2. Legacy USER.md migration (草案 §12.3, local, no Provider) ------
-    const userHash = sha256Text(fixedFiles.user);
+    const userHash = fixedFiles.userHash;
     const defaultUserHash = sha256Text(DEFAULT_USER_PROFILE_TEXT);
     const userIsCustom = userHash !== defaultUserHash;
+    const userIsOversized = fixedFiles.userChars > USER_PROFILE_WRITE_HARD_MAX_CHARS;
+    const userExceedsLegacyReadBoundary = fixedFiles.userChars > USER_PROFILE_LEGACY_READ_MAX_CHARS;
+    const trustedOversizedUser = userIsOversized && fixedFiles.userManifestHashMatches;
+    if (userIsOversized && !trustedOversizedUser) {
+      throw new Error("user_profile_oversized_untrusted");
+    }
+    if (trustedOversizedUser) {
+      // The raw value is carried only into this deterministic local backup.
+      // It is never placed in buildDreamPrompts or any Provider input.
+      legacyUserBackupChange = {
+        relativePath: `shared-user/.runtime/backups/USER.md.legacy-${userHash.slice(0, 16)}.md`,
+        content: fixedFiles.user
+      };
+    }
     if (workingProfile.revision === 0 && workingProfile.legacyUserMigration === null) {
       workingProfile = Object.freeze({
         ...workingProfile,
         revision: workingProfile.revision + 1,
-        legacyUserMigration: userIsCustom ? "pending" as const : "done" as const,
-        lastProjectedUserHash: userIsCustom ? "" : userHash,
+        legacyUserMigration: userIsCustom && !trustedOversizedUser ? "pending" as const : "done" as const,
+        lastProjectedUserHash: userIsCustom && !trustedOversizedUser ? "" : userHash,
         updatedAt: startedAt
       });
     }
-    if (workingProfile.legacyUserMigration === "pending") {
+    if (trustedOversizedUser && workingProfile.legacyUserMigration !== "done") {
+      workingProfile = Object.freeze({
+        ...workingProfile,
+        revision: workingProfile.revision + 1,
+        legacyUserMigration: "done" as const,
+        lastProjectedUserHash: userHash,
+        updatedAt: startedAt
+      });
+    } else if (workingProfile.legacyUserMigration === "pending") {
       try {
         const alreadyMigrated = inspected.records.find(
           (record) => record.status === "current" && record.title === USER_MIGRATION_TITLE
@@ -278,6 +318,10 @@ export class DreamEngine {
             recallWhen: "需要用户稳定画像、身份或长期合作方式时",
             basis: "explicit"
           });
+          // This write belongs to the current Dream round. Advance only the
+          // round's own CAS baseline; any later external Memory write still
+          // conflicts and leaves every selected source pending.
+          expectedMemoryRevision = migrated.revision;
           workingProfile = Object.freeze({
             ...workingProfile,
             revision: workingProfile.revision + 1,
@@ -291,6 +335,12 @@ export class DreamEngine {
         // 旧 USER.md 不会被覆盖。
         migrationError = errorMessage(error);
       }
+    }
+
+    // Explicit marker documents the evidence boundary for maintenance logs;
+    // the value itself is intentionally unused outside backup/replacement.
+    if (userExceedsLegacyReadBoundary && !trustedOversizedUser) {
+      throw new Error("user_profile_legacy_read_blocked");
     }
 
     // --- 3. Select memories to process --------------------------------------
@@ -313,16 +363,12 @@ export class DreamEngine {
     const candidatesByParent = new Map<string, SecondaryFactCandidate[]>();
     let tokensUsed = 0;
 
-    // 同一轮内前面 Memory 新产生的 profileKey 也要供后续 Memory 复用；
-    // Prompt 携带的 key 目录有界（Round 6 修复七：PROFILE_KEY_PROMPT_CAP），
-    // 持久 current 项 + 本轮新增项一起去重、稳定排序后截断。
-    const sameRoundKeys: ProfileKeyCatalogEntry[] = [];
     for (const record of processable) {
       if (!llm) break;
       const promptInput = buildDreamPrompts(
         record,
         this.config.maxInputChars,
-        profileKeyPromptCatalog(workingProfile, sameRoundKeys)
+        profileKeyPromptCatalog(workingProfile)
       );
       const estimated = estimateTokens(promptInput.systemPrompt) + estimateTokens(promptInput.userPrompt);
       if (tokensUsed + estimated > this.config.tokenBudget && processedMemoryIds.length > 0) {
@@ -376,22 +422,14 @@ export class DreamEngine {
           }
         }
         if (isProfileEligible(record)) {
-          for (const item of parsed.profileItems.slice(0, 2)) {
+          // One primary Memory may yield at most one profile candidate from a
+          // Provider response. Extra candidates are ignored deterministically.
+          for (const item of parsed.profileItems.slice(0, 1)) {
             profileItems.push({
               ...item,
               basis: record.basis === "explicit" ? "explicit_memory" : "observed_memory",
               sourceMemoryId: record.id
             });
-            // 与 applyDreamProfileUpdate 同口径生成有效 key（缺省 fallback），
-            // 供本轮后续 Memory 复用；目录有界在 profileKeyPromptCatalog 内截断。
-            const effectiveKey = (item.profileKey && item.profileKey.trim())
-              ? normalizeTextForDedupe(item.profileKey).slice(0, PROFILE_KEY_MAX_CHARS)
-              : fallbackProfileKey(item.text);
-            if (!sameRoundKeys.some((existing) =>
-              existing.section === item.section && existing.profileKey === effectiveKey
-            )) {
-              sameRoundKeys.push({ section: item.section, profileKey: effectiveKey });
-            }
           }
         }
 
@@ -492,11 +530,11 @@ export class DreamEngine {
     }
     const renderableItems = nextProfile.items.filter((item) => isProfileItemRenderable(item));
     const migrationDone = nextProfile.legacyUserMigration === "done";
-    const projectionAllowed = (renderableItems.length > 0
+    const projectionAllowed = trustedOversizedUser || ((renderableItems.length > 0
       || nextProfile.lastProjectedUserHash === userHash
       || !userIsCustom)
-      && (!userIsCustom || migrationDone);
-    if (nextProfile !== profileState && projectionAllowed) {
+      && (!userIsCustom || migrationDone));
+    if ((nextProfile !== profileState || trustedOversizedUser) && projectionAllowed) {
       const rendered = renderUserMarkdown(nextProfile);
       if (rendered !== fixedFiles.user) {
         userContent = rendered;
@@ -514,6 +552,7 @@ export class DreamEngine {
       || decayed > 0
       || Boolean(agentContent)
       || Boolean(userContent)
+      || legacyUserBackupChange !== null
       || workingProfile !== profileState
       || nextPersonality !== personalityState
       || migrationEnqueue.length > 0;
@@ -559,6 +598,7 @@ export class DreamEngine {
 
     // --- 12. ONE transaction: all cognitive files + dream-state --------------
     const extraChanges: Array<{ relativePath: string; content: string }> = [
+      ...(legacyUserBackupChange ? [legacyUserBackupChange] : []),
       ...secondaryFileChanges,
       ...decayedFileChanges,
       {
@@ -588,6 +628,7 @@ export class DreamEngine {
           ...(userContent ? { userContent } : {}),
           secondaryRecords: decayedSecondary,
           extraChanges,
+          expectedMemoryRevision,
           expectedAgentIdentityRevision: expectedIdentityRevision,
           detail: `dream: processed=${processedMemoryIds.length} facts=+${factsCreated}/~${factsReused}/-${factsRetired} decayed=${decayed}${migrationError ? ` migration_error=${migrationError}` : ""}`
         });
@@ -616,7 +657,12 @@ export class DreamEngine {
     if (!committed) {
       // Transaction failed → nothing persisted; still record the attempt so we
       // do not re-pay every heartbeat, but never advance success semantics.
-      await this.recordAttemptOnly(dreamState);
+      // A global Memory CAS conflict may include a concurrent dream-state
+      // commit. Do not write the stale attempt state over it; leave every
+      // source pending for the next round against the latest revision.
+      if (!isGlobalMemoryRevisionConflict(commitError)) {
+        await this.recordAttemptOnly(dreamState);
+      }
       return this.finish({
         startedAt,
         processedMemoryIds: [],
@@ -797,7 +843,7 @@ export function buildDreamPrompts(
     "规则：",
     "1. 只输出一个 JSON 对象，键为 secondaryFacts、personalitySignals、agentRequirements、userProfileItems；不要 Markdown 围栏、注释或解释。",
     `2. secondaryFacts：0-${SECONDARY_MAX_CANDIDATES} 条临时候选（宁缺毋滥，没有可靠推理就输出空数组），作为未来相关查询召回这条记忆的桥梁概念（上位类别、具体实例、属性、场景、常见联想）。`,
-    `3. 每条 secondaryFact 必须包含：{\"title\":≤30字, \"content\":≤120字且使用不确定语气如\"可能/也许相关/可参考\", \"recallWhen\":何时可能想起, \"matchTerms\":≤${SECONDARY_MAX_MATCH_TERMS}个完整词或短语（禁止单个汉字）, \"relation\":\"category|instance|attribute|context|associated\", \"supportLevel\":\"direct|strong_inference|weak_inference\"（direct=记忆直接陈述，strong_inference=强推理，weak_inference=弱联想）, \"reason\":≤80字, \"evidence\":≤120字，说明该事实如何由这条一级记忆推导}。缺少 supportLevel 或 evidence 的候选会被丢弃。`,
+    `3. 每条 secondaryFact 必须包含：{\"title\":≤${SECONDARY_TITLE_MAX_CHARS}字, \"content\":≤${SECONDARY_CONTENT_MAX_CHARS}字且使用不确定语气如\"可能/也许相关/可参考\", \"recallWhen\":≤${SECONDARY_RECALL_WHEN_MAX_CHARS}字, \"matchTerms\":≤${SECONDARY_MAX_MATCH_TERMS}个完整词或短语且每个≤${SECONDARY_MATCH_TERM_MAX_CHARS}字（禁止单个汉字）, \"relation\":\"category|instance|attribute|context|associated\", \"supportLevel\":\"direct|strong_inference|weak_inference\"（direct=记忆直接陈述，strong_inference=强推理，weak_inference=弱联想）, \"reason\":≤${SECONDARY_REASON_MAX_CHARS}字, \"evidence\":≤${SECONDARY_EVIDENCE_MAX_CHARS}字，说明该事实如何由这条一级记忆推导}。任一字段缺失或越界整条丢弃，不截断。`,
     "4. 允许带「可能、也许相关、可参考」等不确定口径的保守推理（包括饮食禁忌关联到相关食物类别这类生活化桥接）；但禁止：把推理表述为用户亲口说过的话；给出确定诊断、确定因果或确定身份结论；把二级事实写成一级事实口径；生成三级或更深的推理链。",
     `5. personalitySignals：0-2 条，形如 {\"dimension\":\"${TRAIT_DIMENSIONS.join("|")}\", \"direction\":\"increase|decrease\", \"strength\":0-1, \"evidence\":≤80字}。方向是单向语义：increase=该特质表现更多，decrease=该特质表现更少。六个维度的含义：`,
     ...dimensionLines,
@@ -805,7 +851,7 @@ export function buildDreamPrompts(
     "5.2 不得从以下内容推断人格：用户自己说话毒舌或说脏话；当前任务内容；用户的职业、爱好或身份；Provider 或模型选择；reasoning 强度；用户临时要求「这次详细一点」这类单次指令；引用、代码、Tool 输出和 Knowledge；单次情绪。",
     "5.3 区分「人格信号」和「长期行为要求」：回答长度、举例数量、固定格式、称呼、语言习惯（如「以后回答先给结论」「以后详细解释」「每次最多三段」「多举例」「少用表格」「使用中文」「称呼我为方哥」「每次附验收步骤」）只进入 agentRequirements，不产生 personalitySignals；只有直接改变性格或工作方式稳定强度的表达才形成 trait signal，例如「以后说话毒舌一点」→sharpness increase、「以后你来替我收敛方案」→dominance increase、「不要能跑就算完成」→rigor increase、「输出习惯按第一、第二、第三」→structure increase、「低风险步骤别总问我」→boldness increase、「多给非传统方案」→creativity increase；这类表达可以同时进入 agentRequirements。「思考深一点」不属于任何人格维度。",
     "6. agentRequirements：仅当记忆是用户对 Agent 的明确长期要求（如\"以后回复简短\"）时给出 0-2 条短语；否则空数组。",
-    `7. userProfileItems：仅当记忆包含稳定、当前有效的用户画像（身份、长期偏好、合作方式）时给出 0-2 条 {"section":"identity|preference|collaboration", "profileKey":≤${PROFILE_KEY_MAX_CHARS}字的稳定主题词（如"清晨散步"，同义表述必须复用同一 key）, "text":≤120字}；一次性任务、临时指令、引用、假设不得进入。${knownProfileKeys.length > 0 ? `已有 profileKey（格式 section:key，主题相同必须复用，不要新造近义 key）：${knownProfileKeys.map((entry) => `${entry.section}:${entry.profileKey}`).join("、")}` : ""}`,
+    `7. userProfileItems：仅当记忆包含稳定、当前有效的用户画像（身份、长期偏好、合作方式）时给出 0-1 条 {"section":"identity|preference|collaboration", "profileKey":"下列封闭 key 之一", "text":"建议≤${USER_PROFILE_ITEM_RECOMMENDED_MAX_CHARS}字"}。text 超过 ${USER_PROFILE_ITEM_HARD_MAX_CHARS} 字会整条拒绝，绝不截断；一次性任务、临时指令、聊天过程、引用、假设、证据原文和推理过程不得进入。允许的 profileKey（格式 section:key，必须原样选择，禁止新造近义 key）：${knownProfileKeys.map((entry) => `${entry.section}:${entry.profileKey}`).join("、")}`,
     "8. 不得声称用户亲口说过记忆之外的话；语言与记忆保持一致。"
   ].join("\n");
   const content = record.content.slice(0, maxInputChars);
@@ -867,32 +913,22 @@ export function parseDreamOutput(raw: string): ParsedDreamOutput | null {
     for (const entry of root.secondaryFacts.slice(0, SECONDARY_MAX_CANDIDATES)) {
       if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
       const fact = entry as Record<string, unknown>;
-      const title = boundedString(fact.title, 60);
-      const content = boundedString(fact.content, 300);
-      if (!title || !content) continue;
-      const matchTerms = Array.isArray(fact.matchTerms)
-        ? fact.matchTerms
-            .filter((term): term is string => typeof term === "string")
-            .map((term) => term.trim())
-            .filter((term) => term.length >= 1 && term.length <= 40)
-            .slice(0, SECONDARY_MAX_MATCH_TERMS)
-        : [];
-      if (matchTerms.length === 0) continue;
-      // supportLevel 与 evidence 是候选必填项：缺失即丢弃。
-      if (!isSecondarySupportLevel(fact.supportLevel)) continue;
-      const evidence = boundedString(fact.evidence, 300);
-      if (!evidence) continue;
-      const relation = isSecondaryRelation(fact.relation) ? fact.relation : "associated";
-      facts.push(Object.freeze({
-        title,
-        content,
-        recallWhen: boundedString(fact.recallWhen, 500) || title,
-        matchTerms: Object.freeze(matchTerms),
-        relation,
-        supportLevel: fact.supportLevel,
-        reason: boundedString(fact.reason, 300),
-        evidence
-      }));
+      if (!isSecondarySupportLevel(fact.supportLevel) || !isSecondaryRelation(fact.relation)) continue;
+      try {
+        const normalized = normalizeAssociationClueFields({
+          title: typeof fact.title === "string" ? fact.title : "",
+          content: typeof fact.content === "string" ? fact.content : "",
+          recallWhen: typeof fact.recallWhen === "string" ? fact.recallWhen : "",
+          matchTerms: Array.isArray(fact.matchTerms) ? fact.matchTerms as string[] : [],
+          relation: fact.relation,
+          supportLevel: fact.supportLevel,
+          reason: typeof fact.reason === "string" ? fact.reason : "",
+          evidence: typeof fact.evidence === "string" ? fact.evidence : ""
+        });
+        facts.push(Object.freeze(normalized));
+      } catch {
+        // Invalid or oversized association clues are rejected as a whole.
+      }
     }
   }
 
@@ -927,16 +963,18 @@ export function parseDreamOutput(raw: string): ParsedDreamOutput | null {
       if (!entry || typeof entry !== "object") continue;
       const item = entry as Record<string, unknown>;
       if (!sections.has(item.section as string)) continue;
-      const text = boundedString(item.text, 800);
-      if (!text) continue;
+      const text = typeof item.text === "string" ? item.text.trim() : "";
+      if (!text || text.length > USER_PROFILE_ITEM_HARD_MAX_CHARS) continue;
       const rawKey = typeof item.profileKey === "string" ? item.profileKey.trim() : "";
+      if (!isUserProfileKey(rawKey)) continue;
+      const expectedSection = rawKey.split(".", 1)[0];
+      if (expectedSection !== item.section) continue;
       profileItems.push(Object.freeze({
         section: item.section as UserProfileSection,
-        profileKey: rawKey
-          ? rawKey.slice(0, PROFILE_KEY_MAX_CHARS)
-          : fallbackProfileKey(text),
+        profileKey: rawKey,
         text
       }));
+      break;
     }
   }
 
@@ -964,6 +1002,10 @@ function errorMessage(error: unknown): string {
 /** Round 6 修复四：识别 Repository 身份 CAS 冲突（稳定标记）。 */
 export function isIdentityRevisionConflict(error: unknown): boolean {
   return /identity_revision_conflict/u.test(errorMessage(error));
+}
+
+export function isGlobalMemoryRevisionConflict(error: unknown): boolean {
+  return /Memory revision conflict:/u.test(errorMessage(error));
 }
 
 function personalityJson(state: PersonalityState): string {
