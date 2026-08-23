@@ -1,17 +1,39 @@
 import assert from "node:assert/strict";
+import { mkdtemp, mkdir, realpath, rm } from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import {
+  CURRENT_SESSION_VERSION,
+  SessionManager,
+  VERSION
+} from "@earendil-works/pi-coding-agent";
 import { defaultAgentIdentityState } from "../../harness/memory/agent-identity-state";
+import { PersonalMemoryRepository } from "../../harness/memory/personal-memory-repository";
+import { FileDomainReceiptStore } from "../../harness/pi-native/domain-receipt-store";
+import { FileConversationCatalog } from "../../harness/pi-native/file-conversation-catalog";
+import { FileProductRunStore } from "../../harness/pi-native/file-product-run-store";
 import CodexForObsidianPlugin from "../../main";
 import type {
   PiConversationCatalogEntry,
   PiConversationProjection
 } from "../../harness/pi-native/contracts";
 import {
+  createDurablePiSession,
+  type PiSessionManagerApi
+} from "../../harness/pi-native/pi-session-durability";
+import { FileApprovalTicketStore } from "../../harness/pi-native/tool-authorization";
+import { devicePiCanonicalStoreRoots } from "../../harness/pi/pi-store-layout";
+import { FileKnowledgeUsageStore } from "../../knowledge-base/usage";
+import {
+  createPiProductionRuntimeBundle,
   PiProductionConfigurationError
 } from "../../plugin/pi-production-runtime-composition";
+import { DEFAULT_SETTINGS, type StoredSession } from "../../settings/settings";
 
 const pluginPrototype = CodexForObsidianPlugin.prototype as any;
 
 export async function runPiPluginConversationBoundaryTests(): Promise<void> {
+  await runtimeBundleInitializesConversationShellsWithoutBodyReads();
   await missingProviderKeepsHistoryReadableWithoutActivation();
   await localHistoryDoesNotWaitForProductionRuntimeInitialization();
   await openingReturnsHistoryBeforeActivationCompletes();
@@ -25,6 +47,203 @@ export async function runPiPluginConversationBoundaryTests(): Promise<void> {
   await localManagementAndMemoryStayProviderIndependent();
   await releaseClearsPluginActivationStateEvenWhenRuntimeReleaseFails();
   await chatPropagatesTheMissingApiKeyError();
+}
+
+async function runtimeBundleInitializesConversationShellsWithoutBodyReads():
+Promise<void> {
+  const root = await realpath(await mkdtemp(
+    path.join(os.tmpdir(), "echoink-runtime-shell-sync-")
+  ));
+  try {
+    const vaultRootPath = path.join(root, "vault");
+    const pluginDataRootPath = path.join(root, "plugin-data");
+    const piNativeStorageRootPath = path.join(
+      pluginDataRootPath,
+      "pi-agent-product-v1"
+    );
+    await mkdir(vaultRootPath, { recursive: true });
+
+    let sessionOpens = 0;
+    const sessionApi: PiSessionManagerApi = {
+      codingAgentVersion: VERSION,
+      currentSessionVersion: CURRENT_SESSION_VERSION,
+      open: (sessionFile, sessionRoot, cwdOverride) => {
+        sessionOpens += 1;
+        return SessionManager.open(sessionFile, sessionRoot, cwdOverride);
+      }
+    };
+    const vaultId = "vault-runtime-shell-sync";
+    const catalog = new FileConversationCatalog({
+      storageRootPath: piNativeStorageRootPath,
+      vaultId
+    });
+    const productRuns = new FileProductRunStore({
+      storageRootPath: piNativeStorageRootPath,
+      vaultId,
+      catalog
+    });
+    const approvals = new FileApprovalTicketStore({
+      storageRootPath: piNativeStorageRootPath,
+      vaultId
+    });
+    const receipts = new FileDomainReceiptStore({
+      storageRootPath: piNativeStorageRootPath,
+      vaultId
+    });
+    const knowledgeUsageStore = new FileKnowledgeUsageStore({
+      storageRootPath: piNativeStorageRootPath,
+      vaultId
+    });
+    const personalMemory = new PersonalMemoryRepository({
+      vaultPath: piNativeStorageRootPath,
+      vaultId
+    });
+    await catalog.initialize();
+    await productRuns.initialize();
+    await approvals.initialize();
+    await receipts.initialize();
+    await knowledgeUsageStore.initialize();
+    await personalMemory.initialize();
+
+    const createCatalogConversation = async (
+      conversationId: string,
+      status: PiConversationCatalogEntry["status"],
+      updatedAt: number
+    ): Promise<PiConversationCatalogEntry> => {
+      const durable = createDurablePiSession({
+        api: sessionApi,
+        sessionRoot: catalog.sessionRootPath,
+        cwd: vaultRootPath
+      });
+      return await catalog.upsert({
+        conversationId,
+        piSessionId: durable.piSessionId,
+        vaultId,
+        title: `Catalog ${conversationId}`,
+        status,
+        defaultMemoryMode: "normal",
+        createdAt: updatedAt,
+        updatedAt,
+        sessionFile: durable.sessionFile
+      });
+    };
+    const activeEntries: PiConversationCatalogEntry[] = [];
+    for (const [index, conversationId] of [
+      "conversation-runtime-current",
+      "conversation-runtime-history-1",
+      "conversation-runtime-history-2",
+      "conversation-runtime-history-3",
+      "conversation-runtime-history-4"
+    ].entries()) {
+      activeEntries.push(await createCatalogConversation(
+        conversationId,
+        "active",
+        index + 1
+      ));
+    }
+    const archived = await createCatalogConversation(
+      "conversation-runtime-archived",
+      "archived",
+      20
+    );
+    const deleted = await createCatalogConversation(
+      "conversation-runtime-deleted",
+      "deleted",
+      21
+    );
+    sessionOpens = 0;
+
+    const current = activeEntries[0]!;
+    const resident = shellFromCatalogEntry(current, "resident-history");
+    resident.title = "stale local title";
+    resident.piSessionId = "stale-pi-session";
+    const settings = structuredClone(DEFAULT_SETTINGS);
+    settings.sessions = [
+      resident,
+      ...activeEntries.slice(1).map((entry) => shellFromCatalogEntry(entry)),
+      shellFromCatalogEntry(archived, "archived-history"),
+      shellFromCatalogEntry(deleted, "deleted-history")
+    ];
+    settings.activeSessionId = archived.conversationId;
+    let persisted = 0;
+    const plugin = {
+      app: {
+        vault: {
+          getMarkdownFiles: () => [],
+          getFileByPath: () => null,
+          getAbstractFileByPath: () => null
+        }
+      },
+      settings,
+      resolveOpenAICodexAccessToken: async () => "",
+      getVaultPath: () => vaultRootPath,
+      getPluginDataDirName: () => "echoink",
+      persistPiNativeSettings: async () => { persisted += 1; },
+      buildRuntimeEchoInkResourceCatalog: async () => [],
+      readPersistedEchoInkResourceSnapshot: async () => settings.resources,
+      listEchoInkMcpTools: async () => [],
+      callEchoInkMcpTool: async () => { throw new Error("unused fixture MCP"); },
+      callEchoInkMcpToolFromResourceSnapshot: async () => {
+        throw new Error("unused fixture MCP snapshot");
+      }
+    } as never;
+    const localData = {
+      vaultRootPath,
+      pluginDataRootPath,
+      piNativeStorageRootPath,
+      deviceScope: {
+        stateRootPath: path.join(root, "device"),
+        vaultIdDigest: vaultId,
+        deviceIdDigest: "device-runtime-shell-sync"
+      },
+      storeScope: {
+        pluginDataRootPath,
+        vaultRootPath,
+        deviceControlRootPath: path.join(root, "device"),
+        vaultIdDigest: vaultId,
+        deviceIdDigest: "device-runtime-shell-sync"
+      },
+      roots: devicePiCanonicalStoreRoots(pluginDataRootPath),
+      catalog,
+      productRuns,
+      approvals,
+      receipts,
+      knowledgeUsageStore,
+      personalMemory,
+      sessionApi
+    } as never;
+
+    const bundle = await createPiProductionRuntimeBundle(plugin, localData);
+    try {
+      assert.equal(
+        sessionOpens,
+        0,
+        "Runtime bundle initialization must not open every historical Session to synchronize shells"
+      );
+      assert.deepEqual(
+        settings.sessions.map((session) => session.id),
+        activeEntries.map((entry) => entry.conversationId),
+        "only active Catalog sessions may remain in the current shell list"
+      );
+      assert.equal(
+        settings.activeSessionId,
+        current.conversationId,
+        "an archived active shell must fall back to an active Catalog shell"
+      );
+      assert.equal(resident.title, current.title);
+      assert.equal(resident.piSessionId, current.piSessionId);
+      assert.equal(
+        resident.messages[0]?.id,
+        "resident-history",
+        "metadata synchronization must not overwrite an already resident active body"
+      );
+      assert.equal(persisted, 1);
+    } finally {
+      await bundle.runtime.shutdown();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 }
 
 async function localHistoryDoesNotWaitForProductionRuntimeInitialization():
@@ -795,5 +1014,24 @@ function catalogEntry(
     defaultMemoryMode: "normal",
     createdAt: 1,
     updatedAt: 1
+  };
+}
+
+function shellFromCatalogEntry(
+  entry: Readonly<PiConversationCatalogEntry>,
+  messageId?: string
+): StoredSession {
+  return {
+    id: entry.conversationId,
+    title: entry.title,
+    kind: "chat",
+    piSessionId: entry.piSessionId,
+    bodyAuthority: "pi_session_only",
+    cwd: "/disposable-vault",
+    messages: messageId
+      ? [{ id: messageId } as StoredSession["messages"][number]]
+      : [],
+    createdAt: entry.createdAt,
+    updatedAt: entry.updatedAt
   };
 }

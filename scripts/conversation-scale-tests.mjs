@@ -28,6 +28,12 @@ await esbuild.build({
   platform: "node",
   target: "node22",
   format: "esm",
+  external: [
+    "@earendil-works/pi-agent-core",
+    "@earendil-works/pi-ai",
+    "@earendil-works/pi-coding-agent",
+    "yaml"
+  ],
   plugins: [{
     name: "conversation-scale-test-shims",
     setup(build) {

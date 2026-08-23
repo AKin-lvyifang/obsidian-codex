@@ -18,6 +18,7 @@ import {
   personalMemorySourceEmptyStateLabel,
   piConversationDeriveActionLabel
 } from "../../ui/codex-view/message-list";
+import { activateSession } from "../../ui/codex-view/session-controller";
 import type { QueuedTurnItem } from "../../ui/turn-queue";
 
 export async function runPiNativeTurnRunnerTests(): Promise<void> {
@@ -28,6 +29,7 @@ export async function runPiNativeTurnRunnerTests(): Promise<void> {
   emptyPersonalMemorySourceDisplayDoesNotClaimInjection();
   await messageActionContractsStayTruthful();
   await agentSettlementOnlyFinalizesPiChatTurn();
+  await pendingSubmitKeepsRunningConversationResidentAcrossSessionSwitch();
   await disabledOrStaleSkillCannotStartTurn();
   await maintainScopeIsResolvedBeforeProviderSubmit();
 }
@@ -491,6 +493,204 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
     true,
     "the formal ProductRun event must be the first event allowed to render terminal status"
   );
+}
+
+async function pendingSubmitKeepsRunningConversationResidentAcrossSessionSwitch():
+Promise<void> {
+  const runningSession: StoredSession = {
+    id: "conversation-turn-runner",
+    title: "Running conversation",
+    kind: "chat",
+    piSessionId: "pi-session-turn-runner",
+    bodyAuthority: "pi_session_only",
+    cwd: "/vault",
+    messages: [{ id: "history-before-submit" } as StoredSession["messages"][number]],
+    createdAt: 1,
+    updatedAt: 1
+  };
+  const targetSession: StoredSession = {
+    id: "conversation-switch-target",
+    title: "Other conversation",
+    kind: "chat",
+    piSessionId: "pi-session-switch-target",
+    bodyAuthority: "pi_session_only",
+    cwd: "/vault",
+    messages: [],
+    createdAt: 1,
+    updatedAt: 1
+  };
+  const item: QueuedTurnItem = {
+    id: "queued-pending-submit",
+    sessionId: runningSession.id,
+    text: "keep the full history",
+    attachments: [],
+    skill: null,
+    turnOptions: {
+      model: "",
+      reasoning: "high",
+      serviceTier: "fast",
+      permission: "read-only",
+      mode: "agent",
+      mcpEnabled: false
+    },
+    kind: "chat",
+    createdAt: 2
+  };
+  const runResult = deferred<Readonly<PiProductRunRecord>>();
+  const handle = {
+    productRunId: "product-run-turn-runner",
+    conversationId: runningSession.id,
+    piSessionId: runningSession.piSessionId!,
+    userEntryId: "entry-user",
+    result: runResult.promise
+  };
+  const pendingSubmit = deferred<typeof handle>();
+  let listener: PiChatRuntimeEventListener | null = null;
+  let projectionReads = 0;
+  const plugin = {
+    settings: {
+      memory: { useLongTermMemory: true },
+      sessions: [runningSession, targetSession],
+      activeSessionId: runningSession.id
+    },
+    getVaultPath: () => "/vault",
+    submitPiChat: async () => await pendingSubmit.promise,
+    subscribePiRun: (_productRunId: string, next: PiChatRuntimeEventListener) => {
+      listener = next;
+      return { unsubscribe: () => { listener = null; } };
+    },
+    readPiConversationProjection: async (): Promise<PiConversationProjection> => {
+      projectionReads += 1;
+      return durableProjection(
+        runningSession,
+        projectionReads === 1 ? "running" : "completed"
+      );
+    },
+    abortPiConversation: async () => undefined,
+    releasePiProductionRun: () => undefined,
+    switchPiConversation: async (
+      _previous: string | null,
+      next: string
+    ): Promise<PiConversationProjection> => ({
+      catalog: {
+        conversationId: next,
+        piSessionId: targetSession.piSessionId!,
+        vaultId: "vault-turn-runner",
+        title: targetSession.title,
+        status: "active",
+        defaultMemoryMode: "normal",
+        createdAt: 1,
+        updatedAt: 1,
+        sessionFile: "/sessions/pi-session-switch-target.jsonl"
+      },
+      activeLeafId: null,
+      messages: [{ id: "target-history" } as PiConversationProjection["messages"][number]],
+      diagnostics: [],
+      drafts: []
+    }),
+    saveSettings: async () => undefined
+  };
+  let running = false;
+  let activeRunId = "";
+  const view: any = {
+    plugin,
+    get running() { return running; },
+    set running(value: boolean) { running = value; },
+    get activeRunId() { return activeRunId; },
+    set activeRunId(value: string) { activeRunId = value; },
+    activeRunKind: "",
+    activeRunSessionId: "",
+    activeTurnId: "",
+    turnStartedAt: 0,
+    messagesBottomFollowPaused: false,
+    renderTabs: () => undefined,
+    renderMessages: () => undefined,
+    renderMessagesIfActive: () => undefined,
+    renderToolbar: () => undefined,
+    applyStatus: () => undefined,
+    clearComposerDraft: () => undefined,
+    armTurnWatchdog: () => undefined,
+    clearTurnWatchdog: () => undefined,
+    clearActiveRun: () => {
+      activeRunId = "";
+      view.activeRunKind = "";
+      view.activeRunSessionId = "";
+      view.activeTurnId = "";
+    }
+  };
+  const sessionHost: any = {
+    plugin,
+    get running() { return view.running; },
+    get activeRunSessionId() { return view.activeRunSessionId; },
+    updateInputPlaceholder: () => undefined,
+    resetVirtualWindow: () => undefined,
+    renderTabs: () => undefined,
+    renderMessages: () => undefined,
+    renderToolbar: () => undefined
+  };
+
+  const turn = startChatTurn(view, runningSession, item, "composer");
+  await waitFor(() =>
+    view.running
+    && view.activeRunKind === "chat"
+    && view.activeRunSessionId === runningSession.id
+  );
+  await activateSession(sessionHost, targetSession);
+  assert.equal(plugin.settings.activeSessionId, targetSession.id);
+  assert.equal(
+    runningSession.messages[0]?.id,
+    "history-before-submit",
+    "the running session must remain resident while submitPiChat is pending"
+  );
+
+  pendingSubmit.resolve(handle);
+  await waitFor(() => listener !== null);
+  await emit(listener, runtimeEvent({
+    type: "message_start",
+    messageKey: "assistant-pending",
+    role: "assistant"
+  }));
+  await emit(listener, runtimeEvent({
+    type: "message_update",
+    messageKey: "assistant-pending",
+    textDelta: "streaming after switch"
+  }));
+  assert.equal(
+    runningSession.messages.some((message) =>
+      message.id === "history-before-submit"
+    ),
+    true,
+    "post-submit runtime events must build on the retained history, not an empty live projection"
+  );
+
+  await emit(listener, runtimeEvent({ type: "agent_settled" }));
+  await waitFor(() => projectionReads === 1);
+  await emit(listener, runtimeEvent({
+    type: "product_run_settled",
+    terminalState: "completed",
+    assistantEntryId: "entry-assistant"
+  }));
+  runResult.resolve({
+    productRunId: handle.productRunId,
+    conversationId: handle.conversationId,
+    piSessionId: handle.piSessionId,
+    userEntryId: handle.userEntryId,
+    assistantEntryId: "entry-assistant",
+    toolCallIds: [],
+    memoryMode: "normal",
+    state: "product_run_settled",
+    terminalState: "completed",
+    activeLeafId: "entry-assistant",
+    agentSettledAt: 7,
+    settledAt: 8,
+    createdAt: 2,
+    updatedAt: 8
+  });
+
+  assert.equal(await turn, "completed");
+  assert.equal(view.running, false);
+  assert.equal(view.activeRunKind, "");
+  assert.equal(view.activeRunSessionId, "");
 }
 
 function runtimeEvent(

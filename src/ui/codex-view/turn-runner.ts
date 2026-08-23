@@ -370,6 +370,8 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
   let finalizingProjectionFlight: Promise<void> = Promise.resolve();
 
   view.running = true;
+  view.activeRunKind = "chat";
+  view.activeRunSessionId = session.id;
   view.turnStartedAt = Date.now();
   view.renderTabs();
   view.renderToolbar();

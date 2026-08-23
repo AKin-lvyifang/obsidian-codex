@@ -86,9 +86,6 @@ import {
   isEchoInkTaskPlanTerminal,
   type EchoInkTaskPlanSnapshot
 } from "../types/task-plan";
-import {
-  PiSessionDurabilityError
-} from "../harness/pi-native/pi-session-durability";
 import { FileApprovalTicketStore } from "../harness/pi-native/tool-authorization";
 import { VaultDomainService } from "../harness/pi-native/vault-domain-service";
 import { EchoInkVaultToolEgressPolicy } from "../harness/pi-native/vault-tool-result-safety";
@@ -1759,18 +1756,15 @@ export async function synchronizePiConversationShells(
     sessions: plugin.settings.sessions,
     activeSessionId: plugin.settings.activeSessionId
   });
-  const catalogEntries = await runtime.listConversations();
-  const deletedIds = new Set(
-    catalogEntries
-      .filter((entry) => entry.status === "deleted")
-      .map((entry) => entry.conversationId)
+  const catalogEntries = await runtime.listConversations(["active"]);
+  const activeIds = new Set(
+    catalogEntries.map((entry) => entry.conversationId)
   );
   plugin.settings.sessions = plugin.settings.sessions.filter(
-    (session) => !deletedIds.has(session.id)
+    (session) => activeIds.has(session.id)
   );
 
   for (const catalogEntry of catalogEntries) {
-    if (catalogEntry.status === "deleted") continue;
     const existingShell = plugin.settings.sessions.find(
       (session) => session.id === catalogEntry.conversationId
     );
@@ -1791,21 +1785,6 @@ export async function synchronizePiConversationShells(
     shell.bodyAuthority = "pi_session_only";
     shell.createdAt = catalogEntry.createdAt;
     shell.updatedAt = catalogEntry.updatedAt;
-    try {
-      const projection = await runtime.readProjection(
-        catalogEntry.conversationId
-      );
-      shell.messages = structuredClone(projection.messages);
-    } catch (error) {
-      if (!(error instanceof PiSessionDurabilityError)) throw error;
-      // Runtime has already persisted the JSONL diagnostic. Keep the Catalog
-      // shell available for explicit recovery, but never synthesize or replace
-      // its body from a damaged Session.
-      console.error(
-        `EchoInk Pi Conversation ${catalogEntry.conversationId} requires explicit Session recovery`,
-        error
-      );
-    }
   }
   selectActiveConversationSession(plugin.settings);
   return before !== JSON.stringify({
