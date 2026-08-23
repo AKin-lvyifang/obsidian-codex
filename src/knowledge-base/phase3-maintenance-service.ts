@@ -494,7 +494,11 @@ export class Phase3KnowledgeMaintenanceService {
     }
     const committed = commitResult(wal, false);
     const evidence = await this.collectExecutionEvidence(wal);
-    if (evidence.notes.length === 0) {
+    const expectedKnowledgeNotes = preview.actions.some((action) =>
+      action.targetPath.startsWith("wiki/")
+      || action.targetPath.startsWith("projects/")
+    );
+    if (expectedKnowledgeNotes && evidence.notes.length === 0) {
       return Object.freeze({
         status: "failed",
         appliedPaths: evidence.appliedPaths,

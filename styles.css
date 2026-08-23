@@ -13994,15 +13994,15 @@ button.echoink-picker-row:focus-visible {
   height: 18px;
 }
 
-.echoink-knowledge-init-status-heading.is-ready .echoink-knowledge-init-status-icon {
+.echoink-knowledge-init-status-heading.is-init-ready .echoink-knowledge-init-status-icon {
   color: var(--color-green, #2da44e);
 }
 
-.echoink-knowledge-init-status-heading.is-warning .echoink-knowledge-init-status-icon {
+.echoink-knowledge-init-status-heading.is-init-warning .echoink-knowledge-init-status-icon {
   color: var(--text-warning, #d6a216);
 }
 
-.echoink-knowledge-init-status-heading.is-loading .echoink-knowledge-init-status-icon {
+.echoink-knowledge-init-status-heading.is-init-loading .echoink-knowledge-init-status-icon {
   color: var(--interactive-accent);
   animation: echoink-knowledge-init-spin 900ms linear infinite;
 }
@@ -14374,6 +14374,39 @@ button.echoink-picker-row:focus-visible {
   height: 18px;
 }
 
+.echoink-knowledge-init-pause-text {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.echoink-knowledge-init-pause-details {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.echoink-knowledge-init-pause-detail {
+  display: grid;
+  grid-template-columns: 5.5em minmax(0, 1fr);
+  gap: 10px;
+  min-width: 0;
+}
+
+.echoink-knowledge-init-pause-label {
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  font-weight: 600;
+}
+
+.echoink-knowledge-init-pause-value {
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 /* Smooth Button link adaptation: an inline, accent-colored recovery route
    whose underline grows left-to-right without turning the text into a card. */
 .echoink-knowledge-init-pause .echoink-knowledge-init-provider-link {
@@ -14544,6 +14577,11 @@ button.echoink-picker-row:focus-visible {
 }
 
 @media (max-width: 560px) {
+  .echoink-knowledge-init-pause-detail {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+
   .echoink-knowledge-init-folder-purposes {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -14968,7 +15006,7 @@ button.echoink-picker-row:focus-visible {
     transition: none;
   }
 
-  .echoink-knowledge-init-status-heading.is-loading .echoink-knowledge-init-status-icon {
+  .echoink-knowledge-init-status-heading.is-init-loading .echoink-knowledge-init-status-icon {
     animation: none;
   }
 

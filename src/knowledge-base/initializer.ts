@@ -47,6 +47,11 @@ export function knowledgeInitializationSourceDefaultRole(
 ): Exclude<KnowledgeInitializationRole, "keep"> {
   return managedMarkdownRole(sourcePath) ?? "raw";
 }
+
+export function isKnowledgeInitializationMarkdownPath(sourcePath: string): boolean {
+  const extension = normalizedExtension(sourcePath);
+  return extension === ".md" || extension === ".markdown";
+}
 export type KnowledgeInitializationPhase =
   | "scan" | "preview" | "confirmed" | "create_directories"
   | "move_notes" | "batch_extraction" | "generate_guide" | "complete";
@@ -159,12 +164,14 @@ export interface KnowledgeInitializationHost {
   now(): number;
   listVaultFiles(): Promise<readonly KnowledgeInitializationVaultFile[]>;
   readText(relativePath: string): Promise<string | null>;
+  /** 按原始字节计算哈希，适用于 Markdown、图片、PDF 等所有普通文件。 */
+  readFileHash(relativePath: string): Promise<string | null>;
   pathExists(relativePath: string): Promise<boolean>;
   pathKind(relativePath: string): Promise<KnowledgeBasePathKind>;
   createFolder(relativePath: string): Promise<void>;
   createText(relativePath: string, content: string): Promise<void>;
   updateText(relativePath: string, expectedContentHash: string, content: string): Promise<void>;
-  moveMarkdown(sourcePath: string, targetPath: string, expectedContentHash: string): Promise<void>;
+  moveFile(sourcePath: string, targetPath: string, expectedContentHash: string): Promise<void>;
   currentProvider(): KnowledgeInitializationProviderSnapshot | null;
   processedRawPaths(): ReadonlySet<string>;
   ensureInitializationConversation(existingConversationId: string | null): Promise<string>;
@@ -311,19 +318,20 @@ export class KnowledgeBaseInitializer {
         ignored += 1;
         continue;
       }
-      const extension = normalizedExtension(relativePath);
-      if (extension !== ".md" && extension !== ".markdown") {
-        ignored += 1;
-        continue;
-      }
-      const content = await this.host.readText(relativePath);
-      if (content === null) {
-        ignored += 1;
-        continue;
-      }
-      const contentHash = sha256(content);
+      const isMarkdown = isKnowledgeInitializationMarkdownPath(relativePath);
       const topLevel = relativePath.split("/")[0]?.toLocaleLowerCase() ?? "";
       if (FIXED_ROOTS.has(topLevel)) {
+        // EchoInk 体系内的内容保持原位。只有 Markdown 笔记参与
+        // 自定义分配或 Raw 提炼；附件不会被当作可提炼来源。
+        if (!isMarkdown) {
+          ignored += 1;
+          continue;
+        }
+        const contentHash = await this.host.readFileHash(relativePath);
+        if (contentHash === null) {
+          ignored += 1;
+          continue;
+        }
         if (
           topLevel === "raw"
           && relativePath.toLocaleLowerCase() !== "raw/index.md"
@@ -353,6 +361,14 @@ export class KnowledgeBaseInitializer {
         }
         continue;
       }
+      // 推荐方案把体系外的普通 Vault 文件都安全归档到
+      // raw/imported，包括 Markdown、图片、PDF 和其他附件。目标路径
+      // 保留原相对层级，因此文件夹结构也在 Raw 下复现。
+      const contentHash = await this.host.readFileHash(relativePath);
+      if (contentHash === null) {
+        ignored += 1;
+        continue;
+      }
       const targetPath = importedTarget("raw", relativePath);
       const conflict = await this.host.pathExists(targetPath);
       items.push({
@@ -366,7 +382,7 @@ export class KnowledgeBaseInitializer {
         state: conflict ? "conflict" : "pending",
         reason: conflict
           ? `目标已存在：${targetPath}`
-          : "体系外 Markdown 将保留原相对层级移动到 raw/imported"
+          : "体系外文件将保留原相对层级移动到 raw/imported"
       });
     }
     const job: KnowledgeInitializationJob = {
@@ -429,6 +445,12 @@ export class KnowledgeBaseInitializer {
       const normalizedSource = normalizeRelativePath(assignment.sourcePath);
       if (!normalizedSource || !itemByPath.has(normalizedSource)) {
         throw new Error("找不到待分配的笔记。");
+      }
+      if (
+        !isKnowledgeInitializationMarkdownPath(normalizedSource)
+        && assignment.role !== "raw"
+      ) {
+        throw new Error("附件不能分配到笔记目录；它们会按原路径归入 Raw。");
       }
       planned.set(normalizedSource, assignment.role);
     }
@@ -605,7 +627,7 @@ export class KnowledgeBaseInitializer {
         return;
       }
       try {
-        await this.host.moveMarkdown(item.sourcePath, item.targetPath, item.contentHash);
+        await this.host.moveFile(item.sourcePath, item.targetPath, item.contentHash);
       } catch (error) {
         const afterError = await this.readMoveState(item);
         if (afterError !== "already_moved") {
@@ -649,8 +671,8 @@ export class KnowledgeBaseInitializer {
       );
       for (const sourcePath of batch) {
         const snapshot = sourceSnapshotByPath.get(sourcePath);
-        const current = await this.host.readText(sourcePath);
-        if (!snapshot || current === null || sha256(current) !== snapshot.contentHash) {
+        const currentHash = await this.host.readFileHash(sourcePath);
+        if (!snapshot || currentHash === null || currentHash !== snapshot.contentHash) {
           await this.pause(job, "failed_recoverable", `待提炼来源已变化：${sourcePath}`,
             "重新生成预览并确认新的来源 revision、digest、Provider 与模型。");
           return;
@@ -775,10 +797,10 @@ export class KnowledgeBaseInitializer {
   Promise<"ready" | "already_moved" | "source_changed" | "conflict" | "missing" | "ambiguous"> {
     if (!item.targetPath) return "missing";
     const [source, target] = await Promise.all([
-      this.host.readText(item.sourcePath), this.host.readText(item.targetPath)
+      this.host.readFileHash(item.sourcePath), this.host.readFileHash(item.targetPath)
     ]);
-    if (source === null && target !== null && sha256(target) === item.contentHash) return "already_moved";
-    if (source !== null && target === null) return sha256(source) === item.contentHash ? "ready" : "source_changed";
+    if (source === null && target === item.contentHash) return "already_moved";
+    if (source !== null && target === null) return source === item.contentHash ? "ready" : "source_changed";
     if (source !== null && target !== null) return "conflict";
     if (source === null && target === null) return "missing";
     return "ambiguous";
@@ -884,7 +906,12 @@ function refreshFrozenPlan(
   ignored: number
 ): void {
   const movableRaw = job.items
-    .filter((item) => item.role === "raw" && item.targetPath && item.state !== "conflict")
+    .filter((item) =>
+      item.role === "raw"
+      && item.targetPath
+      && item.state !== "conflict"
+      && isKnowledgeInitializationMarkdownPath(item.sourcePath)
+    )
     .map((item) => ({
       path: item.targetPath as string,
       sourceRevision: item.sourceRevision,
@@ -970,6 +997,7 @@ function managedMarkdownRole(
   sourcePath: string
 ): Exclude<KnowledgeInitializationRole, "keep"> | null {
   const normalized = normalizeRelativePath(sourcePath);
+  if (!isKnowledgeInitializationMarkdownPath(normalized)) return null;
   const topLevel = normalized.split("/")[0]?.toLocaleLowerCase() ?? "";
   return (KNOWLEDGE_INITIALIZATION_MARKDOWN_ROLES as readonly string[]).includes(topLevel)
     ? topLevel as Exclude<KnowledgeInitializationRole, "keep">

@@ -2776,11 +2776,13 @@ async function assertKnowledgeInitDefaultTabAndOneClickStart(): Promise<void> {
   // 默认方案内容：直接用用户能理解的顺序说清楚方法、十个目录、
   // 原笔记保护与 AI 分批提炼；不再藏在「方案说明」折叠区。
   assert.match(panel.textContent, /Karpathy（卡帕西）/u);
-  assert.match(panel.textContent, /现有 Markdown 笔记/u);
+  assert.match(panel.textContent, /现有的普通文件/u);
+  assert.match(panel.textContent, /Markdown、图片和 PDF/u);
   assert.match(panel.textContent, /Raw/u);
   assert.match(panel.textContent, /AI/u);
   assert.match(panel.textContent, /Wiki/u);
-  assert.match(panel.textContent, /不会删除或改写原笔记/u);
+  assert.match(panel.textContent, /不会改写原文/u);
+  assert.match(panel.textContent, /没有可提炼内容时会直接跳过/u);
   assert.match(panel.textContent, /确认无误后/u);
   assert.equal(panel.querySelectorAll(".echoink-knowledge-init-folder-purpose").length, 10);
   assert.equal(panel.querySelector(".echoink-knowledge-init-plan-details"), null);
@@ -2945,8 +2947,11 @@ async function assertKnowledgeInitPausedMappingsHideTechnicalDetails(): Promise<
   activateApiProvider(settings, readyProvider);
   const tab = await renderKnowledgeInitTab(plugin);
   const panel = knowledgeInitPanel(tab);
-  assert.match(panel.textContent, /初始化暂停了/u);
-  assert.match(panel.textContent, /已经完成的内容会保留/u);
+  assert.match(panel.textContent, /初始化没有完成/u);
+  assert.match(panel.textContent, /失败原因/u);
+  assert.match(panel.textContent, /有文件未能安全归入 Raw/u);
+  assert.match(panel.textContent, /已完成/u);
+  assert.match(panel.textContent, /下一步/u);
   assert.ok(panel.querySelector(".echoink-knowledge-init-pause-icon"));
   const resume = panel.querySelector(".echoink-knowledge-init-cta");
   assert.equal(resume?.textContent, "继续初始化");
@@ -2982,7 +2987,7 @@ async function assertKnowledgeInitPausedMappingsHideTechnicalDetails(): Promise<
   const rerun = createKnowledgeInitPluginFixture(rerunState);
   const rerunTab = await renderKnowledgeInitTab(rerun.plugin);
   const rerunPanel = knowledgeInitPanel(rerunTab);
-  assert.match(rerunPanel.textContent, /初始化暂停了/u);
+  assert.match(rerunPanel.textContent, /初始化已暂停/u);
   const rerunReselect = knowledgeInitButtons(rerunPanel)
     .find((button) => button.textContent === "重新选择方案");
   rerunReselect?.click();
@@ -3004,7 +3009,7 @@ async function assertKnowledgeInitPausedMappingsHideTechnicalDetails(): Promise<
   const providerlessTab = await renderKnowledgeInitTab(providerless.plugin);
   assert.match(
     knowledgeInitPanel(providerlessTab).textContent,
-    /需要先设置可用模型/u
+    /没有可用的 API Provider/u
   );
 }
 
@@ -3067,7 +3072,7 @@ async function assertKnowledgeInitProgressAndCompletion(): Promise<void> {
     "an initialized knowledge base must still expose the tutorial anchor"
   );
   assert.match(donePanel.textContent, /知识库状态正常/u);
-  assert.ok(donePanel.querySelector(".echoink-knowledge-init-status-heading.is-ready"));
+  assert.ok(donePanel.querySelector(".echoink-knowledge-init-status-heading.is-init-ready"));
   assert.deepEqual(
     knowledgeInitButtons(donePanel).map((button) => button.textContent),
     ["打开 Wiki 首页", "整理新增笔记"]
@@ -3120,7 +3125,7 @@ async function assertKnowledgeInitStructureTruthAndRepair(): Promise<void> {
   assert.match(partialPanel.textContent, /缺少目录：projects、assets/u);
   assert.match(partialPanel.textContent, /可能无法正常工作/u);
   assert.match(partialPanel.textContent, /不会移动、删除或改写任何笔记/u);
-  assert.ok(partialPanel.querySelector(".echoink-knowledge-init-status-heading.is-warning"));
+  assert.ok(partialPanel.querySelector(".echoink-knowledge-init-status-heading.is-init-warning"));
   assert.equal(
     knowledgeInitButtons(partialPanel).find((button) => button.textContent === "恢复文件夹体系")
       ?.getAttribute("type"),
@@ -3135,7 +3140,12 @@ async function assertKnowledgeInitStructureTruthAndRepair(): Promise<void> {
   partialTab.display();
   partialPanel = knowledgeInitPanel(partialTab);
   assert.match(partialPanel.textContent, /正在恢复文件夹体系/u);
-  assert.ok(partialPanel.querySelector(".echoink-knowledge-init-status-heading.is-loading"));
+  assert.ok(partialPanel.querySelector(".echoink-knowledge-init-status-heading.is-init-loading"));
+  assert.equal(
+    partialPanel.querySelector(".echoink-knowledge-init-status-heading.is-loading"),
+    null,
+    "knowledge initialization must not reuse Obsidian's generic is-loading class"
+  );
   assert.equal(
     partialPanel.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow"),
     "40"
@@ -3149,7 +3159,7 @@ async function assertKnowledgeInitStructureTruthAndRepair(): Promise<void> {
   partialTab.display();
   partialPanel = knowledgeInitPanel(partialTab);
   assert.match(partialPanel.textContent, /知识库状态正常/u);
-  assert.ok(partialPanel.querySelector(".echoink-knowledge-init-status-heading.is-ready"));
+  assert.ok(partialPanel.querySelector(".echoink-knowledge-init-status-heading.is-init-ready"));
   // 关闭后重新进入必须重新读 Vault，不能继续复用上次的 ready 快照。
   partialTab.hide();
   partialState.structure = makeKnowledgeBaseStructureFixture("uninitialized");
@@ -3391,7 +3401,7 @@ async function assertKnowledgeInitRecoveryAndActionErrorRendering(): Promise<voi
   const maskedPanel = knowledgeInitPanel(maskedTab);
   assert.doesNotMatch(maskedPanel.textContent, /知识库状态正常/u,
     "a pending job must never be masked by the done panel");
-  assert.match(maskedPanel.textContent, /初始化暂停了/u);
+  assert.match(maskedPanel.textContent, /初始化已暂停/u);
   assert.equal(maskedPanel.querySelector(".echoink-knowledge-init-cta")?.textContent, "继续初始化");
   maskedTab.hide();
 
@@ -3504,7 +3514,7 @@ async function assertKnowledgeInitRecoveryAndActionErrorRendering(): Promise<voi
     providerlessRecheck?.querySelectorAll(".echoink-particle-button-dot").length,
     6
   );
-  assert.match(providerlessPanel.textContent, /需要先设置可用模型/u);
+  assert.match(providerlessPanel.textContent, /没有可用的 API Provider/u);
   const providerLink = providerlessPanel.querySelector<HTMLButtonElement>(
     ".echoink-knowledge-init-provider-link"
   );
@@ -3534,7 +3544,7 @@ async function assertKnowledgeInitRecoveryAndActionErrorRendering(): Promise<voi
   const staleTab = await renderKnowledgeInitTab(staleDigest.plugin);
   const stalePanel = knowledgeInitPanel(staleTab);
   assert.equal(stalePanel.querySelector(".echoink-knowledge-init-cta")?.textContent, "重新检查并继续");
-  assert.match(stalePanel.textContent, /模型或计划已经变化/u);
+  assert.match(stalePanel.textContent, /模型或文件计划在确认后发生了变化/u);
   assert.equal(
     stalePanel.querySelector(".echoink-knowledge-init-provider-link"),
     null,

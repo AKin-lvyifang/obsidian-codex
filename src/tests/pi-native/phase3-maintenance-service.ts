@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import * as fsp from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import {
   PHASE3_MAINTENANCE_RAW_INDEX_PATH,
   PHASE3_MAINTENANCE_TRACKER_PATH,
@@ -60,6 +63,8 @@ export async function runPhase3KnowledgeMaintenanceServiceTests(): Promise<void>
   assertStrictDurableResultEnvelope();
   await assertMaintenanceScopeSecurityIsFailClosed();
   await assertReliableExistingKnowledgeReturnsNoopBeforeWrites();
+  await assertProductionStructuredNoopCompletesChangedRaw();
+  await assertStructuredNoopProcessesExplicitRaw();
   await assertExplicitRawPriorityAndDirectSequentialWrite();
   await assertDirectRunCreatesNoActivePreviewOrApproval();
   await assertTrackerSelectionStopsAtTwenty();
@@ -308,6 +313,98 @@ async function assertReliableExistingKnowledgeReturnsNoopBeforeWrites(): Promise
   assert.deepEqual(result.producedPaths, []);
   assert.match(result.message, /现有知识/u);
   assert.match(result.message, /wiki\/existing\.md/u);
+}
+
+async function assertProductionStructuredNoopCompletesChangedRaw(): Promise<void> {
+  const fixtureRoot = await fsp.realpath(
+    await fsp.mkdtemp(path.join(os.tmpdir(), "echoink-maintain-noop-"))
+  );
+  const vaultRootPath = path.join(fixtureRoot, "vault");
+  const privateKnowledgeRootPath = path.join(fixtureRoot, "private");
+  const rawPath = "raw/a.md";
+  const rawContent = "没有可提炼的测试内容";
+  const trackerContent = "# Knowledge Maintenance Tracker\n";
+  const domain = new FakeVaultDomain();
+  try {
+    await fsp.mkdir(path.join(vaultRootPath, "raw"), { recursive: true });
+    await fsp.mkdir(path.join(vaultRootPath, "outputs"), { recursive: true });
+    await fsp.mkdir(privateKnowledgeRootPath, { recursive: true, mode: 0o700 });
+    await fsp.chmod(privateKnowledgeRootPath, 0o700);
+    await fsp.writeFile(path.join(vaultRootPath, rawPath), rawContent);
+    await fsp.writeFile(
+      path.join(vaultRootPath, PHASE3_MAINTENANCE_TRACKER_PATH),
+      trackerContent
+    );
+    domain.seed(rawPath, rawContent);
+    domain.seed(PHASE3_MAINTENANCE_TRACKER_PATH, trackerContent);
+
+    const port = new ProductionPiKnowledgeMaintenanceToolPort({
+      vaultRootPath,
+      privateKnowledgeRootPath,
+      vaultId: VAULT_ID,
+      userId: "user-phase3",
+      deviceId: "device-phase3",
+      domainService: domain as never,
+      dateKey: () => DATE_KEY
+    });
+    await port.initialize();
+    const result = await port.execute({
+      vaultId: VAULT_ID,
+      conversationId: "conversation-production-noop",
+      piSessionId: "pi-production-noop",
+      productRunId: "run-production-noop",
+      toolCallId: "tool-production-noop",
+      mode: "maintain",
+      request: "/maintain",
+      sourcePaths: [rawPath],
+      preferenceSnapshot: PREFERENCE,
+      candidateActions: []
+    });
+
+    assert.equal(result.status, "completed", JSON.stringify(result));
+    assert.equal(result.maintenanceResult?.status, "noop");
+    assert.match(result.message, /没有可提炼内容/u);
+    assert.deepEqual(result.maintenanceResult?.notes, []);
+    assert.equal(
+      result.maintenanceResult?.systemPaths.includes(
+        PHASE3_MAINTENANCE_TRACKER_PATH
+      ),
+      true
+    );
+    assert.equal(domain.formalWrites.length, 3);
+  } finally {
+    await fsp.rm(fixtureRoot, { recursive: true, force: true });
+  }
+}
+
+async function assertStructuredNoopProcessesExplicitRaw(): Promise<void> {
+  const fixture = createFixture({
+    trackerPaths: ["raw/a.md"],
+    proposalFactory: (input) => structuredNoopProposal(input)
+  });
+  fixture.domain.seed("raw/a.md", "没有可提炼的测试内容");
+  fixture.domain.seed(PHASE3_MAINTENANCE_TRACKER_PATH, "tracker");
+
+  const result = await fixture.service.execute({
+    vaultId: VAULT_ID,
+    dateKey: DATE_KEY,
+    explicitRawPaths: ["raw/a.md"],
+    preference: PREFERENCE,
+    toolCall: toolCallFor("structured-noop")
+  });
+
+  assert.equal(result.status, "completed");
+  assert.deepEqual(result.notes, []);
+  assert.deepEqual([...result.systemPaths].sort(), [
+    PHASE3_MAINTENANCE_RAW_INDEX_PATH,
+    PHASE3_MAINTENANCE_TRACKER_PATH,
+    phase3MaintenanceReportPath(DATE_KEY)
+  ].sort());
+  assert.equal(fixture.domain.formalWrites.length, 3);
+  assert.match(
+    fixture.domain.content(PHASE3_MAINTENANCE_TRACKER_PATH) ?? "",
+    /raw\/a\.md/u
+  );
 }
 
 function assertStrictDurableResultEnvelope(): void {
@@ -1288,6 +1385,32 @@ function defaultProposal(
         targetPath: PHASE3_MAINTENANCE_RAW_INDEX_PATH,
         content: `index: ${selected}`
       }
+    ])
+  });
+}
+
+function structuredNoopProposal(
+  input: Readonly<Phase3MaintenanceProposalInput>
+): Readonly<Phase3MaintenanceProposal> {
+  const selected = input.selectedSources
+    .map((source) => source.raw.relativePath)
+    .join(", ");
+  return Object.freeze({
+    shadowId: `shadow-${input.previewId}`,
+    shadowRevision: `sealed-noop-${input.previewId}`,
+    actions: Object.freeze([
+      Object.freeze({
+        targetPath: input.reportPath,
+        content: `noop report for ${selected}`
+      }),
+      Object.freeze({
+        targetPath: PHASE3_MAINTENANCE_TRACKER_PATH,
+        content: `processed: ${selected}`
+      }),
+      Object.freeze({
+        targetPath: PHASE3_MAINTENANCE_RAW_INDEX_PATH,
+        content: `index: ${selected}`
+      })
     ])
   });
 }

@@ -35,6 +35,7 @@ export async function runKnowledgeInitializationTests(): Promise<void> {
   assertKnowledgeInitializationRecoveryDerivation();
   await assertProviderOrModelChangeRequiresNewPreview();
   await assertInitializationDoesNotGenerateLegacyRulesFile();
+  await assertRecommendedArchivesOrdinaryFilesAndOnlyExtractsMarkdown();
   await assertZeroQueuePreservesUserFilesAndSkipsProvider();
   await assertSerialBatchSizes();
   await assertFrozenExtractionSourcesAndNoProgress();
@@ -233,6 +234,7 @@ async function assertRecommendedAndCustomPreview(): Promise<void> {
     host.addFile("outside/note.md", "alpha");
     host.addFile("outside/long.markdown", "beta");
     host.addFile("outside/rejected.mdown", "nope");
+    host.addFile("outside/image.png", "binary image bytes");
     host.addFile("raw/existing.md", "raw");
     host.addFile("wiki/existing.md", "wiki");
     host.addFile("LLM-WIKI.md", "profile");
@@ -242,11 +244,21 @@ async function assertRecommendedAndCustomPreview(): Promise<void> {
     const recommended = await initializer.startPreview("recommended");
     assert.deepEqual(
       recommended.items.map((item) => item.sourcePath),
-      ["outside/long.markdown", "outside/note.md"]
+      [
+        "outside/image.png",
+        "outside/long.markdown",
+        "outside/note.md",
+        "outside/rejected.mdown"
+      ]
     );
     assert.deepEqual(
       recommended.items.map((item) => item.targetPath),
-      ["raw/imported/outside/long.markdown", "raw/imported/outside/note.md"]
+      [
+        "raw/imported/outside/image.png",
+        "raw/imported/outside/long.markdown",
+        "raw/imported/outside/note.md",
+        "raw/imported/outside/rejected.mdown"
+      ]
     );
     assert.deepEqual(recommended.extractionQueue, [
       "raw/existing.md",
@@ -260,6 +272,10 @@ async function assertRecommendedAndCustomPreview(): Promise<void> {
     assert.equal(recommended.expectedBatches, 1);
 
     const custom = await initializer.startPreview("custom");
+    await assert.rejects(
+      initializer.assign("outside/image.png", "wiki"),
+      /附件不能分配到笔记目录/u
+    );
     const assigned = await initializer.assign("outside/note.md", "wiki");
     assert.equal(
       assigned.items.find((item) => item.sourcePath === "outside/note.md")?.targetPath,
@@ -268,6 +284,44 @@ async function assertRecommendedAndCustomPreview(): Promise<void> {
     assert.equal(assigned.extractionQueue.includes("wiki/imported/outside/note.md"), false);
     assert.equal(assigned.extractionQueue.includes("raw/imported/outside/note.md"), false);
     assert.equal(custom.mode, "custom");
+  });
+}
+
+async function assertRecommendedArchivesOrdinaryFilesAndOnlyExtractsMarkdown(): Promise<void> {
+  await withHost(async (host) => {
+    host.addFile("old-folder/note.md", "useful note");
+    host.addFile("old-folder/diagram.png", "\u0000\u0001image bytes");
+    host.addFile("old-folder/reference.pdf", "%PDF fixture");
+
+    const initializer = new KnowledgeBaseInitializer(host);
+    await initializer.initialize();
+    const preview = await initializer.startPreview("recommended");
+    assert.deepEqual(
+      preview.items.map((item) => item.targetPath),
+      [
+        "raw/imported/old-folder/diagram.png",
+        "raw/imported/old-folder/note.md",
+        "raw/imported/old-folder/reference.pdf"
+      ]
+    );
+    assert.deepEqual(preview.extractionQueue, [
+      "raw/imported/old-folder/note.md"
+    ]);
+
+    await initializer.confirm();
+    const completed = await waitForTerminal(initializer);
+    assert.equal(completed.status, "initialized");
+    assert.equal(host.read("old-folder/diagram.png"), null);
+    assert.equal(host.read("old-folder/reference.pdf"), null);
+    assert.equal(
+      host.read("raw/imported/old-folder/diagram.png"),
+      "\u0000\u0001image bytes"
+    );
+    assert.equal(
+      host.read("raw/imported/old-folder/reference.pdf"),
+      "%PDF fixture"
+    );
+    assert.deepEqual(host.batchCalls, [["raw/imported/old-folder/note.md"]]);
   });
 }
 
@@ -1002,6 +1056,11 @@ class MemoryKnowledgeInitializationHost implements KnowledgeInitializationHost {
     return this.read(relativePath);
   }
 
+  async readFileHash(relativePath: string): Promise<string | null> {
+    const content = this.read(relativePath);
+    return content === null ? null : hash(content);
+  }
+
   async pathExists(relativePath: string): Promise<boolean> {
     if (this.failPathExists) throw new Error("injected pathExists failure");
     return this.files.has(relativePath) || this.folders.has(relativePath);
@@ -1042,7 +1101,7 @@ class MemoryKnowledgeInitializationHost implements KnowledgeInitializationHost {
     this.files.set(relativePath, content);
   }
 
-  async moveMarkdown(sourcePath: string, targetPath: string, expectedContentHash: string): Promise<void> {
+  async moveFile(sourcePath: string, targetPath: string, expectedContentHash: string): Promise<void> {
     this.moveCalls += 1;
     const source = this.files.get(sourcePath);
     if (source === undefined || hash(source) !== expectedContentHash) throw new Error("version_conflict");

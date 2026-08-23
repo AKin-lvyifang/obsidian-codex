@@ -168,6 +168,11 @@ function createKnowledgeInitializationHost(
     const file = plugin.app.vault.getFileByPath(normalizePath(relativePath));
     return file ? await plugin.app.vault.cachedRead(file) : null;
   };
+  const readFileHash = async (relativePath: string): Promise<string | null> => {
+    const file = plugin.app.vault.getFileByPath(normalizePath(relativePath));
+    if (!file) return null;
+    return binaryContentHash(await plugin.app.vault.readBinary(file));
+  };
   const ensureFolder = async (relativePath: string): Promise<void> => {
     const segments = normalizePath(relativePath).split("/").filter(Boolean);
     let current = "";
@@ -188,9 +193,10 @@ function createKnowledgeInitializationHost(
     now: Date.now,
     async listVaultFiles(): Promise<readonly KnowledgeInitializationVaultFile[]> {
       return await Promise.all(plugin.app.vault.getFiles().map(async (file) => {
-        const absolute = path.join(vaultRootPath, file.path);
-        const symbolicLink = await fsp.lstat(absolute)
-          .then((stats) => stats.isSymbolicLink(), () => true);
+        const symbolicLink = await knowledgeInitializationPathHasSymbolicLink(
+          vaultRootPath,
+          file.path
+        );
         return Object.freeze({
           path: file.path,
           size: file.stat.size,
@@ -201,6 +207,7 @@ function createKnowledgeInitializationHost(
       }));
     },
     readText,
+    readFileHash,
     async pathExists(relativePath: string): Promise<boolean> {
       const normalized = normalizePath(relativePath);
       return await knowledgeInitializationPathExists(
@@ -240,10 +247,10 @@ function createKnowledgeInitializationHost(
         return content;
       });
     },
-    async moveMarkdown(sourcePath: string, targetPath: string, expectedContentHash: string): Promise<void> {
+    async moveFile(sourcePath: string, targetPath: string, expectedContentHash: string): Promise<void> {
       const source = requireVaultFile(plugin, sourcePath);
-      if (contentHash(await plugin.app.vault.cachedRead(source)) !== expectedContentHash) {
-        throw new Error(`源笔记已变化：${sourcePath}`);
+      if (await readFileHash(sourcePath) !== expectedContentHash) {
+        throw new Error(`源文件已变化：${sourcePath}`);
       }
       if (plugin.app.vault.getAbstractFileByPath(normalizePath(targetPath))) {
         throw new Error(`目标已存在：${targetPath}`);
@@ -357,4 +364,21 @@ function requireVaultFile(
 
 function contentHash(content: string): string {
   return `sha256:${createHash("sha256").update(content, "utf8").digest("hex")}`;
+}
+
+function binaryContentHash(content: ArrayBuffer): string {
+  return `sha256:${createHash("sha256").update(Buffer.from(content)).digest("hex")}`;
+}
+
+async function knowledgeInitializationPathHasSymbolicLink(
+  vaultRootPath: string,
+  relativePath: string
+): Promise<boolean> {
+  let cursor = vaultRootPath;
+  for (const segment of normalizePath(relativePath).split("/").filter(Boolean)) {
+    cursor = path.join(cursor, segment);
+    const stats = await fsp.lstat(cursor).catch(() => null);
+    if (!stats || stats.isSymbolicLink()) return true;
+  }
+  return false;
 }

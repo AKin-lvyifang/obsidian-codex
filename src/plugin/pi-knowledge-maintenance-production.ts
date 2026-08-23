@@ -185,35 +185,6 @@ implements PiKnowledgeMaintenanceToolPort {
         }
       }
       const actions = input.candidateActions ?? [];
-      if (actions.length === 0) {
-        const service = this.createService(
-          new UnavailableMaintenanceProposalPort()
-        );
-        await service.recoverBeforeExecute(this.vaultId);
-        const noop = await service.isNoop({
-          vaultId: this.vaultId,
-          dateKey: this.dateKey(),
-          explicitRawPaths: sourcePaths,
-          preference: requirePreferenceSnapshot(input.preferenceSnapshot)
-        });
-        if (!noop) {
-          throw new Phase3MaintenanceError(
-            "proposal_invalid",
-            "Knowledge maintenance requires candidate actions"
-          );
-        }
-        return Object.freeze({
-          status: "completed" as const,
-          producedPaths: Object.freeze([]),
-          maintenanceResult: createKnowledgeMaintenanceResultEnvelope({
-            status: "noop"
-          }),
-          protocolVersion: ECHOINK_KNOWLEDGE_MAINTENANCE_PROTOCOL_VERSION,
-          preferenceProfileVersion: input.preferenceSnapshot?.profileVersion,
-          preferenceState: input.preferenceSnapshot?.state,
-          message: "没有待提炼的 Raw；本轮未写入知识笔记。"
-        });
-      }
       const preference = requirePreferenceSnapshot(input.preferenceSnapshot);
       const proposal = new FilePhase3MaintenanceShadowProposalPort({
           vaultRootPath: this.vaultRootPath,
@@ -245,7 +216,9 @@ implements PiKnowledgeMaintenanceToolPort {
         status: committed.status === "completed" ? "completed" as const : "failed" as const,
         producedPaths: committed.appliedPaths,
         maintenanceResult: createKnowledgeMaintenanceResultEnvelope({
-          status: committed.status,
+          status: actions.length === 0 && committed.status === "completed"
+            ? "noop"
+            : committed.status,
           notes: committed.notes,
           issues: committed.issues,
           systemPaths: committed.systemPaths
@@ -260,13 +233,15 @@ implements PiKnowledgeMaintenanceToolPort {
               ? "write_uncertain" as const
               : "write_failed" as const }),
         message: [
-          committed.status === "completed"
-            ? "知识维护已安全写入并完成 Readback。"
-            : committed.status === "partial"
-              ? "知识维护部分完成；仅展示已回读验证的知识笔记。"
-              : committed.status === "write_uncertain"
-                ? "知识写入状态不确定，已停止继续写入。"
-                : "知识维护失败，未完成回读验证的候选不会显示为成功。",
+          committed.status === "completed" && actions.length === 0
+            ? "Raw 已检查，没有可提炼内容；原文保留，本轮未生成知识笔记。"
+            : committed.status === "completed"
+              ? "知识维护已安全写入并完成 Readback。"
+              : committed.status === "partial"
+                ? "知识维护部分完成；仅展示已回读验证的知识笔记。"
+                : committed.status === "write_uncertain"
+                  ? "知识写入状态不确定，已停止继续写入。"
+                  : "知识维护失败，未完成回读验证的候选不会显示为成功。",
           ...committed.appliedPaths.map((relativePath) => `- ${relativePath}`)
         ].join("\n")
       });

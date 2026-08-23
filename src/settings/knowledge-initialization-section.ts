@@ -1,7 +1,9 @@
 import { Notice, setIcon } from "obsidian";
 import type CodexForObsidianPlugin from "../main";
 import {
+  isKnowledgeInitializationMarkdownPath,
   isKnowledgeInitializationRole,
+  KNOWLEDGE_INITIALIZATION_ROOTS,
   knowledgeInitializationSourceDefaultRole,
   type KnowledgeBaseStructureRepairProgress,
   type KnowledgeBaseStructureSnapshot,
@@ -47,7 +49,7 @@ interface KnowledgeInitDirectoryDef {
  * 只展示、不参与笔记分配。
  */
 export const KNOWLEDGE_INIT_DIRECTORIES: readonly KnowledgeInitDirectoryDef[] = Object.freeze([
-  { role: "raw", labelZh: "Raw", labelEn: "Raw", descriptionZh: "现有原始笔记和后续待提炼资料", descriptionEn: "Original notes and new material waiting to be distilled" },
+  { role: "raw", labelZh: "Raw", labelEn: "Raw", descriptionZh: "现有原始文件和后续待提炼资料", descriptionEn: "Original files and new material waiting to be distilled" },
   { role: "wiki", labelZh: "Wiki", labelEn: "Wiki", descriptionZh: "AI 提炼后的长期知识与索引", descriptionEn: "Long-term knowledge and indexes distilled by AI" },
   { role: "projects", labelZh: "Projects", labelEn: "Projects", descriptionZh: "按项目组织的资料与知识", descriptionEn: "Notes and knowledge organized by project" },
   { role: "outputs", labelZh: "Outputs", labelEn: "Outputs", descriptionZh: "整理过程记录与生成结果", descriptionEn: "Processing records and generated results" },
@@ -306,7 +308,7 @@ export class KnowledgeInitializationSection {
     tone: "ready" | "warning" | "loading"
   ): void {
     const row = panel.createDiv({
-      cls: `echoink-knowledge-init-status-heading is-${tone}`
+      cls: `echoink-knowledge-init-status-heading is-init-${tone}`
     });
     const icon = row.createSpan({
       cls: "echoink-knowledge-init-status-icon",
@@ -488,13 +490,15 @@ export class KnowledgeInitializationSection {
     const assetsRow = folderList.createDiv({ cls: "echoink-knowledge-init-folder-purpose" });
     assetsRow.createEl("dt", { text: "Assets" });
     assetsRow.createEl("dd", {
-      text: zh ? "图片、PDF 等附件，保持原位" : "Images, PDFs, and other attachments, kept in place"
+      text: zh
+        ? "知识库后续使用的图片、PDF 等附件"
+        : "Images, PDFs, and other attachments used by the knowledge base"
     });
     body.createDiv({
       cls: "echoink-knowledge-init-plan-copy",
       text: zh
-        ? "现有 Markdown 笔记会原样移入 Raw，并保留原来的相对路径；EchoInk 不会删除或改写原笔记。随后，AI 会最多每 20 篇分批提炼并生成 Wiki，文件多时会自动分批处理。"
-        : "Existing Markdown notes move into Raw unchanged while keeping their relative paths; EchoInk never deletes or rewrites the originals. AI then distills them into Wiki in batches of up to 20, automatically splitting larger Vaults into multiple batches."
+        ? "现有的普通文件（包括 Markdown、图片和 PDF）会原样归入 Raw，并保留原来的相对路径。EchoInk 不会改写原文。随后，AI 最多每 20 篇 Markdown 分批提炼 Wiki；没有可提炼内容时会直接跳过。"
+        : "Existing files, including Markdown, images, and PDFs, move into Raw unchanged while keeping their relative paths. EchoInk does not rewrite the source files. AI then distills Markdown into Wiki in batches of up to 20 and simply skips files with nothing useful to extract."
     });
     body.createDiv({
       cls: "echoink-knowledge-init-plan-confirm",
@@ -545,8 +549,8 @@ export class KnowledgeInitializationSection {
     body.createDiv({
       cls: "echoink-knowledge-init-copy",
       text: zh
-        ? "把体系外的笔记分配到固定目录；未指定的笔记默认归入 Raw。"
-        : "Assign stray notes to fixed folders; unspecified notes default to Raw."
+        ? "你可以把 Markdown 笔记分配到指定目录。未指定的笔记和普通附件会按原路径归入 Raw。"
+        : "Assign Markdown notes to specific folders. Unassigned notes and ordinary attachments move into Raw while keeping their original paths."
     });
     const conflicts = job.items.filter((item) => item.state === "conflict").length;
     if (conflicts > 0) {
@@ -557,8 +561,8 @@ export class KnowledgeInitializationSection {
       warning.createSpan({
         cls: "echoink-knowledge-init-warning-text",
         text: zh
-          ? `有 ${conflicts} 篇笔记的目标位置已存在文件，需要先处理这些冲突。`
-          : `${conflicts} notes have existing files at their targets; resolve these conflicts first.`
+          ? `有 ${conflicts} 个文件的目标位置已存在内容，需要先处理这些冲突。`
+          : `${conflicts} files already have content at their target paths; resolve these conflicts first.`
       });
     }
     this.dirListEl = body.createDiv({ cls: "echoink-knowledge-init-dirs" });
@@ -641,7 +645,7 @@ export class KnowledgeInitializationSection {
       row.createDiv({
         cls: "echoink-knowledge-init-dir-count",
         text: String(notes.length),
-        attr: { "aria-label": zh ? `${label} 已分配 ${notes.length} 篇` : `${notes.length} notes in ${label}` }
+        attr: { "aria-label": zh ? `${label} 已分配 ${notes.length} 项` : `${notes.length} items in ${label}` }
       });
       const addLabel = dir.role === "raw"
         ? (zh ? "移回 Raw" : "Move back to Raw")
@@ -717,7 +721,10 @@ export class KnowledgeInitializationSection {
     const job = this.job;
     if (!job) return;
     const notes = job.items
-      .filter((item) => item.role !== "keep")
+      .filter((item) =>
+        item.role !== "keep"
+        && isKnowledgeInitializationMarkdownPath(item.sourcePath)
+      )
       .map((item) => ({ sourcePath: item.sourcePath, role: item.role }));
     const modal = new KnowledgeNotePickerModal(this.plugin.app, {
       zh: this.zh,
@@ -997,21 +1004,54 @@ export class KnowledgeInitializationSection {
       currentProvider: this.currentProviderSnapshot()
     });
     const needsProviderSetup = this.recoveryNeedsProviderSetup(recovery, job);
+    const stoppedWithoutCompletion = job.status === "failed_recoverable"
+      || job.status === "write_uncertain";
     panel.createDiv({
       cls: "echoink-knowledge-init-heading",
       text: recovery.kind === "recheck-conflict"
         ? (zh ? "初始化遇到冲突" : "Initialization hit a conflict")
-        : (zh ? "初始化暂停了" : "Initialization paused")
+        : stoppedWithoutCompletion
+          ? (zh ? "初始化没有完成" : "Initialization did not finish")
+          : (zh ? "初始化已暂停" : "Initialization paused")
     });
     const notice = panel.createDiv({ cls: "echoink-knowledge-init-pause" });
     const icon = notice.createSpan({ cls: "echoink-knowledge-init-pause-icon" });
     setIcon(icon, "alert-triangle");
     icon.setAttr("aria-hidden", "true");
     const pauseText = notice.createDiv({ cls: "echoink-knowledge-init-pause-text" });
-    pauseText.createSpan({
-      text: this.pauseNoticeText(recovery, job, zh, needsProviderSetup),
+    const pauseDetails = pauseText.createDiv({
+      cls: "echoink-knowledge-init-pause-details",
       attr: { role: "status", "aria-live": "polite" }
     });
+    const details = [
+      {
+        label: stoppedWithoutCompletion
+          ? (zh ? "失败原因" : "What stopped")
+          : (zh ? "暂停原因" : "Why it paused"),
+        value: this.pauseReasonText(recovery, job, zh, needsProviderSetup)
+      },
+      {
+        label: zh ? "已完成" : "Completed",
+        value: this.pauseCompletedText(job, zh)
+      },
+      {
+        label: zh ? "下一步" : "Next step",
+        value: this.pauseNextStepText(recovery, job, zh, needsProviderSetup)
+      }
+    ];
+    for (const detail of details) {
+      const detailRow = pauseDetails.createDiv({
+        cls: "echoink-knowledge-init-pause-detail"
+      });
+      detailRow.createDiv({
+        cls: "echoink-knowledge-init-pause-label",
+        text: detail.label
+      });
+      detailRow.createDiv({
+        cls: "echoink-knowledge-init-pause-value",
+        text: detail.value
+      });
+    }
     if (needsProviderSetup) {
       const providerLink = pauseText.createEl("button", {
         cls: "echoink-knowledge-init-provider-link",
@@ -1079,7 +1119,7 @@ export class KnowledgeInitializationSection {
     }
   }
 
-  private pauseNoticeText(
+  private pauseReasonText(
     recovery: KnowledgeInitializationRecovery,
     job: Readonly<KnowledgeInitializationJob>,
     zh: boolean,
@@ -1087,24 +1127,97 @@ export class KnowledgeInitializationSection {
   ): string {
     if (recovery.kind === "recheck-conflict") {
       return zh
-        ? "有些笔记的目标位置已存在文件，EchoInk 不会覆盖。处理冲突或修改分配后，重新检查即可。"
-        : "Some notes have existing files at their targets, and EchoInk will not overwrite them. Resolve the conflicts or edit the assignments, then recheck.";
+        ? "有文件的目标位置已存在内容。EchoInk 已停止移动，避免覆盖原文件。"
+        : "Some target paths already contain files. EchoInk stopped before moving anything there so the existing files are not overwritten.";
     }
     if (recovery.kind === "recheck-preview") {
       // 作业快照本身没有 Provider（创建时就没配）且还有待提炼内容：
       // 直接说「先设置模型」，而不是「模型已变化」。
       if (needsProviderSetup) {
         return zh
-          ? "需要先设置可用模型，才能把 Raw 笔记提炼成 Wiki。"
-          : "Set up an available model first so Raw notes can be distilled into Wiki.";
+          ? "当前没有可用的 API Provider，因此 AI 还不能提炼 Raw 笔记。"
+          : "No API Provider is currently available, so AI cannot distill the Raw notes yet.";
       }
       return zh
-        ? "模型或计划已经变化，原来的确认不再有效。重新检查并确认新的计划后即可继续。"
-        : "The model or plan has changed, so the previous confirmation is no longer valid. Recheck and confirm the new plan to continue.";
+        ? "模型或文件计划在确认后发生了变化，EchoInk 已停止使用旧计划。"
+        : "The model or file plan changed after confirmation, so EchoInk stopped using the old plan.";
+    }
+    if (job.status === "cancelled") {
+      return zh ? "你暂停了这次初始化。" : "You paused this initialization.";
+    }
+    if (job.status === "write_uncertain") {
+      return zh
+        ? "上一步的文件写入结果还无法确认，EchoInk 已停止后续操作，避免重复写入。"
+        : "The previous file write could not be verified, so EchoInk stopped to avoid writing it twice.";
+    }
+    if (job.phase === "create_directories") {
+      return zh
+        ? "有固定目录未能创建或被同名文件占用。"
+        : "A required folder could not be created or its path is occupied by a file.";
+    }
+    if (job.phase === "move_notes") {
+      return zh
+        ? "有文件未能安全归入 Raw。EchoInk 已停止，不会覆盖原文件。"
+        : "A file could not be moved safely into Raw. EchoInk stopped without overwriting the source.";
+    }
+    if (job.phase === "batch_extraction") {
+      return zh
+        ? "模型没有完成当前这批 Wiki 提炼。Raw 原文和已完成的整理都会保留。"
+        : "The model did not finish the current Wiki batch. Raw sources and completed organization are preserved.";
+    }
+    if (job.phase === "generate_guide") {
+      return zh
+        ? "Wiki 使用指南或索引还没有完成。"
+        : "The Wiki guide or index has not finished generating.";
     }
     return zh
-      ? "初始化暂停了。已经完成的内容会保留，解决问题后可以继续。"
-      : "Initialization paused. Completed work is kept; you can continue after fixing the issue.";
+      ? "初始化没有完成，EchoInk 已保留当前进度。"
+      : "Initialization did not finish, and EchoInk preserved the current progress.";
+  }
+
+  private pauseCompletedText(
+    job: Readonly<KnowledgeInitializationJob>,
+    zh: boolean
+  ): string {
+    const moveTotal = job.items.filter((item) => item.targetPath !== null).length;
+    const moved = job.items.filter((item) => item.state === "moved").length;
+    const directoryTotal = KNOWLEDGE_INITIALIZATION_ROOTS.length;
+    const directories = Math.min(job.createdDirectories.length, directoryTotal);
+    if (zh) {
+      return `目录 ${directories}/${directoryTotal}；归档文件 ${moved}/${moveTotal}；AI 提炼 ${job.extractionCursor}/${job.extractionQueue.length}。已完成内容和 Raw 原文都会保留。`;
+    }
+    return `Folders ${directories}/${directoryTotal}; archived files ${moved}/${moveTotal}; AI sources ${job.extractionCursor}/${job.extractionQueue.length}. Completed work and Raw source files are preserved.`;
+  }
+
+  private pauseNextStepText(
+    recovery: KnowledgeInitializationRecovery,
+    job: Readonly<KnowledgeInitializationJob>,
+    zh: boolean,
+    needsProviderSetup = this.recoveryNeedsProviderSetup(recovery, job)
+  ): string {
+    if (recovery.kind === "recheck-conflict") {
+      return zh
+        ? "先处理目标路径的同名文件，然后点击“重新检查冲突”。"
+        : "Resolve the files occupying the target paths, then select Recheck conflicts.";
+    }
+    if (recovery.kind === "recheck-preview") {
+      if (needsProviderSetup) {
+        return zh
+          ? "先设置可用的 API Provider，再点击“重新检查并继续”。"
+          : "Set up an available API Provider, then select Recheck and continue.";
+      }
+      return zh
+        ? "点击“重新检查并继续”，EchoInk 会根据当前模型和文件重建计划。"
+        : "Select Recheck and continue to rebuild the plan from the current model and files.";
+    }
+    if (job.phase === "batch_extraction") {
+      return zh
+        ? "确认 API Provider 可用后，点击“继续初始化”。已完成的批次不会重做。"
+        : "Confirm the API Provider is available, then select Continue initialization. Completed batches will not run again.";
+    }
+    return zh
+      ? "确认文件没有被其他操作占用后，点击“继续初始化”。"
+      : "Make sure no other action is using the files, then select Continue initialization.";
   }
 
   private recoveryNeedsProviderSetup(
