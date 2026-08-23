@@ -53,6 +53,7 @@ import {
 import {
   applyDreamProfileUpdate,
   emptyUserProfileState,
+  inspectUserProfileStateFile,
   parseUserProfileState,
   profileKeyPromptCatalog,
   PROFILE_KEY_PROMPT_CAP,
@@ -2329,6 +2330,105 @@ async function scenarioUserProfileV1MigrationFailsClosed(): Promise<void> {
     void system;
   });
   console.log("PASS cognitive: user-profile v1 migration maps deterministically or fails closed");
+}
+
+async function scenarioMalformedUserProfileStateFailsClosed(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    assert.deepEqual(
+      await inspectUserProfileStateFile(fixture.repository.layout.userProfileState),
+      { kind: "missing" }
+    );
+
+    const validV2 = userProfileStateJson(emptyUserProfileState(fixture.now()));
+    await writeFile(fixture.repository.layout.userProfileState, validV2);
+    assert.equal(
+      (await inspectUserProfileStateFile(fixture.repository.layout.userProfileState)).kind,
+      "v2"
+    );
+
+    const validV1 = JSON.stringify({
+      schema: "echoink.user-profile.v1",
+      revision: 0,
+      items: [],
+      processedSources: [],
+      legacyUserMigration: null,
+      lastProjectedUserHash: "",
+      updatedAt: 0
+    }, null, 2) + "\n";
+    await writeFile(fixture.repository.layout.userProfileState, validV1);
+    assert.equal(
+      (await inspectUserProfileStateFile(fixture.repository.layout.userProfileState)).kind,
+      "v1"
+    );
+
+    await writeFile(fixture.repository.layout.userProfileState, "{malformed-json\n");
+    assert.deepEqual(
+      await inspectUserProfileStateFile(fixture.repository.layout.userProfileState),
+      { kind: "invalid", reason: "unparseable_json" }
+    );
+
+    await writeFile(
+      fixture.repository.layout.userProfileState,
+      Uint8Array.from([0x7b, 0x22, 0x78, 0x22, 0x3a, 0x22, 0xc3, 0x28, 0x22, 0x7d])
+    );
+    assert.deepEqual(
+      await inspectUserProfileStateFile(fixture.repository.layout.userProfileState),
+      { kind: "invalid", reason: "invalid_utf8" }
+    );
+  });
+
+  await withPersonalMemoryFixture(async (fixture) => {
+    const malformed = Buffer.from("{startup-malformed\n", "utf8");
+    const userBefore = await readFile(fixture.repository.layout.user);
+    const manifestBefore = await readFile(fixture.repository.layout.manifest);
+    await writeFile(fixture.repository.layout.userProfileState, malformed);
+    await assert.rejects(
+      () => createSystem(fixture, () => null),
+      /user_profile_state_invalid:unparseable_json/u
+    );
+    assert.deepEqual(await readFile(fixture.repository.layout.userProfileState), malformed);
+    assert.deepEqual(await readFile(fixture.repository.layout.user), userBefore);
+    assert.deepEqual(await readFile(fixture.repository.layout.manifest), manifestBefore);
+  });
+
+  await withPersonalMemoryFixture(async (fixture) => {
+    const system = await createSystem(fixture, () => scriptedDreamLlm(() => EMPTY_DREAM_OUTPUT));
+    const malformed = Buffer.from("{dream-malformed\n", "utf8");
+    const userBefore = await readFile(fixture.repository.layout.user);
+    const manifestBefore = await readFile(fixture.repository.layout.manifest);
+    await writeFile(fixture.repository.layout.userProfileState, malformed);
+    await assert.rejects(
+      () => system.forceDreamRun(),
+      /user_profile_state_invalid:unparseable_json/u
+    );
+    assert.deepEqual(await readFile(fixture.repository.layout.userProfileState), malformed);
+    assert.deepEqual(await readFile(fixture.repository.layout.user), userBefore);
+    assert.deepEqual(await readFile(fixture.repository.layout.manifest), manifestBefore);
+  });
+
+  await withPersonalMemoryFixture(async (fixture) => {
+    const malformed = Buffer.from("{profile-update-malformed\n", "utf8");
+    const userBefore = await readFile(fixture.repository.layout.user);
+    const manifestBefore = await readFile(fixture.repository.layout.manifest, "utf8");
+    const revision = (JSON.parse(manifestBefore) as { revision: number }).revision;
+    await writeFile(fixture.repository.layout.userProfileState, malformed);
+    await assert.rejects(
+      () => fixture.repository.write({
+        operation: "profile_update",
+        profileKey: "preference.language",
+        text: "用户明确偏好中文",
+        basis: "explicit",
+        contentOrigin: "user_statement",
+        expectedRevision: revision
+      }, fixture.runtime()),
+      /user_profile_state_invalid:unparseable_json/u
+    );
+    assert.deepEqual(await readFile(fixture.repository.layout.userProfileState), malformed);
+    assert.deepEqual(await readFile(fixture.repository.layout.user), userBefore);
+    assert.equal(await readFile(fixture.repository.layout.manifest, "utf8"), manifestBefore);
+  });
+
+  console.log("PASS cognitive: malformed user-profile state fails closed without overwrite");
 }
 
 async function scenarioUserProjectionCasAndProfileUpdate(): Promise<void> {
@@ -5466,6 +5566,7 @@ export async function runCognitiveSystemScenarios(): Promise<void> {
   await scenarioObservedProfileKeyAggregation();
   await scenarioUserProfileProcessedSourcesStayBounded();
   await scenarioUserProfileV1MigrationFailsClosed();
+  await scenarioMalformedUserProfileStateFailsClosed();
   await scenarioUserProjectionCasAndProfileUpdate();
   await scenarioUserEditedLowConfidenceRecallable();
   await scenarioFirstQueryUsesMountedSecondaryRecords();
