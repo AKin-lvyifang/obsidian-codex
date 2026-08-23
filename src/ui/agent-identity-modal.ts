@@ -1,29 +1,25 @@
-/**
- * agent-identity-modal.ts — 「给你的 Agent 起个名字」/ 身份编辑弹窗。
- *
- * 首次选择人格模板后必须经过这里确认名字；取消时零写入（调用方在确认前
- * 根本不会调用 selectPersonalityTemplate）。基础设置中的「编辑身份」
- * 复用同一个弹窗，保存时调用 CognitiveSystem.updateAgentIdentity()。
- */
-
-import { Modal, Notice } from "obsidian";
+import { Modal, Notice, setIcon } from "obsidian";
 import {
   AGENT_DISPLAY_NAME_MAX_CHARS,
   countUnicodeChars,
   normalizeAgentDisplayName,
   type AgentAvatarState
 } from "../harness/memory/agent-identity-state";
+import { applyAmicroButton } from "../settings/amicro-buttons";
 import {
-  processAgentAvatar,
   AvatarProcessingError,
   createBrowserAvatarRenderer,
+  processAgentAvatar,
   type AvatarRenderer
 } from "./agent-avatar-processor";
 import {
-  resolveAgentAvatarUrl,
+  AGENT_AVATAR_PRESETS,
+  DEFAULT_AGENT_AVATAR_PRESET_ID,
   type AgentAvatarPreset
 } from "./agent-avatar-presets";
-import { applyAmicroButton } from "../settings/amicro-buttons";
+import { renderAnimateIcon } from "./animate-icon";
+
+let avatarRadioGroupSequence = 0;
 
 export interface AgentIdentityDraft {
   readonly displayName: string;
@@ -34,32 +30,31 @@ export interface AgentIdentityModalOptions {
   readonly initialName: string;
   readonly initialAvatar: AgentAvatarState;
   readonly language: "zh" | "en";
-  /** first-run = 首次命名（完成设置）；edit = 设置页修改（保存）。 */
   readonly mode: "first-run" | "edit";
   readonly presets?: readonly AgentAvatarPreset[];
-  /** 测试注入：文件 → custom 头像状态。默认使用浏览器 Canvas 渲染器。 */
   readonly avatarRenderer?: AvatarRenderer;
-  /** preset 资源解析；解析失败回退默认 bot 图标。 */
   readonly resolvePresetAsset?: (presetId: string) => string | null;
   readonly onConfirm: (draft: AgentIdentityDraft) => Promise<void>;
 }
 
 export class AgentIdentityModal extends Modal {
   private readonly options: AgentIdentityModalOptions;
+  private readonly radioGroupName = `echoink-agent-avatar-${++avatarRadioGroupSequence}`;
   private nameValue: string;
   private avatarValue: AgentAvatarState;
   private nameInputEl: HTMLInputElement | null = null;
   private nameErrorEl: HTMLElement | null = null;
+  private avatarErrorEl: HTMLElement | null = null;
+  private avatarGridEl: HTMLElement | null = null;
+  private uploadButtonEl: HTMLButtonElement | null = null;
   private confirmButtonEl: HTMLButtonElement | null = null;
-  private previewEl: HTMLElement | null = null;
-  private presetListEl: HTMLElement | null = null;
   private busy = false;
 
   constructor(app: unknown, options: AgentIdentityModalOptions) {
     super(app as never);
     this.options = options;
     this.nameValue = options.initialName;
-    this.avatarValue = options.initialAvatar;
+    this.avatarValue = normalizeInitialAvatar(options.initialAvatar, this.presets());
   }
 
   onOpen(): void {
@@ -68,119 +63,104 @@ export class AgentIdentityModal extends Modal {
     content.empty();
     content.addClass("echoink-agent-identity-modal");
 
-    content.createEl("h2", {
-      text: zh ? "给你的 Agent 起个名字" : "Name your Agent"
-    });
+    content.createEl("h2", { text: zh ? "给你的 Agent 起个名字" : "Name your Agent" });
     content.createDiv({
       cls: "echoink-agent-identity-modal-desc",
       text: this.options.mode === "first-run"
         ? (zh
             ? "这个名称和头像会显示在 Agent 的回复旁。以后可以在「基础设置 → 身份与用户画像」中修改。"
             : "This name and avatar appear next to the Agent's replies. You can change them later in Settings → Identity and user profile.")
-        : (zh
-            ? "修改身份不会重置人格或 Memory。"
-            : "Changing identity does not reset personality or Memory.")
+        : (zh ? "修改身份不会重置人格或 Memory。" : "Changing identity does not reset personality or Memory.")
     });
 
-    // --- Name field ---------------------------------------------------------
     const nameField = content.createDiv({ cls: "echoink-agent-identity-field" });
-    nameField.createDiv({ cls: "echoink-agent-identity-label", text: zh ? "Agent 名称" : "Agent name" });
+    const nameLabel = nameField.createEl("label", {
+      cls: "echoink-agent-identity-label",
+      text: zh ? "Agent 名称" : "Agent name"
+    });
     this.nameInputEl = nameField.createEl("input", {
-      type: "text",
       attr: {
+        type: "text",
         placeholder: zh ? "例如：小墨" : "e.g. Xiaomo",
         maxlength: String(AGENT_DISPLAY_NAME_MAX_CHARS * 4)
       }
     }) as unknown as HTMLInputElement;
+    const nameInputId = `${this.radioGroupName}-name`;
+    this.nameInputEl.id = nameInputId;
+    nameLabel.setAttribute("for", nameInputId);
     this.nameInputEl.value = this.nameValue;
-    this.nameErrorEl = nameField.createDiv({ cls: "echoink-agent-identity-error" });
+    this.nameErrorEl = nameField.createDiv({
+      cls: "echoink-agent-identity-error",
+      attr: { "aria-live": "polite" }
+    });
     this.nameInputEl.addEventListener("input", () => {
       this.nameValue = this.nameInputEl?.value ?? "";
       this.refreshConfirmState();
     });
 
-    // --- Avatar area --------------------------------------------------------
     const avatarArea = content.createDiv({ cls: "echoink-agent-identity-avatar-area" });
-    this.previewEl = avatarArea.createDiv({ cls: "echoink-agent-identity-modal-preview" });
-    this.renderPreview();
-
-    const avatarActions = avatarArea.createDiv({ cls: "echoink-agent-identity-avatar-actions" });
-    const uploadButton = avatarActions.createEl("button", {
-      type: "button",
-      cls: "echoink-agent-identity-upload",
-      text: zh ? "上传头像" : "Upload avatar"
+    const avatarHeader = avatarArea.createDiv({ cls: "echoink-agent-identity-avatar-header" });
+    avatarHeader.createDiv({
+      cls: "echoink-agent-identity-avatar-title",
+      text: zh ? "给你的 Agent 选一个形象" : "Choose a look for your Agent"
     });
+    this.uploadButtonEl = avatarHeader.createEl("button", {
+      cls: "echoink-agent-identity-upload",
+      attr: {
+        type: "button",
+        "aria-label": zh ? "上传 SVG 头像" : "Upload SVG avatar",
+        title: zh ? "上传 SVG 头像" : "Upload SVG avatar"
+      }
+    }) as unknown as HTMLButtonElement;
+    renderAnimateIcon(this.uploadButtonEl, "upload");
+    this.uploadButtonEl.createSpan({ text: "Upload" });
+
     const fileInput = avatarArea.createEl("input", {
-      type: "file",
       cls: "echoink-agent-identity-file",
-      attr: { accept: "image/png,image/jpeg,image/webp" }
+      attr: { type: "file", accept: ".svg,image/svg+xml" }
     }) as unknown as HTMLInputElement;
-    uploadButton.addEventListener("click", () => {
+    this.uploadButtonEl.addEventListener("click", () => {
       (fileInput as unknown as { click?: () => void }).click?.();
     });
-    fileInput.addEventListener("change", () => {
-      void this.handleFilePicked(fileInput);
-    });
-    const removeButton = avatarActions.createEl("button", {
-      type: "button",
-      cls: "echoink-agent-identity-remove",
-      text: zh ? "移除头像" : "Remove avatar"
-    });
-    removeButton.addEventListener("click", () => {
-      this.avatarValue = Object.freeze({ kind: "default" });
-      this.renderPreview();
-    });
+    fileInput.addEventListener("change", () => void this.handleFilePicked(fileInput));
 
-    // --- Preset list (hidden entirely when the catalog is empty) ------------
-    const presets = this.options.presets ?? [];
-    if (presets.length > 0) {
-      this.presetListEl = content.createDiv({ cls: "echoink-agent-avatar-preset-list" });
-      this.presetListEl.createDiv({
-        cls: "echoink-agent-identity-label",
-        text: zh ? "选择头像" : "Choose an avatar"
-      });
-      for (const preset of presets) {
-        const chip = this.presetListEl.createDiv({ cls: "echoink-agent-avatar-preset" });
-        chip.setAttr("data-preset-id", preset.id);
-        chip.setText(zh ? preset.labelZh : preset.labelEn);
-        chip.addEventListener("click", () => {
-          this.avatarValue = Object.freeze({ kind: "preset", presetId: preset.id });
-          this.renderPreview();
-        });
-      }
-    }
+    this.avatarErrorEl = avatarArea.createDiv({
+      cls: "echoink-agent-avatar-error",
+      attr: { role: "status", "aria-live": "polite" }
+    });
+    const fieldset = avatarArea.createEl("fieldset", {
+      cls: "echoink-agent-avatar-fieldset"
+    });
+    fieldset.createEl("legend", {
+      cls: "echoink-agent-avatar-legend",
+      text: zh ? "选择 Agent 头像" : "Choose Agent avatar"
+    });
+    this.avatarGridEl = fieldset.createDiv({ cls: "echoink-agent-avatar-grid" });
+    this.renderAvatarOptions();
 
-    // --- Footer --------------------------------------------------------------
     const footer = content.createDiv({ cls: "echoink-agent-identity-footer" });
     const cancelButton = footer.createEl("button", {
-      type: "button",
       cls: "echoink-agent-identity-cancel",
-      text: zh ? "取消" : "Cancel"
+      text: zh ? "取消" : "Cancel",
+      attr: { type: "button" }
     });
     applyAmicroButton(cancelButton, { variant: "secondary" });
     cancelButton.addEventListener("click", () => this.close());
     this.confirmButtonEl = footer.createEl("button", {
-      type: "button",
       cls: "echoink-agent-identity-confirm mod-cta",
       text: this.options.mode === "first-run"
         ? (zh ? "完成设置" : "Finish setup")
-        : (zh ? "保存" : "Save")
+        : (zh ? "保存" : "Save"),
+      attr: { type: "button" }
     }) as unknown as HTMLButtonElement;
     applyAmicroButton(this.confirmButtonEl, { variant: "primary", motion: "complete" });
-    this.confirmButtonEl.addEventListener("click", () => {
-      void this.handleConfirm();
-    });
-
+    this.confirmButtonEl.addEventListener("click", () => void this.handleConfirm());
     this.refreshConfirmState();
   }
 
   onClose(): void {
     this.contentEl.empty();
   }
-
-  // -------------------------------------------------------------------------
-  // Internals (public enough for UI tests)
-  // -------------------------------------------------------------------------
 
   nameValidationError(): string | null {
     const zh = this.options.language !== "en";
@@ -198,74 +178,123 @@ export class AgentIdentityModal extends Modal {
   }
 
   currentDraft(): AgentIdentityDraft {
-    return Object.freeze({
-      displayName: this.nameValue.trim(),
-      avatar: this.avatarValue
-    });
+    return Object.freeze({ displayName: this.nameValue.trim(), avatar: this.avatarValue });
+  }
+
+  private presets(): readonly AgentAvatarPreset[] {
+    return this.options.presets ?? AGENT_AVATAR_PRESETS;
   }
 
   private refreshConfirmState(): void {
     const error = this.nameValidationError();
     if (this.nameErrorEl) this.nameErrorEl.setText(error ?? "");
-    if (this.confirmButtonEl) {
-      this.confirmButtonEl.disabled = Boolean(error) || this.busy;
+    if (this.confirmButtonEl) this.confirmButtonEl.disabled = Boolean(error) || this.busy;
+    if (this.uploadButtonEl) this.uploadButtonEl.disabled = this.busy;
+  }
+
+  private renderAvatarOptions(): void {
+    if (!this.avatarGridEl) return;
+    this.avatarGridEl.empty();
+    for (const preset of this.presets()) {
+      this.renderAvatarOption(
+        `preset:${preset.id}`,
+        this.options.language === "en" ? preset.labelEn : preset.labelZh,
+        preset.assetPath,
+        { kind: "preset", presetId: preset.id }
+      );
+    }
+    if (this.avatarValue.kind === "custom") {
+      this.renderAvatarOption(
+        "custom",
+        this.options.language === "en" ? "Custom" : "自定义",
+        this.avatarValue.dataUrl,
+        this.avatarValue
+      );
     }
   }
 
-  private renderPreview(): void {
-    if (!this.previewEl) return;
-    this.previewEl.empty();
-    const url = this.avatarValue.kind === "preset"
-      ? (this.options.resolvePresetAsset?.(this.avatarValue.presetId) ?? null)
-      : resolveAgentAvatarUrl(this.avatarValue);
-    if (url) {
-      this.previewEl.createEl("img", { attr: { src: url, alt: "" } });
-    } else {
-      // 没有头像（或 preset 解析失败）时显示默认 bot 占位。
-      this.previewEl.addClass("is-default");
-      this.previewEl.setText("🤖");
-    }
-    if (this.presetListEl) {
-      const selectedId = this.avatarValue.kind === "preset" ? this.avatarValue.presetId : null;
-      const chips = this.presetListEl.querySelectorAll<HTMLElement>(".echoink-agent-avatar-preset");
-      chips.forEach((chip) => {
-        const id = chip.getAttribute("data-preset-id");
-        (chip as unknown as { toggleClass: (cls: string, on: boolean) => void })
-          .toggleClass("is-selected", id !== null && id === selectedId);
-      });
+  private renderAvatarOption(
+    value: string,
+    label: string,
+    imageUrl: string,
+    avatar: AgentAvatarState
+  ): void {
+    if (!this.avatarGridEl) return;
+    const selected = avatarEquals(this.avatarValue, avatar);
+    const tile = this.avatarGridEl.createEl("label", {
+      cls: `echoink-agent-avatar-option${selected ? " is-selected" : ""}`,
+      attr: { "data-avatar-value": value }
+    });
+    const input = tile.createEl("input", {
+      cls: "echoink-agent-avatar-radio",
+      attr: {
+        type: "radio",
+        name: this.radioGroupName,
+        value,
+        "aria-label": label
+      }
+    }) as unknown as HTMLInputElement;
+    input.checked = selected;
+    tile.createEl("img", { attr: { src: imageUrl, alt: "" } });
+    tile.createSpan({ cls: "echoink-agent-avatar-option-name", text: label });
+    const check = tile.createSpan({
+      cls: "echoink-agent-avatar-option-check",
+      attr: { "aria-hidden": "true" }
+    });
+    setIcon(check, "check");
+    const select = (): void => {
+      this.avatarValue = Object.freeze(avatar);
+      if (this.avatarErrorEl) this.avatarErrorEl.setText("");
+      this.refreshAvatarSelection();
+    };
+    input.addEventListener("change", select);
+  }
+
+  private refreshAvatarSelection(): void {
+    if (!this.avatarGridEl) return;
+    const selectedValue = this.avatarValue.kind === "preset"
+      ? `preset:${this.avatarValue.presetId}`
+      : this.avatarValue.kind;
+    for (const tile of Array.from(
+      this.avatarGridEl.querySelectorAll<HTMLElement>(".echoink-agent-avatar-option")
+    )) {
+      const selected = tile.getAttribute("data-avatar-value") === selectedValue;
+      tile.toggleClass("is-selected", selected);
+      const radio = tile.querySelector<HTMLInputElement>(".echoink-agent-avatar-radio");
+      if (radio) radio.checked = selected;
     }
   }
 
   private async handleFilePicked(fileInput: HTMLInputElement): Promise<void> {
-    const zh = this.options.language !== "en";
     const files = (fileInput as unknown as { files?: FileList | null }).files;
     const file = files && files.length > 0 ? files[0] : null;
     if (!file) return;
-    const renderer = this.options.avatarRenderer ?? createBrowserAvatarRenderer();
+    this.busy = true;
+    this.refreshConfirmState();
+    if (this.avatarErrorEl) this.avatarErrorEl.setText("");
     try {
       const avatar = await processAgentAvatar(
         file as unknown as Blob,
         file.type,
         file.size,
-        renderer
+        this.options.avatarRenderer ?? createBrowserAvatarRenderer()
       );
       this.avatarValue = avatar;
-      this.renderPreview();
+      this.renderAvatarOptions();
     } catch (error) {
       const code = error instanceof AvatarProcessingError ? error.code : "decode_failed";
-      const message = avatarErrorMessage(code, zh);
-      new Notice(message);
-      if (this.nameErrorEl && !this.nameValidationError()) {
-        // 上传错误不占用名称错误行；Notice 已提示。
+      if (this.avatarErrorEl) {
+        this.avatarErrorEl.setText(avatarErrorMessage(code, this.options.language !== "en"));
       }
     } finally {
       (fileInput as unknown as { value: string }).value = "";
+      this.busy = false;
+      this.refreshConfirmState();
     }
   }
 
   private async handleConfirm(): Promise<void> {
-    if (this.busy) return;
-    if (this.nameValidationError()) {
+    if (this.busy || this.nameValidationError()) {
       this.refreshConfirmState();
       return;
     }
@@ -287,17 +316,47 @@ export class AgentIdentityModal extends Modal {
   }
 }
 
+function normalizeInitialAvatar(
+  avatar: AgentAvatarState,
+  presets: readonly AgentAvatarPreset[]
+): AgentAvatarState {
+  if (avatar.kind === "custom") return avatar;
+  if (avatar.kind === "preset" && presets.some((preset) => preset.id === avatar.presetId)) {
+    return avatar;
+  }
+  const fallback = presets.find((preset) => preset.id === DEFAULT_AGENT_AVATAR_PRESET_ID)
+    ?? presets[0];
+  return fallback
+    ? Object.freeze({ kind: "preset", presetId: fallback.id })
+    : avatar;
+}
+
+function avatarEquals(left: AgentAvatarState, right: AgentAvatarState): boolean {
+  if (left.kind !== right.kind) return false;
+  if (left.kind === "preset" && right.kind === "preset") return left.presetId === right.presetId;
+  if (left.kind === "custom" && right.kind === "custom") return left.dataUrl === right.dataUrl;
+  return left.kind === "default" && right.kind === "default";
+}
+
 function avatarErrorMessage(code: string, zh: boolean): string {
   switch (code) {
     case "unsupported_type":
-      return zh ? "只支持 PNG、JPEG 或 WebP 图片。" : "Only PNG, JPEG or WebP images are supported.";
+      return zh ? "只支持 SVG 头像，请重新选择。" : "Only SVG avatars are supported. Choose another file.";
     case "source_too_large":
-      return zh ? "图片文件不能超过 4MB。" : "The image file must be under 4MB.";
+      return zh ? "SVG 文件不能超过 4MB。" : "The SVG file must be under 4MB.";
+    case "svg_not_square":
+      return zh ? "SVG 画布必须是正方形。" : "The SVG canvas must be square.";
+    case "svg_unsafe":
+      return zh
+        ? "这个 SVG 含脚本、事件或外部资源，无法安全使用。"
+        : "This SVG contains scripts, events, or external resources and cannot be used safely.";
     case "image_too_large":
-      return zh ? "图片尺寸过大（任一边不能超过 4096px）。" : "The image is too large (max 4096px per edge).";
+      return zh ? "SVG 尺寸过大（任一边不能超过 4096px）。" : "The SVG is too large (max 4096px per edge).";
     case "output_too_large":
-      return zh ? "处理后的头像仍然过大，请换一张图片。" : "The processed avatar is still too large. Try another image.";
+      return zh ? "处理后的头像仍然过大，请换一个 SVG。" : "The processed avatar is still too large. Try another SVG.";
+    case "svg_invalid":
+      return zh ? "SVG 文件已损坏或画布信息无效。" : "The SVG is damaged or has an invalid canvas.";
     default:
-      return zh ? "头像处理失败，请换一张图片。" : "Failed to process the avatar. Try another image.";
+      return zh ? "头像处理失败，请换一个 SVG 后重试。" : "Failed to process the avatar. Try another SVG.";
   }
 }

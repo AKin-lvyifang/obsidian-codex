@@ -73,10 +73,13 @@ import {
   AGENT_AVATAR_OUTPUT_MAX_DATA_URL_CHARS,
   AGENT_AVATAR_SOURCE_MAX_BYTES,
   processAgentAvatar,
+  validateAgentAvatarSvg,
   validateAvatarSourceSize,
   validateAvatarSourceType
 } from "../ui/agent-avatar-processor";
 import {
+  AGENT_AVATAR_PRESETS,
+  DEFAULT_AGENT_AVATAR_PRESET_ID,
   resolveAgentAvatarPresetAsset,
   resolveAgentAvatarUrl
 } from "../ui/agent-avatar-presets";
@@ -521,7 +524,7 @@ function assertMemoryComposerVisualCssContract(): void {
     /\.codex-composer-send-button\.codex-send-button\s*\{([^}]*)\}/u
   )?.[1] ?? "";
   const sendIconRule = css.match(
-    /\.codex-composer-send-icon-wrap svg\s*\{([^}]*)\}/u
+    /\.codex-composer-send-icon-wrap svg,\s*\.codex-composer-send-button \.echoink-animate-icon-send\s*\{([^}]*)\}/u
   )?.[1] ?? "";
   const permissionKeyboardFocusRule = css.match(
     /\.codex-permission-control \.codex-composer-native-select\.codex-select:is\(:focus, :focus-visible\)\s*\{([^}]*)\}/u
@@ -548,6 +551,9 @@ function assertMemoryComposerVisualCssContract(): void {
   assert.match(sendButtonRule, /width:\s*34px;/u);
   assert.match(sendButtonRule, /height:\s*34px;/u);
   assert.match(sendButtonRule, /flex:\s*0 0 34px;/u);
+  assert.match(sendButtonRule, /color:\s*var\(--text-normal\);/u);
+  assert.match(sendButtonRule, /box-shadow:\s*none\s*!important;/u);
+  assert.doesNotMatch(sendButtonRule, /interactive-accent|text-on-accent/u);
   assert.match(sendIconRule, /width:\s*20px;/u);
   assert.match(sendIconRule, /height:\s*20px;/u);
   assert.match(permissionKeyboardFocusRule, /outline:\s*none\s*!important;/u);
@@ -561,9 +567,11 @@ function assertMemoryComposerVisualCssContract(): void {
   );
   assert.match(
     css,
-    /\.codex-composer-send-button\.codex-send-button\.is-send-action:is\(:hover, :focus-visible\) \.codex-composer-send-icon-confirm\s*\{[\s\S]*?opacity:\s*1;/u,
-    "the ordinary send action uses the btn-24 send-to-check morph"
+    /\.echoink-animate-icon-host\.is-send-icon:is\(:hover, :focus-visible\) \.echoink-animate-icon-send\s*\{[\s\S]*?1400ms ease-in-out/u,
+    "the ordinary send action uses the pinned Animate Icons send timing"
   );
+  assert.doesNotMatch(css, /codex-composer-send-icon-confirm/u);
+  assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*?animation:\s*none\s*!important/u);
 }
 
 async function assertProviderTextGenerationCompletionContract(): Promise<void> {
@@ -4645,7 +4653,7 @@ async function assertFirstNamingModalZeroWriteOnCancel(): Promise<void> {
   assert.equal(templateCalls, 1, "完成设置 commits template + identity once");
   assert.deepEqual(lastInitialIdentity, {
     displayName: "小墨",
-    avatar: { kind: "default" }
+    avatar: { kind: "preset", presetId: DEFAULT_AGENT_AVATAR_PRESET_ID }
   });
   console.log("PASS settings: first naming modal keeps zero writes on cancel");
 }
@@ -4793,7 +4801,7 @@ async function assertIdentityEntryFirstRunKeepsSingleTransaction(): Promise<void
   assert.equal(templateCalls, 1, "完成设置 commits template + identity exactly once");
   assert.deepEqual(lastInitialIdentity, {
     displayName: "小墨",
-    avatar: { kind: "default" }
+    avatar: { kind: "preset", presetId: DEFAULT_AGENT_AVATAR_PRESET_ID }
   });
   assert.equal(updateCalls, 0, "first-run must not double-write via updateAgentIdentity");
   console.log("PASS settings: identity-entry first-run keeps a single transaction");
@@ -5129,98 +5137,158 @@ async function assertIdentityModalNameValidation(): Promise<void> {
 
 async function assertAvatarPresetCatalogBehavior(): Promise<void> {
   installProviderModalDomFixture();
+  assert.deepEqual(
+    AGENT_AVATAR_PRESETS.map((preset) => preset.labelEn),
+    ["Nova", "Rio", "Lin", "Sol", "Mica", "Aya", "Bo", "Cleo", "Dev", "Emi", "Finn", "Gia", "Han", "Ivo", "June"],
+    "the shipped catalog keeps the approved fixed order"
+  );
+  assert.equal(AGENT_AVATAR_PRESETS.length, 15);
+  assert.ok(AGENT_AVATAR_PRESETS.every((preset) => preset.assetPath.startsWith("data:image/svg+xml")));
 
-  // Empty catalog (the shipped default): no preset list in the modal.
-  const emptyModal = new AgentIdentityModal(new App(), {
+  const modal = new AgentIdentityModal(new App(), {
     initialName: "小墨",
     initialAvatar: { kind: "default" },
     language: "zh",
     mode: "edit",
     onConfirm: async () => undefined
   });
-  emptyModal.open();
-  assert.equal(emptyModal.contentEl.querySelector(".echoink-agent-avatar-preset-list"), null,
-    "empty preset catalog must hide the list entirely");
+  modal.open();
+  assert.match(modal.contentEl.textContent, /给你的 Agent 选一个形象/u);
+  assert.ok(modal.contentEl.querySelector(".echoink-agent-identity-upload"));
+  assert.equal(modal.contentEl.querySelector(".echoink-agent-identity-modal-preview"), null);
+  assert.equal(modal.contentEl.querySelector(".echoink-agent-identity-remove"), null);
+  assert.equal(modal.contentEl.querySelectorAll("fieldset").length, 1);
+  const options = modal.contentEl.querySelectorAll<ProviderModalTestElement>(".echoink-agent-avatar-option");
+  const radios = modal.contentEl.querySelectorAll<ProviderModalTestElement>('input[type="radio"]');
+  assert.equal(options.length, 15, "wide picker exposes all 15 preset tiles");
+  assert.equal(radios.length, 15, "each tile uses a real radio control");
+  assert.equal(radios[0].getAttribute("name"), radios[14].getAttribute("name"));
+  assert.equal(radios[0].checked, true, "default identity selects Nova in the draft");
+  assert.equal(options[0].hasClass("is-selected"), true);
+  assert.ok(options[0].querySelector(".echoink-agent-avatar-option-check"));
+  radios[1].focus();
+  radios[1].checked = true;
+  radios[1].fireEvent("change");
+  assert.equal(providerModalTestDocument.activeElement, radios[1], "radio selection preserves keyboard focus");
+  assert.deepEqual(modal.currentDraft().avatar, { kind: "preset", presetId: "rio" });
+  assert.equal(options[1].hasClass("is-selected"), true);
+  assert.equal(options[0].hasClass("is-selected"), false);
 
-  // Fake catalog: presets become selectable and produce a presetId draft.
-  let saved: { avatar: { kind: string; presetId?: string } } | null = null;
-  const fakeCatalog = Object.freeze([{
-    id: "preset-ink",
-    labelZh: "墨点",
-    labelEn: "Ink Dot",
-    assetPath: "assets/avatars/ink-dot.webp"
-  }]);
-  const modal = new AgentIdentityModal(new App(), {
+  const customDataUrl = "data:image/webp;base64,UkVE";
+  const customModal = new AgentIdentityModal(new App(), {
+    initialName: "阿澈",
+    initialAvatar: {
+      kind: "custom",
+      mimeType: "image/webp",
+      dataUrl: customDataUrl,
+      width: 256,
+      height: 256
+    },
+    language: "zh",
+    mode: "edit",
+    onConfirm: async () => undefined
+  });
+  customModal.open();
+  assert.equal(customModal.contentEl.querySelectorAll(".echoink-agent-avatar-option").length, 16);
+  const customTile = customModal.contentEl.querySelector<ProviderModalTestElement>(
+    '[data-avatar-value="custom"]'
+  );
+  assert.ok(customTile?.hasClass("is-selected"), "existing custom avatar is the selected unique custom tile");
+
+  const uploadModal = new AgentIdentityModal(new App(), {
     initialName: "小墨",
     initialAvatar: { kind: "default" },
     language: "zh",
     mode: "edit",
-    presets: fakeCatalog,
-    resolvePresetAsset: (id) => resolveAgentAvatarPresetAsset(id, fakeCatalog),
-    onConfirm: async (draft) => { saved = { avatar: draft.avatar as never }; }
+    avatarRenderer: async () => ({ sourceWidth: 256, sourceHeight: 256, dataUrl: customDataUrl }),
+    onConfirm: async () => undefined
   });
-  modal.open();
-  const list = modal.contentEl.querySelector<ProviderModalTestElement>(".echoink-agent-avatar-preset-list");
-  assert.ok(list, "non-empty catalog renders the preset list");
-  const chip = list!.querySelector<ProviderModalTestElement>(".echoink-agent-avatar-preset");
-  assert.ok(chip);
-  assert.match(chip!.textContent, /墨点/u);
-  chip!.click();
-  const preview = modal.contentEl.querySelector<ProviderModalTestElement>("img");
-  assert.ok(preview, "selected preset renders its asset in the preview");
-  assert.equal(preview!.getAttribute("src"), "assets/avatars/ink-dot.webp");
+  uploadModal.open();
+  const fileInput = uploadModal.contentEl.querySelector<ProviderModalTestElement>(
+    ".echoink-agent-identity-file"
+  )!;
+  (fileInput as unknown as { files: Blob[] }).files = [
+    new Blob(['<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256"><circle cx="128" cy="128" r="100"/></svg>'], { type: "image/svg+xml" })
+  ];
+  fileInput.fireEvent("change");
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (uploadModal.contentEl.querySelector('[data-avatar-value="custom"]')) break;
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  }
+  const uploaded = uploadModal.contentEl.querySelector<ProviderModalTestElement>(
+    '[data-avatar-value="custom"]'
+  );
+  assert.ok(
+    uploaded?.hasClass("is-selected"),
+    `successful upload creates, replaces, and selects one custom tile; error=${uploadModal.contentEl.querySelector(".echoink-agent-avatar-error")?.textContent ?? ""}; draft=${JSON.stringify(uploadModal.currentDraft())}`
+  );
 
-  const confirm = modal.contentEl.querySelector<ProviderModalTestElement>(".echoink-agent-identity-confirm");
-  confirm!.click();
-  await settleMicrotasks();
-  assert.deepEqual(saved, { avatar: { kind: "preset", presetId: "preset-ink" } });
+  const css = readFileSync("styles.css", "utf8");
+  assert.match(css, /\.echoink-agent-avatar-grid\s*\{[\s\S]*?repeat\(5,\s*minmax\(0,\s*1fr\)\)/u);
+  assert.match(css, /@container\s*\(max-width:\s*520px\)[\s\S]*?repeat\(3,\s*minmax\(0,\s*1fr\)\)/u);
+  assert.match(css, /@container\s*\(max-width:\s*340px\)[\s\S]*?repeat\(2,\s*minmax\(0,\s*1fr\)\)/u);
+  assert.match(css, /\.echoink-agent-avatar-option:focus-within\s*\{[\s\S]*?outline:\s*2px solid/u);
+  assert.match(css, /\.echoink-agent-avatar-option\.is-selected \.echoink-agent-avatar-option-check\s*\{[\s\S]*?display:\s*inline-flex/u);
 
-  // Resolver: unknown preset and default avatar both fall back to null (bot icon).
   assert.equal(resolveAgentAvatarPresetAsset("missing"), null);
   assert.equal(resolveAgentAvatarUrl({ kind: "default" }), null);
   assert.equal(resolveAgentAvatarUrl({ kind: "preset", presetId: "missing" }), null);
-  assert.equal(
-    resolveAgentAvatarUrl({ kind: "preset", presetId: "preset-ink" }, fakeCatalog),
-    "assets/avatars/ink-dot.webp"
-  );
-  console.log("PASS settings: preset catalog hidden when empty and selectable when provided");
+  assert.equal(resolveAgentAvatarUrl({ kind: "preset", presetId: "nova" }), AGENT_AVATAR_PRESETS[0].assetPath);
+  console.log("PASS settings: fixed avatar grid, Nova default, custom tile, and accessible radio semantics");
 }
 
 async function assertAvatarProcessorContract(): Promise<void> {
   const smallWebp = "data:image/webp;base64,UkVE";
+  const validSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><circle cx="256" cy="256" r="200"/></svg>';
+  const svgBlob = (source = validSvg) => new Blob([source], { type: "image/svg+xml" });
   const fakeRenderer = (result: { sourceWidth: number; sourceHeight: number; dataUrl: string }) =>
     async () => result;
 
-  // Type validation: png/jpeg/webp accepted; svg/gif/heic/bmp/pdf rejected.
-  assert.equal(validateAvatarSourceType("image/png"), true);
-  assert.equal(validateAvatarSourceType("image/jpeg"), true);
-  assert.equal(validateAvatarSourceType("image/webp"), true);
-  for (const type of ["image/svg+xml", "image/gif", "image/heic", "image/bmp", "application/pdf", ""]) {
+  assert.equal(validateAvatarSourceType("image/svg+xml"), true);
+  for (const type of ["image/png", "image/jpeg", "image/webp", "image/gif", "application/pdf", ""]) {
     assert.equal(validateAvatarSourceType(type), false, `must reject ${type}`);
   }
   await assert.rejects(
-    processAgentAvatar(new BlobStub() as never, "image/gif", 10, fakeRenderer({ sourceWidth: 10, sourceHeight: 10, dataUrl: smallWebp })),
+    processAgentAvatar(svgBlob(), "image/png", 10, fakeRenderer({ sourceWidth: 10, sourceHeight: 10, dataUrl: smallWebp })),
     /unsupported_type/u
   );
 
-  // Size validation: 4MB cap on the source file.
   assert.equal(validateAvatarSourceSize(AGENT_AVATAR_SOURCE_MAX_BYTES), true);
   assert.equal(validateAvatarSourceSize(AGENT_AVATAR_SOURCE_MAX_BYTES + 1), false);
   await assert.rejects(
-    processAgentAvatar(new BlobStub() as never, "image/png", AGENT_AVATAR_SOURCE_MAX_BYTES + 1, fakeRenderer({ sourceWidth: 10, sourceHeight: 10, dataUrl: smallWebp })),
+    processAgentAvatar(svgBlob(), "image/svg+xml", AGENT_AVATAR_SOURCE_MAX_BYTES + 1, fakeRenderer({ sourceWidth: 10, sourceHeight: 10, dataUrl: smallWebp })),
     /source_too_large/u
   );
 
-  // Dimension cap: any edge over 4096px is rejected after decode.
+  assert.deepEqual(validateAgentAvatarSvg(validSvg), { width: 512, height: 512 });
+  assert.deepEqual(
+    validateAgentAvatarSvg('<svg xmlns="http://www.w3.org/2000/svg" width="256px" height="256px"></svg>'),
+    { width: 256, height: 256 }
+  );
   await assert.rejects(
-    processAgentAvatar(new BlobStub() as never, "image/png", 100, fakeRenderer({ sourceWidth: 5000, sourceHeight: 100, dataUrl: smallWebp })),
+    processAgentAvatar(svgBlob('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 256"></svg>'), "image/svg+xml", 100, fakeRenderer({ sourceWidth: 512, sourceHeight: 256, dataUrl: smallWebp })),
+    /svg_not_square/u
+  );
+  await assert.rejects(
+    processAgentAvatar(svgBlob('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 5000 5000"></svg>'), "image/svg+xml", 100, fakeRenderer({ sourceWidth: 5000, sourceHeight: 5000, dataUrl: smallWebp })),
     /image_too_large/u
   );
 
-  // Output contract: 256x256 webp state.
+  for (const unsafeSvg of [
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><script>alert(1)</script></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect onclick="alert(1)"/></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><foreignObject><div/></foreignObject></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><image href="https://example.com/a.png"/></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><use href="#shape"/></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><style>@import url(https://example.com/a.css)</style></svg>'
+  ]) {
+    assert.throws(() => validateAgentAvatarSvg(unsafeSvg), /svg_unsafe/u);
+  }
+  assert.throws(() => validateAgentAvatarSvg("<svg><broken>"), /svg_invalid/u);
+
   const ok = await processAgentAvatar(
-    new BlobStub() as never, "image/jpeg", 100,
-    fakeRenderer({ sourceWidth: 800, sourceHeight: 600, dataUrl: smallWebp })
+    svgBlob(), "image/svg+xml", 100,
+    fakeRenderer({ sourceWidth: 512, sourceHeight: 512, dataUrl: smallWebp })
   );
   assert.equal(ok.kind, "custom");
   assert.equal(ok.mimeType, "image/webp");
@@ -5230,20 +5298,20 @@ async function assertAvatarProcessorContract(): Promise<void> {
 
   // JPEG data URL output is invalid (must be re-encoded to webp/png).
   await assert.rejects(
-    processAgentAvatar(new BlobStub() as never, "image/jpeg", 100, fakeRenderer({ sourceWidth: 800, sourceHeight: 600, dataUrl: "data:image/jpeg;base64,QUJD" })),
+    processAgentAvatar(svgBlob(), "image/svg+xml", 100, fakeRenderer({ sourceWidth: 512, sourceHeight: 512, dataUrl: "data:image/jpeg;base64,QUJD" })),
     /output_invalid/u
   );
 
   // Oversized output Data URL is rejected before persistence.
   const huge = `data:image/webp;base64,${"A".repeat(AGENT_AVATAR_OUTPUT_MAX_DATA_URL_CHARS)}`;
   await assert.rejects(
-    processAgentAvatar(new BlobStub() as never, "image/png", 100, fakeRenderer({ sourceWidth: 800, sourceHeight: 600, dataUrl: huge })),
+    processAgentAvatar(svgBlob(), "image/svg+xml", 100, fakeRenderer({ sourceWidth: 512, sourceHeight: 512, dataUrl: huge })),
     /output_too_large/u
   );
 
   // Decode failure surfaces decode_failed, never a raw fallback.
   await assert.rejects(
-    processAgentAvatar(new BlobStub() as never, "image/png", 100, async () => { throw new Error("boom"); }),
+    processAgentAvatar(svgBlob(), "image/svg+xml", 100, async () => { throw new Error("boom"); }),
     /decode_failed/u
   );
 
@@ -5251,8 +5319,8 @@ async function assertAvatarProcessorContract(): Promise<void> {
   // never the raw source bytes.
   const rawMarker = "RAW_SOURCE_BYTES_MUST_NOT_APPEAR";
   const processed = await processAgentAvatar(
-    { size: AGENT_AVATAR_SOURCE_MAX_BYTES } as never,
-    "image/png",
+    svgBlob(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4096 4096"><text>${rawMarker}</text></svg>`),
+    "image/svg+xml",
     AGENT_AVATAR_SOURCE_MAX_BYTES,
     fakeRenderer({ sourceWidth: 4096, sourceHeight: 4096, dataUrl: smallWebp })
   );
@@ -5265,10 +5333,8 @@ async function assertAvatarProcessorContract(): Promise<void> {
   });
   assert.ok(json.length < AGENT_AVATAR_OUTPUT_MAX_DATA_URL_CHARS + 10_000);
   assert.ok(!json.includes(rawMarker));
-  console.log("PASS settings: avatar processor type/size/dimension/output contract");
+  console.log("PASS settings: safe square-SVG validation and 256px raster output contract");
 }
-
-class BlobStub {}
 
 function findLatestModalElement<T extends ProviderModalTestElement>(selector: string): T | null {
   const modal = openTestModals[openTestModals.length - 1];

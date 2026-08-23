@@ -503,6 +503,7 @@ const context = await esbuild.context({
   bundle: true,
   loader: {
     ".md": "text",
+    ".svg": "dataurl",
     ".webp": "dataurl"
   },
   external: [

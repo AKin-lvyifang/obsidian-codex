@@ -18,6 +18,7 @@ import type { PermissionMode, ReasoningEffort, UiMode } from "../../types/app-se
 import { composerPrimaryActionForState, composerStateForRuntimeState } from "../composer-state";
 import { handleKnowledgeCommandMenuKeyDown } from "../knowledge-command-menu";
 import type { QueuedTurnItem } from "../turn-queue";
+import { renderAnimateIcon } from "../animate-icon";
 
 let knowledgeCommandMenuId = 0;
 
@@ -284,7 +285,11 @@ export function renderComposerToolbar(
   );
   modelButton.onclick = callbacks.onOpenModelMenu;
 
-  const micButton = createComposerIconButton(right, "mic", "语音输入");
+  const micButton = right.createEl("button", {
+    cls: "codex-composer-icon-button codex-composer-mic-button",
+    attr: { type: "button", "aria-label": "语音输入", title: "语音输入" }
+  });
+  renderAnimateIcon(micButton, "mic");
   micButton.onclick = callbacks.onMicInput;
 
   const composerState = composerStateForRuntimeState({
@@ -325,15 +330,14 @@ export function renderComposerToolbar(
     sendButton.setAttribute("aria-label", "提示词增强中");
     sendButton.setAttribute("title", "提示词增强完成后再发送");
   }
-  const sendIconWrap = sendButton.createSpan({
-    cls: "codex-composer-send-icon-wrap",
-    attr: { "aria-hidden": "true" }
-  });
-  const sendIcon = sendIconWrap.createSpan({ cls: "codex-composer-send-icon-default" });
-  setIcon(sendIcon, sendButtonView.icon);
   if (action === "send") {
-    const sendCheckIcon = sendIconWrap.createSpan({ cls: "codex-composer-send-icon-confirm" });
-    setIcon(sendCheckIcon, "check");
+    renderAnimateIcon(sendButton, "send");
+  } else {
+    const sendIconWrap = sendButton.createSpan({
+      cls: "codex-composer-send-icon-wrap",
+      attr: { "aria-hidden": "true" }
+    });
+    setIcon(sendIconWrap, sendButtonView.icon);
   }
   sendButton.onclick = () => {
     if (action === "cancel-knowledge-task") callbacks.onCancelKnowledgeTask();
@@ -1007,7 +1011,7 @@ function composerActionButtonView(action: ReturnType<typeof composerPrimaryActio
   if (action === "enqueue") return { icon: "list-plus", label: "入队发送", title: "加入队列，当前任务结束后发送" };
   if (action === "resume-queue") return { icon: "play", label: "继续队列", title: "继续队列" };
   if (action === "stop-turn" || action === "cancel-knowledge-task") return { icon: "square", label: "停止", title: "停止当前任务" };
-  return { icon: "send-horizontal", label: "发送", title: "发送" };
+  return { icon: "send", label: "发送", title: "发送" };
 }
 
 function queuedTurnPreview(item: QueuedTurnItem): string {

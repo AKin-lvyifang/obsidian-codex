@@ -22,6 +22,7 @@ await esbuild.build({
       'import { runPiConversationTabsTests } from "./src/tests/pi-native/conversation-tabs";',
       'import { runPiNativeTurnRunnerTests } from "./src/tests/pi-native/turn-runner";',
       'import { runMessageListIdentityTests } from "./src/tests/message-list-identity";',
+      'import { runComposerActionTests } from "./src/tests/composer-actions";',
       "await runPiNativeFileStoreTests();",
       "await runPiSessionDurabilityTests();",
       "await runPiNativeConversationRuntimeTests();",
@@ -31,6 +32,7 @@ await esbuild.build({
       "await runPiChatUiProjectorTests();",
       "await runPiNativeTurnRunnerTests();",
       "await runMessageListIdentityTests();",
+      "await runComposerActionTests();",
       'console.log("Current Pi Conversation acceptance: PASS");'
     ].join("\n"),
     resolveDir: rootDir,
@@ -40,6 +42,7 @@ await esbuild.build({
   bundle: true,
   loader: {
     ".md": "text",
+    ".svg": "dataurl",
     ".webp": "dataurl"
   },
   platform: "node",
@@ -54,6 +57,9 @@ await esbuild.build({
   plugins: [{
     name: "pi-conversation-test-shims",
     setup(build) {
+      build.onResolve({ filter: /provider-brand-icons$/ }, () => ({
+        path: path.join(rootDir, "src", "tests", "composer-provider-brand-shim.ts")
+      }));
       build.onResolve({ filter: /^obsidian$/ }, () => ({
         path: obsidianShimPath
       }));

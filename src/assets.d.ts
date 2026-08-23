@@ -3,6 +3,11 @@ declare module "*.webp" {
   export default dataUrl;
 }
 
+declare module "*.svg" {
+  const dataUrl: string;
+  export default dataUrl;
+}
+
 declare module "*.md" {
   const content: string;
   export default content;

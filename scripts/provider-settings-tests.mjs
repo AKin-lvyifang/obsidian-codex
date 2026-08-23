@@ -21,6 +21,7 @@ await esbuild.build({
   bundle: true,
   loader: {
     ".md": "text",
+    ".svg": "dataurl",
     ".webp": "dataurl"
   },
   platform: "node",

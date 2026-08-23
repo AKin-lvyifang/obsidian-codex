@@ -1,12 +1,19 @@
-/**
- * agent-avatar-presets.ts — 默认头像 preset 预留（本轮不含任何素材）。
- *
- * 产品决定：默认头像素材暂未提供。本轮只预留 preset 数据模型、常量和
- * 选择入口；catalog 为空时 UI 不显示空白头像列表，也不生成头像。
- * 将来补素材时只需往 AGENT_AVATAR_PRESETS 添加条目和资源文件。
- */
-
 import type { AgentAvatarState } from "../harness/memory/agent-identity-state";
+import ayaAvatar from "../../assets/avatars/monochrome-round-set-01/aya.svg";
+import boAvatar from "../../assets/avatars/monochrome-round-set-01/bo.svg";
+import cleoAvatar from "../../assets/avatars/monochrome-round-set-01/cleo.svg";
+import devAvatar from "../../assets/avatars/monochrome-round-set-01/dev.svg";
+import emiAvatar from "../../assets/avatars/monochrome-round-set-01/emi.svg";
+import finnAvatar from "../../assets/avatars/monochrome-round-set-01/finn.svg";
+import giaAvatar from "../../assets/avatars/monochrome-round-set-01/gia.svg";
+import hanAvatar from "../../assets/avatars/monochrome-round-set-01/han.svg";
+import ivoAvatar from "../../assets/avatars/monochrome-round-set-01/ivo.svg";
+import juneAvatar from "../../assets/avatars/monochrome-round-set-01/june.svg";
+import linAvatar from "../../assets/avatars/monochrome-round-set-01/lin.svg";
+import micaAvatar from "../../assets/avatars/monochrome-round-set-01/mica.svg";
+import novaAvatar from "../../assets/avatars/monochrome-round-set-01/nova.svg";
+import rioAvatar from "../../assets/avatars/monochrome-round-set-01/rio.svg";
+import solAvatar from "../../assets/avatars/monochrome-round-set-01/sol.svg";
 
 export interface AgentAvatarPreset {
   readonly id: string;
@@ -15,25 +22,34 @@ export interface AgentAvatarPreset {
   readonly assetPath: string;
 }
 
-/** 当前为空：不添加临时图片，不使用 Emoji 冒充默认头像。 */
-export const AGENT_AVATAR_PRESETS: readonly AgentAvatarPreset[] = Object.freeze([]);
+export const DEFAULT_AGENT_AVATAR_PRESET_ID = "nova";
 
-/**
- * 按 id 解析 preset 资源路径；未知 preset（或 catalog 为空）返回 null。
- * 解析失败时由渲染端回退默认 bot 图标，绝不让身份读取失败。
- */
+/** Product order is stable because arrow-key navigation and persisted presetId use it. */
+export const AGENT_AVATAR_PRESETS: readonly AgentAvatarPreset[] = Object.freeze([
+  preset("nova", "Nova", novaAvatar),
+  preset("rio", "Rio", rioAvatar),
+  preset("lin", "Lin", linAvatar),
+  preset("sol", "Sol", solAvatar),
+  preset("mica", "Mica", micaAvatar),
+  preset("aya", "Aya", ayaAvatar),
+  preset("bo", "Bo", boAvatar),
+  preset("cleo", "Cleo", cleoAvatar),
+  preset("dev", "Dev", devAvatar),
+  preset("emi", "Emi", emiAvatar),
+  preset("finn", "Finn", finnAvatar),
+  preset("gia", "Gia", giaAvatar),
+  preset("han", "Han", hanAvatar),
+  preset("ivo", "Ivo", ivoAvatar),
+  preset("june", "June", juneAvatar)
+]);
+
 export function resolveAgentAvatarPresetAsset(
   presetId: string,
   catalog: readonly AgentAvatarPreset[] = AGENT_AVATAR_PRESETS
 ): string | null {
-  const preset = catalog.find((entry) => entry.id === presetId);
-  return preset ? preset.assetPath : null;
+  return catalog.find((entry) => entry.id === presetId)?.assetPath ?? null;
 }
 
-/**
- * 身份状态 → 可直接用于 <img src> 的 URL；null 表示继续使用默认 bot 图标。
- * custom → Data URL；preset → 资源路径（缺失时 null）；default → null。
- */
 export function resolveAgentAvatarUrl(
   avatar: AgentAvatarState,
   catalog: readonly AgentAvatarPreset[] = AGENT_AVATAR_PRESETS
@@ -41,4 +57,8 @@ export function resolveAgentAvatarUrl(
   if (avatar.kind === "custom") return avatar.dataUrl;
   if (avatar.kind === "preset") return resolveAgentAvatarPresetAsset(avatar.presetId, catalog);
   return null;
+}
+
+function preset(id: string, label: string, assetPath: string): AgentAvatarPreset {
+  return Object.freeze({ id, labelZh: label, labelEn: label, assetPath });
 }
