@@ -611,7 +611,8 @@ button.codex-user-message-copy {
   pointer-events: none;
 }
 
-.codex-message-empty-running.has-agent-header > .codex-message-content {
+.codex-message-empty-running.has-agent-header > .codex-message-content,
+.codex-message-empty-running.has-agent-header > .codex-smooth-ai-message-body > .codex-message-content {
   display: none;
 }
 
@@ -2261,7 +2262,12 @@ body.theme-light .codex-code-wrapper pre {
 
 .codex-message-note-link {
   color: var(--color-purple);
-  font-weight: inherit;
+  padding: 0 2px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--interactive-accent) 10%, transparent);
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  font-weight: 400;
   text-decoration: none;
   cursor: pointer;
 }
@@ -2269,6 +2275,11 @@ body.theme-light .codex-code-wrapper pre {
 .codex-message-note-link:hover {
   color: var(--color-purple);
   text-decoration: underline;
+}
+
+.codex-message-note-link:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--interactive-accent) 68%, transparent);
+  outline-offset: 1px;
 }
 
 .codex-message-table {
@@ -10630,6 +10641,19 @@ body.theme-light .codex-container {
   text-decoration: underline;
 }
 
+.codex-process-file-link-vault {
+  padding: 0 2px;
+  border-radius: 3px;
+  color: var(--color-purple);
+  background: color-mix(in srgb, var(--interactive-accent) 10%, transparent);
+  font-weight: 400;
+}
+
+.codex-process-file-link-vault:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--interactive-accent) 68%, transparent);
+  outline-offset: 1px;
+}
+
 .codex-process-file-text {
   color: var(--text-muted);
   font: inherit;
@@ -10693,6 +10717,11 @@ body.theme-light .codex-container {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.codex-process-file-vault .codex-process-file-name {
+  color: var(--color-purple);
+  font-weight: 400;
 }
 
 .codex-process-body {
@@ -15317,5 +15346,288 @@ button.echoink-picker-row:focus-visible {
 
   .echoink-particle-button-dot {
     animation: none !important;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* SmoothUI-derived Conversation primitives — native Obsidian DOM/CSS. */
+/* ------------------------------------------------------------------ */
+
+.codex-smooth-blur-out-up {
+  display: inline;
+  white-space: pre-wrap;
+}
+
+.codex-smooth-blur-out-up-unit,
+.codex-smooth-blur-out-up-space {
+  display: inline-block;
+  white-space: pre;
+}
+
+.codex-smooth-blur-out-up-unit {
+  animation: codex-smooth-blur-out-up 560ms cubic-bezier(0.22, 1, 0.36, 1)
+    var(--codex-smooth-blur-delay, 0ms) both;
+}
+
+@keyframes codex-smooth-blur-out-up {
+  from {
+    filter: blur(6px);
+    opacity: 0;
+    transform: translateY(10px);
+  }
+
+  to {
+    filter: blur(0);
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .codex-smooth-blur-out-up-unit {
+    animation: none;
+    filter: none;
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.codex-smooth-ai-message,
+.codex-smooth-ai-message-body {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.codex-smooth-ai-message-body {
+  width: 100%;
+}
+
+details.codex-smooth-ai-reasoning {
+  width: 100%;
+  margin: 2px 0 8px;
+  color: var(--text-muted);
+}
+
+details.codex-smooth-ai-reasoning > summary::-webkit-details-marker {
+  display: none;
+}
+
+.codex-smooth-ai-reasoning-summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: fit-content;
+  min-height: 28px;
+  padding: 2px 4px 2px 0;
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  list-style: none;
+  cursor: pointer;
+}
+
+.codex-smooth-ai-reasoning-summary:hover,
+.codex-smooth-ai-reasoning-summary:focus-visible,
+details.codex-smooth-ai-reasoning.is-running .codex-smooth-ai-reasoning-label {
+  color: var(--text-normal);
+}
+
+.codex-smooth-ai-reasoning-summary:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--interactive-accent) 68%, transparent);
+  outline-offset: 2px;
+}
+
+.codex-smooth-ai-reasoning-caret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  transition: transform 180ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.codex-smooth-ai-reasoning-caret::before {
+  width: 6px;
+  height: 6px;
+  border-top: 1.5px solid currentColor;
+  border-right: 1.5px solid currentColor;
+  content: "";
+  transform: rotate(45deg);
+}
+
+details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
+  transform: rotate(90deg);
+}
+
+.codex-smooth-ai-reasoning-body {
+  margin: 3px 0 2px 7px;
+  padding: 4px 0 2px 16px;
+  border-left: 1px solid var(--background-modifier-border);
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.codex-thinking-shell.codex-smooth-ai-reasoning,
+.codex-turn-process.codex-smooth-ai-reasoning {
+  color: var(--text-muted);
+}
+
+.codex-action-item.codex-smooth-ai-tool-call {
+  width: 100%;
+  margin: 2px 0;
+  padding: 5px 8px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--background-modifier-border) 70%, transparent);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--background-primary) 84%, var(--background-secondary));
+}
+
+.codex-action-item.codex-smooth-ai-tool-call.is-error {
+  border-color: color-mix(in srgb, var(--text-error) 32%, var(--background-modifier-border));
+}
+
+.codex-action-item.codex-smooth-ai-tool-call > .codex-action-item-head {
+  width: 100%;
+}
+
+.codex-process.codex-smooth-ai-tool-call {
+  border-color: color-mix(in srgb, var(--background-modifier-border) 76%, transparent);
+  background: color-mix(in srgb, var(--background-primary) 88%, var(--background-secondary));
+  box-shadow: none;
+}
+
+.codex-smooth-ai-tool-status {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  border-radius: 50%;
+  color: var(--text-muted);
+}
+
+.codex-smooth-ai-tool-status::before {
+  position: absolute;
+  inset: 1px;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+  content: "";
+  opacity: 0.48;
+}
+
+.codex-smooth-ai-tool-status svg,
+.codex-action-item-icon.codex-smooth-ai-tool-status svg,
+.codex-process-icon.codex-smooth-ai-tool-status svg {
+  position: relative;
+  width: 10px;
+  height: 10px;
+}
+
+.codex-smooth-ai-tool-status.is-running::before {
+  border-right-color: transparent;
+  opacity: 0.8;
+  animation: codex-smooth-tool-ring 900ms linear infinite;
+}
+
+.codex-smooth-ai-tool-status.is-success {
+  color: var(--color-green);
+}
+
+.codex-smooth-ai-tool-status.is-error {
+  color: var(--text-error);
+}
+
+@keyframes codex-smooth-tool-ring {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.codex-smooth-ai-artifact {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--background-modifier-border) 76%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--background-primary) 90%, var(--background-secondary));
+}
+
+.codex-message-content.codex-smooth-ai-artifact {
+  padding: 10px 11px;
+}
+
+.codex-smooth-ai-artifact-header {
+  display: flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 6px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--background-modifier-border) 72%, transparent);
+}
+
+.codex-smooth-ai-artifact-title {
+  overflow: hidden;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-smooth-ai-artifact-body {
+  min-width: 0;
+  padding: 9px 10px;
+  color: var(--text-normal);
+}
+
+.codex-process-channel.codex-smooth-ai-artifact {
+  margin: 7px 0;
+}
+
+.codex-task-plan-card.codex-smooth-ai-task-list {
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--background-primary) 90%, var(--background-secondary));
+  box-shadow: none;
+}
+
+.codex-task-plan-card.codex-smooth-ai-task-list .codex-task-plan-step {
+  border-radius: 6px;
+}
+
+.codex-task-plan-card.codex-smooth-ai-task-list .codex-task-plan-step-current {
+  background: color-mix(in srgb, var(--interactive-accent) 8%, transparent);
+}
+
+@media (max-width: 560px) {
+  .codex-action-item.codex-smooth-ai-tool-call {
+    padding-right: 6px;
+    padding-left: 6px;
+  }
+
+  .codex-smooth-ai-artifact-header,
+  .codex-smooth-ai-artifact-body,
+  .codex-message-content.codex-smooth-ai-artifact {
+    padding-right: 8px;
+    padding-left: 8px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .codex-smooth-ai-reasoning-caret {
+    transition: none;
+  }
+
+  .codex-smooth-ai-tool-status.is-running::before {
+    border-right-color: currentColor;
+    animation: none;
   }
 }

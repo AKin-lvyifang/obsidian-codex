@@ -35,6 +35,18 @@ import {
 } from "../../types/task-plan";
 import { renderProviderBrandIcon, type ProviderBrandId } from "../../settings/provider-brand-icons";
 import { API_PROVIDER_PRESETS } from "../../settings/provider-presets";
+import {
+  createSmoothAIArtifact,
+  createSmoothAIMessageBody,
+  createSmoothAIReasoning,
+  markSmoothAIArtifact,
+  markSmoothAIReasoning,
+  markSmoothAITaskList,
+  markSmoothAIToolCall,
+  renderSmoothAIToolStatus,
+  renderSmoothBlurOutUp,
+  smoothAIStatus
+} from "./smooth-chat-ui";
 
 type MessageRenderRow =
   | { id: string; kind: "message"; message: ChatMessage; showAgentHeader: boolean; showAgentFooter: boolean; processExpanded: boolean }
@@ -263,7 +275,10 @@ export class CodexMessageListRenderer {
       virtualListEl.setCssStyles({ height: "100%" });
       const welcome = virtualListEl.createDiv({ cls: "codex-welcome" });
       welcome.createDiv({ cls: "codex-welcome-title", text: env.welcomeCopy.title });
-      welcome.createDiv({ cls: "codex-resource-note", text: env.welcomeCopy.subtitle });
+      renderSmoothBlurOutUp(
+        welcome.createDiv({ cls: "codex-resource-note codex-welcome-subtitle" }),
+        env.welcomeCopy.subtitle
+      );
       return;
     }
 
@@ -613,8 +628,11 @@ export class CodexMessageListRenderer {
       statusLabel: "",
       compact: false
     });
+    const bodyHost = message.role === "assistant"
+      ? createSmoothAIMessageBody(wrapper)
+      : wrapper;
     if (!emptyRunningAnswer && shouldRenderMessageTitle(message, options.showAgentHeader)) {
-      const title = wrapper.createDiv({ cls: "codex-message-title" });
+      const title = bodyHost.createDiv({ cls: "codex-message-title" });
       title.createSpan({ cls: "codex-message-title-label", text: message.title ?? "" });
       const time = messageTitleTime(message);
       if (time) {
@@ -626,10 +644,10 @@ export class CodexMessageListRenderer {
       }
     }
     if (message.attachments?.length) {
-      this.renderUserAttachmentChips(wrapper.createDiv({ cls: "codex-message-attachments" }), message.attachments);
+      this.renderUserAttachmentChips(bodyHost.createDiv({ cls: "codex-message-attachments" }), message.attachments);
     }
     if (message.images?.length) {
-      const images = wrapper.createDiv({ cls: "codex-message-images" });
+      const images = bodyHost.createDiv({ cls: "codex-message-images" });
       for (const image of message.images) {
         const img = images.createEl("img", { attr: { alt: image.name } });
         img.src = toImageSrc(env.app, image.path);
@@ -637,7 +655,7 @@ export class CodexMessageListRenderer {
         img.onclick = () => openImageOverlay(img.src);
       }
     }
-    const content = wrapper.createDiv({ cls: "codex-message-content" });
+    const content = bodyHost.createDiv({ cls: "codex-message-content" });
     content.dataset.messageContent = "true";
     if (message.itemType === "thinking") {
       this.renderThinkingMessage(content, message);
@@ -645,7 +663,20 @@ export class CodexMessageListRenderer {
     }
     if (message.itemType === "reasoning") {
       content.addClass("codex-inline-reasoning");
-      renderRichText(env.app, env.component, content, displayTextForMessage(message));
+      const bodyId = `codex-smooth-reasoning-${safeDomIdentity(message.id)}`;
+      const open = this.openProcessItems.get(message.id) ?? message.status === "running";
+      const reasoning = createSmoothAIReasoning(content, {
+        bodyId,
+        open,
+        status: smoothAIStatus(message.status),
+        summary: message.status === "running" ? "正在思考" : "思考过程"
+      });
+      reasoning.root.ontoggle = () => {
+        rememberOpenState(this.openProcessItems, message.id, reasoning.root.open);
+        reasoning.summary.setAttribute("aria-expanded", String(reasoning.root.open));
+        env.onScheduleMeasure();
+      };
+      renderRichText(env.app, env.component, reasoning.body, displayTextForMessage(message));
       return;
     }
     if (isProcessItemType(message.itemType)) {
@@ -697,6 +728,7 @@ export class CodexMessageListRenderer {
         "aria-label": `任务计划：${plan.title}`
       }
     });
+    markSmoothAITaskList(card);
     const header = card.createEl("button", {
       cls: "codex-task-plan-header",
       attr: {
@@ -990,11 +1022,13 @@ export class CodexMessageListRenderer {
   private renderKnowledgeBaseResultContent(container: HTMLElement, message: ChatMessage, text: string): boolean {
     const env = this.requireEnv();
     if (message.itemType === "knowledgeBase" && message.knowledgeBaseUi) {
+      markSmoothAIArtifact(container);
       this.renderKnowledgeBaseUiPayload(container, message.knowledgeBaseUi, message);
       return true;
     }
     const result = extractKnowledgeBaseResultTitle(message.itemType, text);
     if (!result) return false;
+    markSmoothAIArtifact(container);
     const title = container.createDiv({ cls: `codex-kb-result-title codex-kb-result-title-${result.status}` });
     const icon = title.createSpan({ cls: "codex-kb-result-title-icon" });
     setIcon(icon, result.status === "success" ? "badge-check" : result.status === "canceled" ? "circle-slash" : "triangle-alert");
@@ -1395,6 +1429,7 @@ export class CodexMessageListRenderer {
     const wrapper = container.createDiv({ cls: "codex-message codex-message-tool codex-message-type-turnProcess" });
     if (showAgentHeader) this.renderAgentHeader(wrapper, { message: turn.finalAnswer, statusLabel: "", compact: true });
     const region = wrapper.createDiv({ cls: "codex-turn-process" });
+    markSmoothAIReasoning(region, turn.failed ? "failed" : turn.requiresAttention ? "blocked" : "completed");
     const bodyId = stableDomId(`codex-turn-process-${stateId}`);
     const summary = region.createEl("button", {
       cls: "codex-turn-process-summary",
@@ -1445,6 +1480,7 @@ export class CodexMessageListRenderer {
       return;
     }
     const row = container.createDiv({ cls: `codex-action-item codex-action-item-${item.kind}` });
+    markSmoothAIToolCall(row, item.status);
     row.toggleClass("is-standalone", options.standalone);
     row.toggleClass("is-failed", isAttentionActionStatus(item.status));
     row.toggleClass("is-running", isActiveActionStatus(item.status));
@@ -1455,6 +1491,7 @@ export class CodexMessageListRenderer {
   private renderExpandableActionItem(container: HTMLElement, item: ActionItemViewModel, options: { standalone: boolean }): void {
     const detailId = stableDomId(`codex-action-detail-${item.id}`);
     const details = container.createEl("details", { cls: `codex-action-item codex-action-item-${item.kind} codex-action-item-expandable` });
+    markSmoothAIToolCall(details, item.status);
     details.toggleClass("is-standalone", options.standalone);
     details.toggleClass("is-failed", isAttentionActionStatus(item.status));
     details.toggleClass("is-running", isActiveActionStatus(item.status));
@@ -1493,7 +1530,8 @@ export class CodexMessageListRenderer {
   }
 
   private renderActionItemHead(head: HTMLElement, item: ActionItemViewModel): void {
-    const icon = head.createSpan({ cls: "codex-action-item-icon" });
+    const icon = renderSmoothAIToolStatus(head, item.status);
+    icon.addClass("codex-action-item-icon");
     setIcon(icon, iconForActionKind(item.kind, item.status));
     const main = head.createDiv({ cls: "codex-action-item-main" });
     this.renderActionItemTitle(main, item);
@@ -1570,6 +1608,7 @@ export class CodexMessageListRenderer {
   private renderThinkingMessage(container: HTMLElement, message: ChatMessage): void {
     const env = this.requireEnv();
     const shell = container.createDiv({ cls: "codex-thinking-shell" });
+    markSmoothAIReasoning(shell, message.status);
     if (message.status === "running") {
       const row = shell.createDiv({ cls: "codex-thinking-live" });
       row.createSpan({ cls: "codex-thinking-dot" });
@@ -1583,6 +1622,7 @@ export class CodexMessageListRenderer {
 
   private renderProcessMessage(container: HTMLElement, message: ChatMessage, nested = false, forceOpen = false): void {
     const details = container.createEl("details", { cls: `codex-structured codex-process codex-process-${message.itemType ?? "item"}` });
+    markSmoothAIToolCall(details, message.status);
     details.toggleClass("is-running", isActiveProcessStatus(message.status));
     details.toggleClass("is-completed", message.status === "completed");
     details.toggleClass("is-error", isAttentionProcessStatus(message.status));
@@ -1605,7 +1645,9 @@ export class CodexMessageListRenderer {
       this.requireEnv().onScheduleMeasure();
     };
     const summary = details.createEl("summary", { cls: "codex-process-summary" });
-    const icon = summary.createSpan({ cls: "codex-structured-icon codex-process-icon" });
+    const icon = renderSmoothAIToolStatus(summary, message.status);
+    icon.addClass("codex-structured-icon");
+    icon.addClass("codex-process-icon");
     setIcon(icon, iconForProcessMessage(message));
     const main = summary.createDiv({ cls: "codex-process-main" });
     if (message.itemType === "fileChange" && message.diffSummary?.files.length) {
@@ -1660,19 +1702,22 @@ export class CodexMessageListRenderer {
   }
 
   private renderProcessChannels(body: HTMLElement, message: ChatMessage): void {
-    this.renderProcessChannel(body, "输入", message.processInputAvailability, message.processInput);
-    this.renderProcessChannel(body, "输出", message.processOutputAvailability, message.processOutput);
+    this.renderProcessChannel(body, "输入", message.processInputAvailability, message.processInput, false);
+    this.renderProcessChannel(body, "输出", message.processOutputAvailability, message.processOutput, true);
   }
 
   private renderProcessChannel(
     body: HTMLElement,
     label: string,
     availability: ChatMessage["processInputAvailability"],
-    text: string | undefined
+    text: string | undefined,
+    artifact: boolean
   ): void {
     if (!availability) return;
-    const channel = body.createDiv({ cls: "codex-process-channel" });
-    channel.createDiv({ cls: "codex-process-raw-title", text: label });
+    const artifactElements = artifact ? createSmoothAIArtifact(body, label) : null;
+    const channel = artifactElements?.body ?? body.createDiv({ cls: "codex-process-channel" });
+    artifactElements?.root.addClass("codex-process-channel");
+    if (!artifact) channel.createDiv({ cls: "codex-process-raw-title", text: label });
     if (availability === "unavailable") {
       channel.createDiv({ cls: "codex-process-raw-loading", text: PROCESS_CONTENT_UNAVAILABLE_TEXT });
       return;
@@ -1681,19 +1726,27 @@ export class CodexMessageListRenderer {
       channel.createDiv({ cls: "codex-process-raw-loading", text: "后端返回空内容" });
       return;
     }
-    this.renderPlainTextBlock(channel, text?.trim() ? text : PROCESS_CONTENT_UNAVAILABLE_TEXT);
+    const content = text?.trim() ? text : PROCESS_CONTENT_UNAVAILABLE_TEXT;
+    if (artifact) {
+      const env = this.requireEnv();
+      renderRichText(env.app, env.component, channel, content);
+    } else {
+      this.renderPlainTextBlock(channel, content);
+    }
   }
 
   private renderFileChangeBody(body: HTMLElement, message: ChatMessage, fallback: string): void {
     const renderDiff = (text: string) => {
       body.empty();
+      const artifact = createSmoothAIArtifact(body, "文件改动");
+      const artifactBody = artifact.body;
       const files = parseFileChangeDiff(text || fallback, message.diffSummary);
       if (!files.length) {
-        this.renderPlainTextBlock(body, text || fallback);
+        this.renderPlainTextBlock(artifactBody, text || fallback);
         return;
       }
-      if (message.diffSummary) this.renderDiffOverview(body, message.diffSummary);
-      this.renderDiffFiles(body, files, message.files ?? []);
+      if (message.diffSummary) this.renderDiffOverview(artifactBody, message.diffSummary);
+      this.renderDiffFiles(artifactBody, files, message.files ?? []);
     };
     if (message.rawRef) {
       body.createDiv({ cls: "codex-process-raw-loading", text: "正在加载文件改动..." });
@@ -1814,21 +1867,22 @@ export class CodexMessageListRenderer {
   }
 
   private renderProcessFileTextLink(container: HTMLElement, file: ProcessFileRef, label: string, extraClass = ""): HTMLElement {
+    const displayLabel = file.kind === "vault" ? noteNameForPath(file.path || label) : label;
     if (!file.openable) {
       return container.createSpan({
         cls: `codex-process-file-text is-disabled ${extraClass}`.trim(),
-        text: label,
+        text: displayLabel,
         attr: { title: `${file.displayPath}（无法打开）` }
       });
     }
     const link = container.createEl("span", {
       cls: `codex-process-file-link codex-process-file-link-${file.kind} ${extraClass}`.trim(),
-      text: label,
+      text: displayLabel,
       attr: {
         role: "button",
         tabindex: "0",
         title: file.displayPath,
-        "aria-label": `打开 ${label}`
+        "aria-label": `打开 ${displayLabel}`
       }
     });
     link.onclick = (event) => {
@@ -1916,18 +1970,19 @@ export class CodexMessageListRenderer {
 
   private renderProcessFileChips(container: HTMLElement, files: ProcessFileRef[]): void {
     for (const file of files) {
+      const displayName = file.kind === "vault" ? noteNameForPath(file.path || file.name) : file.name;
       const chip = container.createEl("button", {
         cls: `codex-process-file-chip codex-process-file-${file.kind}`,
         attr: {
           type: "button",
           title: file.openable ? file.displayPath : `${file.displayPath}（无法打开）`,
-          "aria-label": `打开 ${file.name}`
+          "aria-label": `打开 ${displayName}`
         }
       });
       chip.toggleClass("is-disabled", !file.openable);
       const icon = chip.createSpan({ cls: "codex-process-file-icon" });
       setIcon(icon, file.kind === "external" ? "folder-open" : "file-text");
-      chip.createSpan({ cls: "codex-process-file-name", text: file.name });
+      chip.createSpan({ cls: "codex-process-file-name", text: displayName });
       chip.onclick = (event) => {
         event.preventDefault();
         event.stopPropagation();

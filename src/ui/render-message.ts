@@ -140,12 +140,14 @@ function renderVaultNoteLink(app: App, component: Component, container: HTMLElem
   const resolved = resolveVaultNoteFile(app, segment.targetPath);
   if (!resolved) return false;
   const targetPath = resolved.targetPath;
+  const noteName = vaultNoteName(targetPath);
   const link = container.createEl("a", {
     cls: "codex-message-note-link",
-    text: segment.text,
+    text: noteName,
     attr: {
       href: "#",
       title: segment.title,
+      "aria-label": `打开笔记 ${noteName}`,
       "data-path": targetPath
     }
   });
@@ -156,6 +158,10 @@ function renderVaultNoteLink(app: App, component: Component, container: HTMLElem
     if (current instanceof TFile) await app.workspace.getLeaf("tab").openFile(current, { active: true });
   });
   return true;
+}
+
+function vaultNoteName(targetPath: string): string {
+  return targetPath.split("/").pop()?.replace(/\.md$/iu, "") || targetPath;
 }
 
 function resolveVaultNoteFile(app: App, targetPath: string): { file: TFile; targetPath: string } | null {
