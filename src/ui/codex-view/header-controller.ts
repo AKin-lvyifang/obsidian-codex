@@ -23,10 +23,7 @@ export interface CodexHeaderHost {
 
 export function updateInputPlaceholder(host: CodexHeaderHost): void {
   if (!host.inputEl) return;
-  const session = host.ensureSession();
-  host.inputEl.setAttr("placeholder", session.cwd
-    ? "问 EchoInk；查知识库用 /ask，维护用 /maintain"
-    : "选择工作区后开始对话");
+  host.inputEl.setAttr("placeholder", "");
 }
 
 export function applyStatus(host: CodexHeaderHost): void {

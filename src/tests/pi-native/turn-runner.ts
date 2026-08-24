@@ -357,7 +357,15 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
   };
   const runResult = deferred<Readonly<PiProductRunRecord>>();
   let listener: PiChatRuntimeEventListener | null = null;
+  let approvalListener: (() => void) | null = null;
+  let approvalSubscriptionIdentity: Readonly<{
+    conversationId: string;
+    piSessionId: string;
+    productRunId: string;
+  }> | null = null;
+  let approvalRefreshPending = false;
   let projectionReads = 0;
+  let settlementProjectionReads = 0;
   let releasedRunId = "";
   let composerCleared = false;
   let submittedRequest: PiChatSubmitRequest | null = null;
@@ -379,11 +387,28 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
       listener = next;
       return { unsubscribe: () => { listener = null; } };
     },
+    subscribePiAgentApproval: (
+      identity: Readonly<{
+        conversationId: string;
+        piSessionId: string;
+        productRunId: string;
+      }>,
+      next: () => void
+    ) => {
+      approvalSubscriptionIdentity = identity;
+      approvalListener = next;
+      return { unsubscribe: () => { approvalListener = null; } };
+    },
     readPiConversationProjection: async (): Promise<PiConversationProjection> => {
       projectionReads += 1;
+      if (approvalRefreshPending) {
+        approvalRefreshPending = false;
+        return durableApprovalProjection(session);
+      }
+      settlementProjectionReads += 1;
       return durableProjection(
         session,
-        projectionReads === 1 ? "running" : "completed"
+        settlementProjectionReads === 1 ? "running" : "completed"
       );
     },
     abortPiConversation: async () => undefined,
@@ -426,6 +451,11 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
     return outcome;
   });
   await waitFor(() => listener !== null);
+  assert.deepEqual(approvalSubscriptionIdentity, {
+    conversationId: session.id,
+    piSessionId: session.piSessionId,
+    productRunId: "product-run-turn-runner"
+  }, "turn runner subscribes to the exact active Approval run");
   assert.equal(submittedRequest?.skillPath, "skills/review/SKILL.md");
   assert.equal(submittedRequest?.skillName, "review");
   assert.equal(submittedRequest?.memoryMode, "normal");
@@ -440,16 +470,26 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
     messageKey: "assistant-1",
     textDelta: "streaming"
   }));
+  approvalRefreshPending = true;
+  assert.ok(approvalListener);
+  approvalListener();
+  await waitFor(() => projectionReads === 1);
+  assert.equal(
+    session.messages.find((message) => message.approval?.status === "pending")
+      ?.approval?.target,
+    "{\"relativePath\":\"Approval.md\"}",
+    "a broker notification refreshes the durable Approval projection"
+  );
   await emit(listener, runtimeEvent({ type: "agent_end", willRetry: false }));
   assert.equal(turnResolved, false, "agent_end must not settle the product turn");
-  assert.equal(projectionReads, 0, "agent_end must not trigger final readback");
+  assert.equal(projectionReads, 1, "agent_end must not trigger a settlement readback");
   assert.equal(
     session.messages.find((message) => message.role === "assistant")?.status,
     "running"
   );
 
   await emit(listener, runtimeEvent({ type: "agent_settled" }));
-  await waitFor(() => projectionReads === 1);
+  await waitFor(() => settlementProjectionReads === 1);
   assert.equal(turnResolved, false, "agent_settled must only enter finalizing");
   assert.equal(
     session.messages.find((message) => message.role === "assistant")?.status,
@@ -480,7 +520,8 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
   });
 
   assert.equal(await turn, "completed");
-  assert.equal(projectionReads, 2, "formal settlement must perform final durable readback");
+  assert.equal(projectionReads, 3,
+    "Approval refresh, Agent settlement, and formal ProductRun settlement each read once");
   assert.equal(session.messages.at(-1)?.status, "completed");
   assert.equal(session.messages.at(-1)?.askSourceAttribution, true);
   assert.deepEqual(session.messages.at(-1)?.personalMemorySources, [
@@ -488,6 +529,7 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
   ]);
   assert.equal(composerCleared, true, "durable user entry must clear the submitted draft");
   assert.equal(releasedRunId, "product-run-turn-runner");
+  assert.equal(approvalListener, null, "the run-scoped Approval subscription is released");
   assert.equal(
     renderedAssistantStatuses.slice(0, -1).includes("completed"),
     true,
@@ -559,6 +601,7 @@ Promise<void> {
       listener = next;
       return { unsubscribe: () => { listener = null; } };
     },
+    subscribePiAgentApproval: () => ({ unsubscribe: () => undefined }),
     readPiConversationProjection: async (): Promise<PiConversationProjection> => {
       projectionReads += 1;
       return durableProjection(
@@ -785,6 +828,35 @@ function durableProjection(
     ],
     diagnostics: [],
     drafts: []
+  };
+}
+
+function durableApprovalProjection(
+  session: Readonly<StoredSession>
+): PiConversationProjection {
+  const projection = durableProjection(session, "running");
+  return {
+    ...projection,
+    messages: [
+      ...projection.messages,
+      {
+        id: "pi:tool:tool-call-approval",
+        role: "tool",
+        itemType: "dynamicToolCall",
+        title: "等待确认",
+        text: "pending approval",
+        status: "waiting_approval",
+        runId: "product-run-turn-runner",
+        turnId: "product-run-turn-runner",
+        approval: {
+          status: "pending",
+          target: "{\"relativePath\":\"Approval.md\"}",
+          preview: "{\"operation\":\"note_create\"}",
+          updatedAt: 6
+        },
+        createdAt: 3
+      }
+    ]
   };
 }
 

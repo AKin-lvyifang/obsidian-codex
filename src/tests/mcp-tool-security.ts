@@ -23,10 +23,15 @@ import { closeMcpBrokerConnectionPool } from "../resources/mcp-broker";
 import { recoverProductionPiMcpDomainReceipts } from "../plugin/pi-production-runtime-composition";
 import { FileDomainReceiptStore } from "../harness/pi-native/domain-receipt-store";
 import {
+  createPiMcpToolSecurity,
+  type PiMcpApprovalConfirmationInput
+} from "../harness/pi-native/pi-mcp-tool-security";
+import {
   FileApprovalTicketStore,
   approvalContractFromTicket,
   createMcpApprovalToolId
 } from "../harness/pi-native/tool-authorization";
+import { PiAgentApprovalBroker } from "../plugin/pi-agent-approval-broker";
 import {
   ResourceMutationError,
   runResourceMutationWithReload
@@ -52,6 +57,163 @@ export async function runMcpToolSecurityTests(): Promise<void> {
   assertMissingTrustFailsClosed();
   await assertExplicitTrustAndPolicyAreRequired();
   await assertChangedContractRequiresRetrust();
+  await assertMcpAgentApprovalUsesExistingTicketChain();
+}
+
+async function assertMcpAgentApprovalUsesExistingTicketChain(): Promise<void> {
+  const rootPath = await mkdtemp(path.join(os.tmpdir(), "echoink-mcp-agent-approval-test-"));
+  try {
+    const vaultId = "mcp-agent-approval-vault";
+    const clock = 1_800_000_000_000;
+    const approvals = new FileApprovalTicketStore({
+      storageRootPath: rootPath,
+      vaultId,
+      now: () => clock
+    });
+    const receipts = new FileDomainReceiptStore({ storageRootPath: rootPath, vaultId });
+    await Promise.all([approvals.initialize(), receipts.initialize()]);
+    const broker = new PiAgentApprovalBroker();
+    const executionContext = Object.freeze({
+      conversationId: "conversation-mcp-agent-approval",
+      piSessionId: "pi-session-mcp-agent-approval",
+      productRunId: "product-run-mcp-agent-approval",
+      vaultId
+    });
+    const resourceId = "manual:mcp-server:agent-approval";
+    const descriptor = Object.freeze({
+      name: "echoink_mcp_agent_approval_write",
+      resourceId,
+      resourceName: "Agent Approval MCP",
+      toolName: "write_item",
+      readOnly: false,
+      destructive: true,
+      approvalToolId: createMcpApprovalToolId({
+        resourceId,
+        toolName: "write_item"
+      }),
+      contractFingerprint: `sha256:${"a".repeat(64)}`
+    });
+    const confirmationRequests: PiMcpApprovalConfirmationInput[] = [];
+    const security = createPiMcpToolSecurity({
+      tools: [descriptor],
+      currentExecutionContext: () => executionContext,
+      isToolAllowed: async () => true,
+      approvals,
+      receipts,
+      userId: "user-mcp-agent-approval",
+      deviceId: "device-mcp-agent-approval",
+      now: () => clock,
+      confirmation: {
+        async confirm(request) {
+          confirmationRequests.push(request);
+          return await broker.waitForDecision({
+            requestId: request.requestId,
+            conversationId: request.conversationId,
+            piSessionId: request.piSessionId,
+            productRunId: request.productRunId,
+            toolCallId: request.toolCallId,
+            target: JSON.stringify(request.target),
+            preview: JSON.stringify(request.preview),
+            signal: request.signal
+          });
+        }
+      }
+    });
+    const identityFor = (toolCallId: string) => ({
+      conversationId: executionContext.conversationId,
+      piSessionId: executionContext.piSessionId,
+      productRunId: executionContext.productRunId,
+      toolCallId
+    });
+    const toolEvent = (toolCallId: string) => ({
+      toolName: descriptor.name,
+      toolCallId,
+      input: { id: toolCallId }
+    });
+
+    const approvedEvent = toolEvent("mcp-call-approved");
+    const approvedCall = security.handleToolCall(approvedEvent as never, undefined);
+    const approvedBinding = await waitForMcpApprovalBinding(
+      broker,
+      identityFor(approvedEvent.toolCallId)
+    );
+    assert.equal(approvedBinding.decide("approve"), true);
+    assert.equal(await approvedCall, undefined);
+    const approvedTicket = await approvals.get(
+      executionContext.productRunId,
+      approvedEvent.toolCallId
+    );
+    assert.equal(approvedTicket?.status, "approved");
+    assert.equal(
+      (await receipts.readOperation(
+        approvedTicket!.ticket.operationIdentity
+      ))?.effectState,
+      "authorized",
+      "MCP approve continues through Ticket consume and the existing Receipt journal"
+    );
+
+    const deniedEvent = toolEvent("mcp-call-denied");
+    const deniedCall = security.handleToolCall(deniedEvent as never, undefined);
+    const deniedBinding = await waitForMcpApprovalBinding(
+      broker,
+      identityFor(deniedEvent.toolCallId)
+    );
+    assert.equal(deniedBinding.decide("reject"), true);
+    assert.deepEqual(await deniedCall, { block: true, reason: "approval_denied" });
+    const deniedTicket = await approvals.get(
+      executionContext.productRunId,
+      deniedEvent.toolCallId
+    );
+    assert.equal(deniedTicket?.status, "denied");
+    assert.equal(
+      await receipts.readOperation(deniedTicket!.ticket.operationIdentity),
+      null,
+      "MCP reject resolves the Ticket without starting a Receipt operation");
+
+    assert.deepEqual(
+      confirmationRequests.map((request) => ({
+        conversationId: request.conversationId,
+        piSessionId: request.piSessionId,
+        productRunId: request.productRunId,
+        toolCallId: request.toolCallId
+      })),
+      [approvedEvent.toolCallId, deniedEvent.toolCallId].map(identityFor),
+      "MCP confirmation receives the exact Conversation, Pi session, run, and Tool Call identity"
+    );
+    assert.ok(confirmationRequests.every((request) => request.requestId.trim()));
+    assert.deepEqual(confirmationRequests[0]?.target, {
+      kind: "mcp_tool",
+      resourceId,
+      resourceName: descriptor.resourceName,
+      toolName: descriptor.toolName
+    });
+    assert.deepEqual(confirmationRequests[0]?.preview, {
+      server: descriptor.resourceName,
+      tool: descriptor.toolName,
+      destructive: true,
+      arguments: { id: approvedEvent.toolCallId }
+    });
+    broker.dispose();
+  } finally {
+    await rm(rootPath, { recursive: true, force: true });
+  }
+}
+
+async function waitForMcpApprovalBinding(
+  broker: PiAgentApprovalBroker,
+  identity: Readonly<{
+    conversationId: string;
+    piSessionId: string;
+    productRunId: string;
+    toolCallId: string;
+  }>
+) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const binding = broker.bindingFor(identity);
+    if (binding) return binding;
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  }
+  throw new Error("Timed out waiting for MCP Agent Approval binding");
 }
 
 async function assertProductionMcpReceiptRecoveryDoesNotReenterResourceLane(): Promise<void> {

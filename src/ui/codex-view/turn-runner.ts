@@ -363,6 +363,11 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
   let subscription: ReturnType<
     CodexViewTurnContext["plugin"]["subscribePiRun"]
   > | null = null;
+  let approvalSubscription: ReturnType<
+    CodexViewTurnContext["plugin"]["subscribePiAgentApproval"]
+  > | null = null;
+  let approvalProjectionFlight: Promise<void> = Promise.resolve();
+  let approvalProjectionRefreshFailed = false;
   let liveProjection: PiChatUiViewModel | null = null;
   let agentSettledObserved = false;
   let terminalObserved = false;
@@ -394,6 +399,39 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
     view.activeRunSessionId = session.id;
     view.activeTurnId = handle.productRunId;
     liveProjection = piChatLiveProjectionFromSession(session, handle);
+    approvalSubscription = view.plugin.subscribePiAgentApproval({
+      conversationId: handle.conversationId,
+      piSessionId: handle.piSessionId,
+      productRunId: handle.productRunId
+    }, () => {
+      // The live broker can become ready just after Tool start. Re-render once
+      // immediately for the pending fallback, then project the durable Ticket.
+      view.renderMessagesIfActive(session);
+      approvalProjectionFlight = approvalProjectionFlight
+        .then(async () => {
+          if (!handle || terminalObserved) return;
+          const projection = await view.plugin.readPiConversationProjection(
+            handle.conversationId
+          );
+          if (terminalObserved) return;
+          rememberPiConversationProjection(view.plugin, projection);
+          liveProjection = piChatLiveProjectionFromDurable(
+            projection,
+            handle,
+            "running"
+          );
+          applyPiConversationProjection(session, projection);
+          applyPiChatLiveProjection(session, liveProjection);
+          view.renderMessagesIfActive(session);
+          view.renderToolbar();
+          view.applyStatus();
+        })
+        .catch(() => {
+          if (approvalProjectionRefreshFailed) return;
+          approvalProjectionRefreshFailed = true;
+          new Notice("审批状态刷新失败，请等待当前工具状态更新。");
+        });
+    });
     if (source === "composer") view.clearComposerDraft();
     view.renderTabs();
     view.renderMessagesIfActive(session);
@@ -503,6 +541,12 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
     new Notice(`EchoInk Pi Chat 发送失败：${message}`);
     return "failed";
   } finally {
+    try {
+      approvalSubscription?.unsubscribe();
+    } catch {
+      // The durable Ticket and Tool projection remain authoritative.
+    }
+    await approvalProjectionFlight.catch(() => undefined);
     try {
       subscription?.unsubscribe();
     } catch {
@@ -625,6 +669,7 @@ function piChatLiveProjectionFromDurable(
 function clonePiChatMessages(messages: readonly ChatMessage[]): ChatMessage[] {
   return messages.map((message) => ({
     ...message,
+    ...(message.approval ? { approval: { ...message.approval } } : {}),
     ...(message.attachments
       ? { attachments: message.attachments.map((attachment) => ({ ...attachment })) }
       : {}),
@@ -648,6 +693,16 @@ function clonePiChatMessages(messages: readonly ChatMessage[]): ChatMessage[] {
           steps: message.taskPlan.steps.map((step) => ({ ...step }))
         }
       }
+      : {}),
+    ...(message.reasoningSummary
+      ? {
+          reasoningSummary: {
+            ...message.reasoningSummary,
+            activities: message.reasoningSummary.activities.map(
+              (activity) => ({ ...activity })
+            )
+          }
+        }
       : {})
   }));
 }

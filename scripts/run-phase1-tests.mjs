@@ -22,6 +22,7 @@ await esbuild.build({
       'import { runPiConversationTabsTests } from "./src/tests/pi-native/conversation-tabs";',
       'import { runPiNativeTurnRunnerTests } from "./src/tests/pi-native/turn-runner";',
       'import { runMessageListIdentityTests } from "./src/tests/message-list-identity";',
+      'import { runSmoothConversationUiTests } from "./src/tests/smooth-conversation-ui";',
       'import { runComposerActionTests } from "./src/tests/composer-actions";',
       "await runPiNativeFileStoreTests();",
       "await runPiSessionDurabilityTests();",
@@ -32,6 +33,7 @@ await esbuild.build({
       "await runPiChatUiProjectorTests();",
       "await runPiNativeTurnRunnerTests();",
       "await runMessageListIdentityTests();",
+      "await runSmoothConversationUiTests();",
       "await runComposerActionTests();",
       'console.log("Current Pi Conversation acceptance: PASS");'
     ].join("\n"),

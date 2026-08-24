@@ -14,8 +14,27 @@ import {
   type PiChatUiViewModel,
   type PiSessionBranchEntryView
 } from "../../harness/pi-native/pi-chat-ui-projector";
+import {
+  ECHOINK_TASK_PLAN_ENTRY_TYPE,
+  ECHOINK_TASK_PLAN_SCHEMA_VERSION,
+  freezeEchoInkTaskPlan,
+  taskPlanSessionEntryData
+} from "../../types/task-plan";
+import {
+  ECHOINK_REASONING_SUMMARY_ENTRY_TYPE,
+  reasoningSummaryEntryData
+} from "../../types/reasoning-summary";
+import {
+  closeReasoningSummary,
+  completeReasoningAtFirstText,
+  createReasoningSummary,
+  updateReasoningActivity
+} from "../../harness/pi-native/pi-reasoning-summary";
 
 export async function runPiChatUiProjectorTests(): Promise<void> {
+  assertReasoningSummariesProjectStableAndPrivate();
+  assertTaskPlansProjectOneStableDurableMessage();
+  assertLiveTaskUpdateResultsProjectOneStableHistoricalTask();
   assertAskSourceAttributionDecorationsAreTruthfulAndIsolated();
   assertDurableBranchRebuildsExistingUiCardsAndHidesReasoning();
   assertLiveEventsMergeUntilTheProductSettlementBoundary();
@@ -28,6 +47,396 @@ export async function runPiChatUiProjectorTests(): Promise<void> {
   assertPhaseTwoWriteTerminalStatesRemainDistinct();
   assertSessionRunAndBranchScopesDoNotCross();
   assertInterruptedReadbackNeverPretendsTheRunCompleted();
+}
+
+function assertReasoningSummariesProjectStableAndPrivate(): void {
+  const projector = new PiChatUiProjector();
+  const piSessionId = "session-reasoning-summary";
+  const conversationId = "conversation-reasoning-summary";
+  const productRunId = "run-reasoning-summary";
+  const promptCanary = "PROMPT_PRIVATE_CANARY";
+  const answerCanary = "ANSWER_PRIVATE_CANARY";
+  const toolArgumentCanary = "TOOL_ARGUMENT_PRIVATE_CANARY";
+  const toolResultCanary = "TOOL_RESULT_PRIVATE_CANARY";
+  const privateReasoningCanary = "PRIVATE_REASONING_CANARY";
+  const started = createReasoningSummary({
+    conversationId,
+    piSessionId,
+    productRunId,
+    startedAt: 1_000
+  });
+  const withProvider = updateReasoningActivity({
+    summary: started,
+    activity: {
+      id: "provider",
+      kind: "provider",
+      status: "active",
+      stage: "requesting",
+      startedAt: 1_100,
+      updatedAt: 1_100
+    }
+  });
+  const answered = completeReasoningAtFirstText({
+    summary: withProvider,
+    observedAt: 2_500
+  });
+  const terminal = closeReasoningSummary({
+    summary: answered,
+    status: "completed",
+    terminalAt: 4_000
+  });
+  const entries: PiSessionBranchEntryView[] = [
+    {
+      type: "custom",
+      id: "reasoning-start",
+      parentId: null,
+      timestamp: isoTime(1_000),
+      customType: ECHOINK_REASONING_SUMMARY_ENTRY_TYPE,
+      data: reasoningSummaryEntryData({
+        conversationId,
+        piSessionId,
+        summary: withProvider
+      })
+    },
+    messageEntry("reasoning-user", "reasoning-start", 1_200, {
+      role: "user",
+      content: `请处理 ${promptCanary}`
+    }),
+    messageEntry("reasoning-tool-call", "reasoning-user", 1_800, {
+      role: "assistant",
+      content: [{
+        type: "toolCall",
+        id: "reasoning-tool",
+        name: "vault_search",
+        arguments: { query: toolArgumentCanary }
+      }]
+    }),
+    messageEntry("reasoning-tool-result", "reasoning-tool-call", 2_000, {
+      role: "toolResult",
+      toolCallId: "reasoning-tool",
+      toolName: "vault_search",
+      content: [{ type: "text", text: toolResultCanary }],
+      isError: false
+    }),
+    messageEntry("reasoning-answer", "reasoning-tool-result", 3_000, {
+      role: "assistant",
+      content: `公开回答 ${answerCanary}`
+    }),
+    {
+      type: "custom",
+      id: "reasoning-invalid-private",
+      parentId: "reasoning-answer",
+      timestamp: isoTime(3_500),
+      customType: ECHOINK_REASONING_SUMMARY_ENTRY_TYPE,
+      data: {
+        ...reasoningSummaryEntryData({
+          conversationId,
+          piSessionId,
+          summary: terminal
+        }),
+        thinking: privateReasoningCanary
+      }
+    },
+    {
+      type: "custom",
+      id: "reasoning-terminal",
+      parentId: "reasoning-invalid-private",
+      timestamp: isoTime(4_000),
+      customType: ECHOINK_REASONING_SUMMARY_ENTRY_TYPE,
+      data: reasoningSummaryEntryData({
+        conversationId,
+        piSessionId,
+        summary: terminal
+      })
+    }
+  ];
+  const durable = projector.projectSessionBranch({
+    piSessionId,
+    activeLeafId: "reasoning-terminal",
+    entries,
+    runState: "completed",
+    productRunId,
+    runIdentities: [{
+      productRunId,
+      userEntryId: "reasoning-user",
+      assistantEntryId: "reasoning-answer",
+      toolCallIds: ["reasoning-tool"],
+      updatedAt: 4_000
+    }],
+    now: 4_100
+  });
+  const durableReasoning = durable.messages.filter(
+    (message) => message.reasoningSummary
+  );
+  assert.equal(durableReasoning.length, 1);
+  assert.equal(durableReasoning[0]?.reasoningSummary?.terminalAt, 4_000);
+  assert.equal(durableReasoning[0]?.title, "思考完成 · 2 秒");
+  assert.doesNotMatch(JSON.stringify(durable), new RegExp(privateReasoningCanary, "u"));
+  const projectedReasoning = JSON.stringify(durableReasoning[0]);
+  for (const canary of [
+    promptCanary,
+    answerCanary,
+    toolArgumentCanary,
+    toolResultCanary,
+    privateReasoningCanary
+  ]) {
+    assert.doesNotMatch(projectedReasoning, new RegExp(canary, "u"),
+      `Reasoning projection excludes ${canary}`);
+  }
+  assert.equal(durable.messages.filter((message) => message.role === "tool").length, 1,
+    "dedicated Tool remains a sibling of Reasoning");
+  assert.deepEqual(
+    durable.messages.filter((message) =>
+      message.runId === productRunId
+      && (message.role === "user" || message.reasoningSummary)
+    ).map((message) => message.reasoningSummary ? "reasoning" : "user"),
+    ["user", "reasoning"],
+    "pre-prompt durable snapshot is positioned after its real user message"
+  );
+
+  let live = projector.createEmpty({
+    piSessionId,
+    activeLeafId: "reasoning-terminal",
+    now: 900
+  });
+  live = project(projector, live, runtimeEvent("reasoning_summary", 1_000, {
+    summary: withProvider
+  }, piSessionId, productRunId, "reasoning-terminal"));
+  const liveId = live.messages.find((message) => message.reasoningSummary)?.id;
+  assert.equal(live.messages.find((message) => message.reasoningSummary)?.text.includes("请求模型"), true);
+  live = project(projector, live, runtimeEvent("reasoning_summary", 4_000, {
+    summary: terminal
+  }, piSessionId, productRunId, "reasoning-terminal"));
+  assert.equal(live.messages.filter((message) => message.reasoningSummary).length, 1);
+  assert.equal(live.messages.find((message) => message.reasoningSummary)?.id, liveId);
+  assert.equal(liveId, durableReasoning[0]?.id,
+    "live and durable Reasoning share one stable message id");
+
+  const reopenCases = [
+    { runState: "completed", status: "completed", updatedAt: 5_000, title: "思考完成 · 4 秒" },
+    { runState: "failed", status: "failed", updatedAt: 6_000, title: "处理失败 · 5 秒" },
+    { runState: "cancelled", status: "cancelled", updatedAt: 7_000, title: "思考已取消 · 6 秒" },
+    { runState: "interrupted", status: "interrupted", updatedAt: 8_000, title: "思考中断 · 7 秒" },
+    { runState: "idle", status: "interrupted", updatedAt: 9_000, title: "思考中断 · 8 秒" }
+  ] as const;
+  for (const reopenCase of reopenCases) {
+    const reopened = projector.projectSessionBranch({
+      piSessionId,
+      activeLeafId: "reasoning-user",
+      entries: entries.slice(0, 2),
+      runState: reopenCase.runState,
+      productRunId,
+      runIdentities: [{
+        productRunId,
+        userEntryId: "reasoning-user",
+        updatedAt: reopenCase.updatedAt
+      }],
+      now: 99_999
+    });
+    const reopenedReasoning = reopened.messages.find(
+      (message) => message.reasoningSummary
+    );
+    assert.equal(reopenedReasoning?.reasoningSummary?.status, reopenCase.status);
+    assert.equal(reopenedReasoning?.reasoningSummary?.terminalAt, reopenCase.updatedAt,
+      "reopen closeout uses the real ProductRun updatedAt boundary");
+    assert.equal(reopenedReasoning?.title, reopenCase.title);
+  }
+
+  const missingRunBoundary = projector.projectSessionBranch({
+    piSessionId,
+    activeLeafId: "reasoning-user",
+    entries: entries.slice(0, 2),
+    runState: "failed",
+    productRunId,
+    runIdentities: [{ productRunId, userEntryId: "reasoning-user" }],
+    now: 99_999
+  });
+  assert.equal(
+    missingRunBoundary.messages.find((message) => message.reasoningSummary)
+      ?.reasoningSummary?.terminalAt,
+    undefined,
+    "reopen never invents a terminal time without a real ProductRun updatedAt"
+  );
+}
+
+function assertTaskPlansProjectOneStableDurableMessage(): void {
+  const projector = new PiChatUiProjector();
+  const piSessionId = "session-task-plan-history";
+  const conversationId = "conversation-task-plan-history";
+  const first = freezeEchoInkTaskPlan({
+    schemaVersion: ECHOINK_TASK_PLAN_SCHEMA_VERSION,
+    planId: "durable-plan",
+    title: "真实结构化计划",
+    status: "in_progress",
+    version: 1,
+    steps: [{ stepId: "step-1", text: "第一步", status: "in_progress" }],
+    currentStepId: "step-1",
+    source: "agent",
+    productRunId: "run-task-plan",
+    createdAt: 10,
+    updatedAt: 10
+  });
+  const second = freezeEchoInkTaskPlan({
+    ...first,
+    status: "completed",
+    version: 2,
+    steps: [{ stepId: "step-1", text: "第一步", status: "completed" }],
+    currentStepId: undefined,
+    updatedAt: 20
+  });
+  const entries: PiSessionBranchEntryView[] = [
+    messageEntry("assistant-plan-copy", null, 5, {
+      role: "assistant",
+      content: "计划：第一步，然后完成。"
+    }),
+    {
+      type: "custom",
+      id: "task-plan-entry-v1",
+      parentId: "assistant-plan-copy",
+      timestamp: isoTime(10),
+      customType: ECHOINK_TASK_PLAN_ENTRY_TYPE,
+      data: taskPlanSessionEntryData({ conversationId, piSessionId, plan: first })
+    },
+    {
+      type: "custom",
+      id: "task-plan-entry-v2",
+      parentId: "task-plan-entry-v1",
+      timestamp: isoTime(20),
+      customType: ECHOINK_TASK_PLAN_ENTRY_TYPE,
+      data: taskPlanSessionEntryData({ conversationId, piSessionId, plan: second })
+    }
+  ];
+  const projected = projector.projectSessionBranch({
+    piSessionId,
+    activeLeafId: "task-plan-entry-v2",
+    entries,
+    runState: "completed",
+    productRunId: "run-task-plan",
+    now: 30
+  });
+  const tasks = projected.messages.filter((message) => message.taskPlan);
+  assert.equal(tasks.length, 1,
+    "later versions update one stable history Task instead of adding another row");
+  assert.equal(tasks[0]?.taskPlan?.version, 2);
+  assert.equal(tasks[0]?.taskPlan?.status, "completed");
+  assert.equal(tasks[0]?.id.includes("durable-plan"), true);
+  assert.equal(
+    projected.messages.filter((message) => message.taskPlan).length,
+    1,
+    "natural-language plan copy creates no additional taskPlan"
+  );
+
+  const reopened = projector.projectSessionBranch({
+    piSessionId,
+    activeLeafId: "task-plan-entry-v2",
+    entries,
+    runState: "completed",
+    productRunId: "run-task-plan",
+    now: 40
+  });
+  const reopenedTask = reopened.messages.find((message) => message.taskPlan);
+  assert.equal(reopenedTask?.id, tasks[0]?.id);
+  assert.equal(reopenedTask?.taskPlan?.version, 2,
+    "reopen restores the latest durable version without regeneration");
+}
+
+function assertLiveTaskUpdateResultsProjectOneStableHistoricalTask(): void {
+  const projector = new PiChatUiProjector();
+  const first = freezeEchoInkTaskPlan({
+    schemaVersion: ECHOINK_TASK_PLAN_SCHEMA_VERSION,
+    planId: "live-task-update-plan",
+    title: "实时结构化计划",
+    status: "pending",
+    version: 1,
+    steps: [
+      { stepId: "step-1", text: "读取状态", status: "pending" },
+      { stepId: "step-2", text: "更新结果", status: "pending" }
+    ],
+    source: "agent",
+    productRunId: "run-task-update-live",
+    createdAt: 10,
+    updatedAt: 10
+  });
+  const second = freezeEchoInkTaskPlan({
+    ...first,
+    status: "in_progress",
+    version: 2,
+    steps: [
+      { stepId: "step-1", text: "读取状态", status: "completed" },
+      { stepId: "step-2", text: "更新结果", status: "in_progress" }
+    ],
+    currentStepId: "step-2",
+    updatedAt: 20
+  });
+  let view = projector.createEmpty({
+    piSessionId: "session-task-update-live",
+    activeLeafId: "assistant-task-update-live",
+    now: 1
+  });
+  view = project(projector, view, runtimeEvent("tool_execution_end", 10, {
+    toolCallId: "task-update-v1",
+    toolName: "task_update",
+    result: {
+      content: [{ type: "text", text: "task_plan_update_pending" }],
+      details: { source: "echoink-task-plan", plan: first }
+    },
+    isError: false
+  }, "session-task-update-live", "run-task-update-live", "task-plan-entry-v1"));
+  const firstTasks = view.messages.filter((message) => message.taskPlan);
+  assert.equal(firstTasks.length, 1,
+    "the first valid live task_update immediately inserts one historical Task");
+  assert.equal(firstTasks[0]?.taskPlan?.version, 1);
+  const stableMessageId = firstTasks[0]?.id;
+  assert.ok(stableMessageId,
+    "the first live task_update assigns the historical Task a stable message ID");
+
+  view = project(projector, view, runtimeEvent("tool_execution_end", 20, {
+    toolCallId: "task-update-v2",
+    toolName: "task_update",
+    result: {
+      content: [{ type: "text", text: "task_plan_update_pending" }],
+      details: { source: "echoink-task-plan", plan: second }
+    },
+    isError: false
+  }, "session-task-update-live", "run-task-update-live", "task-plan-entry-v2"));
+  const updatedTasks = view.messages.filter((message) => message.taskPlan);
+  assert.equal(updatedTasks.length, 1,
+    "a same-plan live task_update replaces rather than duplicates the Task");
+  assert.equal(updatedTasks[0]?.id, stableMessageId);
+  assert.equal(updatedTasks[0]?.taskPlan?.version, 2);
+  assert.equal(updatedTasks[0]?.taskPlan?.steps[0]?.status, "completed");
+  assert.equal(updatedTasks[0]?.taskPlan?.steps[1]?.status, "in_progress");
+
+  let invalid = projector.createEmpty({
+    piSessionId: "session-task-update-invalid",
+    activeLeafId: "assistant-task-update-invalid",
+    now: 1
+  });
+  invalid = project(projector, invalid, runtimeEvent("tool_execution_end", 30, {
+    toolCallId: "task-update-invalid",
+    toolName: "task_update",
+    result: {
+      content: [{ type: "text", text: "task_plan_update_pending" }],
+      details: {
+        source: "echoink-task-plan",
+        plan: { ...first, schemaVersion: 999 }
+      }
+    },
+    isError: false
+  }, "session-task-update-invalid", "run-task-update-invalid", null));
+  assert.equal(invalid.messages.some((message) => message.taskPlan), false,
+    "an invalid live task_update plan creates no historical Task");
+  invalid = project(projector, invalid, runtimeEvent("tool_execution_end", 31, {
+    toolCallId: "task-update-missing-plan",
+    toolName: "task_update",
+    result: {
+      content: [{ type: "text", text: "task_plan_update_pending" }],
+      details: { source: "echoink-task-plan" }
+    },
+    isError: false
+  }, "session-task-update-invalid", "run-task-update-invalid", null));
+  assert.equal(invalid.messages.some((message) => message.taskPlan), false,
+    "a live task_update without plan data creates no historical Task");
 }
 
 function assertAskSourceAttributionDecorationsAreTruthfulAndIsolated(): void {
@@ -989,6 +1398,16 @@ function assertPhaseTwoLiveToolProductStatesStayOnOneCard(): void {
     approvals: [approval],
     receipts: [receipt]
   });
+  assert.deepEqual(onlyTool(view).approval, {
+    status: "approved",
+    preview: "创建 Inbox/Live.md",
+    updatedAt: 6
+  });
+  assert.equal(
+    "operationIdentity" in (onlyTool(view).approval ?? {}),
+    false,
+    "ChatMessage approval projection must not expose authorization identity"
+  );
   assert.equal(
     onlyTool(view).status,
     "verifying",
@@ -1155,6 +1574,11 @@ function assertPhaseTwoDurableToolProductStatesReopenWithoutLegacyEvents(): void
   assert.equal(tools.length, 2);
   assert.equal(toolByCall(first, "read-p2").status, "completed");
   assert.equal(toolByCall(first, "write-p2").status, "completed");
+  assert.deepEqual(toolByCall(first, "write-p2").approval, {
+    status: "approved",
+    preview: "创建 Created.md",
+    updatedAt: 7
+  });
   assert.match(toolByCall(first, "write-p2").details ?? "", /读回验证/u);
   assert.deepEqual(reopened.messages, first.messages);
   assert.deepEqual(reopened.provisionalMessageIds, []);
@@ -1251,7 +1675,22 @@ function assertPhaseTwoWriteTerminalStatesRemainDistinct(): void {
     now: 3
   });
   assert.equal(onlyTool(denied).status, "denied");
+  assert.equal(onlyTool(denied).approval?.status, "denied");
   assert.deepEqual(denied.pendingToolCallIds, []);
+
+  const expired = projector.projectSessionBranch({
+    piSessionId: "session-terminal-p2",
+    activeLeafId: "tool-result-terminal-p2",
+    entries,
+    runState: "completed",
+    productRunId: "run-terminal-p2",
+    approvals: [{ ...approval, status: "expired" }],
+    now: 4
+  });
+  assert.equal(onlyTool(expired).status, "denied",
+    "aggregate Tool status keeps its existing denied compatibility mapping");
+  assert.equal(onlyTool(expired).approval?.status, "expired",
+    "the display-only Approval snapshot must preserve expired distinctly");
 }
 
 function assertSessionRunAndBranchScopesDoNotCross(): void {

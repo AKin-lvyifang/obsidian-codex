@@ -12,6 +12,7 @@ export interface CodexViewShellHost extends Component {
   tabBarEl: HTMLElement;
   messagesEl: HTMLElement;
   virtualListEl: HTMLElement;
+  taskPlanDockEl: HTMLElement;
   queueEl: HTMLElement;
   attachmentsEl: HTMLElement;
   workspaceEl: HTMLElement;
@@ -39,6 +40,7 @@ export interface CodexViewShellHost extends Component {
   sendMessage(): Promise<void>;
   handleDroppedFiles(event: DragEvent): void;
   renderToolbar(): void;
+  renderTaskPlanDock(session: StoredSession): void;
   updateInputPlaceholder(): void;
 }
 
@@ -75,6 +77,7 @@ export function renderViewShell(host: CodexViewShellHost): void {
   host.registerDomEvent(host.messagesEl, "touchstart", (event) => host.messageScrollFollow.handleTouchStart(event as TouchEvent));
   host.registerDomEvent(host.messagesEl, "touchmove", (event) => host.messageScrollFollow.handleTouchMove(event as TouchEvent));
   host.registerDomEvent(host.messagesEl, "scroll", () => host.handleMessagesScroll());
+  host.taskPlanDockEl = host.rootEl.createDiv({ cls: "codex-task-plan-dock" });
   const composerRefs = renderComposerShell(host.rootEl, {
     onInputChanged: () => host.onInputChanged(),
     onPasteFiles: (event) => void host.handlePastedFiles(event),

@@ -41,6 +41,12 @@ import {
 import {
   appendTaskPlanEntry
 } from "../../harness/pi-native/pi-task-plan";
+import {
+  closeReasoningSummary,
+  completeReasoningAtFirstText,
+  createReasoningSummary,
+  updateReasoningActivity
+} from "../../harness/pi-native/pi-reasoning-summary";
 import { routeKnowledgeConversationCommand } from "../../knowledge-base/commands";
 import {
   createKnowledgeMaintenanceResultEnvelope
@@ -55,6 +61,10 @@ import {
   freezeEchoInkTaskPlan,
   latestTaskPlanFromBranch
 } from "../../types/task-plan";
+import {
+  reasoningSummaryFromSessionEntry,
+  type EchoInkReasoningSummarySnapshot
+} from "../../types/reasoning-summary";
 
 const API: PiSessionManagerApi = {
   codingAgentVersion: VERSION,
@@ -69,6 +79,8 @@ const QUERY_MAINTENANCE_SCOPE = Object.freeze({
 });
 
 export async function runPiNativeConversationRuntimeTests(): Promise<void> {
+  assertReasoningSummaryLifecycleSemantics();
+  await assertReasoningSummaryRuntimeLifecycle();
   assertKnowledgeMaintenanceRequiresExplicitCommand();
   await assertProjectionAndCatalogManagementStayAgentSessionFree();
   await assertKnowledgeAskUsesAgentAndReadOnlyTools();
@@ -94,6 +106,210 @@ export async function runPiNativeConversationRuntimeTests(): Promise<void> {
   await assertConversationDerivationCreatesIndependentDurablePrefixes();
   await assertDerivationExcludesIdentityBoundOperationalState();
   await assertDerivedActivationFailureRemainsAVisibleDurableConversation();
+  await runPiNativeTaskPlanRuntimeTests();
+}
+
+function assertReasoningSummaryLifecycleSemantics(): void {
+  const started = createReasoningSummary({
+    conversationId: "conversation-reasoning",
+    piSessionId: "session-reasoning",
+    productRunId: "run-reasoning",
+    startedAt: 10
+  });
+  const answered = completeReasoningAtFirstText({
+    summary: started,
+    observedAt: 20
+  });
+  const updatedAfterAnswer = updateReasoningActivity({
+    summary: answered,
+    activity: {
+      id: "tool-call-1",
+      kind: "tool",
+      status: "completed",
+      name: "task_update",
+      startedAt: 18,
+      updatedAt: 25
+    }
+  });
+  assert.equal(updatedAfterAnswer.status, "completed");
+  assert.equal(updatedAfterAnswer.firstAssistantTextAt, 20);
+  assert.equal(updatedAfterAnswer.updatedAt, 25);
+  assert.deepEqual(updatedAfterAnswer.activities.map((activity) => activity.id), [
+    "tool-call-1"
+  ]);
+
+  const completedWithoutText = closeReasoningSummary({
+    summary: createReasoningSummary({
+      conversationId: "conversation-no-text",
+      piSessionId: "session-no-text",
+      productRunId: "run-no-text",
+      startedAt: 30
+    }),
+    status: "completed",
+    terminalAt: 45
+  });
+  assert.equal(completedWithoutText.status, "completed");
+  assert.equal(completedWithoutText.firstAssistantTextAt, undefined);
+  assert.equal(completedWithoutText.terminalAt, 45);
+}
+
+async function assertReasoningSummaryRuntimeLifecycle(): Promise<void> {
+  await withFixture([
+    "run-reasoning-task",
+    "run-reasoning-no-text",
+    "run-reasoning-failed",
+    "run-reasoning-interrupted",
+    "run-reasoning-cancelled"
+  ], async (fixture) => {
+    fixture.configureFactoryTools({
+      registered: ["task_update"],
+      defaults: ["task_update"],
+      planAllowed: []
+    });
+    const conversationId = "reasoning-runtime-lifecycle";
+    await fixture.runtime.createConversation({
+      conversationId,
+      title: "Reasoning runtime lifecycle",
+      cwd: fixture.root,
+      createdAt: 1
+    });
+    await fixture.runtime.activateConversation(conversationId);
+    const session = fixture.latestSession();
+
+    const taskRun = await fixture.runtime.submit({
+      conversationId,
+      text: "执行结构化任务",
+      submittedAt: 2
+    });
+    const taskEvents: PiChatRuntimeEvent[] = [];
+    fixture.runtime.subscribeProductRun(taskRun.productRunId, (event) => {
+      taskEvents.push(structuredClone(event));
+    });
+    session.beginProviderRequest();
+    session.emitAssistantText("首段公开回答");
+    const plan = freezeEchoInkTaskPlan({
+      schemaVersion: ECHOINK_TASK_PLAN_SCHEMA_VERSION,
+      planId: "reasoning-plan",
+      title: "PRIVATE_TASK_TITLE_CANARY",
+      status: "completed",
+      version: 1,
+      steps: [{
+        stepId: "step-1",
+        text: "PRIVATE_TASK_STEP_CANARY",
+        status: "completed"
+      }],
+      source: "agent",
+      productRunId: taskRun.productRunId,
+      createdAt: 3,
+      updatedAt: 4
+    });
+    session.finishTool("reasoning-task-update", "task_update", {
+      details: { source: "echoink-task-plan", plan }
+    }, false);
+    assert.equal(
+      reasoningSummariesForRun(session.sessionManager, taskRun.productRunId).length,
+      1,
+      "streaming Provider, first text, Tool, and Task updates never append custom entries"
+    );
+    session.finishSuccessful("最终公开回答");
+    await taskRun.result;
+    const taskSummaries = reasoningSummariesForRun(
+      session.sessionManager,
+      taskRun.productRunId
+    );
+    assert.equal(taskSummaries.length, 2);
+    assert.equal(taskSummaries[0]?.terminalAt, undefined);
+    assert.equal(taskSummaries[1]?.status, "completed");
+    assert.ok(taskSummaries[1]?.firstAssistantTextAt);
+    assert.ok(taskSummaries[1]?.terminalAt);
+    assert.deepEqual(
+      new Set(taskSummaries[1]?.activities.map((activity) => activity.kind)),
+      new Set(["provider", "tool", "task"])
+    );
+    assert.doesNotMatch(
+      JSON.stringify(taskSummaries),
+      /PRIVATE_TASK_(?:TITLE|STEP)_CANARY/u
+    );
+    const taskReasoningEvents = taskEvents.filter(
+      (event): event is Extract<PiChatRuntimeEvent, { type: "reasoning_summary" }> =>
+        event.type === "reasoning_summary"
+    );
+    assert.equal(taskReasoningEvents[0]?.summary.status, "running");
+    assert.ok(taskReasoningEvents.some((event) =>
+      event.summary.firstAssistantTextAt !== undefined
+      && event.summary.activities.some((activity) => activity.kind === "task")
+    ), "post-answer Task updates remain visible in the same live snapshot");
+
+    const noTextRun = await fixture.runtime.submit({
+      conversationId,
+      text: "合法无文本完成",
+      submittedAt: 5
+    });
+    session.finishSuccessful("");
+    await noTextRun.result;
+    const noText = reasoningSummariesForRun(
+      session.sessionManager,
+      noTextRun.productRunId
+    ).at(-1);
+    assert.equal(noText?.status, "completed");
+    assert.equal(noText?.firstAssistantTextAt, undefined);
+    assert.ok(noText?.terminalAt);
+
+    const failedRun = await fixture.runtime.submit({
+      conversationId,
+      text: "失败收口",
+      submittedAt: 6
+    });
+    session.finishFailed("fixture failure");
+    await failedRun.result;
+    assert.equal(
+      reasoningSummariesForRun(session.sessionManager, failedRun.productRunId).at(-1)?.status,
+      "failed"
+    );
+
+    const interruptedRun = await fixture.runtime.submit({
+      conversationId,
+      text: "非 runtime abort 中断",
+      submittedAt: 7
+    });
+    session.finishAborted();
+    await interruptedRun.result;
+    assert.equal(
+      reasoningSummariesForRun(
+        session.sessionManager,
+        interruptedRun.productRunId
+      ).at(-1)?.status,
+      "interrupted"
+    );
+
+    const cancelledRun = await fixture.runtime.submit({
+      conversationId,
+      text: "runtime abort 取消",
+      submittedAt: 8
+    });
+    await fixture.runtime.abort(conversationId);
+    await cancelledRun.result;
+    assert.equal(
+      reasoningSummariesForRun(
+        session.sessionManager,
+        cancelledRun.productRunId
+      ).at(-1)?.status,
+      "cancelled"
+    );
+  });
+}
+
+function reasoningSummariesForRun(
+  sessionManager: SessionManager,
+  productRunId: string
+): Readonly<EchoInkReasoningSummarySnapshot>[] {
+  return sessionManager.getBranch().flatMap((entry) => {
+    const summary = reasoningSummaryFromSessionEntry(
+      entry,
+      sessionManager.getSessionId()
+    );
+    return summary?.productRunId === productRunId ? [summary] : [];
+  });
 }
 
 async function assertProjectionAndCatalogManagementStayAgentSessionFree():
@@ -1032,6 +1248,26 @@ async function assertKnowledgeObservationAndProgressArePrivacySafe(): Promise<vo
     fixture.runtime.subscribeProductRun(handle.productRunId, (event) => {
       events.push(structuredClone(event));
     });
+    await fixture.reportMemoryRecall({
+      status: "active",
+      stage: "loading",
+      elapsedMs: 0
+    });
+    await fixture.reportMemoryRecall({
+      status: "completed",
+      stage: "assembling",
+      elapsedMs: 7,
+      recall: {
+        result: "completed",
+        stage: "assembling",
+        elapsedMs: 7,
+        scanned: 12,
+        candidates: 4,
+        injected: 2,
+        remaining: 2,
+        exhausted: false
+      }
+    });
 
     session.emitToolStart(
       "knowledge-search-continuation",
@@ -1107,7 +1343,7 @@ async function assertKnowledgeObservationAndProgressArePrivacySafe(): Promise<vo
       exhausted: false,
       continuationCount: 1,
       knowledgeReadCount: 1,
-      memoryRecallUsed: false,
+      memoryRecallUsed: true,
       memorySearchUsed: true,
       memoryReadUsed: false,
       conflictOrFreshnessTriggered: false,
@@ -1133,6 +1369,21 @@ async function assertKnowledgeObservationAndProgressArePrivacySafe(): Promise<vo
       && event.stage === "comparing_memory"
       && event.status === "active"
     ));
+    const terminalReasoning = events.filter(
+      (event): event is Extract<PiChatRuntimeEvent, { type: "reasoning_summary" }> =>
+        event.type === "reasoning_summary"
+    ).at(-1)?.summary;
+    assert.ok(terminalReasoning);
+    assert.deepEqual(
+      new Set(terminalReasoning!.activities.map((activity) => activity.kind)),
+      new Set(["knowledge", "memory", "tool", "provider"])
+    );
+    assert.equal(
+      terminalReasoning!.activities.find((activity) =>
+        activity.kind === "memory" && activity.stage === "assembling"
+      )?.total,
+      4
+    );
     assert.doesNotMatch(JSON.stringify(settled.knowledge), /sha256|PRIVATE_/u);
   }, { knowledge });
 }
@@ -1712,6 +1963,70 @@ export async function runPiNativeTaskPlanRuntimeTests(): Promise<void> {
         fixture.runtime.releaseProductRun(autoPauseRun.productRunId),
         true
       );
+
+      await fixture.runtime.transitionTaskPlan({
+        conversationId,
+        planId: pending.planId,
+        action: "continue"
+      });
+      const abortedRun = await fixture.runtime.submit({
+        conversationId,
+        text: "Provider 自行中断时收口计划",
+        mode: "agent",
+        submittedAt: 8
+      });
+      session.finishAborted();
+      assert.equal((await abortedRun.result).terminalState, "cancelled");
+      const interrupted = latestTaskPlanFromBranch(
+        session.sessionManager.getBranch(),
+        pending.planId
+      );
+      assert.equal(interrupted?.status, "paused");
+      assert.equal(interrupted?.steps[0]?.status, "paused");
+      assert.match(interrupted?.lastUpdateSummary ?? "", /已中断/u);
+      assert.equal(
+        fixture.runtime.releaseProductRun(abortedRun.productRunId),
+        true
+      );
+
+      await fixture.runtime.transitionTaskPlan({
+        conversationId,
+        planId: pending.planId,
+        action: "continue"
+      });
+      const failedRun = await fixture.runtime.submit({
+        conversationId,
+        text: "本轮 Provider 失败时收口计划",
+        mode: "agent",
+        submittedAt: 9
+      });
+      session.finishFailed("fixture provider failure");
+      assert.equal((await failedRun.result).terminalState, "failed");
+      const failed = latestTaskPlanFromBranch(
+        session.sessionManager.getBranch(),
+        pending.planId
+      );
+      assert.equal(failed?.status, "failed");
+      assert.equal(failed?.currentStepId, undefined);
+      assert.equal(failed?.steps[0]?.status, "interrupted");
+      assert.equal(failed?.steps[1]?.status, "pending");
+      assert.equal(
+        failed?.steps.some((step) => step.status === "failed"),
+        false,
+        "whole-run failure must not fabricate a failed step"
+      );
+      assert.equal(
+        fixture.runtime.releaseProductRun(failedRun.productRunId),
+        true
+      );
+
+      await fixture.runtime.releaseConversation(conversationId);
+      const reopened = await fixture.runtime.activateConversation(conversationId);
+      const reopenedPlan = reopened.messages.find((message) =>
+        message.taskPlan?.planId === pending.planId
+      )?.taskPlan;
+      assert.equal(reopenedPlan?.status, "failed");
+      assert.equal(reopenedPlan?.steps[0]?.status, "interrupted");
     }
   );
 }
@@ -2403,10 +2718,12 @@ async function assertSubscriberFailuresAreIsolated(): Promise<void> {
     const result = await handle.result;
     assert.equal(result.terminalState, "completed");
     assert.deepEqual(orderedEvents, [
+      "reasoning_summary",
       "agent_settled",
+      "reasoning_summary",
       "product_run_settled"
     ]);
-    assert.equal(failingSubscriberCalls, 2);
+    assert.equal(failingSubscriberCalls, 4);
     assert.equal(fixture.runtime.releaseProductRun(handle.productRunId), true);
   });
 }
@@ -2886,6 +3203,20 @@ class ControlledAgentSession {
       ...assistantMessage("", 300_000 + this.promptSequence),
       stopReason: "error",
       errorMessage
+    });
+    this.emit({ type: "agent_settled" });
+    this.isStreaming = false;
+    this.resolvePrompt = null;
+    this.rejectPrompt = null;
+    resolve();
+  }
+
+  finishAborted(): void {
+    const resolve = this.resolvePrompt;
+    assert.ok(resolve, "expected a pending prompt");
+    this.sessionManager.appendMessage({
+      ...assistantMessage("", 300_000 + this.promptSequence),
+      stopReason: "aborted"
     });
     this.emit({ type: "agent_settled" });
     this.isStreaming = false;

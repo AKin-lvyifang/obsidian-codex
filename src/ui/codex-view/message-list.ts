@@ -17,7 +17,7 @@ import { calculateVirtualWindow, isNearVirtualBottom, scrollTopForVirtualBottom 
 import { extractKnowledgeBaseResultTitle } from "../knowledge-base-result-title";
 import type { KnowledgeBaseMaintainReportPayload, KnowledgeBaseMaintainReportSectionItem, KnowledgeBaseMessageUiPayload, KnowledgeBaseRunPayload } from "../../knowledge-base/maintain-report-card";
 import { formatMessageHeaderTime } from "../message-time";
-import { openImageOverlay, renderRichText } from "../render-message";
+import { openImageOverlay, renderPreformattedVaultNoteText, renderRichText } from "../render-message";
 import { buildActionTimeline, isActionTimelineItem, type ActionGroupKind, type ActionItemViewModel } from "./action-timeline";
 import { buildAgentTurnProjection, formatAgentTurnDuration, isAgentAnswerMessage, isAgentProcessItemType, type CompletedAgentTurn } from "./agent-turn-process";
 import { copyAnswerMarkdown } from "./answer-copy";
@@ -29,17 +29,53 @@ import {
   type KnowledgeUsageMessageData
 } from "../../knowledge-base/usage";
 import {
-  taskPlanCurrentStep,
   taskPlanProgress,
+  type EchoInkTaskPlanStepStatus,
   type EchoInkTaskPlanStatus
 } from "../../types/task-plan";
 import { renderProviderBrandIcon, type ProviderBrandId } from "../../settings/provider-brand-icons";
 import { API_PROVIDER_PRESETS } from "../../settings/provider-presets";
+import {
+  createAIElementsDocumentSources,
+  createAIElementsTask,
+  createSmoothAIApprovalCard,
+  createSmoothAIArtifact,
+  createSmoothAIMessageBody,
+  createSmoothAIReasoning,
+  markSmoothAIApproval,
+  markSmoothAIArtifact,
+  markSmoothAIDiff,
+  markSmoothAIReasoning,
+  markSmoothAIResponse,
+  markSmoothAIToolCall,
+  renderSmoothAILoader,
+  renderSmoothAISuggestions,
+  renderSmoothAIToolStatus,
+  renderSmoothBlurOutUp,
+  smoothAIStatus,
+  type SmoothAIApprovalState
+} from "./smooth-chat-ui";
 
 type MessageRenderRow =
   | { id: string; kind: "message"; message: ChatMessage; showAgentHeader: boolean; showAgentFooter: boolean; processExpanded: boolean }
   | { id: string; kind: "actionItem"; message: ChatMessage; showAgentHeader: boolean }
   | { id: string; kind: "turnProcess"; turn: CompletedAgentTurn; showAgentHeader: boolean };
+
+interface LocalVaultDocumentSource {
+  citations: KnowledgeBaseCitation[];
+  key: string;
+  kind: "vault";
+  path: string;
+  references: KnowledgeReference[];
+}
+
+interface LocalMemoryDocumentSource {
+  key: string;
+  kind: "memory";
+  source: PersonalMemorySourceReference;
+}
+
+type LocalDocumentSource = LocalVaultDocumentSource | LocalMemoryDocumentSource;
 
 export interface MessageListRenderOptions {
   forceBottom?: boolean;
@@ -51,6 +87,12 @@ export interface MessageListRenderOptions {
 export interface AgentIdentityView {
   readonly displayName: string;
   readonly avatarUrl: string | null;
+}
+
+export interface MessageApprovalDecisionBinding {
+  readonly target: string;
+  readonly preview: string;
+  decide(decision: "approve" | "reject"): boolean;
 }
 
 export interface MessageListRenderInput {
@@ -74,6 +116,10 @@ export interface MessageListRenderInput {
     action: "execute" | "continue" | "pause" | "cancel"
   ) => Promise<void>;
   onModifyTaskPlan?: (planId: string, title: string) => void;
+  resolveApprovalDecision?: (
+    message: Readonly<ChatMessage>
+  ) => MessageApprovalDecisionBinding | null;
+  onSuggestionSelect?: (text: string) => void;
   onScheduleMeasure: (forceBottom?: boolean) => void;
   onScheduleRunProgress: () => void;
   shouldFollowBottom?: () => boolean;
@@ -122,6 +168,11 @@ const AGENT_LIVE_COPY_INTERVAL_MS = 1800;
 const PROCESS_CONTENT_UNAVAILABLE_TEXT = "后端未提供可展示内容";
 const COLD_START_STATUS_TEXT = "正在整理上下文";
 const COLD_START_COPY_TEXTS = ["先把问题看明白", "等模型接上话", "把上下文放到手边"];
+const EMPTY_CONVERSATION_SUGGESTIONS = [
+  { id: "organize-knowledge-base", label: "整理知识库" },
+  { id: "summarize-current-note", label: "总结当前笔记" },
+  { id: "search-knowledge-base", label: "从知识库找答案" }
+] as const;
 
 export interface KnowledgeBaseRunProgressState {
   totalCells: number;
@@ -222,6 +273,42 @@ export function personalMemorySourceEmptyStateLabel(): string {
   return "未记录可展示的 Personal Memory 来源。";
 }
 
+export interface ReasoningDisclosureState {
+  readonly open: boolean;
+  readonly manual: boolean;
+  readonly autoFoldHandled: boolean;
+  readonly lastStatus: string;
+}
+
+export function nextReasoningDisclosureState(
+  previous: Readonly<ReasoningDisclosureState> | undefined,
+  status: string
+): Readonly<ReasoningDisclosureState> {
+  if (!previous) {
+    const running = status === "running";
+    return Object.freeze({
+      open: running,
+      manual: false,
+      autoFoldHandled: !running,
+      lastStatus: status
+    });
+  }
+  if (
+    !previous.manual
+    && !previous.autoFoldHandled
+    && previous.lastStatus === "running"
+    && status !== "running"
+  ) {
+    return Object.freeze({
+      open: false,
+      manual: false,
+      autoFoldHandled: true,
+      lastStatus: status
+    });
+  }
+  return Object.freeze({ ...previous, lastStatus: status });
+}
+
 export class CodexMessageListRenderer {
   private virtualSessionId = "";
   private virtualRowHeights = new Map<string, number>();
@@ -236,6 +323,7 @@ export class CodexMessageListRenderer {
   private openKnowledgeBaseCitations = new Map<string, boolean>();
   private openKnowledgeBaseReportSections = new Map<string, boolean>();
   private openTaskPlans = new Map<string, boolean>();
+  private reasoningDisclosureStates = new Map<string, ReasoningDisclosureState>();
   private env: MessageListEnvironment | null = null;
   private virtualRerenderScheduled = false;
   private virtualRerenderBurst = 0;
@@ -263,7 +351,16 @@ export class CodexMessageListRenderer {
       virtualListEl.setCssStyles({ height: "100%" });
       const welcome = virtualListEl.createDiv({ cls: "codex-welcome" });
       welcome.createDiv({ cls: "codex-welcome-title", text: env.welcomeCopy.title });
-      welcome.createDiv({ cls: "codex-resource-note", text: env.welcomeCopy.subtitle });
+      renderSmoothBlurOutUp(
+        welcome.createDiv({ cls: "codex-resource-note codex-welcome-subtitle" }),
+        env.welcomeCopy.subtitle
+      );
+      const suggestions = renderSmoothAISuggestions(
+        welcome,
+        EMPTY_CONVERSATION_SUGGESTIONS,
+        (suggestion) => env.onSuggestionSelect?.(suggestion.label)
+      );
+      suggestions.addClass("codex-welcome-suggestions");
       return;
     }
 
@@ -497,7 +594,8 @@ export class CodexMessageListRenderer {
       if (!content) continue;
       wrapper.toggleClass("codex-message-streaming", update.message.status === "running");
       wrapper.toggleClass("codex-message-empty-running", update.message.status === "running" && !displayTextForMessage(update.message).trim());
-      renderRichText(env.app, env.component, content, displayTextForMessage(update.message));
+      if (isAgentAnswerMessage(update.message)) this.renderAgentAnswerContent(content, update.message);
+      else renderRichText(env.app, env.component, content, displayTextForMessage(update.message));
       updated = true;
       shouldPinBottom = shouldPinBottom || update.shouldPinBottom;
     }
@@ -550,7 +648,9 @@ export class CodexMessageListRenderer {
     const rows: MessageRenderRow[] = [];
     const agentHeaderKeys = new Set<string>();
     const footerMessageIds = terminalAnswerFooterMessageIds(messages);
-    for (const item of buildAgentTurnProjection(messages)) {
+    for (const item of buildAgentTurnProjection(
+      messagesWithoutSameRunEmptyAnswerLoader(messages)
+    )) {
       if (item.kind === "completedProcess") {
         const completedTurn = item.turn;
         const headerKey = agentRunHeaderKey(completedTurn.processMessages[0] ?? completedTurn.finalAnswer);
@@ -613,8 +713,11 @@ export class CodexMessageListRenderer {
       statusLabel: "",
       compact: false
     });
+    const bodyHost = message.role === "assistant"
+      ? createSmoothAIMessageBody(wrapper)
+      : wrapper;
     if (!emptyRunningAnswer && shouldRenderMessageTitle(message, options.showAgentHeader)) {
-      const title = wrapper.createDiv({ cls: "codex-message-title" });
+      const title = bodyHost.createDiv({ cls: "codex-message-title" });
       title.createSpan({ cls: "codex-message-title-label", text: message.title ?? "" });
       const time = messageTitleTime(message);
       if (time) {
@@ -626,10 +729,10 @@ export class CodexMessageListRenderer {
       }
     }
     if (message.attachments?.length) {
-      this.renderUserAttachmentChips(wrapper.createDiv({ cls: "codex-message-attachments" }), message.attachments);
+      this.renderUserAttachmentChips(bodyHost.createDiv({ cls: "codex-message-attachments" }), message.attachments);
     }
     if (message.images?.length) {
-      const images = wrapper.createDiv({ cls: "codex-message-images" });
+      const images = bodyHost.createDiv({ cls: "codex-message-images" });
       for (const image of message.images) {
         const img = images.createEl("img", { attr: { alt: image.name } });
         img.src = toImageSrc(env.app, image.path);
@@ -637,30 +740,97 @@ export class CodexMessageListRenderer {
         img.onclick = () => openImageOverlay(img.src);
       }
     }
-    const content = wrapper.createDiv({ cls: "codex-message-content" });
+    const content = bodyHost.createDiv({ cls: "codex-message-content" });
     content.dataset.messageContent = "true";
+    if (emptyRunningAnswer) {
+      this.renderAgentAnswerContent(content, message);
+      return;
+    }
     if (message.itemType === "thinking") {
       this.renderThinkingMessage(content, message);
       return;
     }
     if (message.itemType === "reasoning") {
       content.addClass("codex-inline-reasoning");
-      renderRichText(env.app, env.component, content, displayTextForMessage(message));
+      const bodyId = `codex-smooth-reasoning-${safeDomIdentity(message.id)}`;
+      const disclosureKey = message.reasoningSummary
+        ? `${env.sessionId}\0${message.reasoningSummary.productRunId}`
+        : "";
+      const disclosure = message.reasoningSummary
+        ? nextReasoningDisclosureState(
+            this.reasoningDisclosureStates.get(disclosureKey),
+            message.reasoningSummary.status
+          )
+        : undefined;
+      if (disclosure) {
+        this.reasoningDisclosureStates.set(disclosureKey, disclosure);
+      }
+      const open = disclosure?.open
+        ?? this.openProcessItems.get(message.id)
+        ?? message.status === "running";
+      const status = message.reasoningSummary?.status ?? message.status;
+      const reasoning = createSmoothAIReasoning(content, {
+        bodyId,
+        open,
+        status: status === "interrupted" || status === "cancelled"
+          ? "error"
+          : smoothAIStatus(status),
+        summary: message.reasoningSummary
+          ? message.title ?? "正在思考"
+          : message.status === "running" ? "正在思考" : "思考过程"
+      });
+      let pendingUserDisclosureIntent = false;
+      if (message.reasoningSummary) {
+        reasoning.summary.onclick = (event) => {
+          if (event.isTrusted) pendingUserDisclosureIntent = true;
+        };
+        reasoning.summary.onkeydown = (event) => {
+          if (
+            event.isTrusted
+            && (
+              event.key === "Enter"
+              || event.key === " "
+              || event.code === "Space"
+            )
+          ) {
+            pendingUserDisclosureIntent = true;
+          }
+        };
+      }
+      reasoning.root.ontoggle = () => {
+        if (message.reasoningSummary) {
+          const current = this.reasoningDisclosureStates.get(disclosureKey)
+            ?? nextReasoningDisclosureState(undefined, message.reasoningSummary.status);
+          if (pendingUserDisclosureIntent) {
+            this.reasoningDisclosureStates.set(disclosureKey, Object.freeze({
+              ...current,
+              open: reasoning.root.open,
+              manual: true
+            }));
+          }
+          pendingUserDisclosureIntent = false;
+        } else {
+          rememberOpenState(this.openProcessItems, message.id, reasoning.root.open);
+        }
+        reasoning.summary.setAttribute("aria-expanded", String(reasoning.root.open));
+        env.onScheduleMeasure();
+      };
+      renderRichText(env.app, env.component, reasoning.body, displayTextForMessage(message));
       return;
     }
     if (isProcessItemType(message.itemType)) {
       this.renderProcessMessage(content, message, false, options.processExpanded === true);
-      this.renderKnowledgeUsageCards(wrapper, message.id, knowledgeUsageMessageData(message));
+      this.renderKnowledgeUsageCards(wrapper, message.id, knowledgeUsageMessageData(message), message.citations);
       return;
     }
     const displayText = displayTextForMessage(message);
     if (!this.renderKnowledgeBaseResultContent(content, message, displayText)) {
-      renderRichText(env.app, env.component, content, displayText);
+      if (isAgentAnswerMessage(message)) this.renderAgentAnswerContent(content, message);
+      else renderRichText(env.app, env.component, content, displayText);
     }
     if (message.rawRef) this.renderRawMessageExpander(content, message);
     if (message.itemType === "knowledgeBase" && message.details) this.renderKnowledgeBaseContextNote(wrapper, message.details);
-    if (message.citations) this.renderKnowledgeBaseCitations(wrapper, message.id, message.citations);
-    this.renderKnowledgeUsageCards(wrapper, message.id, knowledgeUsageMessageData(message));
+    this.renderKnowledgeUsageCards(wrapper, message.id, knowledgeUsageMessageData(message), message.citations);
     if (message.role === "user") this.renderMessageCopyAction(wrapper, message, true);
     const footerActions = options.showAgentFooter
       ? this.renderAgentFooter(wrapper, message)
@@ -674,6 +844,18 @@ export class CodexMessageListRenderer {
     }
   }
 
+  private renderAgentAnswerContent(container: HTMLElement, message: ChatMessage): void {
+    const env = this.requireEnv();
+    const text = displayTextForMessage(message);
+    if (message.status === "running" && !text.trim()) {
+      container.empty();
+      renderSmoothAILoader(container, "正在生成回复");
+      return;
+    }
+    renderRichText(env.app, env.component, container, text);
+    markSmoothAIResponse(container, message.status === "running");
+  }
+
   private renderTaskPlanCard(
     container: HTMLElement,
     message: ChatMessage
@@ -683,29 +865,15 @@ export class CodexMessageListRenderer {
     if (!plan) return;
     container.addClass("codex-message-task-plan");
     const progress = taskPlanProgress(plan);
-    const currentStep = taskPlanCurrentStep(plan);
-    const defaultExpanded = plan.status === "pending"
-      ? plan.steps.length <= 8
-      : plan.status === "in_progress"
-        ? plan.steps.length <= 6
-        : false;
-    const expanded = this.openTaskPlans.get(message.id) ?? defaultExpanded;
+    const expanded = this.openTaskPlans.get(message.id) ?? true;
     const stepsId = `codex-task-plan-steps-${safeDomIdentity(message.id)}`;
-    const card = container.createDiv({
-      cls: `codex-task-plan-card is-${plan.status}`,
-      attr: {
-        "aria-label": `任务计划：${plan.title}`
-      }
+    const task = createAIElementsTask(container, {
+      bodyId: stepsId,
+      label: `任务计划：${plan.title}`,
+      open: expanded
     });
-    const header = card.createEl("button", {
-      cls: "codex-task-plan-header",
-      attr: {
-        type: "button",
-        "aria-expanded": String(expanded),
-        "aria-controls": stepsId,
-        title: expanded ? "收起任务步骤" : "展开任务步骤"
-      }
-    });
+    task.root.addClass(`is-${plan.status}`);
+    const header = task.summary;
     this.renderTaskPlanStatusIcon(
       header.createSpan({ cls: "codex-task-plan-status" }),
       plan.status
@@ -714,131 +882,50 @@ export class CodexMessageListRenderer {
     heading.createSpan({ cls: "codex-task-plan-title", text: plan.title });
     heading.createSpan({
       cls: "codex-task-plan-progress",
-      text: `第 ${progress.current} / ${progress.total} 步`
+      text: taskPlanHistoryStatus(plan.status, progress.completed, progress.total)
     });
     const disclosure = header.createSpan({
       cls: "codex-task-plan-disclosure",
       attr: { "aria-hidden": "true" }
     });
     setIcon(disclosure, expanded ? "chevron-up" : "chevron-down");
-    header.onclick = () => {
-      this.openTaskPlans.set(message.id, !expanded);
+    task.root.ontoggle = () => {
+      this.openTaskPlans.set(message.id, task.root.open);
+      header.setAttribute("aria-expanded", String(task.root.open));
       env.onScheduleMeasure();
-      this.render({
-        ...env,
-        options: { preserveScroll: true }
-      });
     };
 
-    const steps = card.createDiv({
-      cls: "codex-task-plan-steps",
-      attr: { id: stepsId }
-    });
-    if (expanded) {
-      for (const step of plan.steps) {
-        const row = steps.createDiv({
-          cls: `codex-task-plan-step is-${step.status}`
-        });
-        this.renderTaskPlanStatusIcon(
-          row.createSpan({ cls: "codex-task-plan-step-status" }),
-          step.status
-        );
-        const copy = row.createDiv({ cls: "codex-task-plan-step-copy" });
-        copy.createDiv({ cls: "codex-task-plan-step-text", text: step.text });
-        if (step.reason) {
-          copy.createDiv({
-            cls: "codex-task-plan-step-reason",
-            text: step.reason
-          });
-        }
-      }
-    } else if (currentStep) {
+    const steps = task.body;
+    for (const step of plan.steps) {
       const row = steps.createDiv({
-        cls: `codex-task-plan-step codex-task-plan-step-current is-${currentStep.status}`
+        cls: `codex-task-plan-step is-${step.status}`
       });
       this.renderTaskPlanStatusIcon(
         row.createSpan({ cls: "codex-task-plan-step-status" }),
-        currentStep.status
+        step.status
       );
       const copy = row.createDiv({ cls: "codex-task-plan-step-copy" });
-      copy.createDiv({
-        cls: "codex-task-plan-step-text",
-        text: currentStep.text
-      });
-      if (currentStep.reason) {
+      copy.createDiv({ cls: "codex-task-plan-step-text", text: step.text });
+      if (step.reason) {
         copy.createDiv({
           cls: "codex-task-plan-step-reason",
-          text: currentStep.reason
+          text: step.reason
         });
       }
     }
     if (plan.reason) {
-      card.createDiv({ cls: "codex-task-plan-reason", text: plan.reason });
+      steps.createDiv({ cls: "codex-task-plan-reason", text: plan.reason });
     }
-    this.renderTaskPlanActions(card, plan.planId, plan.title, plan.status);
   }
 
   private renderTaskPlanStatusIcon(
     container: HTMLElement,
-    status: EchoInkTaskPlanStatus
+    status: EchoInkTaskPlanStatus | EchoInkTaskPlanStepStatus
   ): void {
     container.addClass(`is-${status}`);
     container.setAttribute("role", "img");
     container.setAttribute("aria-label", taskPlanStatusLabel(status));
     setIcon(container, taskPlanStatusIcon(status));
-  }
-
-  private renderTaskPlanActions(
-    card: HTMLElement,
-    planId: string,
-    title: string,
-    status: EchoInkTaskPlanStatus
-  ): void {
-    const env = this.requireEnv();
-    const actions = card.createDiv({ cls: "codex-task-plan-actions" });
-    const addAction = (
-      label: string,
-      action: "execute" | "continue" | "pause" | "cancel",
-      tone: "primary" | "secondary" | "danger"
-    ) => {
-      if (!env.onTaskPlanAction) return;
-      const button = actions.createEl("button", {
-        cls: `codex-task-plan-action is-${tone}`,
-        text: label,
-        attr: { type: "button" }
-      });
-      button.onclick = async () => {
-        if (button.disabled) return;
-        setTaskPlanActionsBusy(actions, true);
-        try {
-          await env.onTaskPlanAction?.(planId, action);
-        } finally {
-          setTaskPlanActionsBusy(actions, false);
-        }
-      };
-    };
-    const addModify = () => {
-      if (!env.onModifyTaskPlan) return;
-      const button = actions.createEl("button", {
-        cls: "codex-task-plan-action is-secondary",
-        text: "修改计划",
-        attr: { type: "button" }
-      });
-      button.onclick = () => env.onModifyTaskPlan?.(planId, title);
-    };
-
-    if (status === "pending") {
-      addAction("执行", "execute", "primary");
-      addModify();
-      addAction("取消", "cancel", "danger");
-    } else if (status === "in_progress") {
-      addAction("暂停/中止", "pause", "danger");
-    } else if (status === "paused") {
-      addAction("继续", "continue", "primary");
-      addModify();
-      addAction("取消", "cancel", "danger");
-    }
-    if (!actions.childElementCount) actions.remove();
   }
 
   private renderPiConversationDeriveAction(
@@ -990,11 +1077,13 @@ export class CodexMessageListRenderer {
   private renderKnowledgeBaseResultContent(container: HTMLElement, message: ChatMessage, text: string): boolean {
     const env = this.requireEnv();
     if (message.itemType === "knowledgeBase" && message.knowledgeBaseUi) {
+      markSmoothAIArtifact(container);
       this.renderKnowledgeBaseUiPayload(container, message.knowledgeBaseUi, message);
       return true;
     }
     const result = extractKnowledgeBaseResultTitle(message.itemType, text);
     if (!result) return false;
+    markSmoothAIArtifact(container);
     const title = container.createDiv({ cls: `codex-kb-result-title codex-kb-result-title-${result.status}` });
     const icon = title.createSpan({ cls: "codex-kb-result-title-icon" });
     setIcon(icon, result.status === "success" ? "badge-check" : result.status === "canceled" ? "circle-slash" : "triangle-alert");
@@ -1149,124 +1238,103 @@ export class CodexMessageListRenderer {
   private renderKnowledgeUsageCards(
     container: HTMLElement,
     messageId: string,
-    usage: KnowledgeUsageMessageData
+    usage: KnowledgeUsageMessageData,
+    citations?: KnowledgeBaseCitationSummary
   ): void {
-    if (
-      !usage.askSourceAttribution
-      && !usage.references.length
-      && !usage.producedPaths.length
-    ) return;
-    const stateKey = `knowledge-usage:${messageId}`;
-    const details = container.createEl("details", {
-      cls: "codex-kb-citations codex-knowledge-references"
-    });
-    details.open = this.openKnowledgeBaseCitations.get(stateKey) ?? false;
-    details.ontoggle = () => {
-      this.openKnowledgeBaseCitations.set(stateKey, details.open);
-      this.requireEnv().onScheduleMeasure();
-    };
-    const summary = details.createEl("summary", { cls: "codex-kb-citations-summary" });
-    summary.createSpan({
-      cls: "codex-kb-citations-title",
-      text: usage.askSourceAttribution ? "本轮来源" : "本次引用"
-    });
-    const counts = summary.createSpan({ cls: "codex-kb-citation-buckets" });
-    if (usage.askSourceAttribution) {
-      counts.createSpan({
-        cls: "codex-kb-source-count",
-        text: `${usage.references.length} 个 Vault 参考`
-      });
-      counts.createSpan({
-        cls: "codex-kb-source-count",
-        text: personalMemorySourceCountLabel(usage.personalMemorySources.length)
-      });
-      const body = details.createDiv({ cls: "codex-kb-citations-body" });
-      const vaultGroup = this.renderKnowledgeUsageGroup(body, "Vault 参考");
-      if (usage.references.length) {
-        for (const reference of usage.references) {
-          this.renderKnowledgeReferenceItem(vaultGroup, reference);
-        }
-      } else {
-        vaultGroup.createDiv({
-          cls: "codex-kb-no-evidence",
-          text: "本轮未注入 Vault 参考。"
-        });
+    const documents = localDocumentSources(citations, usage);
+    if (documents.length) {
+      const stateKey = `knowledge-documents:${messageId}`;
+      const sources = createAIElementsDocumentSources(
+        container,
+        documents.length,
+        this.openKnowledgeBaseCitations.get(stateKey) ?? false
+      );
+      sources.root.ontoggle = () => {
+        this.openKnowledgeBaseCitations.set(stateKey, sources.root.open);
+        sources.summary.setAttribute("aria-expanded", String(sources.root.open));
+        this.requireEnv().onScheduleMeasure();
+      };
+      for (const document of documents) {
+        this.renderLocalDocumentSource(sources.body, document, citations?.status);
       }
-      const memoryGroup = this.renderKnowledgeUsageGroup(body, "Personal Memory");
-      if (usage.personalMemorySources.length) {
-        for (const source of usage.personalMemorySources) {
-          this.renderPersonalMemorySourceItem(memoryGroup, source);
-        }
-      } else {
-        memoryGroup.createDiv({
-          cls: "codex-kb-no-evidence",
-          text: personalMemorySourceEmptyStateLabel()
-        });
-      }
-      return;
-    }
-    if (usage.references.length) {
-      counts.createSpan({
-        cls: "codex-kb-source-count",
-        text: `${usage.references.length} 个本地来源`
+    } else if (citations || usage.askSourceAttribution) {
+      container.createDiv({
+        cls: "codex-kb-no-evidence codex-ai-elements-sources-empty",
+        text: citations
+          ? "没有命中文件，也没有引用片段；不会显示伪来源。"
+          : personalMemorySourceEmptyStateLabel()
       });
     }
     if (usage.producedPaths.length) {
-      counts.createSpan({
-        cls: "codex-kb-source-count",
-        text: `${usage.producedPaths.length} 个产物`
-      });
-    }
-    const body = details.createDiv({ cls: "codex-kb-citations-body" });
-    for (const reference of usage.references) {
-      this.renderKnowledgeReferenceItem(body, reference);
-    }
-    for (const producedPath of usage.producedPaths) {
-      this.renderKnowledgeProducedPath(body, producedPath);
+      const artifact = createSmoothAIArtifact(container, "本轮产物");
+      artifact.root.addClass("codex-knowledge-produced-artifact");
+      for (const producedPath of usage.producedPaths) {
+        this.renderKnowledgeProducedPath(artifact.body, producedPath);
+      }
     }
   }
 
-  private renderKnowledgeUsageGroup(container: HTMLElement, title: string): HTMLElement {
-    const group = container.createDiv({ cls: "codex-kb-citation-group" });
-    const header = group.createDiv({ cls: "codex-kb-citation-header" });
-    header.createSpan({ cls: "codex-kb-citation-title", text: title });
-    return group;
-  }
-
-  private renderPersonalMemorySourceItem(
+  private renderLocalDocumentSource(
     container: HTMLElement,
-    source: PersonalMemorySourceReference
+    document: LocalDocumentSource,
+    evidenceStatus?: KnowledgeBaseCitationSummary["status"]
   ): void {
     const item = container.createDiv({
-      cls: "codex-kb-citation-item codex-personal-memory-source-item"
+      cls: `codex-ai-elements-source is-${document.kind}`,
+      attr: { "data-source-key": document.key }
     });
-    const header = item.createDiv({ cls: "codex-kb-citation-header" });
-    header.createSpan({ cls: "codex-kb-citation-title", text: source.title });
-  }
+    const header = item.createDiv({ cls: "codex-ai-elements-source-header" });
+    const icon = header.createSpan({
+      cls: "codex-ai-elements-source-icon",
+      attr: { "aria-hidden": "true" }
+    });
+    setIcon(icon, "book-open");
+    if (document.kind === "memory") {
+      header.createSpan({
+        cls: "codex-ai-elements-source-title codex-message-note-link is-disabled",
+        text: document.source.title,
+        attr: { title: "Personal Memory 没有 Vault 路径，无法打开" }
+      });
+      return;
+    }
 
-  private renderKnowledgeReferenceItem(
-    container: HTMLElement,
-    reference: KnowledgeReference
-  ): void {
-    const item = container.createDiv({ cls: "codex-kb-citation-item codex-knowledge-reference-item" });
-    const header = item.createDiv({ cls: "codex-kb-citation-header" });
-    const title = header.createEl("button", {
-      cls: "codex-kb-citation-title",
-      text: reference.title || noteNameForPath(reference.vaultRelativePath),
-      attr: {
-        type: "button",
-        title: `打开 ${reference.vaultRelativePath} 第 ${reference.lineStart}-${reference.lineEnd} 行`
+    const env = this.requireEnv();
+    const file = env.app.vault.getAbstractFileByPath(document.path);
+    const noteName = noteNameForPath(document.path);
+    if (file instanceof TFile) {
+      const title = header.createEl("button", {
+        cls: "codex-ai-elements-source-title codex-message-note-link",
+        text: noteName,
+        attr: {
+          type: "button",
+          "aria-label": `打开笔记 ${noteName}`,
+          "data-path": document.path,
+          title: `在 Obsidian 中打开 ${document.path}`
+        }
+      });
+      title.onclick = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        void this.openLocalDocumentSource(document);
+      };
+    } else {
+      header.createSpan({
+        cls: "codex-ai-elements-source-title codex-message-note-link is-disabled",
+        text: noteName,
+        attr: { title: `当前 Vault 中找不到 ${document.path}，无法打开` }
+      });
+    }
+
+    const metadata = localDocumentMetadata(document, evidenceStatus);
+    if (metadata.length) {
+      const meta = item.createDiv({ cls: "codex-ai-elements-source-meta" });
+      for (const label of metadata) meta.createSpan({ text: label });
+    }
+    for (const excerpt of localDocumentExcerpts(document)) {
+      const quote = item.createDiv({ cls: "codex-kb-citation-quote" });
+      for (const line of excerpt.split(/\r\n|\n|\r/u)) {
+        quote.createDiv({ cls: "codex-kb-citation-line", text: line });
       }
-    });
-    const openReference = (event: MouseEvent) => {
-      event.preventDefault();
-      event.stopPropagation();
-      void this.openKnowledgeReference(reference);
-    };
-    title.onclick = openReference;
-    const quote = item.createDiv({ cls: "codex-kb-citation-quote" });
-    for (const line of reference.excerpt.split(/\r\n|\n|\r/u)) {
-      quote.createDiv({ cls: "codex-kb-citation-line", text: line });
     }
   }
 
@@ -1274,15 +1342,35 @@ export class CodexMessageListRenderer {
     const item = container.createDiv({ cls: "codex-kb-citation-item codex-knowledge-produced-path" });
     const header = item.createDiv({ cls: "codex-kb-citation-header" });
     const title = header.createEl("button", {
-      cls: "codex-kb-citation-title",
+      cls: "codex-kb-citation-title codex-message-note-link",
       text: noteNameForPath(producedPath),
-      attr: { type: "button", title: `打开 ${producedPath}` }
+      attr: {
+        type: "button",
+        "aria-label": `打开笔记 ${noteNameForPath(producedPath)}`,
+        "data-path": producedPath,
+        title: `打开 ${producedPath}`
+      }
     });
     title.onclick = (event) => {
       event.preventDefault();
       event.stopPropagation();
       void this.openKnowledgeBasePath(producedPath);
     };
+  }
+
+  private async openLocalDocumentSource(document: LocalVaultDocumentSource): Promise<void> {
+    const reference = document.references[0];
+    if (reference) {
+      await this.openKnowledgeReference(reference);
+      return;
+    }
+    const env = this.requireEnv();
+    const file = env.app.vault.getAbstractFileByPath(document.path);
+    if (!(file instanceof TFile)) {
+      new Notice(`没有在当前 Obsidian 仓库找到：${document.path}`);
+      return;
+    }
+    await env.app.workspace.getLeaf("tab").openFile(file, { active: true });
   }
 
   private async openKnowledgeReference(reference: KnowledgeReference): Promise<void> {
@@ -1323,56 +1411,6 @@ export class CodexMessageListRenderer {
     note.createSpan({ cls: "codex-kb-context-note-text", text: normalized });
   }
 
-  private renderKnowledgeBaseCitations(container: HTMLElement, messageId: string, citations: KnowledgeBaseCitationSummary): void {
-    const stateKey = `kb-citations:${messageId}`;
-    const details = container.createEl("details", { cls: `codex-kb-citations codex-kb-citations-${citations.status}` });
-    details.open = this.openKnowledgeBaseCitations.get(stateKey) ?? false;
-    details.ontoggle = () => {
-      this.openKnowledgeBaseCitations.set(stateKey, details.open);
-      this.requireEnv().onScheduleMeasure();
-    };
-    const summary = details.createEl("summary", { cls: "codex-kb-citations-summary" });
-    summary.createSpan({ cls: "codex-kb-citations-title", text: "本次来源" });
-    const buckets = summary.createSpan({ cls: "codex-kb-citation-buckets" });
-    for (const bucket of ["wiki", "journal", "outputs"] as KnowledgeBaseCitationBucket[]) {
-      buckets.createSpan({ cls: `codex-kb-source-count codex-kb-source-${bucket}`, text: `${kbBucketLabel(bucket)} ${citations.counts[bucket] ?? 0}` });
-    }
-    summary.createSpan({ cls: `codex-kb-evidence-status codex-kb-evidence-${citations.status}`, text: kbEvidenceStatusLabel(citations.status) });
-
-    const body = details.createDiv({ cls: "codex-kb-citations-body" });
-    if (!citations.citations.length) {
-      body.createDiv({ cls: "codex-kb-no-evidence", text: "没有命中文件，也没有引用片段；不会显示伪来源。" });
-      return;
-    }
-    for (const citation of citations.citations) this.renderKnowledgeBaseCitationItem(body, citation);
-  }
-
-  private renderKnowledgeBaseCitationItem(container: HTMLElement, citation: KnowledgeBaseCitation): void {
-    const item = container.createDiv({ cls: `codex-kb-citation-item codex-kb-citation-${citation.bucket}` });
-    const header = item.createDiv({ cls: "codex-kb-citation-header" });
-    const title = header.createEl("button", {
-      cls: "codex-kb-citation-title",
-      text: citation.title || noteNameForPath(citation.path),
-      attr: {
-        type: "button",
-        title: `打开 ${citation.path}`
-      }
-    });
-    title.onclick = (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      void this.openKnowledgeBaseCitation(citation);
-    };
-    const quote = item.createDiv({ cls: "codex-kb-citation-quote" });
-    for (const line of citation.excerptLines.length ? citation.excerptLines : ["无可用引用片段"]) {
-      quote.createDiv({ cls: "codex-kb-citation-line", text: line });
-    }
-  }
-
-  private async openKnowledgeBaseCitation(citation: KnowledgeBaseCitation): Promise<void> {
-    await this.openKnowledgeBasePath(citation.path);
-  }
-
   private renderActionStreamItem(container: HTMLElement, message: ChatMessage, showAgentHeader: boolean): void {
     const timeline = buildActionTimeline([message]);
     const item = timeline.groups[0]?.items[0];
@@ -1395,6 +1433,7 @@ export class CodexMessageListRenderer {
     const wrapper = container.createDiv({ cls: "codex-message codex-message-tool codex-message-type-turnProcess" });
     if (showAgentHeader) this.renderAgentHeader(wrapper, { message: turn.finalAnswer, statusLabel: "", compact: true });
     const region = wrapper.createDiv({ cls: "codex-turn-process" });
+    markSmoothAIReasoning(region, turn.failed ? "failed" : turn.requiresAttention ? "blocked" : "completed");
     const bodyId = stableDomId(`codex-turn-process-${stateId}`);
     const summary = region.createEl("button", {
       cls: "codex-turn-process-summary",
@@ -1445,16 +1484,23 @@ export class CodexMessageListRenderer {
       return;
     }
     const row = container.createDiv({ cls: `codex-action-item codex-action-item-${item.kind}` });
+    markSmoothAIToolCall(row, item.status);
+    const approvalState = approvalStateForMessage(item.source);
+    if (approvalState) markSmoothAIApproval(row, approvalState);
     row.toggleClass("is-standalone", options.standalone);
     row.toggleClass("is-failed", isAttentionActionStatus(item.status));
     row.toggleClass("is-running", isActiveActionStatus(item.status));
     const head = row.createDiv({ cls: "codex-action-item-head" });
     this.renderActionItemHead(head, item);
+    this.renderApprovalCard(row, item.source);
   }
 
   private renderExpandableActionItem(container: HTMLElement, item: ActionItemViewModel, options: { standalone: boolean }): void {
     const detailId = stableDomId(`codex-action-detail-${item.id}`);
     const details = container.createEl("details", { cls: `codex-action-item codex-action-item-${item.kind} codex-action-item-expandable` });
+    markSmoothAIToolCall(details, item.status);
+    const approvalState = approvalStateForMessage(item.source);
+    if (approvalState) markSmoothAIApproval(details, approvalState);
     details.toggleClass("is-standalone", options.standalone);
     details.toggleClass("is-failed", isAttentionActionStatus(item.status));
     details.toggleClass("is-running", isActiveActionStatus(item.status));
@@ -1489,11 +1535,13 @@ export class CodexMessageListRenderer {
     this.renderActionItemHead(summary, item);
     caret = summary.createSpan({ cls: "codex-action-item-caret" });
     setIcon(caret, details.open ? "chevron-up" : "chevron-down");
+    this.renderApprovalCard(container, item.source);
     if (details.open) renderBody();
   }
 
   private renderActionItemHead(head: HTMLElement, item: ActionItemViewModel): void {
-    const icon = head.createSpan({ cls: "codex-action-item-icon" });
+    const icon = renderSmoothAIToolStatus(head, item.status);
+    icon.addClass("codex-action-item-icon");
     setIcon(icon, iconForActionKind(item.kind, item.status));
     const main = head.createDiv({ cls: "codex-action-item-main" });
     this.renderActionItemTitle(main, item);
@@ -1528,6 +1576,48 @@ export class CodexMessageListRenderer {
     const stats = container.createSpan({ cls: "codex-action-diff-stats" });
     if (typeof item.diff.added === "number") stats.createSpan({ cls: "codex-diff-stat codex-diff-stat-add", text: `+${item.diff.added}` });
     if (typeof item.diff.removed === "number") stats.createSpan({ cls: "codex-diff-stat codex-diff-stat-remove", text: `-${item.diff.removed}` });
+  }
+
+  private renderApprovalCard(container: HTMLElement, message: ChatMessage): void {
+    const env = this.requireEnv();
+    const binding = env.resolveApprovalDecision?.(message) ?? null;
+    const state = approvalStateForMessage(message)
+      ?? (binding ? "waiting_approval" : null);
+    if (!state) return;
+    const elements = createSmoothAIApprovalCard(container, {
+      state,
+      target: message.approval?.target || binding?.target,
+      preview: message.approval?.preview || binding?.preview,
+      controlled: state === "waiting_approval" && Boolean(binding)
+    });
+    if (!binding || !elements.approveButton || !elements.rejectButton) return;
+    const buttons = [elements.approveButton, elements.rejectButton];
+    let deciding = false;
+    const decide = (decision: "approve" | "reject") => (event: MouseEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (deciding) return;
+      deciding = true;
+      elements.root.setAttribute("aria-busy", "true");
+      for (const button of buttons) button.disabled = true;
+      let accepted = false;
+      try {
+        accepted = binding.decide(decision);
+      } catch {
+        accepted = false;
+      }
+      if (accepted) {
+        env.onScheduleMeasure();
+        return;
+      }
+      deciding = false;
+      elements.root.setAttribute("aria-busy", "false");
+      for (const button of buttons) button.disabled = false;
+      new Notice("该审批已失效，请等待状态刷新。");
+      this.rerenderPreservingScroll();
+    };
+    elements.approveButton.onclick = decide("approve");
+    elements.rejectButton.onclick = decide("reject");
   }
 
   private rerenderPreservingScroll(): void {
@@ -1570,10 +1660,10 @@ export class CodexMessageListRenderer {
   private renderThinkingMessage(container: HTMLElement, message: ChatMessage): void {
     const env = this.requireEnv();
     const shell = container.createDiv({ cls: "codex-thinking-shell" });
+    markSmoothAIReasoning(shell, message.status);
     if (message.status === "running") {
       const row = shell.createDiv({ cls: "codex-thinking-live" });
-      row.createSpan({ cls: "codex-thinking-dot" });
-      row.createSpan({ text: message.text || COLD_START_STATUS_TEXT });
+      renderSmoothAILoader(row, message.text || COLD_START_STATUS_TEXT);
       row.createSpan({ cls: "codex-agent-live-copy", text: ` · ${rotatingChoice(COLD_START_COPY_TEXTS, message.createdAt)}` });
       env.onScheduleRunProgress();
       return;
@@ -1583,6 +1673,9 @@ export class CodexMessageListRenderer {
 
   private renderProcessMessage(container: HTMLElement, message: ChatMessage, nested = false, forceOpen = false): void {
     const details = container.createEl("details", { cls: `codex-structured codex-process codex-process-${message.itemType ?? "item"}` });
+    markSmoothAIToolCall(details, message.status);
+    const approvalState = approvalStateForMessage(message);
+    if (approvalState) markSmoothAIApproval(details, approvalState);
     details.toggleClass("is-running", isActiveProcessStatus(message.status));
     details.toggleClass("is-completed", message.status === "completed");
     details.toggleClass("is-error", isAttentionProcessStatus(message.status));
@@ -1605,7 +1698,9 @@ export class CodexMessageListRenderer {
       this.requireEnv().onScheduleMeasure();
     };
     const summary = details.createEl("summary", { cls: "codex-process-summary" });
-    const icon = summary.createSpan({ cls: "codex-structured-icon codex-process-icon" });
+    const icon = renderSmoothAIToolStatus(summary, message.status);
+    icon.addClass("codex-structured-icon");
+    icon.addClass("codex-process-icon");
     setIcon(icon, iconForProcessMessage(message));
     const main = summary.createDiv({ cls: "codex-process-main" });
     if (message.itemType === "fileChange" && message.diffSummary?.files.length) {
@@ -1617,6 +1712,7 @@ export class CodexMessageListRenderer {
       if (message.itemType === "fileChange" && message.files?.length) this.renderProcessFileChips(main.createDiv({ cls: "codex-process-files" }), message.files);
     }
     if (message.status) summary.createSpan({ cls: "codex-structured-status", text: labelForStatus(message.status) });
+    this.renderApprovalCard(container, message);
     if (details.open) renderBody();
   }
 
@@ -1624,7 +1720,8 @@ export class CodexMessageListRenderer {
     const hasExplicitChannels = hasExplicitProcessChannels(message);
     const env = this.requireEnv();
     if (!hasExplicitChannels && message.processContentAvailability === "unavailable") {
-      body.createDiv({ cls: "codex-process-raw-loading", text: PROCESS_CONTENT_UNAVAILABLE_TEXT });
+      if (isActiveProcessStatus(message.status)) this.renderProcessLoader(body, "正在等待工具输出");
+      else body.createDiv({ cls: "codex-process-raw-loading", text: PROCESS_CONTENT_UNAVAILABLE_TEXT });
       return;
     }
     const fallback = message.status === "running" ? "正在接收过程内容..." : "暂无内容";
@@ -1660,43 +1757,58 @@ export class CodexMessageListRenderer {
   }
 
   private renderProcessChannels(body: HTMLElement, message: ChatMessage): void {
-    this.renderProcessChannel(body, "输入", message.processInputAvailability, message.processInput);
-    this.renderProcessChannel(body, "输出", message.processOutputAvailability, message.processOutput);
+    const active = isActiveProcessStatus(message.status);
+    this.renderProcessChannel(body, "输入", message.processInputAvailability, message.processInput, false, false);
+    this.renderProcessChannel(body, "输出", message.processOutputAvailability, message.processOutput, true, active);
   }
 
   private renderProcessChannel(
     body: HTMLElement,
     label: string,
     availability: ChatMessage["processInputAvailability"],
-    text: string | undefined
+    text: string | undefined,
+    artifact: boolean,
+    activeWait: boolean
   ): void {
     if (!availability) return;
-    const channel = body.createDiv({ cls: "codex-process-channel" });
-    channel.createDiv({ cls: "codex-process-raw-title", text: label });
+    const artifactElements = artifact ? createSmoothAIArtifact(body, label) : null;
+    const channel = artifactElements?.body ?? body.createDiv({ cls: "codex-process-channel" });
+    artifactElements?.root.addClass("codex-process-channel");
+    if (!artifact) channel.createDiv({ cls: "codex-process-raw-title", text: label });
     if (availability === "unavailable") {
-      channel.createDiv({ cls: "codex-process-raw-loading", text: PROCESS_CONTENT_UNAVAILABLE_TEXT });
+      if (activeWait) this.renderProcessLoader(channel, "正在等待工具输出");
+      else channel.createDiv({ cls: "codex-process-raw-loading", text: PROCESS_CONTENT_UNAVAILABLE_TEXT });
       return;
     }
     if (availability === "empty") {
       channel.createDiv({ cls: "codex-process-raw-loading", text: "后端返回空内容" });
       return;
     }
-    this.renderPlainTextBlock(channel, text?.trim() ? text : PROCESS_CONTENT_UNAVAILABLE_TEXT);
+    const content = text?.trim() ? text : PROCESS_CONTENT_UNAVAILABLE_TEXT;
+    if (artifact) {
+      const env = this.requireEnv();
+      renderPreformattedVaultNoteText(env.app, env.component, channel, content);
+    } else {
+      this.renderPlainTextBlock(channel, content);
+    }
   }
 
   private renderFileChangeBody(body: HTMLElement, message: ChatMessage, fallback: string): void {
     const renderDiff = (text: string) => {
       body.empty();
+      const artifact = createSmoothAIArtifact(body, "文件改动");
+      const artifactBody = artifact.body;
       const files = parseFileChangeDiff(text || fallback, message.diffSummary);
-      if (!files.length) {
-        this.renderPlainTextBlock(body, text || fallback);
+      if (!hasRenderableDiff(files)) {
+        this.renderPlainTextBlock(artifactBody, text || fallback);
         return;
       }
-      if (message.diffSummary) this.renderDiffOverview(body, message.diffSummary);
-      this.renderDiffFiles(body, files, message.files ?? []);
+      markSmoothAIDiff(artifact.root);
+      if (message.diffSummary) this.renderDiffOverview(artifactBody, message.diffSummary);
+      this.renderDiffFiles(artifactBody, files, message.files ?? []);
     };
     if (message.rawRef) {
-      body.createDiv({ cls: "codex-process-raw-loading", text: "正在加载文件改动..." });
+      this.renderProcessLoader(body, "正在加载文件改动");
       void this.loadRawText(message)
         .then((text) => {
           renderDiff(text);
@@ -1721,7 +1833,7 @@ export class CodexMessageListRenderer {
       shell.createEl("pre", { cls: "codex-shell-output", text: shellTranscript(text || fallback) });
     };
     if (message.rawRef) {
-      body.createDiv({ cls: "codex-process-raw-loading", text: "正在加载命令输出..." });
+      this.renderProcessLoader(body, "正在加载命令输出");
       void this.loadRawText(message)
         .then((text) => {
           renderShell(text);
@@ -1797,7 +1909,7 @@ export class CodexMessageListRenderer {
       row.createSpan({ cls: "codex-diff-line-no codex-diff-line-old", text: line.oldLine === null ? "" : String(line.oldLine) });
       row.createSpan({ cls: "codex-diff-line-no codex-diff-line-new", text: line.newLine === null ? "" : String(line.newLine) });
       row.createSpan({ cls: "codex-diff-marker", text: line.marker });
-      row.createSpan({ cls: "codex-diff-content", text: line.text || " " });
+      row.createSpan({ cls: "codex-diff-content", text: line.text });
     }
   }
 
@@ -1814,21 +1926,22 @@ export class CodexMessageListRenderer {
   }
 
   private renderProcessFileTextLink(container: HTMLElement, file: ProcessFileRef, label: string, extraClass = ""): HTMLElement {
+    const displayLabel = file.kind === "vault" ? noteNameForPath(file.path || label) : label;
     if (!file.openable) {
       return container.createSpan({
         cls: `codex-process-file-text is-disabled ${extraClass}`.trim(),
-        text: label,
+        text: displayLabel,
         attr: { title: `${file.displayPath}（无法打开）` }
       });
     }
     const link = container.createEl("span", {
       cls: `codex-process-file-link codex-process-file-link-${file.kind} ${extraClass}`.trim(),
-      text: label,
+      text: displayLabel,
       attr: {
         role: "button",
         tabindex: "0",
         title: file.displayPath,
-        "aria-label": `打开 ${label}`
+        "aria-label": `打开 ${displayLabel}`
       }
     });
     link.onclick = (event) => {
@@ -1846,16 +1959,18 @@ export class CodexMessageListRenderer {
   }
 
   private renderDeferredRawText(container: HTMLElement, message: ChatMessage, fallback: string): void {
-    const status = container.createDiv({ cls: "codex-process-raw-loading", text: "正在加载全文..." });
+    const status = this.renderProcessLoader(container, "正在加载全文");
     const pre = container.createEl("pre", { cls: "codex-process-fulltext" });
     pre.setText(displayTextForMessage(message) || fallback);
     void this.loadRawText(message)
       .then((text) => {
+        status.empty();
         status.setText(this.rawMetaLabel(message, text));
         pre.setText(text || fallback);
         this.requireEnv().onScheduleMeasure();
       })
       .catch((error) => {
+        status.empty();
         status.setText(`全文加载失败：${error instanceof Error ? error.message : String(error)}`);
         this.requireEnv().onScheduleMeasure();
       });
@@ -1869,8 +1984,7 @@ export class CodexMessageListRenderer {
       if (!details.open || loaded) return;
       loaded = true;
       const body = details.createDiv({ cls: "codex-raw-message-body" });
-      body.createDiv({ cls: "codex-process-raw-loading", text: "正在加载全文..." });
-      const pre = body.createEl("pre", { cls: "codex-process-fulltext" });
+      this.renderProcessLoader(body, "正在加载全文");
       this.requireEnv().onScheduleMeasure();
       void this.loadRawText(message)
         .then((text) => {
@@ -1879,10 +1993,17 @@ export class CodexMessageListRenderer {
           this.requireEnv().onScheduleMeasure();
         })
         .catch((error) => {
-          pre.setText(`全文加载失败：${error instanceof Error ? error.message : String(error)}`);
+          body.empty();
+          body.createDiv({ cls: "codex-process-raw-loading", text: `全文加载失败：${error instanceof Error ? error.message : String(error)}` });
           this.requireEnv().onScheduleMeasure();
         });
     };
+  }
+
+  private renderProcessLoader(container: HTMLElement, label: string): HTMLElement {
+    const host = container.createDiv({ cls: "codex-process-raw-loading" });
+    renderSmoothAILoader(host, label);
+    return host;
   }
 
   private renderPlainTextBlock(container: HTMLElement, text: string): void {
@@ -1916,18 +2037,19 @@ export class CodexMessageListRenderer {
 
   private renderProcessFileChips(container: HTMLElement, files: ProcessFileRef[]): void {
     for (const file of files) {
+      const displayName = file.kind === "vault" ? noteNameForPath(file.path || file.name) : file.name;
       const chip = container.createEl("button", {
         cls: `codex-process-file-chip codex-process-file-${file.kind}`,
         attr: {
           type: "button",
           title: file.openable ? file.displayPath : `${file.displayPath}（无法打开）`,
-          "aria-label": `打开 ${file.name}`
+          "aria-label": `打开 ${displayName}`
         }
       });
       chip.toggleClass("is-disabled", !file.openable);
       const icon = chip.createSpan({ cls: "codex-process-file-icon" });
       setIcon(icon, file.kind === "external" ? "folder-open" : "file-text");
-      chip.createSpan({ cls: "codex-process-file-name", text: file.name });
+      chip.createSpan({ cls: "codex-process-file-name", text: displayName });
       chip.onclick = (event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -1990,6 +2112,26 @@ export function terminalAnswerFooterMessageIds(messages: ChatMessage[]): Set<str
     .map(([, message]) => message.id));
 }
 
+function messagesWithoutSameRunEmptyAnswerLoader(
+  messages: readonly ChatMessage[]
+): ChatMessage[] {
+  const runningReasoningRunIds = new Set(messages.flatMap((message) =>
+    message.itemType === "reasoning"
+    && message.reasoningSummary?.status === "running"
+    && message.runId
+      ? [message.runId]
+      : []
+  ));
+  if (!runningReasoningRunIds.size) return [...messages];
+  return messages.filter((message) => !(
+    message.runId
+    && runningReasoningRunIds.has(message.runId)
+    && isAgentAnswerMessage(message)
+    && message.status === "running"
+    && !displayTextForMessage(message).trim()
+  ));
+}
+
 function agentRunHeaderKey(message: ChatMessage): string {
   if (message.runId) return `run:${message.runId}`;
   if (message.turnId) return `turn:${message.turnId}`;
@@ -2005,32 +2147,41 @@ function isAgentHeaderCandidate(message: ChatMessage): boolean {
   return message.itemType !== "thinking" && message.itemType !== "contextCompaction";
 }
 
-function taskPlanStatusLabel(status: EchoInkTaskPlanStatus): string {
+function taskPlanStatusLabel(
+  status: EchoInkTaskPlanStatus | EchoInkTaskPlanStepStatus
+): string {
   if (status === "pending") return "待执行";
   if (status === "in_progress") return "进行中";
   if (status === "completed") return "已完成";
   if (status === "failed") return "失败";
   if (status === "paused") return "已暂停";
+  if (status === "interrupted") return "已中断";
   return "已取消";
 }
 
-function taskPlanStatusIcon(status: EchoInkTaskPlanStatus): string {
+function taskPlanStatusIcon(
+  status: EchoInkTaskPlanStatus | EchoInkTaskPlanStepStatus
+): string {
   if (status === "pending") return "circle";
   if (status === "in_progress") return "loader-circle";
   if (status === "completed") return "circle-check";
   if (status === "failed") return "circle-alert";
   if (status === "paused") return "circle-pause";
+  if (status === "interrupted") return "circle-pause";
   return "circle-x";
 }
 
-function setTaskPlanActionsBusy(
-  container: HTMLElement,
-  busy: boolean
-): void {
-  container.toggleClass("is-busy", busy);
-  for (const button of Array.from(
-    container.querySelectorAll<HTMLButtonElement>("button")
-  )) button.disabled = busy;
+function taskPlanHistoryStatus(
+  status: EchoInkTaskPlanStatus,
+  completed: number,
+  total: number
+): string {
+  if (status === "completed") return `${total}/${total} 已完成`;
+  if (status === "failed") return "任务失败";
+  if (status === "cancelled") return "已取消";
+  if (status === "paused") return "已中断，可继续";
+  if (status === "pending") return "等待开始";
+  return `${completed}/${total} 已完成`;
 }
 
 function safeDomIdentity(value: string): string {
@@ -2151,6 +2302,7 @@ function actionItemDetailLabel(item: ActionItemViewModel): string {
 }
 
 export function actionVerb(item: ActionItemViewModel): string {
+  if (item.source.status === "expired") return statusActionVerb(item.kind, "确认已过期");
   if (item.status === "unconfirmed") return statusActionVerb(item.kind, "状态未回传");
   if (item.status === "interrupted") return statusActionVerb(item.kind, "已中断");
   if (item.status === "canceled") return statusActionVerb(item.kind, "已取消");
@@ -2298,6 +2450,7 @@ function labelForStatus(status: string): string {
     uncertain: "结果不确定",
     canceled: "已取消",
     cancelled: "已取消",
+    expired: "确认已过期",
     blocked: "等待确认",
     interrupted: "中断",
     unconfirmed: "状态未回传",
@@ -2322,7 +2475,21 @@ function isActiveProcessStatus(status: string | undefined): boolean {
   return status === "running"
     || status === "waiting_approval"
     || status === "approved"
-    || status === "verifying";
+    || status === "verifying"
+    || status === "blocked"
+    || status === "recovery-pending";
+}
+
+function approvalStateForMessage(
+  message: Readonly<ChatMessage>
+): SmoothAIApprovalState | null {
+  const status = message.approval?.status;
+  if (status === "pending") return "waiting_approval";
+  if (status === "approved") return "approved";
+  if (status === "denied") return "denied";
+  if (status === "cancelled") return "cancelled";
+  if (status === "expired") return "expired";
+  return null;
 }
 
 function isAttentionProcessStatus(status: string | undefined): boolean {
@@ -2341,6 +2508,83 @@ function labelForDiffKind(kind: string): string {
     unknown: "改动"
   };
   return labels[kind] ?? "改动";
+}
+
+function localDocumentSources(
+  citations: KnowledgeBaseCitationSummary | undefined,
+  usage: KnowledgeUsageMessageData
+): LocalDocumentSource[] {
+  const documents: LocalDocumentSource[] = [];
+  const vaultDocuments = new Map<string, LocalVaultDocumentSource>();
+  const memoryKeys = new Set<string>();
+  const getVaultDocument = (rawPath: string): LocalVaultDocumentSource | null => {
+    const path = rawPath.trim();
+    if (!path) return null;
+    const normalizedPath = normalizePath(path);
+    const key = `vault:${normalizedPath}`;
+    const existing = vaultDocuments.get(key);
+    if (existing) return existing;
+    const document: LocalVaultDocumentSource = {
+      citations: [],
+      key,
+      kind: "vault",
+      path: normalizedPath,
+      references: []
+    };
+    vaultDocuments.set(key, document);
+    documents.push(document);
+    return document;
+  };
+
+  for (const citation of citations?.citations ?? []) {
+    getVaultDocument(citation.path)?.citations.push(citation);
+  }
+  for (const reference of usage.references) {
+    getVaultDocument(reference.vaultRelativePath)?.references.push(reference);
+  }
+  for (const source of usage.personalMemorySources) {
+    const id = source.id.trim();
+    if (!id) continue;
+    const key = `memory:${id}`;
+    if (memoryKeys.has(key)) continue;
+    memoryKeys.add(key);
+    documents.push({ key, kind: "memory", source });
+  }
+  return documents;
+}
+
+function localDocumentMetadata(
+  document: LocalVaultDocumentSource,
+  evidenceStatus?: KnowledgeBaseCitationSummary["status"]
+): string[] {
+  const labels = new Set<string>();
+  for (const citation of document.citations) labels.add(kbBucketLabel(citation.bucket));
+  if (document.citations.length && evidenceStatus) labels.add(kbEvidenceStatusLabel(evidenceStatus));
+  for (const reference of document.references) {
+    labels.add(`第 ${reference.lineStart}-${reference.lineEnd} 行`);
+  }
+  return Array.from(labels);
+}
+
+function localDocumentExcerpts(document: LocalVaultDocumentSource): string[] {
+  const excerpts = new Set<string>();
+  for (const citation of document.citations) {
+    const excerpt = citation.excerptLines.join("\n");
+    if (excerpt) excerpts.add(excerpt);
+  }
+  for (const reference of document.references) {
+    if (reference.excerpt) excerpts.add(reference.excerpt);
+  }
+  return Array.from(excerpts);
+}
+
+function hasRenderableDiff(files: ParsedDiffFile[]): boolean {
+  return files.some((file) => file.lines.some((line) =>
+    line.type === "hunk"
+    || line.type === "add"
+    || line.type === "remove"
+    || line.type === "context"
+  ));
 }
 
 function kbBucketLabel(bucket: KnowledgeBaseCitationBucket): string {

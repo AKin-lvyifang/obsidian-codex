@@ -152,7 +152,7 @@ export function renderComposerShell(rootEl: HTMLElement, callbacks: ComposerShel
   const inputEl = inputWrap.createEl("textarea", {
     cls: "codex-input",
     attr: {
-      placeholder: "问 Codex，让它管理当前 Obsidian 仓库",
+      placeholder: "",
       role: "combobox",
       "aria-autocomplete": "list",
       "aria-haspopup": "listbox",
@@ -811,11 +811,65 @@ export function renderComposerAttachments(container: HTMLElement, state: Compose
     remove.onclick = callbacks.onRemoveSkill;
   }
   for (const item of state.attachments) {
-    const chip = container.createDiv({ cls: "codex-attachment-chip" });
-    chip.createSpan({ text: item.name });
-    const remove = chip.createEl("button", { text: "×", attr: { type: "button" } });
+    if (item.type === "image") {
+      const thumbnail = container.createDiv({
+        cls: "codex-attachment-thumbnail",
+        attr: { title: item.path }
+      });
+      const preview = thumbnail.createDiv({ cls: "codex-attachment-thumbnail-preview" });
+      const image = preview.createEl("img", {
+        cls: "codex-attachment-thumbnail-image",
+        attr: { alt: item.name, draggable: "false" }
+      });
+      image.src = composerAttachmentImageSrc(item.path);
+      const fallback = preview.createDiv({
+        cls: "codex-attachment-thumbnail-fallback",
+        attr: { "aria-hidden": "true" }
+      });
+      const fallbackIcon = fallback.createSpan({ cls: "codex-attachment-thumbnail-fallback-icon" });
+      setIcon(fallbackIcon, "image");
+      fallback.createSpan({ cls: "codex-attachment-thumbnail-name", text: item.name });
+      image.onload = () => thumbnail.removeClass("is-broken");
+      image.onerror = () => thumbnail.addClass("is-broken");
+      const remove = thumbnail.createEl("button", {
+        cls: "codex-attachment-thumbnail-remove",
+        attr: {
+          type: "button",
+          "aria-label": `移除图片：${item.name}`,
+          title: `移除 ${item.name}`
+        }
+      });
+      setIcon(remove, "x");
+      remove.onclick = () => callbacks.onRemoveAttachment(item.path);
+      continue;
+    }
+    const chip = container.createDiv({
+      cls: "codex-attachment-chip codex-attachment-file-chip",
+      attr: { title: item.path }
+    });
+    const icon = chip.createSpan({
+      cls: "codex-attachment-file-icon",
+      attr: { "aria-hidden": "true" }
+    });
+    setIcon(icon, "file-text");
+    chip.createSpan({ cls: "codex-attachment-name", text: item.name });
+    const remove = chip.createEl("button", {
+      cls: "codex-attachment-file-remove",
+      attr: {
+        type: "button",
+        "aria-label": `移除文件：${item.name}`,
+        title: `移除 ${item.name}`
+      }
+    });
+    setIcon(remove, "x");
     remove.onclick = () => callbacks.onRemoveAttachment(item.path);
   }
+}
+
+export function composerAttachmentImageSrc(filePath: string): string {
+  if (/^(?:blob:|data:|file:|https?:)/iu.test(filePath)) return filePath;
+  const encodedPath = encodeURI(filePath).replace(/#/gu, "%23").replace(/\?/gu, "%3F");
+  return `file://${encodedPath}`;
 }
 
 export function labelFor(value: string): string {

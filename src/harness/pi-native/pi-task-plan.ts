@@ -12,6 +12,7 @@ import type { PiVaultAdditionalToolSecurityPort } from "./pi-vault-tool-security
 import {
   ECHOINK_TASK_PLAN_ENTRY_TYPE,
   ECHOINK_TASK_PLAN_SCHEMA_VERSION,
+  ECHOINK_TASK_PLAN_STEP_STATUSES,
   ECHOINK_TASK_PLAN_STATUSES,
   activeTaskPlanFromBranch,
   freezeEchoInkTaskPlan,
@@ -173,6 +174,9 @@ export function createPiTaskPlanToolDefinition(input: Readonly<{
   const statusSchema = Type.Union(
     ECHOINK_TASK_PLAN_STATUSES.map((status) => Type.Literal(status))
   );
+  const stepStatusSchema = Type.Union(
+    ECHOINK_TASK_PLAN_STEP_STATUSES.map((status) => Type.Literal(status))
+  );
   return defineTool({
     name: PI_TASK_UPDATE_TOOL_ID,
     label: "更新任务计划",
@@ -188,7 +192,7 @@ export function createPiTaskPlanToolDefinition(input: Readonly<{
       steps: Type.Array(Type.Object({
         stepId: Type.String({ minLength: 1, maxLength: 128 }),
         text: Type.String({ minLength: 1, maxLength: 2_000 }),
-        status: statusSchema,
+        status: stepStatusSchema,
         reason: Type.Optional(Type.String({ minLength: 1, maxLength: 500 }))
       }, { additionalProperties: false }), {
         minItems: 1,
@@ -356,6 +360,39 @@ export function pauseTaskPlanForRuntime(input: Readonly<{
     currentStepId: input.plan.currentStepId,
     reason: undefined,
     lastUpdateSummary: summary,
+    source: "agent",
+    productRunId: input.productRunId,
+    updatedAt: Math.max(input.plan.updatedAt, input.updatedAt)
+  });
+}
+
+export function failTaskPlanForProductRun(input: Readonly<{
+  plan: Readonly<EchoInkTaskPlanSnapshot>;
+  updatedAt: number;
+  productRunId: string;
+  reason: string;
+}>): Readonly<EchoInkTaskPlanSnapshot> {
+  if (isEchoInkTaskPlanTerminal(input.plan.status)) {
+    throw new Error("task_plan_runtime_failure_invalid");
+  }
+  const reason = input.reason.trim();
+  if (!reason || reason.length > 500) {
+    throw new Error("task_plan_runtime_failure_invalid");
+  }
+  const steps = input.plan.steps.map((step) => ({
+    ...step,
+    ...(step.status === "in_progress" || step.status === "paused"
+      ? { status: "interrupted" as const }
+      : {})
+  }));
+  return freezeEchoInkTaskPlan({
+    ...input.plan,
+    status: "failed",
+    version: input.plan.version + 1,
+    steps,
+    currentStepId: undefined,
+    reason,
+    lastUpdateSummary: "本轮执行失败，任务已停止",
     source: "agent",
     productRunId: input.productRunId,
     updatedAt: Math.max(input.plan.updatedAt, input.updatedAt)

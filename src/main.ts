@@ -69,6 +69,12 @@ import {
   createPiProductionRuntimeBundle,
   type PiProductionRuntimeBundle
 } from "./plugin/pi-production-runtime-composition";
+import type {
+  PiAgentApprovalDecisionBinding,
+  PiAgentApprovalIdentity,
+  PiAgentApprovalRunIdentity,
+  PiAgentApprovalSubscription
+} from "./plugin/pi-agent-approval-broker";
 import { PiLocalDataService } from "./plugin/pi-local-data-service";
 import { pluginDataDir } from "./plugin/plugin-data-paths";
 import {
@@ -556,6 +562,18 @@ export default class CodexForObsidianPlugin extends Plugin {
       productRunId,
       listener
     );
+  }
+  piAgentApprovalBinding(
+    identity: Readonly<PiAgentApprovalIdentity>
+  ): PiAgentApprovalDecisionBinding | null {
+    return this.piRuntimeBundle?.approvalBroker.bindingFor(identity) ?? null;
+  }
+  subscribePiAgentApproval(
+    identity: Readonly<PiAgentApprovalRunIdentity>,
+    listener: () => void
+  ): PiAgentApprovalSubscription {
+    return this.piRuntimeBundle?.approvalBroker.subscribeRun(identity, listener)
+      ?? Object.freeze({ unsubscribe: () => undefined });
   }
   isPiProductionRun(runId: string): boolean {
     return this.piRunConversations.has(runId);

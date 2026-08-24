@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import {
+  lstat as nodeLstat,
+  mkdtemp,
+  realpath as nodeRealpath,
+  rm
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import {
@@ -11,6 +16,14 @@ import {
 } from "../../harness/pi-native/domain-receipt-store";
 import { PiNativeFileStoreError } from "../../harness/pi-native/file-store-utils";
 import {
+  PI_VAULT_TOOL_POLICIES,
+  PI_VAULT_TOOL_POLICY_VERSION,
+  PI_VAULT_TOOL_VERSION
+} from "../../harness/pi-native/pi-vault-tool-contracts";
+import {
+  PiVaultToolAuthorizationError
+} from "../../harness/pi-native/pi-vault-tool-security-extension";
+import {
   FileApprovalTicketStore,
   createReadToolAuthorizationContext,
   isReadToolAuthorizationContext,
@@ -19,8 +32,12 @@ import {
   type EchoInkApprovalTicket,
   type WriteToolAuthorizationContext
 } from "../../harness/pi-native/tool-authorization";
+import type { VaultDomainAdapter } from "../../harness/pi-native/vault-domain-service";
+import { PiAgentApprovalBroker } from "../../plugin/pi-agent-approval-broker";
+import { createPiVaultProductionAuthorizationPort } from "../../plugin/pi-vault-tool-production";
 
 export async function runToolAuthorizationAndReceiptTests(): Promise<void> {
+  await assertAgentApprovalBrokerOneShotIdentity();
   await withFixture(async (fixture) => {
     await assertExactTicketConsumptionAndInvalidation(fixture);
     await assertDurableApprovalTerminalViews(fixture);
@@ -28,8 +45,347 @@ export async function runToolAuthorizationAndReceiptTests(): Promise<void> {
     await assertReceiptLifecycleAndReadbackInvariant(fixture);
     await assertTestUncertainRecoveryNeverRetriesEffect(fixture);
     await assertStartedJournalCanOnlyRecoverByReadback(fixture);
+    await assertVaultApprovalBrokerKeepsTicketAuthority(fixture);
     await assertVaultIsolation(fixture);
   });
+}
+
+async function assertAgentApprovalBrokerOneShotIdentity(): Promise<void> {
+  const broker = new PiAgentApprovalBroker();
+  const identity = Object.freeze({
+    conversationId: "conversation-approval",
+    piSessionId: "pi-session-approval",
+    productRunId: "product-run-approval",
+    toolCallId: "tool-call-approval"
+  });
+  let matchingNotifications = 0;
+  let foreignNotifications = 0;
+  const matchingSubscription = broker.subscribeRun(identity, () => {
+    matchingNotifications += 1;
+  });
+  const foreignSubscription = broker.subscribeRun({
+    conversationId: identity.conversationId,
+    piSessionId: identity.piSessionId,
+    productRunId: "product-run-other"
+  }, () => {
+    foreignNotifications += 1;
+  });
+
+  const approved = broker.waitForDecision({
+    ...identity,
+    requestId: "request-approve",
+    target: "Target.md",
+    preview: "approve preview"
+  });
+  const approvedBinding = broker.bindingFor(identity);
+  assert.ok(approvedBinding);
+  assert.equal(approvedBinding.target, "Target.md");
+  assert.equal(approvedBinding.preview, "approve preview");
+  assert.equal(broker.bindingFor({
+    ...identity,
+    conversationId: "conversation-other"
+  }), null, "a different Conversation cannot obtain the waiter");
+  assert.equal(broker.bindingFor({
+    ...identity,
+    piSessionId: "pi-session-other"
+  }), null, "a different Pi session cannot obtain the waiter");
+  assert.equal(broker.bindingFor({
+    ...identity,
+    productRunId: "product-run-other"
+  }), null, "a different ProductRun cannot obtain the waiter");
+  assert.equal(broker.bindingFor({
+    ...identity,
+    toolCallId: "tool-call-other"
+  }), null, "a different Tool Call cannot obtain the waiter");
+  assert.equal(approvedBinding.decide("approve"), true);
+  assert.equal(approvedBinding.decide("reject"), false,
+    "one live request can be decided only once");
+  assert.equal(await approved, true);
+
+  const rejected = broker.waitForDecision({
+    ...identity,
+    requestId: "request-approve",
+    target: "Target.md",
+    preview: "reject preview"
+  });
+  assert.equal(approvedBinding.decide("approve"), false,
+    "a stale binding cannot decide a later waiter even when every external identity repeats");
+  const rejectedBinding = broker.bindingFor(identity);
+  assert.ok(rejectedBinding);
+  assert.equal(rejectedBinding.decide("reject"), true);
+  assert.equal(await rejected, false);
+
+  const conflict = broker.waitForDecision({
+    ...identity,
+    requestId: "request-conflict",
+    target: "Target.md",
+    preview: "conflict preview"
+  });
+  await assert.rejects(
+    broker.waitForDecision({
+      ...identity,
+      requestId: "request-conflict-other-identity",
+      target: "Other.md",
+      preview: "must not replace"
+    }),
+    /waiter_conflict/u,
+    "a second request cannot replace an identity that is already waiting"
+  );
+  await assert.rejects(
+    broker.waitForDecision({
+      ...identity,
+      toolCallId: "tool-call-conflicting-request-id",
+      requestId: "request-conflict",
+      target: "Other.md",
+      preview: "must not alias"
+    }),
+    /waiter_conflict/u,
+    "one opaque request identity cannot alias another Tool Call"
+  );
+  assert.equal(broker.bindingFor(identity)?.decide("reject"), true);
+  assert.equal(await conflict, false);
+
+  const abortController = new AbortController();
+  const cancelledIdentity = {
+    ...identity,
+    toolCallId: "tool-call-cancelled"
+  };
+  const cancelled = broker.waitForDecision({
+    ...cancelledIdentity,
+    requestId: "request-cancelled",
+    target: "Cancelled.md",
+    preview: "cancel preview",
+    signal: abortController.signal
+  });
+  const cancelledBinding = broker.bindingFor(cancelledIdentity);
+  assert.ok(cancelledBinding);
+  abortController.abort();
+  await assert.rejects(cancelled, /approval_cancelled/u);
+  assert.equal(cancelledBinding.decide("approve"), false,
+    "an aborted waiter cannot later approve anything");
+
+  const disposedIdentity = {
+    ...identity,
+    toolCallId: "tool-call-disposed"
+  };
+  const disposed = broker.waitForDecision({
+    ...disposedIdentity,
+    requestId: "request-disposed",
+    target: "Disposed.md",
+    preview: "dispose preview"
+  });
+  const disposedBinding = broker.bindingFor(disposedIdentity);
+  assert.ok(disposedBinding);
+  broker.dispose();
+  await assert.rejects(disposed, /broker_disposed/u);
+  assert.equal(disposedBinding.decide("approve"), false,
+    "runtime disposal invalidates every captured decision closure");
+  await assert.rejects(
+    broker.waitForDecision({
+      ...identity,
+      requestId: "request-after-dispose",
+      target: "After.md",
+      preview: "after dispose"
+    }),
+    /broker_disposed/u
+  );
+  assert.ok(matchingNotifications >= 10,
+    "the matching run is notified when live waiters enter and leave");
+  assert.equal(foreignNotifications, 0,
+    "run subscriptions never receive another ProductRun's waiter changes");
+  matchingSubscription.unsubscribe();
+  foreignSubscription.unsubscribe();
+}
+
+async function assertVaultApprovalBrokerKeepsTicketAuthority(
+  fixture: Fixture
+): Promise<void> {
+  const broker = new PiAgentApprovalBroker();
+  const runIdentity = Object.freeze({
+    conversationId: "conversation-vault-agent-approval",
+    piSessionId: "pi-session-vault-agent-approval",
+    productRunId: "product-run-vault-agent-approval",
+    vaultId: fixture.vaultId
+  });
+  const confirmationRequests: Array<Readonly<{
+    requestId: string;
+    conversationId: string;
+    piSessionId: string;
+    productRunId: string;
+    toolCallId: string;
+  }>> = [];
+  const authorization = createPiVaultProductionAuthorizationPort({
+    approvals: fixture.approvals,
+    adapter: localAuthorizationAdapter(fixture),
+    currentRunIdentity: () => runIdentity,
+    userId: "user-vault-agent-approval",
+    deviceId: "device-vault-agent-approval",
+    now: () => fixture.clock.value,
+    confirmation: {
+      async confirm(request) {
+        confirmationRequests.push(request);
+        return await broker.waitForDecision({
+          requestId: request.requestId,
+          conversationId: request.conversationId,
+          piSessionId: request.piSessionId,
+          productRunId: request.productRunId,
+          toolCallId: request.toolCallId,
+          target: JSON.stringify(request.target),
+          preview: JSON.stringify(request.preview),
+          signal: request.signal
+        });
+      }
+    }
+  });
+  const authorize = (
+    toolCallId: string,
+    relativePath: string,
+    signal?: AbortSignal
+  ) => authorization.authorize({
+    toolCallId,
+    toolId: "note_create",
+    arguments: { relativePath, content: `content for ${relativePath}` },
+    policy: PI_VAULT_TOOL_POLICIES.note_create,
+    toolVersion: PI_VAULT_TOOL_VERSION,
+    policyVersion: PI_VAULT_TOOL_POLICY_VERSION,
+    signal
+  });
+  const identityFor = (toolCallId: string) => ({
+    conversationId: runIdentity.conversationId,
+    piSessionId: runIdentity.piSessionId,
+    productRunId: runIdentity.productRunId,
+    toolCallId
+  });
+
+  const approvedPromise = authorize("vault-call-approved", "Approved.md");
+  const approvedBinding = await waitForApprovalBinding(
+    broker,
+    identityFor("vault-call-approved")
+  );
+  assert.equal(approvedBinding.decide("approve"), true);
+  const approvedAuthorization = await approvedPromise;
+  assert.ok(isWriteToolAuthorizationContext(approvedAuthorization));
+  assert.equal((await fixture.approvals.get(
+    runIdentity.productRunId,
+    "vault-call-approved"
+  ))?.status, "approved",
+  "the existing Ticket store, not the broker, records approved after consume");
+
+  const deniedPromise = authorize("vault-call-denied", "Denied.md");
+  const deniedBinding = await waitForApprovalBinding(
+    broker,
+    identityFor("vault-call-denied")
+  );
+  assert.equal(deniedBinding.decide("reject"), true);
+  await assert.rejects(
+    deniedPromise,
+    (error) => error instanceof PiVaultToolAuthorizationError
+      && error.code === "approval_denied"
+  );
+  assert.equal((await fixture.approvals.get(
+    runIdentity.productRunId,
+    "vault-call-denied"
+  ))?.status, "denied",
+  "reject continues through the existing denied Ticket resolution");
+
+  const abortController = new AbortController();
+  const cancelledPromise = authorize(
+    "vault-call-cancelled",
+    "Cancelled.md",
+    abortController.signal
+  );
+  await waitForApprovalBinding(
+    broker,
+    identityFor("vault-call-cancelled")
+  );
+  abortController.abort();
+  await assert.rejects(
+    cancelledPromise,
+    (error) => error instanceof PiVaultToolAuthorizationError
+      && error.code === "approval_cancelled"
+  );
+  assert.equal((await fixture.approvals.get(
+    runIdentity.productRunId,
+    "vault-call-cancelled"
+  ))?.status, "cancelled");
+
+  assert.deepEqual(
+    confirmationRequests.map((request) => ({
+      conversationId: request.conversationId,
+      piSessionId: request.piSessionId,
+      productRunId: request.productRunId,
+      toolCallId: request.toolCallId
+    })),
+    ["vault-call-approved", "vault-call-denied", "vault-call-cancelled"].map(
+      (toolCallId) => identityFor(toolCallId)
+    ),
+    "Vault confirmation receives the exact four-part runtime identity"
+  );
+  assert.ok(confirmationRequests.every((request) => request.requestId.trim()),
+    "Vault confirmation receives the existing opaque Ticket identity");
+  broker.dispose();
+}
+
+function localAuthorizationAdapter(fixture: Fixture): VaultDomainAdapter {
+  return {
+    vaultId: fixture.vaultId,
+    vaultRootPath: fixture.rootPath,
+    async lstat(absolutePath) {
+      try {
+        const stat = await nodeLstat(absolutePath);
+        return {
+          kind: stat.isSymbolicLink()
+            ? "symbolic_link"
+            : stat.isFile()
+              ? "file"
+              : stat.isDirectory()
+                ? "directory"
+                : "other"
+        };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+        throw error;
+      }
+    },
+    async realpath(absolutePath) {
+      return await nodeRealpath(absolutePath);
+    },
+    async search() {
+      return [];
+    },
+    async readFile() {
+      return null;
+    },
+    async createFile() {
+      throw new Error("not used by authorization test");
+    },
+    async updateFile() {
+      throw new Error("not used by authorization test");
+    },
+    async moveFile() {
+      throw new Error("not used by authorization test");
+    },
+    async trashFileRecoverably() {
+      throw new Error("not used by authorization test");
+    }
+  };
+}
+
+async function waitForApprovalBinding(
+  broker: PiAgentApprovalBroker,
+  identity: Readonly<{
+    conversationId: string;
+    piSessionId: string;
+    productRunId: string;
+    toolCallId: string;
+  }>
+) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const binding = broker.bindingFor(identity);
+    if (binding) return binding;
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  }
+  throw new Error("Timed out waiting for Agent Approval binding");
 }
 
 interface Fixture {

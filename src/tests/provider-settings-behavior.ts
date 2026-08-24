@@ -168,6 +168,7 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   await assertResourceScanErrorsClearAcrossTabs();
   assertProviderBadgeReflowCssContract();
   await assertSavedBindingPreflightLifecycle();
+  await assertProviderPickerGroupingAndFiltering();
   await assertOpenAICodexModalLifecycle();
   await assertProviderModelModalPreflightLifecycle();
   await assertProviderApiKeyEditLifecycle();
@@ -1563,9 +1564,94 @@ function assertSettingsAccessibleNamesAndOverflow(): void {
   tab.display();
   assert.match(tab.containerEl.textContent, /当前事实/u);
   assert.match(tab.containerEl.textContent, /用户可见的事实正文/u);
+  const correctionCard = tab.containerEl.querySelector<ProviderModalTestElement>(
+    ".echoink-memory-correction-row"
+  );
+  assert.ok(correctionCard, "the current Memory renders as one correction card");
+  const cardHeader = correctionCard.querySelector<ProviderModalTestElement>(
+    ".echoink-memory-card-header"
+  );
+  const cardFields = correctionCard.querySelector<ProviderModalTestElement>(
+    ".echoink-memory-card-fields"
+  );
+  assert.ok(cardHeader && cardFields);
+  assert.equal(correctionCard.children[0], cardHeader,
+    "the title and Correct action stay in the first card layer");
+  assert.equal(correctionCard.children[1], cardFields,
+    "the readable Memory fields follow the header");
+  assert.equal(
+    cardHeader.querySelector(".echoink-memory-card-title")?.textContent,
+    "当前事实"
+  );
+  assert.deepEqual(
+    cardFields.querySelectorAll(".echoink-memory-card-label")
+      .map((element) => element.textContent),
+    ["记忆内容", "召回时机"]
+  );
+  assert.deepEqual(
+    cardFields.querySelectorAll(".echoink-memory-card-body")
+      .map((element) => element.textContent),
+    ["用户可见的事实正文", "需要核对事实时"]
+  );
+  assert.deepEqual(
+    cardFields.children.map((element) => element.className),
+    [
+      "echoink-memory-card-field echoink-memory-card-content",
+      "echoink-memory-card-field echoink-memory-card-recall"
+    ]
+  );
+  const correctionActions = correctionCard.querySelectorAll<ProviderModalTestElement>("button");
+  assert.deepEqual(correctionActions.map((button) => button.textContent), ["修正"]);
+  assert.equal(correctionActions[0]?.closest(".echoink-memory-card-header"), cardHeader);
+  assert.equal(correctionCard.querySelectorAll("input, textarea, select").length, 0);
+  assert.equal(
+    correctionCard.querySelectorAll("*")
+      .some((element) => element.className.includes("echoink-secondary-")),
+    false
+  );
+  assert.doesNotMatch(
+    correctionCard.textContent,
+    /联想线索|AI 推断|Association clues|secondary/iu
+  );
   assert.doesNotMatch(
     tab.containerEl.textContent,
     /mem_ui_private_id|private-source|records\/facts|revision/u
+  );
+
+  settings.settingsLanguage = "en";
+  tab.display();
+  const englishCard = tab.containerEl.querySelector<ProviderModalTestElement>(
+    ".echoink-memory-correction-row"
+  );
+  assert.ok(englishCard);
+  assert.deepEqual(
+    englishCard.querySelectorAll(".echoink-memory-card-label")
+      .map((element) => element.textContent),
+    ["Memory content", "Recall when"]
+  );
+  assert.deepEqual(
+    englishCard.querySelectorAll("button").map((button) => button.textContent),
+    ["Correct"]
+  );
+  assert.doesNotMatch(englishCard.textContent, /Association clues|AI inferred/iu);
+  settings.settingsLanguage = "zh-CN";
+
+  const correctionCss = readFileSync("styles.css", "utf8");
+  const bodyRule = correctionCss.match(/\.echoink-memory-card-body\s*\{([^}]*)\}/u)?.[1] ?? "";
+  assert.match(bodyRule, /max-inline-size:\s*68ch;/u);
+  assert.match(bodyRule, /line-height:\s*1\.6;/u);
+  assert.match(bodyRule, /overflow-wrap:\s*anywhere;/u);
+  assert.match(bodyRule, /text-wrap:\s*pretty;/u);
+  assert.doesNotMatch(bodyRule, /(?:^|;)\s*(?:width|height)\s*:/u);
+  assert.match(
+    correctionCss,
+    /@container \(max-width:\s*360px\)\s*\{[\s\S]*?\.echoink-memory-card-header\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\);/u
+  );
+  assert.doesNotMatch(correctionCss, /\.echoink-secondary-/u);
+  const settingsTabSource = readFileSync("src/settings/settings-tab.ts", "utf8");
+  assert.doesNotMatch(
+    settingsTabSource,
+    /echoink-secondary-facts|listSecondaryForParent|renderSecondaryFactRow|openSecondaryFactEditor/u
   );
 
   settings.settingsTab = "general";
@@ -4354,6 +4440,185 @@ async function assertSavedBindingPreflightLifecycle(): Promise<void> {
     "connection:loading",
     "connection:available"
   ]);
+}
+
+async function assertProviderPickerGroupingAndFiltering(): Promise<void> {
+  installProviderModalDomFixture();
+  const modalRegistryBaseline = openTestModals.length;
+  const provider = createApiProviderConfig("deepseek", "provider-grouping-modal");
+  const preflight = {
+    listModels: async () => ({
+      status: "available" as const,
+      models: provider.models
+    }),
+    testConnection: async () => ({ status: "available" as const })
+  };
+  const createModal = (language: "zh-CN" | "en") => new ProviderModelModal({
+    app: new App(),
+    draft: provider,
+    editing: true,
+    language,
+    copy: settingsCopy(language),
+    preflight,
+    save: async () => ({ saved: true })
+  });
+
+  const modal = createModal("zh-CN");
+  modal.open();
+  const picker = modal.contentEl.querySelector<ProviderModalTestElement>(
+    ".codex-provider-combobox"
+  );
+  const options = picker?.querySelector<ProviderModalTestElement>(
+    ".codex-provider-combobox-options"
+  );
+  const trigger = picker?.querySelector<ProviderModalTestElement>(
+    ".codex-provider-combobox-trigger"
+  );
+  const search = picker?.querySelector<ProviderModalTestElement>(
+    'input[aria-label="搜索 Provider"]'
+  );
+  assert.ok(picker && options && trigger && search);
+  assert.equal(openTestModals.length, modalRegistryBaseline + 1);
+  assert.deepEqual(
+    options.children.map((child) => child.hasClass("codex-provider-combobox-group")
+      ? `group:${child.textContent}`
+      : `option:${child.getAttribute("data-provider-id")}`),
+    [
+      "group:登录账户",
+      "option:openai-codex",
+      "group:供应商",
+      "option:glm",
+      "option:kimi",
+      "option:minimax",
+      "option:deepseek",
+      "option:ollama",
+      "group:其他",
+      "option:custom"
+    ]
+  );
+  const optionIds = options.querySelectorAll<ProviderModalTestElement>(
+    ".codex-provider-combobox-option"
+  ).map((option) => option.getAttribute("data-provider-id"));
+  const visibleOptionIds = () => options.querySelectorAll<ProviderModalTestElement>(
+    ".codex-provider-combobox-option"
+  )
+    .filter((option) => !option.hasClass("is-hidden"))
+    .map((option) => option.getAttribute("data-provider-id"));
+  assert.deepEqual(optionIds, [
+    "openai-codex",
+    "glm",
+    "kimi",
+    "minimax",
+    "deepseek",
+    "ollama",
+    "custom"
+  ]);
+  assert.equal(optionIds.includes("grok"), false);
+  assert.doesNotMatch(options.textContent, /Grok/iu);
+  const oauthPreset = API_PROVIDER_PRESETS.find((preset) => preset.id === "openai-codex");
+  assert.equal(oauthPreset?.authMode, "oauth");
+  assert.ok(oauthPreset?.baseUrl,
+    "OAuth grouping has priority even when the preset defines a baseUrl");
+
+  const selected = options.querySelector<ProviderModalTestElement>(
+    '[data-provider-id="deepseek"]'
+  );
+  const ollama = options.querySelector<ProviderModalTestElement>(
+    '[data-provider-id="ollama"]'
+  );
+  assert.ok(selected && ollama);
+  assert.equal(selected.hasClass("is-selected"), true);
+  assert.equal(selected.getAttribute("aria-selected"), "true");
+  trigger.fireEvent("keydown", { key: "ArrowDown" });
+  assert.equal(picker.hasClass("is-open"), true);
+  assert.equal(providerModalTestDocument.activeElement, selected,
+    "opening by keyboard focuses the selected Provider across groups");
+  options.fireEvent("keydown", { key: "ArrowDown", target: selected });
+  assert.equal(providerModalTestDocument.activeElement, ollama,
+    "keyboard navigation skips headings and follows visible Provider order");
+
+  const headings = options.querySelectorAll<ProviderModalTestElement>(
+    ".codex-provider-combobox-group"
+  );
+  assert.deepEqual(headings.map((heading) => heading.textContent), [
+    "登录账户",
+    "供应商",
+    "其他"
+  ]);
+  search.value = "codex";
+  search.fireEvent("input");
+  assert.deepEqual(headings.map((heading) => heading.hasClass("is-hidden")), [
+    false,
+    true,
+    true
+  ]);
+  assert.deepEqual(visibleOptionIds(), ["openai-codex"]);
+  search.fireEvent("keydown", { key: "ArrowDown" });
+  assert.equal(
+    providerModalTestDocument.activeElement?.getAttribute("data-provider-id"),
+    "openai-codex"
+  );
+  search.value = "deepseek";
+  search.fireEvent("input");
+  assert.deepEqual(headings.map((heading) => heading.hasClass("is-hidden")), [
+    true,
+    false,
+    true
+  ]);
+  assert.deepEqual(visibleOptionIds(), ["deepseek"]);
+  search.value = "custom";
+  search.fireEvent("input");
+  assert.deepEqual(headings.map((heading) => heading.hasClass("is-hidden")), [
+    true,
+    true,
+    false
+  ]);
+  assert.deepEqual(visibleOptionIds(), ["custom"]);
+  search.value = "no matching provider";
+  search.fireEvent("input");
+  assert.deepEqual(headings.map((heading) => heading.hasClass("is-hidden")), [
+    true,
+    true,
+    true
+  ]);
+  assert.deepEqual(visibleOptionIds(), []);
+  search.value = "";
+  search.fireEvent("input");
+  assert.deepEqual(headings.map((heading) => heading.hasClass("is-hidden")), [
+    false,
+    false,
+    false
+  ]);
+  assert.deepEqual(visibleOptionIds(), optionIds);
+  assert.equal(selected.getAttribute("aria-selected"), "true",
+    "filtering never changes the selected Provider");
+
+  options.fireEvent("keydown", {
+    key: "Escape",
+    target: providerModalTestDocument.activeElement
+  });
+  assert.equal(picker.hasClass("is-open"), false);
+  assert.equal(trigger.getAttribute("aria-expanded"), "false");
+  assert.equal(providerModalTestDocument.activeElement, trigger);
+  modal.close();
+  assert.equal(openTestModals.length, modalRegistryBaseline,
+    "closing the grouped Provider Modal must release the fake Modal registry");
+  providerModalTestDocument.activeElement = null;
+  await flushProviderModalTasks();
+
+  const englishModal = createModal("en");
+  englishModal.open();
+  assert.equal(openTestModals.length, modalRegistryBaseline + 1);
+  assert.deepEqual(
+    englishModal.contentEl.querySelectorAll<ProviderModalTestElement>(
+      ".codex-provider-combobox-group"
+    ).map((heading) => heading.textContent),
+    ["Account sign-in", "Providers", "Other"]
+  );
+  englishModal.close();
+  await flushProviderModalTasks();
+  assert.equal(openTestModals.length, modalRegistryBaseline,
+    "the English Provider Modal must also release the fake Modal registry");
 }
 
 async function assertOpenAICodexModalLifecycle(): Promise<void> {
