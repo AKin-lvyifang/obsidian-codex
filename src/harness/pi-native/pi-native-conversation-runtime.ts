@@ -77,8 +77,9 @@ import {
   ECHOINK_KNOWLEDGE_MAINTENANCE_PROTOCOL_VERSION
 } from "../../knowledge-base/knowledge-maintenance-protocol";
 import { PI_KNOWLEDGE_READ_TOOL_IDS } from "./pi-knowledge-read-tools";
-import type {
-  PiNativeProviderExecutionContext
+import {
+  piModelSupportsImageInput,
+  type PiNativeProviderExecutionContext
 } from "./pi-native-controlled-provider";
 import { runtimeInterruptedDiagnosticId } from "./file-store-utils";
 import {
@@ -4130,17 +4131,7 @@ function productRunStartFailureAfterUserEntry(
 export function agentSessionSupportsImageInput(
   session: Pick<AgentSession, "model">
 ): boolean {
-  const model = session.model as Readonly<{
-    imageInput?: unknown;
-    input?: unknown;
-  }> | undefined;
-  return Boolean(
-    model
-    && (
-      model.imageInput === true
-      || (Array.isArray(model.input) && model.input.includes("image"))
-    )
-  );
+  return piModelSupportsImageInput(session.model);
 }
 
 function normalizePiChatPreparedImages(

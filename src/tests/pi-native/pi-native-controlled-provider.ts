@@ -8,6 +8,8 @@ import type {
 import {
   createPiNativeControlledProvider,
   createPiNativeModelFromCatalog,
+  createPiNativeModelFromConfiguration,
+  piModelSupportsImageInput,
   PiNativeModelMetadataError
 } from "../../harness/pi-native/pi-native-controlled-provider";
 import {
@@ -17,10 +19,43 @@ import {
 
 export async function runPiNativeControlledProviderTests(): Promise<void> {
   assertCatalogModelMetadataFailsClosed();
+  assertCurrentModelImageCapabilityIsCanonical();
   await assertExecutableAgentToolsProjectToProviderMetadata();
   await assertImageContentSurvivesControlledProviderProjection();
   await assertThrownOverflowRemainsVisibleToAgentSession();
   await assertUnknownProviderFailuresRemainSanitized();
+}
+
+function assertCurrentModelImageCapabilityIsCanonical(): void {
+  const apiKeyProvider = providerConfig();
+  const oauthProvider = oauthProviderConfig();
+  const catalogImageModel = {
+    ...providerModel(oauthProvider),
+    input: ["text", "image"] as Model<Api>["input"]
+  };
+  const catalogResolved = createPiNativeModelFromConfiguration({
+    catalogModel: catalogImageModel,
+    provider: oauthProvider,
+    configured: configuredModelMetadata(oauthProvider, false)
+  });
+  assert.equal(piModelSupportsImageInput(catalogResolved), true);
+  assert.deepEqual(catalogResolved.input, ["text", "image"]);
+
+  const configuredResolved = createPiNativeModelFromConfiguration({
+    catalogModel: undefined,
+    provider: apiKeyProvider,
+    configured: configuredModelMetadata(apiKeyProvider, true)
+  });
+  assert.equal(piModelSupportsImageInput(configuredResolved), true);
+  assert.deepEqual(configuredResolved.input, ["text", "image"]);
+
+  const textOnly = createPiNativeModelFromConfiguration({
+    catalogModel: providerModel(),
+    provider: apiKeyProvider,
+    configured: configuredModelMetadata(apiKeyProvider, false)
+  });
+  assert.equal(piModelSupportsImageInput(textOnly), false);
+  assert.deepEqual(textOnly.input, ["text"]);
 }
 
 function assertCatalogModelMetadataFailsClosed(): void {
@@ -139,8 +174,16 @@ Promise<void> {
 
 async function assertImageContentSurvivesControlledProviderProjection():
 Promise<void> {
-  const model = providerModel();
   const config = providerConfig();
+  const model = createPiNativeModelFromConfiguration({
+    catalogModel: {
+      ...providerModel(),
+      input: ["text", "image"]
+    },
+    provider: config,
+    configured: configuredModelMetadata(config, false)
+  });
+  assert.equal(piModelSupportsImageInput(model), true);
   const image: ImageContent = {
     type: "image",
     data: "AQIDBA==",
@@ -220,13 +263,14 @@ async function runThrowingProvider(message: string) {
   return await provider.stream(model, emptyContext(), {}).result();
 }
 
-function providerModel(): Model<Api> {
+function providerModel(
+  config: PiProviderRuntimeConfig = providerConfig()
+): Model<Api> {
   return createPiProviderModelDefinition({
-    providerId: "custom",
-    apiProtocol: "openai-completions",
-    authMode: "api-key",
-    baseUrl: "https://fixture.example/v1",
-    modelRef: "fixture/model"
+    providerId: config.providerId,
+    apiProtocol: config.apiProtocol,
+    baseUrl: config.baseUrl,
+    modelRef: config.modelRef
   });
 }
 
@@ -234,8 +278,32 @@ function providerConfig(): PiProviderRuntimeConfig {
   return {
     providerId: "custom",
     apiProtocol: "openai-completions",
+    authMode: "api-key",
     baseUrl: "https://fixture.example/v1",
     modelRef: "fixture/model"
+  };
+}
+
+function oauthProviderConfig(): PiProviderRuntimeConfig {
+  return {
+    providerId: "openai-codex",
+    apiProtocol: "openai-codex-responses",
+    authMode: "oauth",
+    baseUrl: "https://chatgpt.com/backend-api",
+    modelRef: "gpt-5.6-sol"
+  };
+}
+
+function configuredModelMetadata(
+  provider: PiProviderRuntimeConfig,
+  imageInput: boolean
+) {
+  return {
+    apiProtocol: provider.apiProtocol,
+    contextWindow: 64_000,
+    maxOutputTokens: 8_192,
+    reasoning: true,
+    imageInput
   };
 }
 
