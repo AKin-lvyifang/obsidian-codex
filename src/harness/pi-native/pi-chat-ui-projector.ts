@@ -36,7 +36,7 @@ import {
   type EchoInkReasoningActivity,
   type EchoInkReasoningSummarySnapshot
 } from "../../types/reasoning-summary";
-import { interruptReasoningSummary } from "./pi-reasoning-summary";
+import { closeReasoningSummary } from "./pi-reasoning-summary";
 
 export type {
   PiChatUiToolApprovalStatus,
@@ -252,24 +252,28 @@ export class PiChatUiProjector {
     for (const entry of input.entries) {
       this.projectDurableEntry(messages, pendingTools, entry, context);
     }
-    if (runState === "interrupted" && input.productRunId) {
+    const reopenedReasoningStatus = reopenedReasoningTerminalStatus(runState);
+    if (reopenedReasoningStatus && input.productRunId) {
       const message = messages.find((candidate) =>
         candidate.reasoningSummary?.productRunId === input.productRunId
       );
       const summary = message?.reasoningSummary;
-      if (summary && summary.terminalAt === undefined) {
-        const run = (input.runIdentities ?? []).find(
-          (candidate) => candidate.productRunId === input.productRunId
-        );
+      const run = (input.runIdentities ?? []).find(
+        (candidate) => candidate.productRunId === input.productRunId
+      );
+      if (
+        summary
+        && summary.terminalAt === undefined
+        && run?.updatedAt !== undefined
+        && Number.isFinite(run.updatedAt)
+      ) {
         upsertReasoningSummaryMessage(
           messages,
           scope,
-          interruptReasoningSummary({
+          closeReasoningSummary({
             summary,
-            interruptedAt: Math.max(
-              summary.updatedAt,
-              finiteTime(run?.updatedAt, summary.updatedAt)
-            )
+            status: reopenedReasoningStatus,
+            terminalAt: run.updatedAt
           })
         );
       }
@@ -1962,8 +1966,18 @@ function reasoningSummaryTitle(
 function reasoningSummaryText(
   summary: Readonly<EchoInkReasoningSummarySnapshot>
 ): string {
-  if (summary.activities.length === 0) return "正在思考";
+  if (summary.activities.length === 0) return "";
   return summary.activities.map(reasoningActivityText).join("\n");
+}
+
+function reopenedReasoningTerminalStatus(
+  runState: PiChatUiRunState
+): Exclude<EchoInkReasoningSummarySnapshot["status"], "running"> | null {
+  if (runState === "completed") return "completed";
+  if (runState === "failed") return "failed";
+  if (runState === "cancelled") return "cancelled";
+  if (runState === "interrupted" || runState === "idle") return "interrupted";
+  return null;
 }
 
 function reasoningActivityText(

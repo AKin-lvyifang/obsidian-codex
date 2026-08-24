@@ -49,7 +49,7 @@ class FakeElement {
   textContent = "";
   onclick: ((event: never) => unknown) | null = null;
   onkeydown: ((event: never) => unknown) | null = null;
-  ontoggle: (() => unknown) | null = null;
+  ontoggle: ((event: { readonly isTrusted: boolean }) => unknown) | null = null;
 
   constructor(readonly tag: string) {}
 
@@ -150,6 +150,10 @@ class FakeElement {
   }
 
   setCssStyles(_styles: Record<string, string>): void {}
+
+  getBoundingClientRect(): { height: number } {
+    return { height: 0 };
+  }
 
   findByClass(cls: string): FakeElement | null {
     return this.findAllByClass(cls)[0] ?? null;
@@ -660,11 +664,16 @@ export async function runSmoothConversationUiTests(): Promise<void> {
   const renderer = new CodexMessageListRenderer();
   bindRenderer(renderer, context);
   const previousDocument = (globalThis as unknown as { document?: unknown }).document;
+  const previousHTMLElement = (globalThis as unknown as { HTMLElement?: unknown }).HTMLElement;
   Object.defineProperty(globalThis, "document", {
     configurable: true,
     value: {
       createElementNS: (_namespace: string, tag: string) => new FakeElement(tag)
     }
+  });
+  Object.defineProperty(globalThis, "HTMLElement", {
+    configurable: true,
+    value: FakeElement
   });
   try {
     const answer = renderMessage(renderer, {
@@ -737,7 +746,7 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       role: "assistant",
       itemType: "reasoning",
       title: "正在思考",
-      text: "正在思考",
+      text: "",
       status: "running",
       reasoningSummary: {
         schemaVersion: 1,
@@ -766,8 +775,93 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       runningReasoning.findByClass("codex-smooth-ai-reasoning-label")?.textContent,
       "正在思考"
     );
-    assert.match(renderedText(runningReasoning), /正在思考/u,
-      "empty structured activity renders only the truthful fallback");
+    assert.equal(
+      renderedText(runningReasoning).match(/正在思考/gu)?.length,
+      1,
+      "empty structured activity renders exactly one truthful summary label"
+    );
+    assert.equal(
+      renderedText(runningReasoning.findByClass("codex-smooth-ai-reasoning-body")!),
+      "",
+      "empty Reasoning has no duplicate body fallback"
+    );
+
+    const conversationMessages = new FakeElement("div");
+    const conversationVirtualList = new FakeElement("div");
+    const sameRunEmptyAnswer: ChatMessage = {
+      id: "answer-same-running-empty",
+      role: "assistant",
+      text: "",
+      status: "running",
+      runId: "run-structured",
+      turnId: "run-structured",
+      createdAt: 10_100
+    };
+    const otherRunEmptyAnswer: ChatMessage = {
+      ...sameRunEmptyAnswer,
+      id: "answer-other-running-empty",
+      runId: "run-without-reasoning",
+      turnId: "run-without-reasoning",
+      createdAt: 10_200
+    };
+    const suppressionRenderer = new CodexMessageListRenderer();
+    suppressionRenderer.render({
+      app: context.app as never,
+      component: context.component as never,
+      messagesEl: conversationMessages as unknown as HTMLElement,
+      virtualListEl: conversationVirtualList as unknown as HTMLElement,
+      sessionId: "reasoning-loader-suppression",
+      welcomeCopy: { title: "EchoInk", subtitle: "从一个问题开始" },
+      settingsLanguage: "zh",
+      messages: [structuredRunning, sameRunEmptyAnswer, otherRunEmptyAnswer],
+      vaultPath: "/test-vault",
+      readRawMessageText: async () => "",
+      onScheduleMeasure: () => undefined,
+      onScheduleRunProgress: () => undefined
+    });
+    const renderedMessageIds = conversationVirtualList
+      .findAllByClass("codex-message")
+      .map((message) => message.dataset.messageId);
+    assert.equal(renderedMessageIds.includes(sameRunEmptyAnswer.id), false,
+      "dedicated running Reasoning suppresses only its same-run empty answer row");
+    assert.equal(renderedMessageIds.includes(otherRunEmptyAnswer.id), true,
+      "an unrelated run without Reasoning keeps its empty answer row");
+    assert.equal(
+      renderedText(conversationVirtualList).match(/正在思考/gu)?.length,
+      1,
+      "the running conversation contains one Reasoning label"
+    );
+    assert.equal(conversationVirtualList.findAllByClass("codex-smooth-ai-loader").length, 1,
+      "only the unrelated run keeps a generating-answer Loader");
+    assert.equal(
+      renderedText(conversationVirtualList).match(/正在生成回复/gu)?.length,
+      1
+    );
+    suppressionRenderer.render({
+      app: context.app as never,
+      component: context.component as never,
+      messagesEl: conversationMessages as unknown as HTMLElement,
+      virtualListEl: conversationVirtualList as unknown as HTMLElement,
+      sessionId: "reasoning-loader-suppression",
+      welcomeCopy: { title: "EchoInk", subtitle: "从一个问题开始" },
+      settingsLanguage: "zh",
+      messages: [
+        structuredRunning,
+        { ...sameRunEmptyAnswer, text: "首段公开回答" }
+      ],
+      vaultPath: "/test-vault",
+      readRawMessageText: async () => "",
+      onScheduleMeasure: () => undefined,
+      onScheduleRunProgress: () => undefined
+    });
+    assert.equal(
+      conversationVirtualList.findAllByClass("codex-message")
+        .some((message) => message.dataset.messageId === sameRunEmptyAnswer.id),
+      true,
+      "the same-run answer row returns with its first non-empty public text"
+    );
+    assert.ok(conversationVirtualList.findByClass("codex-smooth-ai-response"));
+    assert.equal(conversationVirtualList.findAllByClass("codex-smooth-ai-loader").length, 0);
 
     const structuredAnswered: ChatMessage = {
       ...structuredRunning,
@@ -804,7 +898,25 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       "思考完成 · 2 秒"
     );
     answeredReasoningRoot!.open = true;
-    answeredReasoningRoot!.ontoggle?.();
+    answeredReasoningRoot!.ontoggle?.({ isTrusted: false });
+    assert.equal(
+      answeredReasoning.findByClass("codex-smooth-ai-reasoning-summary")
+        ?.attributes.get("aria-expanded"),
+      "true",
+      "untrusted toggles still synchronize accessibility state"
+    );
+    const afterProgrammaticOpen = renderMessage(
+      renderer,
+      structuredAnswered,
+      { showAgentFooter: false, showAgentHeader: false }
+    );
+    const afterProgrammaticRoot = afterProgrammaticOpen.findByClass(
+      "codex-smooth-ai-reasoning"
+    )!;
+    assert.equal(afterProgrammaticRoot.open, false,
+      "a programmatic toggle never establishes manual disclosure precedence");
+    afterProgrammaticRoot.open = true;
+    afterProgrammaticRoot.ontoggle?.({ isTrusted: true });
 
     const structuredFailed: ChatMessage = {
       ...structuredAnswered,
@@ -846,7 +958,7 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     );
     const collapsedRoot = collapsedRunning.findByClass("codex-smooth-ai-reasoning")!;
     collapsedRoot.open = false;
-    collapsedRoot.ontoggle?.();
+    collapsedRoot.ontoggle?.({ isTrusted: true });
     const collapsedAnswered = renderMessage(
       renderer,
       {
@@ -882,77 +994,203 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     (renderer as unknown as { env: { sessionId: string } }).env.sessionId =
       "smooth-ui-test";
 
-    const restoredRenderer = new CodexMessageListRenderer();
-    bindRenderer(restoredRenderer, context);
-    const restoredTerminal = renderMessage(
-      restoredRenderer,
-      {
-        ...structuredFailed,
-        title: "思考已取消 · 4 秒",
-        status: "cancelled",
-        reasoningSummary: {
-          ...structuredFailed.reasoningSummary!,
-          status: "cancelled"
-        }
-      },
-      { showAgentFooter: false, showAgentHeader: false }
-    );
-    assert.equal(
-      restoredTerminal.findByClass("codex-smooth-ai-reasoning")?.open,
-      false
-    );
-    assert.equal(
-      restoredTerminal.findByClass("codex-smooth-ai-reasoning-label")?.textContent,
-      "思考已取消 · 4 秒"
-    );
+    const restoredTerminalCases = [
+      { status: "completed", title: "思考完成 · 4 秒" },
+      { status: "failed", title: "处理失败 · 4 秒" },
+      { status: "interrupted", title: "思考中断 · 4 秒" },
+      { status: "cancelled", title: "思考已取消 · 4 秒" }
+    ] as const;
+    for (const terminalCase of restoredTerminalCases) {
+      const restoredRenderer = new CodexMessageListRenderer();
+      bindRenderer(restoredRenderer, context);
+      const restoredTerminal = renderMessage(
+        restoredRenderer,
+        {
+          ...structuredFailed,
+          id: `reasoning-restored-${terminalCase.status}`,
+          title: terminalCase.title,
+          status: terminalCase.status,
+          reasoningSummary: {
+            ...structuredFailed.reasoningSummary!,
+            productRunId: `run-restored-${terminalCase.status}`,
+            status: terminalCase.status
+          }
+        },
+        { showAgentFooter: false, showAgentHeader: false }
+      );
+      assert.equal(
+        restoredTerminal.findByClass("codex-smooth-ai-reasoning")?.open,
+        false,
+        `restored ${terminalCase.status} Reasoning starts folded`
+      );
+      assert.equal(
+        restoredTerminal.findByClass("codex-smooth-ai-reasoning-label")?.textContent,
+        terminalCase.title
+      );
+    }
 
-    const separatedProjection = buildAgentTurnProjection([
+    const siblingCanaries = {
+      prompt: "PROMPT_DOM_PRIVATE_CANARY",
+      answer: "ANSWER_DOM_PRIVATE_CANARY",
+      toolArgument: "TOOL_ARGUMENT_DOM_PRIVATE_CANARY",
+      toolResult: "TOOL_RESULT_DOM_PRIVATE_CANARY",
+      sourceData: "SOURCE_DATA_DOM_PRIVATE_CANARY",
+      diffContent: "DIFF_CONTENT_DOM_PRIVATE_CANARY",
+      approvalPayload: "APPROVAL_PAYLOAD_DOM_PRIVATE_CANARY",
+      privateReasoning: "PRIVATE_REASONING_DOM_CANARY"
+    } as const;
+    const reasoningSibling = {
+      ...structuredRunning,
+      id: "reasoning-separated",
+      title: "正在思考",
+      text: "请求模型",
+      details: siblingCanaries.privateReasoning,
+      runId: "run-separated",
+      turnId: "run-separated",
+      reasoningSummary: {
+        ...structuredRunning.reasoningSummary!,
+        productRunId: "run-separated",
+        activities: [{
+          id: "provider",
+          kind: "provider",
+          status: "active",
+          stage: "requesting",
+          startedAt: 2,
+          updatedAt: 2
+        }]
+      }
+    } as ChatMessage;
+    const siblingMessages: ChatMessage[] = [
       {
         id: "reasoning-user-row",
         role: "user",
-        text: "问题",
+        text: `问题 ${siblingCanaries.prompt}`,
         runId: "run-separated",
         turnId: "run-separated",
         createdAt: 1
       },
-      {
-        ...structuredFailed,
-        id: "reasoning-separated",
-        runId: "run-separated",
-        turnId: "run-separated",
-        reasoningSummary: {
-          ...structuredFailed.reasoningSummary!,
-          productRunId: "run-separated"
-        }
-      },
+      reasoningSibling,
       {
         id: "tool-separated",
         role: "tool",
         itemType: "dynamicToolCall",
-        text: "工具结果",
+        title: "工具",
+        text: siblingCanaries.toolResult,
+        processInput: siblingCanaries.toolArgument,
+        processOutput: siblingCanaries.toolResult,
+        processInputAvailability: "provided",
+        processOutputAvailability: "provided",
         status: "completed",
         runId: "run-separated",
         turnId: "run-separated",
         createdAt: 3
       },
       {
+        id: "task-separated",
+        role: "assistant",
+        itemType: "taskPlan",
+        text: "",
+        taskPlan: {
+          schemaVersion: 1,
+          planId: "plan-separated",
+          title: "独立任务",
+          status: "in_progress",
+          version: 1,
+          steps: [{ stepId: "step-separated", text: "继续处理", status: "in_progress" }],
+          currentStepId: "step-separated",
+          source: "agent",
+          productRunId: "run-separated",
+          createdAt: 4,
+          updatedAt: 4
+        },
+        runId: "run-separated",
+        turnId: "run-separated",
+        createdAt: 4
+      },
+      {
+        id: "sources-separated",
+        role: "assistant",
+        text: "基于本地资料",
+        citations: {
+          status: "strong",
+          counts: { wiki: 1, journal: 0, outputs: 0 },
+          citations: [{
+            bucket: "wiki",
+            title: "Alpha",
+            path: "projects/Alpha.md",
+            excerptLines: [siblingCanaries.sourceData],
+            relevance: "strong",
+            reason: "matched",
+            score: 1
+          }]
+        },
+        askSourceAttribution: true,
+        runId: "run-separated",
+        turnId: "run-separated",
+        createdAt: 5
+      },
+      {
+        id: "diff-separated",
+        role: "tool",
+        itemType: "fileChange",
+        title: "文件改动",
+        text: `@@ -1 +1 @@\n-old\n+${siblingCanaries.diffContent}`,
+        status: "completed",
+        diffSummary: {
+          totalFiles: 1,
+          added: 1,
+          removed: 1,
+          files: [{ path: "projects/Alpha.md", kind: "update", added: 1, removed: 1 }]
+        },
+        runId: "run-separated",
+        turnId: "run-separated",
+        createdAt: 6
+      },
+      {
+        id: "approval-separated",
+        role: "tool",
+        itemType: "dynamicToolCall",
+        title: "等待确认",
+        text: "等待审批",
+        status: "waiting_approval",
+        approval: {
+          status: "pending",
+          target: siblingCanaries.approvalPayload,
+          preview: siblingCanaries.approvalPayload,
+          updatedAt: 7
+        },
+        runId: "run-separated",
+        turnId: "run-separated",
+        createdAt: 7
+      },
+      {
+        id: "loader-separated",
+        role: "assistant",
+        text: "",
+        status: "running",
+        runId: "run-separated",
+        turnId: "run-separated",
+        createdAt: 8
+      },
+      {
         id: "answer-separated",
         role: "assistant",
-        text: "最终回答",
+        text: `最终回答 ${siblingCanaries.answer}`,
         status: "completed",
         runId: "run-separated",
         turnId: "run-separated",
-        createdAt: 4,
-        completedAt: 5
+        createdAt: 9,
+        completedAt: 10
       }
-    ]);
+    ];
+    const separatedProjection = buildAgentTurnProjection(siblingMessages);
     assert.equal(
       separatedProjection.some((item) => item.kind === "completedProcess"),
       false,
       "dedicated Reasoning prevents legacy whole-turn nesting"
     );
-    assert.equal(separatedProjection.length, 4,
-      "Tool and final Response remain dedicated siblings");
+    assert.equal(separatedProjection.length, siblingMessages.length,
+      "Tool, Task, Sources, Diff, Approval, Loader, and Response remain dedicated siblings");
 
     const processOutput = [
       "{",
@@ -1374,9 +1612,90 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     assert.equal(planMessage.findAllByClass("codex-smooth-ai-task-list").length, 0);
     assert.equal(planMessage.findAllByTag("button").length, 0,
       "the durable history Task is read-only");
+
+    const siblingSurface = new FakeElement("div");
+    const siblingRoots = siblingMessages.map((message) => renderMessage(
+      renderer,
+      message,
+      {
+        showAgentFooter: false,
+        showAgentHeader: false,
+        processExpanded: true
+      }
+    ));
+    siblingSurface.append(...siblingRoots);
+    const actionTimelineRoot = new FakeElement("div");
+    (renderer as unknown as {
+      renderActionStreamItem(
+        container: unknown,
+        message: ChatMessage,
+        showAgentHeader: boolean
+      ): void;
+    }).renderActionStreamItem(actionTimelineRoot, siblingMessages[2]!, false);
+    siblingSurface.append(actionTimelineRoot);
+    for (const componentClass of [
+      "codex-smooth-ai-tool-call",
+      "codex-ai-elements-task",
+      "codex-ai-elements-sources",
+      "codex-smooth-ai-diff",
+      "codex-smooth-ai-approval-card",
+      "codex-smooth-ai-loader",
+      "codex-smooth-ai-response",
+      "codex-action-stream"
+    ]) {
+      assert.ok(siblingSurface.findByClass(componentClass),
+        `${componentClass} remains a rendered sibling`);
+    }
+    const reasoningSiblingDom = siblingRoots[1]!.findByClass(
+      "codex-smooth-ai-reasoning"
+    )!;
+    for (const nestedClass of [
+      "codex-smooth-ai-tool-call",
+      "codex-ai-elements-task",
+      "codex-ai-elements-sources",
+      "codex-smooth-ai-diff",
+      "codex-smooth-ai-approval-card",
+      "codex-smooth-ai-loader",
+      "codex-smooth-ai-response",
+      "codex-action-stream"
+    ]) {
+      assert.equal(reasoningSiblingDom.findAllByClass(nestedClass).length, 0,
+        `Reasoning never nests ${nestedClass}`);
+    }
+    const visibleSiblingCanaries = [
+      siblingCanaries.prompt,
+      siblingCanaries.answer,
+      siblingCanaries.toolArgument,
+      siblingCanaries.toolResult,
+      siblingCanaries.sourceData,
+      siblingCanaries.diffContent,
+      siblingCanaries.approvalPayload
+    ];
+    for (const canary of visibleSiblingCanaries) {
+      assert.match(renderedText(siblingSurface), new RegExp(canary, "u"),
+        `${canary} reaches only its dedicated sibling fixture`);
+    }
+    for (const canary of [...visibleSiblingCanaries, siblingCanaries.privateReasoning]) {
+      assert.doesNotMatch(
+        JSON.stringify(reasoningSibling.reasoningSummary),
+        new RegExp(canary, "u"),
+        `Reasoning snapshot excludes ${canary}`
+      );
+      assert.doesNotMatch(reasoningSibling.text, new RegExp(canary, "u"),
+        `Reasoning message text excludes ${canary}`);
+      assert.doesNotMatch(renderedText(reasoningSiblingDom), new RegExp(canary, "u"),
+        `rendered Reasoning DOM excludes ${canary}`);
+    }
+    assert.doesNotMatch(
+      renderedText(siblingSurface),
+      new RegExp(siblingCanaries.privateReasoning, "u"),
+      "private reasoning canary is never rendered anywhere"
+    );
   } finally {
     if (previousDocument === undefined) delete (globalThis as unknown as { document?: unknown }).document;
     else Object.defineProperty(globalThis, "document", { configurable: true, value: previousDocument });
+    if (previousHTMLElement === undefined) delete (globalThis as unknown as { HTMLElement?: unknown }).HTMLElement;
+    else Object.defineProperty(globalThis, "HTMLElement", { configurable: true, value: previousHTMLElement });
   }
 
   assert.deepEqual(context.openedPaths, [

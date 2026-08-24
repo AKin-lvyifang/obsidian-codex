@@ -648,7 +648,9 @@ export class CodexMessageListRenderer {
     const rows: MessageRenderRow[] = [];
     const agentHeaderKeys = new Set<string>();
     const footerMessageIds = terminalAnswerFooterMessageIds(messages);
-    for (const item of buildAgentTurnProjection(messages)) {
+    for (const item of buildAgentTurnProjection(
+      messagesWithoutSameRunEmptyAnswerLoader(messages)
+    )) {
       if (item.kind === "completedProcess") {
         const completedTurn = item.turn;
         const headerKey = agentRunHeaderKey(completedTurn.processMessages[0] ?? completedTurn.finalAnswer);
@@ -777,15 +779,17 @@ export class CodexMessageListRenderer {
           ? message.title ?? "正在思考"
           : message.status === "running" ? "正在思考" : "思考过程"
       });
-      reasoning.root.ontoggle = () => {
+      reasoning.root.ontoggle = (event) => {
         if (message.reasoningSummary) {
           const current = this.reasoningDisclosureStates.get(disclosureKey)
             ?? nextReasoningDisclosureState(undefined, message.reasoningSummary.status);
-          this.reasoningDisclosureStates.set(disclosureKey, Object.freeze({
-            ...current,
-            open: reasoning.root.open,
-            manual: true
-          }));
+          if (event.isTrusted) {
+            this.reasoningDisclosureStates.set(disclosureKey, Object.freeze({
+              ...current,
+              open: reasoning.root.open,
+              manual: true
+            }));
+          }
         } else {
           rememberOpenState(this.openProcessItems, message.id, reasoning.root.open);
         }
@@ -2087,6 +2091,26 @@ export function terminalAnswerFooterMessageIds(messages: ChatMessage[]): Set<str
   return new Set(Array.from(finalAnswerByKey.entries())
     .filter(([key, message]) => !activeKeys.has(key) && !ACTIVE_ANSWER_FOOTER_STATUSES.has(message.status ?? ""))
     .map(([, message]) => message.id));
+}
+
+function messagesWithoutSameRunEmptyAnswerLoader(
+  messages: readonly ChatMessage[]
+): ChatMessage[] {
+  const runningReasoningRunIds = new Set(messages.flatMap((message) =>
+    message.itemType === "reasoning"
+    && message.reasoningSummary?.status === "running"
+    && message.runId
+      ? [message.runId]
+      : []
+  ));
+  if (!runningReasoningRunIds.size) return [...messages];
+  return messages.filter((message) => !(
+    message.runId
+    && runningReasoningRunIds.has(message.runId)
+    && isAgentAnswerMessage(message)
+    && message.status === "running"
+    && !displayTextForMessage(message).trim()
+  ));
 }
 
 function agentRunHeaderKey(message: ChatMessage): string {

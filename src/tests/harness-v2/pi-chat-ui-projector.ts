@@ -54,6 +54,11 @@ function assertReasoningSummariesProjectStableAndPrivate(): void {
   const piSessionId = "session-reasoning-summary";
   const conversationId = "conversation-reasoning-summary";
   const productRunId = "run-reasoning-summary";
+  const promptCanary = "PROMPT_PRIVATE_CANARY";
+  const answerCanary = "ANSWER_PRIVATE_CANARY";
+  const toolArgumentCanary = "TOOL_ARGUMENT_PRIVATE_CANARY";
+  const toolResultCanary = "TOOL_RESULT_PRIVATE_CANARY";
+  const privateReasoningCanary = "PRIVATE_REASONING_CANARY";
   const started = createReasoningSummary({
     conversationId,
     piSessionId,
@@ -95,7 +100,7 @@ function assertReasoningSummariesProjectStableAndPrivate(): void {
     },
     messageEntry("reasoning-user", "reasoning-start", 1_200, {
       role: "user",
-      content: "请处理"
+      content: `请处理 ${promptCanary}`
     }),
     messageEntry("reasoning-tool-call", "reasoning-user", 1_800, {
       role: "assistant",
@@ -103,19 +108,19 @@ function assertReasoningSummariesProjectStableAndPrivate(): void {
         type: "toolCall",
         id: "reasoning-tool",
         name: "vault_search",
-        arguments: { query: "公开查询" }
+        arguments: { query: toolArgumentCanary }
       }]
     }),
     messageEntry("reasoning-tool-result", "reasoning-tool-call", 2_000, {
       role: "toolResult",
       toolCallId: "reasoning-tool",
       toolName: "vault_search",
-      content: [{ type: "text", text: "公开结果" }],
+      content: [{ type: "text", text: toolResultCanary }],
       isError: false
     }),
     messageEntry("reasoning-answer", "reasoning-tool-result", 3_000, {
       role: "assistant",
-      content: "公开回答"
+      content: `公开回答 ${answerCanary}`
     }),
     {
       type: "custom",
@@ -129,7 +134,7 @@ function assertReasoningSummariesProjectStableAndPrivate(): void {
           piSessionId,
           summary: terminal
         }),
-        thinking: "PRIVATE_REASONING_CANARY"
+        thinking: privateReasoningCanary
       }
     },
     {
@@ -166,7 +171,18 @@ function assertReasoningSummariesProjectStableAndPrivate(): void {
   assert.equal(durableReasoning.length, 1);
   assert.equal(durableReasoning[0]?.reasoningSummary?.terminalAt, 4_000);
   assert.equal(durableReasoning[0]?.title, "思考完成 · 2 秒");
-  assert.doesNotMatch(JSON.stringify(durable), /PRIVATE_REASONING_CANARY/u);
+  assert.doesNotMatch(JSON.stringify(durable), new RegExp(privateReasoningCanary, "u"));
+  const projectedReasoning = JSON.stringify(durableReasoning[0]);
+  for (const canary of [
+    promptCanary,
+    answerCanary,
+    toolArgumentCanary,
+    toolResultCanary,
+    privateReasoningCanary
+  ]) {
+    assert.doesNotMatch(projectedReasoning, new RegExp(canary, "u"),
+      `Reasoning projection excludes ${canary}`);
+  }
   assert.equal(durable.messages.filter((message) => message.role === "tool").length, 1,
     "dedicated Tool remains a sibling of Reasoning");
   assert.deepEqual(
@@ -196,25 +212,51 @@ function assertReasoningSummariesProjectStableAndPrivate(): void {
   assert.equal(liveId, durableReasoning[0]?.id,
     "live and durable Reasoning share one stable message id");
 
-  const interrupted = projector.projectSessionBranch({
+  const reopenCases = [
+    { runState: "completed", status: "completed", updatedAt: 5_000, title: "思考完成 · 4 秒" },
+    { runState: "failed", status: "failed", updatedAt: 6_000, title: "处理失败 · 5 秒" },
+    { runState: "cancelled", status: "cancelled", updatedAt: 7_000, title: "思考已取消 · 6 秒" },
+    { runState: "interrupted", status: "interrupted", updatedAt: 8_000, title: "思考中断 · 7 秒" },
+    { runState: "idle", status: "interrupted", updatedAt: 9_000, title: "思考中断 · 8 秒" }
+  ] as const;
+  for (const reopenCase of reopenCases) {
+    const reopened = projector.projectSessionBranch({
+      piSessionId,
+      activeLeafId: "reasoning-user",
+      entries: entries.slice(0, 2),
+      runState: reopenCase.runState,
+      productRunId,
+      runIdentities: [{
+        productRunId,
+        userEntryId: "reasoning-user",
+        updatedAt: reopenCase.updatedAt
+      }],
+      now: 99_999
+    });
+    const reopenedReasoning = reopened.messages.find(
+      (message) => message.reasoningSummary
+    );
+    assert.equal(reopenedReasoning?.reasoningSummary?.status, reopenCase.status);
+    assert.equal(reopenedReasoning?.reasoningSummary?.terminalAt, reopenCase.updatedAt,
+      "reopen closeout uses the real ProductRun updatedAt boundary");
+    assert.equal(reopenedReasoning?.title, reopenCase.title);
+  }
+
+  const missingRunBoundary = projector.projectSessionBranch({
     piSessionId,
     activeLeafId: "reasoning-user",
     entries: entries.slice(0, 2),
-    runState: "interrupted",
+    runState: "failed",
     productRunId,
-    runIdentities: [{
-      productRunId,
-      userEntryId: "reasoning-user",
-      updatedAt: 5_500
-    }],
-    now: 9_999
+    runIdentities: [{ productRunId, userEntryId: "reasoning-user" }],
+    now: 99_999
   });
-  const interruptedReasoning = interrupted.messages.find(
-    (message) => message.reasoningSummary
+  assert.equal(
+    missingRunBoundary.messages.find((message) => message.reasoningSummary)
+      ?.reasoningSummary?.terminalAt,
+    undefined,
+    "reopen never invents a terminal time without a real ProductRun updatedAt"
   );
-  assert.equal(interruptedReasoning?.reasoningSummary?.status, "interrupted");
-  assert.equal(interruptedReasoning?.reasoningSummary?.terminalAt, 5_500);
-  assert.equal(interruptedReasoning?.title, "思考中断 · 5 秒");
 }
 
 function assertTaskPlansProjectOneStableDurableMessage(): void {
