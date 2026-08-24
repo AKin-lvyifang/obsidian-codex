@@ -693,6 +693,16 @@ function clonePiChatMessages(messages: readonly ChatMessage[]): ChatMessage[] {
           steps: message.taskPlan.steps.map((step) => ({ ...step }))
         }
       }
+      : {}),
+    ...(message.reasoningSummary
+      ? {
+          reasoningSummary: {
+            ...message.reasoningSummary,
+            activities: message.reasoningSummary.activities.map(
+              (activity) => ({ ...activity })
+            )
+          }
+        }
       : {})
   }));
 }

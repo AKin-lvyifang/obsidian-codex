@@ -32,6 +32,10 @@ import {
   normalizeEchoInkTaskPlanSnapshot,
   type EchoInkTaskPlanSnapshot
 } from "../types/task-plan";
+import {
+  normalizeEchoInkReasoningSummarySnapshot,
+  type EchoInkReasoningSummarySnapshot
+} from "../types/reasoning-summary";
 import type { EchoInkConversationSessionShell } from "./current-conversation";
 
 export interface StoredAttachment {
@@ -151,6 +155,8 @@ export interface ChatMessage {
   runUsage?: HarnessRunUsage;
   /** Thin projection of a structured Pi Session task-plan entry. */
   taskPlan?: Readonly<EchoInkTaskPlanSnapshot>;
+  /** Bounded, privacy-safe projection of one Pi ProductRun lifecycle. */
+  reasoningSummary?: Readonly<EchoInkReasoningSummarySnapshot>;
   createdAt: number;
   completedAt?: number;
 }
@@ -1299,6 +1305,13 @@ function normalizeChatMessages(value: unknown): ChatMessage[] {
         message.taskPlan = normalizeEchoInkTaskPlanSnapshot(item.taskPlan);
       } catch {
         delete message.taskPlan;
+      }
+      try {
+        message.reasoningSummary = normalizeEchoInkReasoningSummarySnapshot(
+          item.reasoningSummary
+        );
+      } catch {
+        delete message.reasoningSummary;
       }
       message.createdAt = normalizeNonNegativeNumber(item.createdAt);
       message.completedAt = normalizeOptionalPositiveNumber(item.completedAt);

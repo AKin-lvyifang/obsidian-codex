@@ -30,6 +30,13 @@ import {
   type EchoInkTaskPlanSnapshot
 } from "../../types/task-plan";
 import { PI_TASK_UPDATE_TOOL_ID } from "./pi-task-plan";
+import {
+  reasoningSummaryFromSessionEntry,
+  reasoningSummaryIsNewer,
+  type EchoInkReasoningActivity,
+  type EchoInkReasoningSummarySnapshot
+} from "../../types/reasoning-summary";
+import { interruptReasoningSummary } from "./pi-reasoning-summary";
 
 export type {
   PiChatUiToolApprovalStatus,
@@ -116,6 +123,7 @@ export interface PiChatUiRunIdentity {
   readonly assistantEntryId?: string;
   readonly toolCallIds?: readonly string[];
   readonly knowledgeWorkflow?: PiKnowledgeObservation["workflow"];
+  readonly updatedAt?: number;
 }
 
 export interface PiChatUiViewModel {
@@ -244,6 +252,28 @@ export class PiChatUiProjector {
     for (const entry of input.entries) {
       this.projectDurableEntry(messages, pendingTools, entry, context);
     }
+    if (runState === "interrupted" && input.productRunId) {
+      const message = messages.find((candidate) =>
+        candidate.reasoningSummary?.productRunId === input.productRunId
+      );
+      const summary = message?.reasoningSummary;
+      if (summary && summary.terminalAt === undefined) {
+        const run = (input.runIdentities ?? []).find(
+          (candidate) => candidate.productRunId === input.productRunId
+        );
+        upsertReasoningSummaryMessage(
+          messages,
+          scope,
+          interruptReasoningSummary({
+            summary,
+            interruptedAt: Math.max(
+              summary.updatedAt,
+              finiteTime(run?.updatedAt, summary.updatedAt)
+            )
+          })
+        );
+      }
+    }
     settleUnfinishedDurableTools(messages, pendingTools, runState);
 
     const diagnostics = dedupeDiagnostics(
@@ -277,7 +307,7 @@ export class PiChatUiProjector {
       activeLeafId: input.activeLeafId,
       productRunId: input.productRunId,
       runState,
-      messages: dedupeMessages(messages),
+      messages: positionReasoningMessages(dedupeMessages(messages)),
       diagnostics,
       queuedSteering: [...(input.queuedSteering ?? [])],
       queuedFollowUp: [...(input.queuedFollowUp ?? [])],
@@ -317,6 +347,13 @@ export class PiChatUiProjector {
     view.updatedAt = Math.max(view.updatedAt, finiteTime(event.occurredAt, view.updatedAt));
 
     switch (event.type) {
+      case "reasoning_summary":
+        upsertReasoningSummaryMessage(
+          view.messages,
+          scope,
+          event.summary
+        );
+        break;
       case "knowledge_progress":
         this.projectKnowledgeProgress(view, scope, event);
         break;
@@ -374,7 +411,7 @@ export class PiChatUiProjector {
         this.projectProductSettlement(view, scope, event.terminalState, event.occurredAt);
         break;
     }
-    view.messages = dedupeMessages(view.messages);
+    view.messages = positionReasoningMessages(dedupeMessages(view.messages));
     view.provisionalMessageIds = uniqueStrings(view.provisionalMessageIds);
     view.pendingToolCallIds = uniqueStrings(view.pendingToolCallIds);
     applyToolProductStates(view, input);
@@ -553,6 +590,18 @@ export class PiChatUiProjector {
       return;
     }
     if (entry.type === "custom") {
+      const reasoningSummary = reasoningSummaryFromSessionEntry(
+        entry,
+        context.piSessionId
+      );
+      if (reasoningSummary) {
+        upsertReasoningSummaryMessage(
+          messages,
+          context.scope,
+          reasoningSummary
+        );
+        return;
+      }
       const taskPlan = taskPlanFromSessionEntry(entry, context.piSessionId);
       if (taskPlan) {
         upsertTaskPlanMessage(messages, context.scope, taskPlan, createdAt);
@@ -1757,6 +1806,10 @@ function taskPlanMessageId(scope: string, planId: string): string {
   return `${scope}:task-plan:${encodeIdentity(planId)}`;
 }
 
+function reasoningSummaryMessageId(scope: string, productRunId: string): string {
+  return `${scope}:reasoning:${encodeIdentity(productRunId)}`;
+}
+
 function runtimeMessageId(scope: string, messageKey: string): string {
   return `${scope}:provisional-message:${encodeIdentity(messageKey)}`;
 }
@@ -1859,6 +1912,144 @@ function upsertMessage(messages: ChatMessage[], message: ChatMessage): void {
   else messages.push(message);
 }
 
+function upsertReasoningSummaryMessage(
+  messages: ChatMessage[],
+  scope: string,
+  summary: Readonly<EchoInkReasoningSummarySnapshot>
+): void {
+  const id = reasoningSummaryMessageId(scope, summary.productRunId);
+  const existing = messages.find(
+    (message) => message.id === id && message.reasoningSummary
+  );
+  if (
+    existing?.reasoningSummary
+    && !reasoningSummaryIsNewer(summary, existing.reasoningSummary)
+  ) return;
+  const terminalAt = summary.terminalAt;
+  upsertMessage(messages, {
+    id,
+    role: "assistant",
+    itemType: "reasoning",
+    processKind: "reasoning",
+    title: reasoningSummaryTitle(summary),
+    text: reasoningSummaryText(summary),
+    processContentAvailability: summary.activities.length ? "provided" : "empty",
+    status: summary.status,
+    reasoningSummary: summary,
+    runId: summary.productRunId,
+    turnId: summary.productRunId,
+    createdAt: summary.startedAt,
+    ...(terminalAt === undefined ? {} : { completedAt: terminalAt })
+  });
+}
+
+function reasoningSummaryTitle(
+  summary: Readonly<EchoInkReasoningSummarySnapshot>
+): string {
+  if (summary.status === "running") return "正在思考";
+  const endpoint = summary.status === "completed"
+    ? summary.firstAssistantTextAt ?? summary.terminalAt ?? summary.updatedAt
+    : summary.terminalAt ?? summary.updatedAt;
+  const seconds = Math.max(1, Math.round(
+    Math.max(0, endpoint - summary.startedAt) / 1_000
+  ));
+  if (summary.status === "completed") return `思考完成 · ${seconds} 秒`;
+  if (summary.status === "interrupted") return `思考中断 · ${seconds} 秒`;
+  if (summary.status === "cancelled") return `思考已取消 · ${seconds} 秒`;
+  return `处理失败 · ${seconds} 秒`;
+}
+
+function reasoningSummaryText(
+  summary: Readonly<EchoInkReasoningSummarySnapshot>
+): string {
+  if (summary.activities.length === 0) return "正在思考";
+  return summary.activities.map(reasoningActivityText).join("\n");
+}
+
+function reasoningActivityText(
+  activity: Readonly<EchoInkReasoningActivity>
+): string {
+  const progress = activity.total === undefined
+    ? ""
+    : ` · ${activity.current ?? activity.completed ?? 0}/${activity.total}`;
+  if (activity.kind === "provider") {
+    return `${reasoningActivityStatusCopy(activity.status, "请求模型")}${progress}`;
+  }
+  if (activity.kind === "knowledge") {
+    return `${reasoningStageCopy(activity.stage, "处理 Knowledge")}${progress}`;
+  }
+  if (activity.kind === "memory") {
+    return `${reasoningStageCopy(activity.stage, "处理 Memory")}${progress}`;
+  }
+  if (activity.kind === "task") {
+    return `${reasoningActivityStatusCopy(activity.status, "更新任务计划")}${progress}`;
+  }
+  return reasoningActivityStatusCopy(
+    activity.status,
+    `执行 ${activity.name ?? "工具"}`
+  );
+}
+
+function reasoningActivityStatusCopy(
+  status: EchoInkReasoningActivity["status"],
+  activeCopy: string
+): string {
+  if (status === "active") return activeCopy;
+  if (status === "completed") return `${activeCopy}完成`;
+  if (status === "failed") return `${activeCopy}失败`;
+  if (status === "cancelled") return `${activeCopy}已取消`;
+  return `${activeCopy}中断`;
+}
+
+function reasoningStageCopy(
+  stage: EchoInkReasoningActivity["stage"],
+  fallback: string
+): string {
+  switch (stage) {
+    case "requesting": return "请求模型";
+    case "searching": return "检索 Knowledge";
+    case "continuing_search": return "继续检索 Knowledge";
+    case "reading_knowledge": return "读取 Knowledge";
+    case "comparing_memory": return "比对 Memory";
+    case "checking_conflicts_freshness": return "检查冲突与时效";
+    case "refining_knowledge": return "提炼 Knowledge";
+    case "writing_and_readback": return "写入并回读 Knowledge";
+    case "loading": return "加载 Memory";
+    case "catalog": return "检查 Memory 目录";
+    case "matching": return "匹配 Memory";
+    case "budgeting": return "分配 Memory 上下文";
+    case "assembling": return "组装 Memory 上下文";
+    case "pending": return "等待任务计划";
+    case "in_progress": return "执行任务计划";
+    case "paused": return "任务计划已中断";
+    case "completed": return "任务计划已完成";
+    case "failed": return "任务计划失败";
+    case "cancelled": return "任务计划已取消";
+    default: return fallback;
+  }
+}
+
+function positionReasoningMessages(messages: ChatMessage[]): ChatMessage[] {
+  for (const reasoning of messages.filter((message) =>
+    message.itemType === "reasoning" && Boolean(message.reasoningSummary)
+  )) {
+    const currentIndex = messages.findIndex((message) => message.id === reasoning.id);
+    if (currentIndex < 0) continue;
+    const userIndex = messages.findIndex((message) =>
+      message.role === "user"
+      && message.runId === reasoning.runId
+    );
+    if (userIndex < 0 || currentIndex === userIndex + 1) continue;
+    messages.splice(currentIndex, 1);
+    const nextUserIndex = messages.findIndex((message) =>
+      message.role === "user"
+      && message.runId === reasoning.runId
+    );
+    messages.splice(nextUserIndex + 1, 0, reasoning);
+  }
+  return messages;
+}
+
 function upsertTaskPlanMessage(
   messages: ChatMessage[],
   scope: string,
@@ -1930,6 +2121,16 @@ function cloneProjectedMessage(message: Readonly<ChatMessage>): ChatMessage {
           steps: message.taskPlan.steps.map((step) => ({ ...step }))
         }
       }
+      : {}),
+    ...(message.reasoningSummary
+      ? {
+          reasoningSummary: {
+            ...message.reasoningSummary,
+            activities: message.reasoningSummary.activities.map(
+              (activity) => ({ ...activity })
+            )
+          }
+        }
       : {})
   };
 }

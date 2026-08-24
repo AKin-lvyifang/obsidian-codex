@@ -20,8 +20,19 @@ import {
   freezeEchoInkTaskPlan,
   taskPlanSessionEntryData
 } from "../../types/task-plan";
+import {
+  ECHOINK_REASONING_SUMMARY_ENTRY_TYPE,
+  reasoningSummaryEntryData
+} from "../../types/reasoning-summary";
+import {
+  closeReasoningSummary,
+  completeReasoningAtFirstText,
+  createReasoningSummary,
+  updateReasoningActivity
+} from "../../harness/pi-native/pi-reasoning-summary";
 
 export async function runPiChatUiProjectorTests(): Promise<void> {
+  assertReasoningSummariesProjectStableAndPrivate();
   assertTaskPlansProjectOneStableDurableMessage();
   assertLiveTaskUpdateResultsProjectOneStableHistoricalTask();
   assertAskSourceAttributionDecorationsAreTruthfulAndIsolated();
@@ -36,6 +47,174 @@ export async function runPiChatUiProjectorTests(): Promise<void> {
   assertPhaseTwoWriteTerminalStatesRemainDistinct();
   assertSessionRunAndBranchScopesDoNotCross();
   assertInterruptedReadbackNeverPretendsTheRunCompleted();
+}
+
+function assertReasoningSummariesProjectStableAndPrivate(): void {
+  const projector = new PiChatUiProjector();
+  const piSessionId = "session-reasoning-summary";
+  const conversationId = "conversation-reasoning-summary";
+  const productRunId = "run-reasoning-summary";
+  const started = createReasoningSummary({
+    conversationId,
+    piSessionId,
+    productRunId,
+    startedAt: 1_000
+  });
+  const withProvider = updateReasoningActivity({
+    summary: started,
+    activity: {
+      id: "provider",
+      kind: "provider",
+      status: "active",
+      stage: "requesting",
+      startedAt: 1_100,
+      updatedAt: 1_100
+    }
+  });
+  const answered = completeReasoningAtFirstText({
+    summary: withProvider,
+    observedAt: 2_500
+  });
+  const terminal = closeReasoningSummary({
+    summary: answered,
+    status: "completed",
+    terminalAt: 4_000
+  });
+  const entries: PiSessionBranchEntryView[] = [
+    {
+      type: "custom",
+      id: "reasoning-start",
+      parentId: null,
+      timestamp: isoTime(1_000),
+      customType: ECHOINK_REASONING_SUMMARY_ENTRY_TYPE,
+      data: reasoningSummaryEntryData({
+        conversationId,
+        piSessionId,
+        summary: withProvider
+      })
+    },
+    messageEntry("reasoning-user", "reasoning-start", 1_200, {
+      role: "user",
+      content: "请处理"
+    }),
+    messageEntry("reasoning-tool-call", "reasoning-user", 1_800, {
+      role: "assistant",
+      content: [{
+        type: "toolCall",
+        id: "reasoning-tool",
+        name: "vault_search",
+        arguments: { query: "公开查询" }
+      }]
+    }),
+    messageEntry("reasoning-tool-result", "reasoning-tool-call", 2_000, {
+      role: "toolResult",
+      toolCallId: "reasoning-tool",
+      toolName: "vault_search",
+      content: [{ type: "text", text: "公开结果" }],
+      isError: false
+    }),
+    messageEntry("reasoning-answer", "reasoning-tool-result", 3_000, {
+      role: "assistant",
+      content: "公开回答"
+    }),
+    {
+      type: "custom",
+      id: "reasoning-invalid-private",
+      parentId: "reasoning-answer",
+      timestamp: isoTime(3_500),
+      customType: ECHOINK_REASONING_SUMMARY_ENTRY_TYPE,
+      data: {
+        ...reasoningSummaryEntryData({
+          conversationId,
+          piSessionId,
+          summary: terminal
+        }),
+        thinking: "PRIVATE_REASONING_CANARY"
+      }
+    },
+    {
+      type: "custom",
+      id: "reasoning-terminal",
+      parentId: "reasoning-invalid-private",
+      timestamp: isoTime(4_000),
+      customType: ECHOINK_REASONING_SUMMARY_ENTRY_TYPE,
+      data: reasoningSummaryEntryData({
+        conversationId,
+        piSessionId,
+        summary: terminal
+      })
+    }
+  ];
+  const durable = projector.projectSessionBranch({
+    piSessionId,
+    activeLeafId: "reasoning-terminal",
+    entries,
+    runState: "completed",
+    productRunId,
+    runIdentities: [{
+      productRunId,
+      userEntryId: "reasoning-user",
+      assistantEntryId: "reasoning-answer",
+      toolCallIds: ["reasoning-tool"],
+      updatedAt: 4_000
+    }],
+    now: 4_100
+  });
+  const durableReasoning = durable.messages.filter(
+    (message) => message.reasoningSummary
+  );
+  assert.equal(durableReasoning.length, 1);
+  assert.equal(durableReasoning[0]?.reasoningSummary?.terminalAt, 4_000);
+  assert.equal(durableReasoning[0]?.title, "思考完成 · 2 秒");
+  assert.doesNotMatch(JSON.stringify(durable), /PRIVATE_REASONING_CANARY/u);
+  assert.equal(durable.messages.filter((message) => message.role === "tool").length, 1,
+    "dedicated Tool remains a sibling of Reasoning");
+  assert.deepEqual(
+    durable.messages.filter((message) =>
+      message.runId === productRunId
+      && (message.role === "user" || message.reasoningSummary)
+    ).map((message) => message.reasoningSummary ? "reasoning" : "user"),
+    ["user", "reasoning"],
+    "pre-prompt durable snapshot is positioned after its real user message"
+  );
+
+  let live = projector.createEmpty({
+    piSessionId,
+    activeLeafId: "reasoning-terminal",
+    now: 900
+  });
+  live = project(projector, live, runtimeEvent("reasoning_summary", 1_000, {
+    summary: withProvider
+  }, piSessionId, productRunId, "reasoning-terminal"));
+  const liveId = live.messages.find((message) => message.reasoningSummary)?.id;
+  assert.equal(live.messages.find((message) => message.reasoningSummary)?.text.includes("请求模型"), true);
+  live = project(projector, live, runtimeEvent("reasoning_summary", 4_000, {
+    summary: terminal
+  }, piSessionId, productRunId, "reasoning-terminal"));
+  assert.equal(live.messages.filter((message) => message.reasoningSummary).length, 1);
+  assert.equal(live.messages.find((message) => message.reasoningSummary)?.id, liveId);
+  assert.equal(liveId, durableReasoning[0]?.id,
+    "live and durable Reasoning share one stable message id");
+
+  const interrupted = projector.projectSessionBranch({
+    piSessionId,
+    activeLeafId: "reasoning-user",
+    entries: entries.slice(0, 2),
+    runState: "interrupted",
+    productRunId,
+    runIdentities: [{
+      productRunId,
+      userEntryId: "reasoning-user",
+      updatedAt: 5_500
+    }],
+    now: 9_999
+  });
+  const interruptedReasoning = interrupted.messages.find(
+    (message) => message.reasoningSummary
+  );
+  assert.equal(interruptedReasoning?.reasoningSummary?.status, "interrupted");
+  assert.equal(interruptedReasoning?.reasoningSummary?.terminalAt, 5_500);
+  assert.equal(interruptedReasoning?.title, "思考中断 · 5 秒");
 }
 
 function assertTaskPlansProjectOneStableDurableMessage(): void {

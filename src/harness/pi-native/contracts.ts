@@ -8,6 +8,9 @@ import type { KnowledgeMaintenanceResultEnvelope } from "../../knowledge-base/kn
 import type {
   EchoInkTaskPlanSnapshot
 } from "../../types/task-plan";
+import type {
+  EchoInkReasoningSummarySnapshot
+} from "../../types/reasoning-summary";
 
 export type PiConversationMemoryMode = "normal" | "no_memory";
 export type PiChatMode = "agent" | "plan";
@@ -360,6 +363,10 @@ interface PiChatRuntimeEventBase {
 }
 
 export type PiChatRuntimeEvent =
+  | (PiChatRuntimeEventBase & {
+      type: "reasoning_summary";
+      summary: Readonly<EchoInkReasoningSummarySnapshot>;
+    })
   | (PiChatRuntimeEventBase & {
       type: "knowledge_progress";
       status: "active" | "completed";

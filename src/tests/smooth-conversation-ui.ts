@@ -3,7 +3,11 @@ import { readFileSync } from "node:fs";
 import { TFile } from "obsidian";
 import type { ChatMessage } from "../settings/settings";
 import { renderRichText } from "../ui/render-message";
-import { CodexMessageListRenderer } from "../ui/codex-view/message-list";
+import {
+  CodexMessageListRenderer,
+  nextReasoningDisclosureState
+} from "../ui/codex-view/message-list";
+import { buildAgentTurnProjection } from "../ui/codex-view/agent-turn-process";
 import {
   createAIElementsDocumentSources,
   createSmoothAIArtifact,
@@ -315,6 +319,34 @@ function taskPlanMessage(
 }
 
 export async function runSmoothConversationUiTests(): Promise<void> {
+  const initialDisclosure = nextReasoningDisclosureState(undefined, "running");
+  assert.deepEqual(initialDisclosure, {
+    open: true,
+    manual: false,
+    autoFoldHandled: false,
+    lastStatus: "running"
+  });
+  const autoFoldedDisclosure = nextReasoningDisclosureState(
+    initialDisclosure,
+    "completed"
+  );
+  assert.deepEqual(autoFoldedDisclosure, {
+    open: false,
+    manual: false,
+    autoFoldHandled: true,
+    lastStatus: "completed"
+  });
+  assert.equal(
+    nextReasoningDisclosureState(autoFoldedDisclosure, "failed").open,
+    false,
+    "later terminal updates cannot replay the first-answer auto-fold"
+  );
+  assert.deepEqual(nextReasoningDisclosureState(undefined, "interrupted"), {
+    open: false,
+    manual: false,
+    autoFoldHandled: true,
+    lastStatus: "interrupted"
+  }, "a restored terminal snapshot starts folded with auto-fold already handled");
   const chineseHost = new FakeElement("div");
   const chinese = renderSmoothBlurOutUp(
     chineseHost as unknown as HTMLElement,
@@ -699,6 +731,228 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     assert.ok(reasoningRoot);
     assert.equal(reasoningRoot!.tag, "details");
     assert.equal(reasoningRoot!.open, true);
+
+    const structuredRunning: ChatMessage = {
+      id: "pi:session:reasoning:run-structured",
+      role: "assistant",
+      itemType: "reasoning",
+      title: "正在思考",
+      text: "正在思考",
+      status: "running",
+      reasoningSummary: {
+        schemaVersion: 1,
+        conversationId: "conversation-structured",
+        piSessionId: "session-structured",
+        productRunId: "run-structured",
+        status: "running",
+        startedAt: 10_000,
+        updatedAt: 10_000,
+        activities: []
+      },
+      runId: "run-structured",
+      turnId: "run-structured",
+      createdAt: 10_000
+    };
+    const runningReasoning = renderMessage(
+      renderer,
+      structuredRunning,
+      { showAgentFooter: false, showAgentHeader: false }
+    );
+    const runningReasoningRoot = runningReasoning.findByClass(
+      "codex-smooth-ai-reasoning"
+    );
+    assert.equal(runningReasoningRoot?.open, true);
+    assert.equal(
+      runningReasoning.findByClass("codex-smooth-ai-reasoning-label")?.textContent,
+      "正在思考"
+    );
+    assert.match(renderedText(runningReasoning), /正在思考/u,
+      "empty structured activity renders only the truthful fallback");
+
+    const structuredAnswered: ChatMessage = {
+      ...structuredRunning,
+      title: "思考完成 · 2 秒",
+      text: "请求模型完成",
+      status: "completed",
+      reasoningSummary: {
+        ...structuredRunning.reasoningSummary!,
+        status: "completed",
+        firstAssistantTextAt: 12_000,
+        updatedAt: 12_000,
+        activities: [{
+          id: "provider",
+          kind: "provider",
+          status: "completed",
+          stage: "requesting",
+          startedAt: 10_100,
+          updatedAt: 12_000
+        }]
+      }
+    };
+    const answeredReasoning = renderMessage(
+      renderer,
+      structuredAnswered,
+      { showAgentFooter: false, showAgentHeader: false }
+    );
+    const answeredReasoningRoot = answeredReasoning.findByClass(
+      "codex-smooth-ai-reasoning"
+    );
+    assert.equal(answeredReasoningRoot?.open, false,
+      "the first real answer transition auto-folds once");
+    assert.equal(
+      answeredReasoning.findByClass("codex-smooth-ai-reasoning-label")?.textContent,
+      "思考完成 · 2 秒"
+    );
+    answeredReasoningRoot!.open = true;
+    answeredReasoningRoot!.ontoggle?.();
+
+    const structuredFailed: ChatMessage = {
+      ...structuredAnswered,
+      title: "处理失败 · 4 秒",
+      status: "failed",
+      completedAt: 14_000,
+      reasoningSummary: {
+        ...structuredAnswered.reasoningSummary!,
+        status: "failed",
+        terminalAt: 14_000,
+        updatedAt: 14_000
+      }
+    };
+    const failedAfterManualOpen = renderMessage(
+      renderer,
+      structuredFailed,
+      { showAgentFooter: false, showAgentHeader: false }
+    );
+    assert.equal(
+      failedAfterManualOpen.findByClass("codex-smooth-ai-reasoning")?.open,
+      true,
+      "manual disclosure permanently wins over later live and terminal updates"
+    );
+
+    const collapsedRun: ChatMessage = {
+      ...structuredRunning,
+      id: "pi:session:reasoning:run-collapsed",
+      runId: "run-collapsed",
+      turnId: "run-collapsed",
+      reasoningSummary: {
+        ...structuredRunning.reasoningSummary!,
+        productRunId: "run-collapsed"
+      }
+    };
+    const collapsedRunning = renderMessage(
+      renderer,
+      collapsedRun,
+      { showAgentFooter: false, showAgentHeader: false }
+    );
+    const collapsedRoot = collapsedRunning.findByClass("codex-smooth-ai-reasoning")!;
+    collapsedRoot.open = false;
+    collapsedRoot.ontoggle?.();
+    const collapsedAnswered = renderMessage(
+      renderer,
+      {
+        ...structuredAnswered,
+        id: collapsedRun.id,
+        runId: "run-collapsed",
+        turnId: "run-collapsed",
+        reasoningSummary: {
+          ...structuredAnswered.reasoningSummary!,
+          productRunId: "run-collapsed"
+        }
+      },
+      { showAgentFooter: false, showAgentHeader: false }
+    );
+    assert.equal(
+      collapsedAnswered.findByClass("codex-smooth-ai-reasoning")?.open,
+      false,
+      "manual collapse before first text is never stolen"
+    );
+
+    (renderer as unknown as { env: { sessionId: string } }).env.sessionId =
+      "smooth-ui-other-session";
+    const otherSessionRunning = renderMessage(
+      renderer,
+      collapsedRun,
+      { showAgentFooter: false, showAgentHeader: false }
+    );
+    assert.equal(
+      otherSessionRunning.findByClass("codex-smooth-ai-reasoning")?.open,
+      true,
+      "another session cannot inherit disclosure state for the same productRunId"
+    );
+    (renderer as unknown as { env: { sessionId: string } }).env.sessionId =
+      "smooth-ui-test";
+
+    const restoredRenderer = new CodexMessageListRenderer();
+    bindRenderer(restoredRenderer, context);
+    const restoredTerminal = renderMessage(
+      restoredRenderer,
+      {
+        ...structuredFailed,
+        title: "思考已取消 · 4 秒",
+        status: "cancelled",
+        reasoningSummary: {
+          ...structuredFailed.reasoningSummary!,
+          status: "cancelled"
+        }
+      },
+      { showAgentFooter: false, showAgentHeader: false }
+    );
+    assert.equal(
+      restoredTerminal.findByClass("codex-smooth-ai-reasoning")?.open,
+      false
+    );
+    assert.equal(
+      restoredTerminal.findByClass("codex-smooth-ai-reasoning-label")?.textContent,
+      "思考已取消 · 4 秒"
+    );
+
+    const separatedProjection = buildAgentTurnProjection([
+      {
+        id: "reasoning-user-row",
+        role: "user",
+        text: "问题",
+        runId: "run-separated",
+        turnId: "run-separated",
+        createdAt: 1
+      },
+      {
+        ...structuredFailed,
+        id: "reasoning-separated",
+        runId: "run-separated",
+        turnId: "run-separated",
+        reasoningSummary: {
+          ...structuredFailed.reasoningSummary!,
+          productRunId: "run-separated"
+        }
+      },
+      {
+        id: "tool-separated",
+        role: "tool",
+        itemType: "dynamicToolCall",
+        text: "工具结果",
+        status: "completed",
+        runId: "run-separated",
+        turnId: "run-separated",
+        createdAt: 3
+      },
+      {
+        id: "answer-separated",
+        role: "assistant",
+        text: "最终回答",
+        status: "completed",
+        runId: "run-separated",
+        turnId: "run-separated",
+        createdAt: 4,
+        completedAt: 5
+      }
+    ]);
+    assert.equal(
+      separatedProjection.some((item) => item.kind === "completedProcess"),
+      false,
+      "dedicated Reasoning prevents legacy whole-turn nesting"
+    );
+    assert.equal(separatedProjection.length, 4,
+      "Tool and final Response remain dedicated siblings");
 
     const processOutput = [
       "{",

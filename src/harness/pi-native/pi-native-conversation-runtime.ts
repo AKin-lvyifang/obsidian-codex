@@ -90,9 +90,25 @@ import {
   activeTaskPlanFromBranch,
   latestTaskPlanFromBranch,
   taskPlanFromSessionEntry,
+  taskPlanFromToolResult,
+  taskPlanProgress,
   type EchoInkTaskPlanSnapshot
 } from "../../types/task-plan";
 import { resolveExplicitMemoryProjectId } from "../memory/project-identity";
+import {
+  appendReasoningSummaryEntry,
+  cloneReasoningSummary,
+  closeReasoningSummary,
+  completeReasoningAtFirstText,
+  createReasoningSummary,
+  updateReasoningActivity
+} from "./pi-reasoning-summary";
+import type {
+  EchoInkReasoningActivity,
+  EchoInkReasoningActivityStatus,
+  EchoInkReasoningSummarySnapshot,
+  EchoInkReasoningSummaryStatus
+} from "../../types/reasoning-summary";
 
 const BUILTIN_TOOL_NAMES = new Set([
   "bash",
@@ -374,6 +390,9 @@ interface ActiveProductRun {
   memoryRecall?: PiMemoryRecallObservation;
   providerStartedAt?: number;
   firstAssistantTextSeen: boolean;
+  reasoningSummary: Readonly<EchoInkReasoningSummarySnapshot>;
+  reasoningStartEntryId?: string;
+  reasoningTerminalEntryId?: string;
   knowledgeProgressDepth: Map<Extract<
     PiChatRuntimeEvent,
     { type: "knowledge_progress" }
@@ -1052,6 +1071,12 @@ export class PiNativeConversationRuntime {
       mode,
       memoryMode,
       firstAssistantTextSeen: false,
+      reasoningSummary: createReasoningSummary({
+        conversationId: catalog.conversationId,
+        piSessionId: catalog.piSessionId,
+        productRunId,
+        startedAt: request.submittedAt
+      }),
       knowledgeProgressDepth: new Map(),
       knowledgeToolStages: new Map(),
       knowledgeObservation: null,
@@ -1065,6 +1090,10 @@ export class PiNativeConversationRuntime {
     );
 
     try {
+      await this.emitRuntimeEvent(active, execution, {
+        type: "reasoning_summary",
+        summary: cloneReasoningSummary(execution.reasoningSummary)
+      });
       this.configureToolsForTurn(active, knowledgeCommand, mode, memoryMode);
       if (knowledgeCommand.kind === "ask") {
         await this.emitRuntimeEvent(active, execution, {
@@ -1140,6 +1169,42 @@ export class PiNativeConversationRuntime {
     const promptText = knowledgeCommand.kind === "chat" && active.skillCommandName
       ? `/skill:${active.skillCommandName} ${request.text}`
       : request.text;
+    try {
+      execution.reasoningStartEntryId = appendReasoningSummaryEntry(
+        active.sessionManager,
+        execution.reasoningSummary
+      );
+      const reasoningStartReadback = assertPiSessionPreAssistantDurable({
+        sessionRoot: this.catalog.sessionRootPath,
+        sessionManager: active.sessionManager,
+        expectedEntryIds: [execution.reasoningStartEntryId]
+      });
+      persistPiActiveLeaf({
+        sessionRoot: this.catalog.sessionRootPath,
+        sessionManager: active.sessionManager,
+        verifiedReadback: reasoningStartReadback
+      });
+    } catch (reasoningStartError) {
+      const closeErrors: unknown[] = [];
+      if (execution.reasoningStartEntryId) {
+        try {
+          await this.closeAndPersistReasoningSummary(
+            active,
+            execution,
+            "failed",
+            this.now()
+          );
+        } catch (error) {
+          closeErrors.push(error);
+        }
+      }
+      this.abandonUnstartedProductRun(active, execution);
+      throw productRunStartFailure(
+        reasoningStartError,
+        closeErrors,
+        "Reasoning start snapshot durability failed"
+      );
+    }
     let promptPromise: Promise<void>;
     try {
       promptPromise = active.session.prompt(promptText, {
@@ -1371,8 +1436,23 @@ export class PiNativeConversationRuntime {
     } catch (error) {
       cleanupErrors.push(error);
     }
-    this.runChannels.delete(execution.productRunId);
     await promptPromise.catch(() => undefined);
+    try {
+      await active.eventLane;
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    try {
+      await this.closeAndPersistReasoningSummary(
+        active,
+        execution,
+        execution.abortRequested ? "cancelled" : "failed",
+        this.now()
+      );
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    this.runChannels.delete(execution.productRunId);
     this.finishProductRunRuntimeState(active, execution);
     return cleanupErrors;
   }
@@ -1419,6 +1499,14 @@ export class PiNativeConversationRuntime {
       active,
       active.projection.runState
     );
+    if (active.currentRun) {
+      const occurredAt = this.now();
+      this.updateReasoningTaskPlan(active.currentRun, updated, occurredAt);
+      await this.emitRuntimeEvent(active, active.currentRun, {
+        type: "reasoning_summary",
+        summary: cloneReasoningSummary(active.currentRun.reasoningSummary)
+      });
+    }
     if (request.action === "pause" && active.currentRun) {
       await this.abort(request.conversationId);
     }
@@ -1449,6 +1537,12 @@ export class PiNativeConversationRuntime {
         active,
         active.projection.runState
       );
+      const occurredAt = this.now();
+      this.updateReasoningTaskPlan(active.currentRun, steered, occurredAt);
+      await this.emitRuntimeEvent(active, active.currentRun, {
+        type: "reasoning_summary",
+        summary: cloneReasoningSummary(active.currentRun.reasoningSummary)
+      });
     }
     await active.session.steer(text);
   }
@@ -1817,14 +1911,23 @@ export class PiNativeConversationRuntime {
         const active = holder.active;
         const run = active?.currentRun;
         const execution = active?.currentExecution;
-        if (!execution) {
+        if (!active || !execution) {
           throw new PiNativeConversationRuntimeError(
             "provider_execution_unbound",
             "Provider request has no bound Pi-native execution"
           );
         }
         if (run && run.providerStartedAt === undefined) {
-          run.providerStartedAt = this.now();
+          const providerStartedAt = this.now();
+          run.providerStartedAt = providerStartedAt;
+          this.queueReasoningActivity(active, run, {
+            id: "provider",
+            kind: "provider",
+            status: "active",
+            stage: "requesting",
+            startedAt: providerStartedAt,
+            updatedAt: providerStartedAt
+          });
         }
         return execution;
       },
@@ -1926,6 +2029,23 @@ export class PiNativeConversationRuntime {
         }
         if (run.knowledgeObservation?.workflow === "ask") {
           if (run.memoryMode === "no_memory") return;
+          const occurredAt = this.now();
+          const previousReasoning = run.reasoningSummary;
+          this.updateReasoningFromRuntimeEvent(
+            active,
+            run,
+            {
+              type: "memory_recall_progress",
+              ...progress
+            },
+            occurredAt
+          );
+          if (run.reasoningSummary !== previousReasoning) {
+            await this.emitRuntimeEvent(active, run, {
+              type: "reasoning_summary",
+              summary: cloneReasoningSummary(run.reasoningSummary)
+            });
+          }
           await this.setKnowledgeProgressState(
             active,
             run,
@@ -2308,6 +2428,15 @@ export class PiNativeConversationRuntime {
         );
       }
 
+      await this.closeAndPersistReasoningSummary(
+        active,
+        execution,
+        reasoningSummaryTerminalStatus(
+          terminalState,
+          execution.abortRequested
+        ),
+        this.now()
+      );
       const settledAt = Math.max(agentSettledAt, this.now());
       const settled = await this.productRuns.update(
         execution.productRunId,
@@ -2331,6 +2460,19 @@ export class PiNativeConversationRuntime {
       });
       return settled;
     } catch (settlementError) {
+      let reasoningCloseError: unknown = null;
+      if (!execution.reasoningTerminalEntryId) {
+        try {
+          await this.closeAndPersistReasoningSummary(
+            active,
+            execution,
+            execution.abortRequested ? "cancelled" : "failed",
+            this.now()
+          );
+        } catch (error) {
+          reasoningCloseError = error;
+        }
+      }
       const diagnostic: PiConversationDiagnostic = {
         diagnosticId: runtimeInterruptedDiagnosticId(
           active.catalog.conversationId,
@@ -2347,8 +2489,18 @@ export class PiNativeConversationRuntime {
         await this.catalog.appendDiagnostic(diagnostic);
       } catch (diagnosticError) {
         throw new AggregateError(
-          [settlementError, diagnosticError],
+          [
+            settlementError,
+            ...(reasoningCloseError === null ? [] : [reasoningCloseError]),
+            diagnosticError
+          ],
           "ProductRun settlement failed and its diagnostic could not be persisted"
+        );
+      }
+      if (reasoningCloseError !== null) {
+        throw new AggregateError(
+          [settlementError, reasoningCloseError],
+          "ProductRun settlement and Reasoning closeout both failed"
         );
       }
       throw settlementError;
@@ -2532,13 +2684,22 @@ export class PiNativeConversationRuntime {
   ): Promise<void> {
     if (execution.firstAssistantTextSeen) return;
     execution.firstAssistantTextSeen = true;
+    const observedAt = this.now();
+    execution.reasoningSummary = completeReasoningAtFirstText({
+      summary: execution.reasoningSummary,
+      observedAt
+    });
+    await this.emitRuntimeEvent(active, execution, {
+      type: "reasoning_summary",
+      summary: cloneReasoningSummary(execution.reasoningSummary)
+    });
     if (
       execution.knowledgeObservation
       && execution.providerStartedAt !== undefined
     ) {
       execution.knowledgeObservation.modelFirstTextLatencyMs = Math.max(
         0,
-        this.now() - execution.providerStartedAt
+        observedAt - execution.providerStartedAt
       );
       await this.persistKnowledgeObservation(active, execution);
     }
@@ -2749,33 +2910,242 @@ export class PiNativeConversationRuntime {
     await this.emitRuntimeEvent(active, execution, event);
   }
 
+  private async closeAndPersistReasoningSummary(
+    active: ActiveConversation,
+    execution: ActiveProductRun,
+    status: Exclude<EchoInkReasoningSummaryStatus, "running">,
+    terminalAt: number
+  ): Promise<void> {
+    if (execution.reasoningTerminalEntryId) return;
+    const plan = activeTaskPlanFromBranch(active.sessionManager.getBranch());
+    if (plan) this.updateReasoningTaskPlan(execution, plan, terminalAt);
+    execution.reasoningSummary = closeReasoningSummary({
+      summary: execution.reasoningSummary,
+      status,
+      terminalAt
+    });
+    execution.reasoningTerminalEntryId = appendReasoningSummaryEntry(
+      active.sessionManager,
+      execution.reasoningSummary
+    );
+    const verifiedReadback = assertPiSessionPreAssistantDurable({
+      sessionRoot: this.catalog.sessionRootPath,
+      sessionManager: active.sessionManager,
+      expectedEntryIds: [execution.reasoningTerminalEntryId]
+    });
+    persistPiActiveLeaf({
+      sessionRoot: this.catalog.sessionRootPath,
+      sessionManager: active.sessionManager,
+      verifiedReadback
+    });
+    await this.emitRuntimeEvent(active, execution, {
+      type: "reasoning_summary",
+      summary: cloneReasoningSummary(execution.reasoningSummary)
+    });
+    active.projection = await this.rebuildProjection(
+      active,
+      active.projection.runState
+    );
+    const maintenanceResult = execution.knowledgeWorkflow?.kind === "maintain"
+      ? classifyKnowledgeMaintenanceResult(
+          active.sessionManager.getEntries().filter(
+            (entry) => !execution.baselineEntryIds.has(entry.id)
+          )
+        )
+      : null;
+    if (maintenanceResult?.kind === "invalid") {
+      settleInvalidKnowledgeMaintenanceProjection(
+        active.projection,
+        execution.productRunId,
+        maintenanceResult.toolCallIds
+      );
+    }
+  }
+
+  private queueReasoningActivity(
+    active: ActiveConversation,
+    execution: ActiveProductRun,
+    activity: Readonly<EchoInkReasoningActivity>
+  ): void {
+    const previous = execution.reasoningSummary;
+    this.updateReasoningActivitySafely(execution, activity);
+    if (execution.reasoningSummary === previous) return;
+    const summary = cloneReasoningSummary(execution.reasoningSummary);
+    active.eventLane = active.eventLane.then(async () => {
+      await this.emitRuntimeEvent(active, execution, {
+        type: "reasoning_summary",
+        summary
+      });
+    }).catch((error) => {
+      execution.eventError ??= error;
+    });
+  }
+
+  private updateReasoningActivitySafely(
+    execution: ActiveProductRun,
+    activity: Readonly<EchoInkReasoningActivity>
+  ): void {
+    try {
+      execution.reasoningSummary = updateReasoningActivity({
+        summary: execution.reasoningSummary,
+        activity
+      });
+    } catch {
+      // Reasoning is display-only. An invalid bounded observation is omitted
+      // instead of breaking the underlying Agent/Tool execution.
+    }
+  }
+
+  private updateReasoningFromRuntimeEvent(
+    active: ActiveConversation,
+    execution: ActiveProductRun,
+    event: PiChatRuntimeEventPayload,
+    occurredAt: number
+  ): void {
+    if (event.type === "knowledge_progress") {
+      const observation = execution.knowledgeObservation;
+      const counts = observation && observation.candidates > 0
+        ? {
+            current: Math.min(observation.returned, observation.candidates),
+            total: observation.candidates,
+            completed: Math.min(observation.returned, observation.candidates)
+          }
+        : {};
+      this.updateReasoningActivitySafely(execution, {
+        id: `knowledge:${event.stage}`,
+        kind: "knowledge",
+        status: event.status === "active" ? "active" : "completed",
+        stage: event.stage,
+        startedAt: occurredAt,
+        updatedAt: occurredAt,
+        ...counts
+      });
+      return;
+    }
+    if (event.type === "memory_recall_progress") {
+      const recall = event.recall;
+      const counts = recall && recall.candidates > 0
+        ? {
+            current: Math.min(recall.injected, recall.candidates),
+            total: recall.candidates,
+            completed: Math.min(recall.injected, recall.candidates)
+          }
+        : {};
+      this.updateReasoningActivitySafely(execution, {
+        id: `memory:${event.stage}`,
+        kind: "memory",
+        status: event.status === "active" ? "active" : "completed",
+        stage: event.stage,
+        startedAt: occurredAt,
+        updatedAt: occurredAt,
+        ...counts
+      });
+      return;
+    }
+    if (event.type === "tool_execution_start") {
+      if (!active.registeredToolNames.has(event.toolName)) return;
+      this.updateReasoningActivitySafely(execution, {
+        id: stableId("reasoning-tool", event.toolCallId),
+        kind: "tool",
+        status: "active",
+        name: event.toolName,
+        startedAt: occurredAt,
+        updatedAt: occurredAt
+      });
+      return;
+    }
+    if (event.type !== "tool_execution_end") return;
+    if (active.registeredToolNames.has(event.toolName)) {
+      this.updateReasoningActivitySafely(execution, {
+        id: stableId("reasoning-tool", event.toolCallId),
+        kind: "tool",
+        status: reasoningToolWasCancelled(event.result)
+          ? "cancelled"
+          : event.isError
+            ? "failed"
+            : "completed",
+        name: event.toolName,
+        startedAt: occurredAt,
+        updatedAt: occurredAt
+      });
+    }
+    const plan = taskPlanFromToolResult(event.result);
+    if (plan) this.updateReasoningTaskPlan(execution, plan, occurredAt);
+  }
+
+  private updateReasoningTaskPlan(
+    execution: ActiveProductRun,
+    plan: Readonly<EchoInkTaskPlanSnapshot>,
+    occurredAt: number
+  ): void {
+    const progress = taskPlanProgress(plan);
+    this.updateReasoningActivitySafely(execution, {
+      id: stableId("reasoning-task", plan.planId),
+      kind: "task",
+      status: reasoningTaskActivityStatus(plan.status),
+      stage: plan.status,
+      startedAt: occurredAt,
+      updatedAt: occurredAt,
+      current: progress.current,
+      total: progress.total,
+      completed: progress.completed
+    });
+  }
+
   private async emitRuntimeEvent(
     active: ActiveConversation,
     execution: ActiveProductRun,
     event: PiChatRuntimeEventPayload
   ): Promise<void> {
+    const occurredAt = this.now();
+    const previousReasoning = execution.reasoningSummary;
+    if (event.type !== "reasoning_summary") {
+      this.updateReasoningFromRuntimeEvent(
+        active,
+        execution,
+        event,
+        occurredAt
+      );
+    }
     const runtimeEvent = {
       ...event,
       productRunId: execution.productRunId,
       conversationId: active.catalog.conversationId,
       piSessionId: active.catalog.piSessionId,
       activeLeafId: active.sessionManager.getLeafId(),
-      occurredAt: this.now()
+      occurredAt
+    } as PiChatRuntimeEvent;
+    const publish = async (published: Readonly<PiChatRuntimeEvent>) => {
+      active.projection = this.projector.projectRuntimeEvent({
+        current: active.projection,
+        event: published
+      });
+      if (published.type.startsWith("tool_execution_")) {
+        active.projection = this.projector.decorateToolProductState(
+          active.projection,
+          await this.loadToolProductState(
+            active.catalog,
+            execution.productRunId
+          )
+        );
+      }
+      await execution.channel.emit(published);
     };
-    active.projection = this.projector.projectRuntimeEvent({
-      current: active.projection,
-      event: runtimeEvent
-    });
-    if (event.type.startsWith("tool_execution_")) {
-      active.projection = this.projector.decorateToolProductState(
-        active.projection,
-        await this.loadToolProductState(
-          active.catalog,
-          execution.productRunId
-        )
-      );
+    await publish(runtimeEvent);
+    if (
+      event.type !== "reasoning_summary"
+      && execution.reasoningSummary !== previousReasoning
+    ) {
+      await publish({
+        type: "reasoning_summary",
+        productRunId: execution.productRunId,
+        conversationId: active.catalog.conversationId,
+        piSessionId: active.catalog.piSessionId,
+        activeLeafId: active.sessionManager.getLeafId(),
+        occurredAt,
+        summary: cloneReasoningSummary(execution.reasoningSummary)
+      });
     }
-    await execution.channel.emit(runtimeEvent);
   }
 
   private async resolveRuntimeEntryIds(
@@ -4050,6 +4420,7 @@ function runIdentity(run: Readonly<PiProductRunRecord>): PiChatUiRunIdentity {
     userEntryId: run.userEntryId,
     assistantEntryId: run.assistantEntryId,
     toolCallIds: run.toolCallIds,
+    updatedAt: run.updatedAt,
     ...(run.knowledge
       ? { knowledgeWorkflow: run.knowledge.workflow }
       : {})
@@ -4362,6 +4733,18 @@ function safeAgentToolResultDetails(
   return safeRecord(outer?.details) ?? outer;
 }
 
+function reasoningToolWasCancelled(result: unknown): boolean {
+  const record = safeRecord(result);
+  if (!record) return false;
+  const status = typeof record.status === "string"
+    ? record.status.trim().toLowerCase()
+    : "";
+  return record.cancelled === true
+    || record.canceled === true
+    || status === "cancelled"
+    || status === "canceled";
+}
+
 function safeRecord(value: unknown): Readonly<Record<string, unknown>> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Readonly<Record<string, unknown>>
@@ -4413,6 +4796,25 @@ function requireSkillCommandName(value: string): string {
     );
   }
   return normalized;
+}
+
+function reasoningTaskActivityStatus(
+  status: EchoInkTaskPlanSnapshot["status"]
+): EchoInkReasoningActivityStatus {
+  if (status === "completed") return "completed";
+  if (status === "failed") return "failed";
+  if (status === "paused") return "interrupted";
+  if (status === "cancelled") return "cancelled";
+  return "active";
+}
+
+function reasoningSummaryTerminalStatus(
+  terminalState: PiProductRunTerminalState,
+  abortRequested: boolean
+): Exclude<EchoInkReasoningSummaryStatus, "running"> {
+  if (terminalState === "completed") return "completed";
+  if (terminalState === "failed") return "failed";
+  return abortRequested ? "cancelled" : "interrupted";
 }
 
 function stableId(namespace: string, ...parts: string[]): string {

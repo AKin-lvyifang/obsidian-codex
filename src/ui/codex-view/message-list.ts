@@ -273,6 +273,42 @@ export function personalMemorySourceEmptyStateLabel(): string {
   return "未记录可展示的 Personal Memory 来源。";
 }
 
+export interface ReasoningDisclosureState {
+  readonly open: boolean;
+  readonly manual: boolean;
+  readonly autoFoldHandled: boolean;
+  readonly lastStatus: string;
+}
+
+export function nextReasoningDisclosureState(
+  previous: Readonly<ReasoningDisclosureState> | undefined,
+  status: string
+): Readonly<ReasoningDisclosureState> {
+  if (!previous) {
+    const running = status === "running";
+    return Object.freeze({
+      open: running,
+      manual: false,
+      autoFoldHandled: !running,
+      lastStatus: status
+    });
+  }
+  if (
+    !previous.manual
+    && !previous.autoFoldHandled
+    && previous.lastStatus === "running"
+    && status !== "running"
+  ) {
+    return Object.freeze({
+      open: false,
+      manual: false,
+      autoFoldHandled: true,
+      lastStatus: status
+    });
+  }
+  return Object.freeze({ ...previous, lastStatus: status });
+}
+
 export class CodexMessageListRenderer {
   private virtualSessionId = "";
   private virtualRowHeights = new Map<string, number>();
@@ -287,6 +323,7 @@ export class CodexMessageListRenderer {
   private openKnowledgeBaseCitations = new Map<string, boolean>();
   private openKnowledgeBaseReportSections = new Map<string, boolean>();
   private openTaskPlans = new Map<string, boolean>();
+  private reasoningDisclosureStates = new Map<string, ReasoningDisclosureState>();
   private env: MessageListEnvironment | null = null;
   private virtualRerenderScheduled = false;
   private virtualRerenderBurst = 0;
@@ -714,15 +751,44 @@ export class CodexMessageListRenderer {
     if (message.itemType === "reasoning") {
       content.addClass("codex-inline-reasoning");
       const bodyId = `codex-smooth-reasoning-${safeDomIdentity(message.id)}`;
-      const open = this.openProcessItems.get(message.id) ?? message.status === "running";
+      const disclosureKey = message.reasoningSummary
+        ? `${env.sessionId}\0${message.reasoningSummary.productRunId}`
+        : "";
+      const disclosure = message.reasoningSummary
+        ? nextReasoningDisclosureState(
+            this.reasoningDisclosureStates.get(disclosureKey),
+            message.reasoningSummary.status
+          )
+        : undefined;
+      if (disclosure) {
+        this.reasoningDisclosureStates.set(disclosureKey, disclosure);
+      }
+      const open = disclosure?.open
+        ?? this.openProcessItems.get(message.id)
+        ?? message.status === "running";
+      const status = message.reasoningSummary?.status ?? message.status;
       const reasoning = createSmoothAIReasoning(content, {
         bodyId,
         open,
-        status: smoothAIStatus(message.status),
-        summary: message.status === "running" ? "正在思考" : "思考过程"
+        status: status === "interrupted" || status === "cancelled"
+          ? "error"
+          : smoothAIStatus(status),
+        summary: message.reasoningSummary
+          ? message.title ?? "正在思考"
+          : message.status === "running" ? "正在思考" : "思考过程"
       });
       reasoning.root.ontoggle = () => {
-        rememberOpenState(this.openProcessItems, message.id, reasoning.root.open);
+        if (message.reasoningSummary) {
+          const current = this.reasoningDisclosureStates.get(disclosureKey)
+            ?? nextReasoningDisclosureState(undefined, message.reasoningSummary.status);
+          this.reasoningDisclosureStates.set(disclosureKey, Object.freeze({
+            ...current,
+            open: reasoning.root.open,
+            manual: true
+          }));
+        } else {
+          rememberOpenState(this.openProcessItems, message.id, reasoning.root.open);
+        }
         reasoning.summary.setAttribute("aria-expanded", String(reasoning.root.open));
         env.onScheduleMeasure();
       };

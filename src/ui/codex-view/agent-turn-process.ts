@@ -77,6 +77,10 @@ export function buildCompletedAgentTurns(messages: ChatMessage[]): CompletedAgen
 
   const turns: CompletedAgentTurn[] = [];
   for (const [key, indices] of indicesByKey) {
+    if (indices.some((index) =>
+      messages[index].itemType === "reasoning"
+      && Boolean(messages[index].reasoningSummary)
+    )) continue;
     const finalAnswerIndex = indices.slice().reverse().find((index) => isAgentTurnTerminalMessage(messages[index]));
     if (finalAnswerIndex === undefined) continue;
     const relevantIndices = indices.filter((index) => index <= finalAnswerIndex);
