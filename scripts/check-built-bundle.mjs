@@ -1,7 +1,7 @@
 /**
  * Post-build gate for the EchoInk Obsidian bundle.
  *
- * Guards three Obsidian community-review requirements that a plain `npm run
+ * Guards four Obsidian community-review requirements that a plain `npm run
  * build` cannot express:
  *
  *   1. `dist/main.js` size versus the 5 MiB Obsidian Sync Standard cap
@@ -16,6 +16,9 @@
  *      browser-side externals stubbed — a top-level `ReferenceError` or similar
  *      from a shim would otherwise pass typecheck/build yet crash the plugin on
  *      startup.
+ *   4. Pi's public image helpers must retain the version-anchored Photon WASM
+ *      bridge inside the single bundle rather than falling back to the old
+ *      always-null image-processing shim.
  *
  * It intentionally does NOT flag the generic strings `main.js`, `manifest.json`,
  * `fs`, or `child_process` — the plugin entry is legitimately named `main.js`,
@@ -57,6 +60,14 @@ const CODEX_REQUIRED_MARKERS = [
 const CODEX_UNRESOLVED_IMPORT_MARKERS = [
   'importOAuthModule("./openai-codex.ts")',
   'import("./openai-codex.js")'
+];
+
+const PI_IMAGE_RUNTIME_MARKER =
+  "EchoInk embedded Photon runtime mismatch: photon-node@0.3.4 "
+    + "wasm sha256:10468181565c56004c867f3a4af96f89a0ef5a63a72f2b5fb12c1f1992a3615c";
+const PI_IMAGE_FORBIDDEN_MARKERS = [
+  "EchoInk never processes images through Pi's default read tool",
+  "export async function loadPhoton() { return null; }"
 ];
 
 /** Browser-side modules the production bundle keeps external. */
@@ -119,6 +130,14 @@ function checkMarkers() {
   for (const marker of CODEX_UNRESOLVED_IMPORT_MARKERS) {
     if (contents.includes(marker)) {
       failures.push(`unresolved Codex OAuth import present in bundle: ${marker}`);
+    }
+  }
+  if (!contents.includes(PI_IMAGE_RUNTIME_MARKER)) {
+    failures.push("embedded Pi Photon runtime marker missing from bundle");
+  }
+  for (const marker of PI_IMAGE_FORBIDDEN_MARKERS) {
+    if (contents.includes(marker)) {
+      failures.push(`disabled Pi image-runtime shim present in bundle: ${marker}`);
     }
   }
 }

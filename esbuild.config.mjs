@@ -1,10 +1,13 @@
 import esbuild from "esbuild";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import process from "process";
 
-const isProd = process.argv[2] === "production";
-const isWatch = process.argv[2] === "watch";
+const buildMode = process.argv[2];
+const isPiImageBundleProbe = buildMode === "pi-image-bundle-probe";
+const isProd = buildMode === "production" || isPiImageBundleProbe;
+const isWatch = buildMode === "watch";
 
 const PI_HTTP_DISPATCHER_MODULE =
   "/node_modules/@earendil-works/pi-coding-agent/dist/core/http-dispatcher.js";
@@ -203,6 +206,44 @@ if (piCodingAgentInstalledVersion !== PI_CODING_AGENT_VERSION) {
   );
 }
 
+const PI_PHOTON_VERSION = "0.3.4";
+const PI_PHOTON_WASM_BYTE_LENGTH = 1_881_634;
+const PI_PHOTON_WASM_SHA256 =
+  "10468181565c56004c867f3a4af96f89a0ef5a63a72f2b5fb12c1f1992a3615c";
+const piPhotonPackageRoot = path.join(
+  path.dirname(piCodingAgentPackagePath),
+  "node_modules",
+  "@silvia-odwyer",
+  "photon-node"
+);
+const piPhotonPackagePath = path.join(piPhotonPackageRoot, "package.json");
+const piPhotonWasmPath = path.join(piPhotonPackageRoot, "photon_rs_bg.wasm");
+const piPhotonInstalledVersion = JSON.parse(
+  fs.readFileSync(piPhotonPackagePath, "utf8")
+).version;
+if (piPhotonInstalledVersion !== PI_PHOTON_VERSION) {
+  throw new Error(
+    `Pi transitive @silvia-odwyer/photon-node version changed `
+      + `(${piPhotonInstalledVersion} !== ${PI_PHOTON_VERSION}); `
+      + "re-audit the embedded image runtime before building."
+  );
+}
+const piPhotonWasmBytes = fs.readFileSync(piPhotonWasmPath);
+const piPhotonWasmSha256 = createHash("sha256")
+  .update(piPhotonWasmBytes)
+  .digest("hex");
+if (
+  piPhotonWasmBytes.byteLength !== PI_PHOTON_WASM_BYTE_LENGTH
+  || piPhotonWasmSha256 !== PI_PHOTON_WASM_SHA256
+) {
+  throw new Error(
+    `Pi transitive Photon WASM changed `
+      + `(${piPhotonWasmBytes.byteLength} bytes, sha256:${piPhotonWasmSha256}); `
+      + "re-audit the embedded image runtime before building."
+  );
+}
+const piPhotonWasmBase64 = piPhotonWasmBytes.toString("base64");
+
 const piRuntimeSurfacePlugin = {
   name: "echoink-pi-runtime-surface",
   setup(build) {
@@ -217,7 +258,9 @@ const piRuntimeSurfacePlugin = {
           'export { main } from "./main.js";',
           "SessionManager",
           "createAgentSession",
-          "ModelRuntime"
+          "ModelRuntime",
+          'export { convertToPng } from "./utils/image-convert.js";',
+          'export { formatDimensionNote, resizeImage } from "./utils/image-resize.js";'
         ];
         for (const anchor of requiredAnchors) {
           if (!source.includes(anchor)) {
@@ -254,7 +297,51 @@ export {
 } from "./core/skills.js";
 
 export { convertToLlm } from "./core/messages.js";
+
+export { convertToPng } from "./utils/image-convert.js";
+export { resizeImage } from "./utils/image-resize.js";
 `
+        };
+      }
+    );
+  }
+};
+
+/**
+ * Photon 0.3.4's CommonJS entry synchronously reads photon_rs_bg.wasm next to
+ * itself. Obsidian ships EchoInk as one main.js, so there is no package-local
+ * WASM file at runtime. Keep Pi's public image helpers and the existing
+ * transitive Photon implementation, but replace only that fixed file read with
+ * the version- and hash-verified bytes captured above. The marker remains in
+ * the built bundle so the post-build gate can prove this bridge was retained.
+ */
+const piPhotonRuntimePlugin = {
+  name: "echoink-pi-photon-runtime",
+  setup(build) {
+    build.onLoad(
+      {
+        filter:
+          /[\\/]@earendil-works[\\/]pi-coding-agent[\\/]node_modules[\\/]@silvia-odwyer[\\/]photon-node[\\/]photon_rs\.js$/
+      },
+      async (args) => {
+        const source = await fs.promises.readFile(args.path, "utf8");
+        const original = `const path = require('path').join(__dirname, 'photon_rs_bg.wasm');
+const bytes = require('fs').readFileSync(path);`;
+        if (!source.includes(original) || !source.includes("wasm.__wbindgen_start();")) {
+          throw new Error(
+            "Photon 0.3.4 CommonJS loader changed; re-audit the embedded WASM bridge."
+          );
+        }
+        const embedded = `const bytes = Buffer.from(${JSON.stringify(piPhotonWasmBase64)}, "base64");
+if (bytes.byteLength !== ${PI_PHOTON_WASM_BYTE_LENGTH}) {
+  throw new Error(${JSON.stringify(
+    `EchoInk embedded Photon runtime mismatch: photon-node@${PI_PHOTON_VERSION} wasm sha256:${PI_PHOTON_WASM_SHA256}`
+  )});
+}`;
+        return {
+          loader: "js",
+          resolveDir: path.dirname(args.path),
+          contents: source.replace(original, embedded)
         };
       }
     );
@@ -390,18 +477,6 @@ export const createToolHtmlRenderer = fail("createToolHtmlRenderer");
 const fail = ${failFactory("default package manager")};
 export const getExtensionTempFolder = fail("getExtensionTempFolder");
 export class DefaultPackageManager { constructor() { fail("DefaultPackageManager")(); } }
-`
-      },
-      {
-        filter:
-          /[\\/]@earendil-works[\\/]pi-coding-agent[\\/]dist[\\/]utils[\\/]photon\.js$/,
-        anchor: "loadPhoton",
-        contents: `
-// EchoInk never processes images through Pi's default read tool, so the
-// Photon WASM image backend is unreachable. Return null so the existing
-// "image processing unavailable" path in image-convert/image-resize runs
-// unchanged, and the native binding is never bundled.
-export async function loadPhoton() { return null; }
 `
       },
       {
@@ -574,7 +649,11 @@ const context = await esbuild.context({
       "file:///__echoink_pi_runtime__/main.js"
     )
   },
-  entryPoints: ["src/main.ts"],
+  entryPoints: [
+    isPiImageBundleProbe
+      ? "scripts/pi-image-bundle-probe-entry.ts"
+      : "src/main.ts"
+  ],
   bundle: true,
   loader: {
     ".md": "text",
@@ -611,12 +690,15 @@ const context = await esbuild.context({
   plugins: [
     piOpenAICodexOAuthPlugin,
     piRuntimeSurfacePlugin,
+    piPhotonRuntimePlugin,
     piLeafModuleShimsPlugin,
     piProviderSdkShimsPlugin,
     piControlledEgressPlugin,
     piRendererNodeImportShimPlugin
   ],
-  outfile: "dist/main.js"
+  outfile: isPiImageBundleProbe
+    ? ".tmp/pi-image-production-bundle-probe.cjs"
+    : "dist/main.js"
 });
 
 if (isWatch) {
