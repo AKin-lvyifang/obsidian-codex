@@ -4359,6 +4359,7 @@ async function assertSavedBindingPreflightLifecycle(): Promise<void> {
 
 async function assertProviderPickerGroupingAndFiltering(): Promise<void> {
   installProviderModalDomFixture();
+  const modalRegistryBaseline = openTestModals.length;
   const provider = createApiProviderConfig("deepseek", "provider-grouping-modal");
   const preflight = {
     listModels: async () => ({
@@ -4392,6 +4393,7 @@ async function assertProviderPickerGroupingAndFiltering(): Promise<void> {
     'input[aria-label="搜索 Provider"]'
   );
   assert.ok(picker && options && trigger && search);
+  assert.equal(openTestModals.length, modalRegistryBaseline + 1);
   assert.deepEqual(
     options.children.map((child) => child.hasClass("codex-provider-combobox-group")
       ? `group:${child.textContent}`
@@ -4412,6 +4414,11 @@ async function assertProviderPickerGroupingAndFiltering(): Promise<void> {
   const optionIds = options.querySelectorAll<ProviderModalTestElement>(
     ".codex-provider-combobox-option"
   ).map((option) => option.getAttribute("data-provider-id"));
+  const visibleOptionIds = () => options.querySelectorAll<ProviderModalTestElement>(
+    ".codex-provider-combobox-option"
+  )
+    .filter((option) => !option.hasClass("is-hidden"))
+    .map((option) => option.getAttribute("data-provider-id"));
   assert.deepEqual(optionIds, [
     "openai-codex",
     "glm",
@@ -4460,11 +4467,20 @@ async function assertProviderPickerGroupingAndFiltering(): Promise<void> {
     true,
     true
   ]);
+  assert.deepEqual(visibleOptionIds(), ["openai-codex"]);
   search.fireEvent("keydown", { key: "ArrowDown" });
   assert.equal(
     providerModalTestDocument.activeElement?.getAttribute("data-provider-id"),
     "openai-codex"
   );
+  search.value = "deepseek";
+  search.fireEvent("input");
+  assert.deepEqual(headings.map((heading) => heading.hasClass("is-hidden")), [
+    true,
+    false,
+    true
+  ]);
+  assert.deepEqual(visibleOptionIds(), ["deepseek"]);
   search.value = "custom";
   search.fireEvent("input");
   assert.deepEqual(headings.map((heading) => heading.hasClass("is-hidden")), [
@@ -4472,6 +4488,15 @@ async function assertProviderPickerGroupingAndFiltering(): Promise<void> {
     true,
     false
   ]);
+  assert.deepEqual(visibleOptionIds(), ["custom"]);
+  search.value = "no matching provider";
+  search.fireEvent("input");
+  assert.deepEqual(headings.map((heading) => heading.hasClass("is-hidden")), [
+    true,
+    true,
+    true
+  ]);
+  assert.deepEqual(visibleOptionIds(), []);
   search.value = "";
   search.fireEvent("input");
   assert.deepEqual(headings.map((heading) => heading.hasClass("is-hidden")), [
@@ -4479,12 +4504,26 @@ async function assertProviderPickerGroupingAndFiltering(): Promise<void> {
     false,
     false
   ]);
+  assert.deepEqual(visibleOptionIds(), optionIds);
   assert.equal(selected.getAttribute("aria-selected"), "true",
     "filtering never changes the selected Provider");
+
+  options.fireEvent("keydown", {
+    key: "Escape",
+    target: providerModalTestDocument.activeElement
+  });
+  assert.equal(picker.hasClass("is-open"), false);
+  assert.equal(trigger.getAttribute("aria-expanded"), "false");
+  assert.equal(providerModalTestDocument.activeElement, trigger);
   modal.close();
+  assert.equal(openTestModals.length, modalRegistryBaseline,
+    "closing the grouped Provider Modal must release the fake Modal registry");
+  providerModalTestDocument.activeElement = null;
+  await flushProviderModalTasks();
 
   const englishModal = createModal("en");
   englishModal.open();
+  assert.equal(openTestModals.length, modalRegistryBaseline + 1);
   assert.deepEqual(
     englishModal.contentEl.querySelectorAll<ProviderModalTestElement>(
       ".codex-provider-combobox-group"
@@ -4493,6 +4532,8 @@ async function assertProviderPickerGroupingAndFiltering(): Promise<void> {
   );
   englishModal.close();
   await flushProviderModalTasks();
+  assert.equal(openTestModals.length, modalRegistryBaseline,
+    "the English Provider Modal must also release the fake Modal registry");
 }
 
 async function assertOpenAICodexModalLifecycle(): Promise<void> {
