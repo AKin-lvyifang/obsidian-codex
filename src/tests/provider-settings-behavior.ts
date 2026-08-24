@@ -168,6 +168,7 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   await assertResourceScanErrorsClearAcrossTabs();
   assertProviderBadgeReflowCssContract();
   await assertSavedBindingPreflightLifecycle();
+  await assertProviderPickerGroupingAndFiltering();
   await assertOpenAICodexModalLifecycle();
   await assertProviderModelModalPreflightLifecycle();
   await assertProviderApiKeyEditLifecycle();
@@ -4354,6 +4355,144 @@ async function assertSavedBindingPreflightLifecycle(): Promise<void> {
     "connection:loading",
     "connection:available"
   ]);
+}
+
+async function assertProviderPickerGroupingAndFiltering(): Promise<void> {
+  installProviderModalDomFixture();
+  const provider = createApiProviderConfig("deepseek", "provider-grouping-modal");
+  const preflight = {
+    listModels: async () => ({
+      status: "available" as const,
+      models: provider.models
+    }),
+    testConnection: async () => ({ status: "available" as const })
+  };
+  const createModal = (language: "zh-CN" | "en") => new ProviderModelModal({
+    app: new App(),
+    draft: provider,
+    editing: true,
+    language,
+    copy: settingsCopy(language),
+    preflight,
+    save: async () => ({ saved: true })
+  });
+
+  const modal = createModal("zh-CN");
+  modal.open();
+  const picker = modal.contentEl.querySelector<ProviderModalTestElement>(
+    ".codex-provider-combobox"
+  );
+  const options = picker?.querySelector<ProviderModalTestElement>(
+    ".codex-provider-combobox-options"
+  );
+  const trigger = picker?.querySelector<ProviderModalTestElement>(
+    ".codex-provider-combobox-trigger"
+  );
+  const search = picker?.querySelector<ProviderModalTestElement>(
+    'input[aria-label="搜索 Provider"]'
+  );
+  assert.ok(picker && options && trigger && search);
+  assert.deepEqual(
+    options.children.map((child) => child.hasClass("codex-provider-combobox-group")
+      ? `group:${child.textContent}`
+      : `option:${child.getAttribute("data-provider-id")}`),
+    [
+      "group:登录账户",
+      "option:openai-codex",
+      "group:供应商",
+      "option:glm",
+      "option:kimi",
+      "option:minimax",
+      "option:deepseek",
+      "option:ollama",
+      "group:其他",
+      "option:custom"
+    ]
+  );
+  const optionIds = options.querySelectorAll<ProviderModalTestElement>(
+    ".codex-provider-combobox-option"
+  ).map((option) => option.getAttribute("data-provider-id"));
+  assert.deepEqual(optionIds, [
+    "openai-codex",
+    "glm",
+    "kimi",
+    "minimax",
+    "deepseek",
+    "ollama",
+    "custom"
+  ]);
+  assert.equal(optionIds.includes("grok"), false);
+  assert.doesNotMatch(options.textContent, /Grok/iu);
+  const oauthPreset = API_PROVIDER_PRESETS.find((preset) => preset.id === "openai-codex");
+  assert.equal(oauthPreset?.authMode, "oauth");
+  assert.ok(oauthPreset?.baseUrl,
+    "OAuth grouping has priority even when the preset defines a baseUrl");
+
+  const selected = options.querySelector<ProviderModalTestElement>(
+    '[data-provider-id="deepseek"]'
+  );
+  const ollama = options.querySelector<ProviderModalTestElement>(
+    '[data-provider-id="ollama"]'
+  );
+  assert.ok(selected && ollama);
+  assert.equal(selected.hasClass("is-selected"), true);
+  assert.equal(selected.getAttribute("aria-selected"), "true");
+  trigger.fireEvent("keydown", { key: "ArrowDown" });
+  assert.equal(picker.hasClass("is-open"), true);
+  assert.equal(providerModalTestDocument.activeElement, selected,
+    "opening by keyboard focuses the selected Provider across groups");
+  options.fireEvent("keydown", { key: "ArrowDown", target: selected });
+  assert.equal(providerModalTestDocument.activeElement, ollama,
+    "keyboard navigation skips headings and follows visible Provider order");
+
+  const headings = options.querySelectorAll<ProviderModalTestElement>(
+    ".codex-provider-combobox-group"
+  );
+  assert.deepEqual(headings.map((heading) => heading.textContent), [
+    "登录账户",
+    "供应商",
+    "其他"
+  ]);
+  search.value = "codex";
+  search.fireEvent("input");
+  assert.deepEqual(headings.map((heading) => heading.hasClass("is-hidden")), [
+    false,
+    true,
+    true
+  ]);
+  search.fireEvent("keydown", { key: "ArrowDown" });
+  assert.equal(
+    providerModalTestDocument.activeElement?.getAttribute("data-provider-id"),
+    "openai-codex"
+  );
+  search.value = "custom";
+  search.fireEvent("input");
+  assert.deepEqual(headings.map((heading) => heading.hasClass("is-hidden")), [
+    true,
+    true,
+    false
+  ]);
+  search.value = "";
+  search.fireEvent("input");
+  assert.deepEqual(headings.map((heading) => heading.hasClass("is-hidden")), [
+    false,
+    false,
+    false
+  ]);
+  assert.equal(selected.getAttribute("aria-selected"), "true",
+    "filtering never changes the selected Provider");
+  modal.close();
+
+  const englishModal = createModal("en");
+  englishModal.open();
+  assert.deepEqual(
+    englishModal.contentEl.querySelectorAll<ProviderModalTestElement>(
+      ".codex-provider-combobox-group"
+    ).map((heading) => heading.textContent),
+    ["Account sign-in", "Providers", "Other"]
+  );
+  englishModal.close();
+  await flushProviderModalTasks();
 }
 
 async function assertOpenAICodexModalLifecycle(): Promise<void> {

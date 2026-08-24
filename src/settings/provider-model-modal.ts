@@ -416,29 +416,43 @@ export class ProviderModelModal extends Modal {
       }
     });
     options.id = listboxId;
-    const official = API_PROVIDER_PRESETS.filter((item) => item.id !== "custom");
     const optionRows: Array<{ element: HTMLElement; text: string }> = [];
-    for (const item of official) {
-      optionRows.push({
+    const renderedGroups: Array<{
+      heading: HTMLElement;
+      rows: Array<{ element: HTMLElement; text: string }>;
+    }> = [];
+    for (const group of PROVIDER_PICKER_GROUPS) {
+      const presets = API_PROVIDER_PRESETS.filter(
+        (preset) => providerPickerGroupKey(preset) === group.key
+      );
+      if (!presets.length) continue;
+      const heading = options.createDiv({
+        cls: "codex-provider-combobox-group",
+        text: this.label(group.zh, group.en)
+      });
+      const rows = presets.map((item) => ({
         element: this.renderProviderOption(options, item.id, item.name),
         text: `${item.id} ${item.name}`.toLowerCase()
-      });
+      }));
+      optionRows.push(...rows);
+      renderedGroups.push({ heading, rows });
     }
-    const otherHeading = options.createDiv({
-      cls: "codex-provider-combobox-group",
-      text: this.label("其他", "Other")
-    });
-    const custom = getApiProviderPreset("custom");
-    const customRow = this.renderProviderOption(options, "custom", custom.name);
-    optionRows.push({
-      element: customRow,
-      text: `custom ${custom.name}`.toLowerCase()
-    });
+
+    const applyProviderFilter = (query: string) => {
+      for (const row of optionRows) {
+        row.element.toggleClass("is-hidden", Boolean(query) && !row.text.includes(query));
+      }
+      for (const group of renderedGroups) {
+        group.heading.toggleClass(
+          "is-hidden",
+          group.rows.every((row) => row.element.hasClass("is-hidden"))
+        );
+      }
+    };
 
     const resetProviderFilter = () => {
       search.value = "";
-      for (const row of optionRows) row.element.removeClass("is-hidden");
-      otherHeading.removeClass("is-hidden");
+      applyProviderFilter("");
     };
     const openPicker = (focusTarget: ComboboxFocusTarget) => {
       this.closeOpenPickers();
@@ -465,10 +479,7 @@ export class ProviderModelModal extends Modal {
     search.onclick = (event) => event.stopPropagation();
     search.oninput = () => {
       const query = search.value.trim().toLowerCase();
-      for (const row of optionRows) {
-        row.element.toggleClass("is-hidden", Boolean(query) && !row.text.includes(query));
-      }
-      otherHeading.toggleClass("is-hidden", customRow.hasClass("is-hidden"));
+      applyProviderFilter(query);
     };
     bindComboboxKeyboard({
       picker,
@@ -1733,6 +1744,26 @@ export class ProviderModelModal extends Modal {
 }
 
 type ComboboxFocusTarget = "search" | "selected" | "last";
+
+type ProviderPickerGroupKey = "account" | "provider" | "other";
+
+const PROVIDER_PICKER_GROUPS: readonly Readonly<{
+  key: ProviderPickerGroupKey;
+  zh: string;
+  en: string;
+}>[] = Object.freeze([
+  { key: "account", zh: "登录账户", en: "Account sign-in" },
+  { key: "provider", zh: "供应商", en: "Providers" },
+  { key: "other", zh: "其他", en: "Other" }
+]);
+
+function providerPickerGroupKey(
+  preset: Pick<ApiProviderPreset, "authMode" | "baseUrl">
+): ProviderPickerGroupKey {
+  if (preset.authMode === "oauth") return "account";
+  if (preset.baseUrl.trim()) return "provider";
+  return "other";
+}
 
 interface ComboboxKeyboardBinding {
   readonly picker: HTMLElement;
