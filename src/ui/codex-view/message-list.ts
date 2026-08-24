@@ -779,17 +779,36 @@ export class CodexMessageListRenderer {
           ? message.title ?? "正在思考"
           : message.status === "running" ? "正在思考" : "思考过程"
       });
-      reasoning.root.ontoggle = (event) => {
+      let pendingUserDisclosureIntent = false;
+      if (message.reasoningSummary) {
+        reasoning.summary.onclick = (event) => {
+          if (event.isTrusted) pendingUserDisclosureIntent = true;
+        };
+        reasoning.summary.onkeydown = (event) => {
+          if (
+            event.isTrusted
+            && (
+              event.key === "Enter"
+              || event.key === " "
+              || event.code === "Space"
+            )
+          ) {
+            pendingUserDisclosureIntent = true;
+          }
+        };
+      }
+      reasoning.root.ontoggle = () => {
         if (message.reasoningSummary) {
           const current = this.reasoningDisclosureStates.get(disclosureKey)
             ?? nextReasoningDisclosureState(undefined, message.reasoningSummary.status);
-          if (event.isTrusted) {
+          if (pendingUserDisclosureIntent) {
             this.reasoningDisclosureStates.set(disclosureKey, Object.freeze({
               ...current,
               open: reasoning.root.open,
               manual: true
             }));
           }
+          pendingUserDisclosureIntent = false;
         } else {
           rememberOpenState(this.openProcessItems, message.id, reasoning.root.open);
         }

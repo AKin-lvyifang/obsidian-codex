@@ -32,6 +32,14 @@ type TestEventHandler = (event: {
   stopPropagation(): void;
 }) => unknown;
 
+interface TestActivationEvent {
+  readonly isTrusted: boolean;
+  readonly key?: string;
+  readonly code?: string;
+  preventDefault(): void;
+  stopPropagation(): void;
+}
+
 class FakeElement {
   readonly attributes = new Map<string, string>();
   readonly dataset: Record<string, string> = {};
@@ -47,8 +55,8 @@ class FakeElement {
   scrollHeight = 640;
   scrollTop = 0;
   textContent = "";
-  onclick: ((event: never) => unknown) | null = null;
-  onkeydown: ((event: never) => unknown) | null = null;
+  onclick: ((event: TestActivationEvent) => unknown) | null = null;
+  onkeydown: ((event: TestActivationEvent) => unknown) | null = null;
   ontoggle: ((event: { readonly isTrusted: boolean }) => unknown) | null = null;
 
   constructor(readonly tag: string) {}
@@ -898,12 +906,12 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       "思考完成 · 2 秒"
     );
     answeredReasoningRoot!.open = true;
-    answeredReasoningRoot!.ontoggle?.({ isTrusted: false });
+    answeredReasoningRoot!.ontoggle?.({ isTrusted: true });
     assert.equal(
       answeredReasoning.findByClass("codex-smooth-ai-reasoning-summary")
         ?.attributes.get("aria-expanded"),
       "true",
-      "untrusted toggles still synchronize accessibility state"
+      "a trusted programmatic toggle still synchronizes accessibility state"
     );
     const afterProgrammaticOpen = renderMessage(
       renderer,
@@ -914,7 +922,15 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       "codex-smooth-ai-reasoning"
     )!;
     assert.equal(afterProgrammaticRoot.open, false,
-      "a programmatic toggle never establishes manual disclosure precedence");
+      "a trusted programmatic toggle without summary activation never becomes manual");
+    const afterProgrammaticSummary = afterProgrammaticOpen.findByClass(
+      "codex-smooth-ai-reasoning-summary"
+    )!;
+    afterProgrammaticSummary.onclick?.({
+      isTrusted: true,
+      preventDefault: () => undefined,
+      stopPropagation: () => undefined
+    });
     afterProgrammaticRoot.open = true;
     afterProgrammaticRoot.ontoggle?.({ isTrusted: true });
 
@@ -957,6 +973,14 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       { showAgentFooter: false, showAgentHeader: false }
     );
     const collapsedRoot = collapsedRunning.findByClass("codex-smooth-ai-reasoning")!;
+    collapsedRunning.findByClass("codex-smooth-ai-reasoning-summary")
+      ?.onkeydown?.({
+        isTrusted: true,
+        key: "Enter",
+        code: "Enter",
+        preventDefault: () => undefined,
+        stopPropagation: () => undefined
+      });
     collapsedRoot.open = false;
     collapsedRoot.ontoggle?.({ isTrusted: true });
     const collapsedAnswered = renderMessage(
@@ -976,7 +1000,60 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     assert.equal(
       collapsedAnswered.findByClass("codex-smooth-ai-reasoning")?.open,
       false,
-      "manual collapse before first text is never stolen"
+      "trusted Enter collapse before first text is never stolen"
+    );
+
+    const spaceRun: ChatMessage = {
+      ...collapsedRun,
+      id: "pi:session:reasoning:run-space",
+      runId: "run-space",
+      turnId: "run-space",
+      reasoningSummary: {
+        ...collapsedRun.reasoningSummary!,
+        productRunId: "run-space"
+      }
+    };
+    const spaceRunning = renderMessage(
+      renderer,
+      spaceRun,
+      { showAgentFooter: false, showAgentHeader: false }
+    );
+    const spaceRoot = spaceRunning.findByClass("codex-smooth-ai-reasoning")!;
+    const spaceSummary = spaceRunning.findByClass(
+      "codex-smooth-ai-reasoning-summary"
+    )!;
+    spaceSummary.onkeydown?.({
+      isTrusted: true,
+      key: " ",
+      code: "Space",
+      preventDefault: () => undefined,
+      stopPropagation: () => undefined
+    });
+    spaceSummary.onclick?.({
+      isTrusted: true,
+      preventDefault: () => undefined,
+      stopPropagation: () => undefined
+    });
+    spaceRoot.open = false;
+    spaceRoot.ontoggle?.({ isTrusted: true });
+    const spaceAnswered = renderMessage(
+      renderer,
+      {
+        ...structuredAnswered,
+        id: spaceRun.id,
+        runId: "run-space",
+        turnId: "run-space",
+        reasoningSummary: {
+          ...structuredAnswered.reasoningSummary!,
+          productRunId: "run-space"
+        }
+      },
+      { showAgentFooter: false, showAgentHeader: false }
+    );
+    assert.equal(
+      spaceAnswered.findByClass("codex-smooth-ai-reasoning")?.open,
+      false,
+      "trusted Space activation is consumed once even when it also emits click"
     );
 
     (renderer as unknown as { env: { sessionId: string } }).env.sessionId =
