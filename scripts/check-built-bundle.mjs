@@ -86,6 +86,10 @@ const EXTERNAL_MODULES = [
   "@lezer/highlight",
   "@lezer/lr"
 ];
+const BUNDLED_ONLY_MODULE_PREFIXES = [
+  "@earendil-works/pi-coding-agent",
+  "@silvia-odwyer/photon-node"
+];
 
 const failures = [];
 
@@ -165,6 +169,11 @@ function checkLoad() {
   const originalLoad = Module._load;
   const externalSet = new Set(EXTERNAL_MODULES);
   Module._load = function (request, parent, isMain) {
+    if (BUNDLED_ONLY_MODULE_PREFIXES.some((prefix) =>
+      request === prefix || request.startsWith(`${prefix}/`)
+    )) {
+      throw new Error(`production bundle escaped to external module: ${request}`);
+    }
     if (externalSet.has(request)) return proxy;
     return originalLoad.call(this, request, parent, isMain);
   };

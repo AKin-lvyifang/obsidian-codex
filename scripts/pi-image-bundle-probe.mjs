@@ -33,6 +33,10 @@ const externalModules = new Set([
   "@lezer/highlight",
   "@lezer/lr"
 ]);
+const bundledOnlyModulePrefixes = [
+  "@earendil-works/pi-coding-agent",
+  "@silvia-odwyer/photon-node"
+];
 const proxy = new Proxy({}, {
   get(_target, property) {
     if (property === "__esModule") return true;
@@ -42,6 +46,11 @@ const proxy = new Proxy({}, {
 });
 const originalLoad = Module._load;
 Module._load = function (request, parent, isMain) {
+  if (bundledOnlyModulePrefixes.some((prefix) =>
+    request === prefix || request.startsWith(`${prefix}/`)
+  )) {
+    throw new Error(`Pi image bundle escaped to external module: ${request}`);
+  }
   if (externalModules.has(request)) return proxy;
   return originalLoad.call(this, request, parent, isMain);
 };
@@ -52,7 +61,8 @@ try {
   const result = await bundle.runPiImageProductionBundleProbe();
   console.log(
     `Pi image production bundle probe: OK `
-      + `(resize=${result.resizedMimeType}, convert=${result.convertedMimeType})`
+      + `(resize=${result.originalSize}->${result.resizedSize} `
+      + `${result.resizedMimeType}, convert=${result.convertedMimeType})`
   );
 } finally {
   Module._load = originalLoad;

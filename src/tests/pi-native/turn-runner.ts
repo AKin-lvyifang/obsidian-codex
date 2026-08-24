@@ -57,7 +57,7 @@ export async function runPiNativeTurnRunnerTests(): Promise<void> {
   tableRowsKeepVaultNoteAliasesInsideOneCell();
   emptyPersonalMemorySourceDisplayDoesNotClaimInjection();
   await messageActionContractsStayTruthful();
-  await userImageDerivationRestoresTheResendComposer();
+  await assistantImageDerivationCopiesMetadataWithoutInventingResend();
   await activeRunImagesUseTheNormalQueue();
   await queuedImageFailuresAreRetainedOnlyBeforePiAcceptance();
   await inFlightComposerImageTransferCannotDuplicate();
@@ -619,11 +619,13 @@ async function messageActionContractsStayTruthful(): Promise<void> {
   assert.equal(failure.status, "failure");
 }
 
-async function userImageDerivationRestoresTheResendComposer(): Promise<void> {
-  const entryId = "user-image-derive";
+async function assistantImageDerivationCopiesMetadataWithoutInventingResend():
+Promise<void> {
+  const userEntryId = "user-image-derive";
+  const assistantEntryId = "assistant-image-derive";
   const source = piSessionShell("conversation-image-derive-source");
   source.piImageAttachments = {
-    [entryId]: [{
+    [userEntryId]: [{
       name: "derive.png",
       path: "/missing/derive.png",
       mimeType: "image/png"
@@ -642,30 +644,56 @@ async function userImageDerivationRestoresTheResendComposer(): Promise<void> {
       activeSessionId: source.id
     },
     getVaultPath: () => "/vault",
-    derivePiConversation: async () => ({
-      sourceConversationId: source.id,
-      anchorEntryId: entryId,
-      anchorRole: "user" as const,
-      editorText: "请重新看这张图",
-      activation: { status: "activated" as const },
-      projection: {
-        catalog: {
-          conversationId: targetId,
-          piSessionId: "pi-image-derive-target",
-          vaultId: "vault-turn-runner",
-          title: "Derived image conversation",
-          status: "active" as const,
-          defaultMemoryMode: "normal" as const,
-          createdAt: 3,
-          updatedAt: 3,
-          sessionFile: "/sessions/pi-image-derive-target.jsonl"
-        },
-        activeLeafId: null,
-        messages: [],
-        diagnostics: [],
-        drafts: []
-      }
-    }),
+    derivePiConversation: async (input: Readonly<{
+      anchorEntryId: string;
+    }>) => {
+      assert.equal(
+        input.anchorEntryId,
+        assistantEntryId,
+        "the product UI exposes derivation only from an assistant reply"
+      );
+      return {
+        sourceConversationId: source.id,
+        anchorEntryId: assistantEntryId,
+        anchorRole: "assistant" as const,
+        editorText: "",
+        activation: { status: "activated" as const },
+        projection: {
+          catalog: {
+            conversationId: targetId,
+            piSessionId: "pi-image-derive-target",
+            vaultId: "vault-turn-runner",
+            title: "Derived image conversation",
+            status: "active" as const,
+            defaultMemoryMode: "normal" as const,
+            createdAt: 3,
+            updatedAt: 3,
+            sessionFile: "/sessions/pi-image-derive-target.jsonl"
+          },
+          activeLeafId: assistantEntryId,
+          messages: [{
+            id: piProjectedEntryMessageId(
+              "pi-image-derive-target",
+              assistantEntryId,
+              userEntryId
+            ),
+            role: "user" as const,
+            itemType: "user" as const,
+            text: "",
+            images: [{
+              type: "image" as const,
+              name: "图片 1",
+              path: "",
+              mimeType: "image/png",
+              availability: "unavailable" as const
+            }],
+            createdAt: 2
+          }],
+          diagnostics: [],
+          drafts: []
+        }
+      };
+    },
     saveSettings: async () => { saveCalls += 1; }
   };
   const host: any = {
@@ -686,15 +714,31 @@ async function userImageDerivationRestoresTheResendComposer(): Promise<void> {
     updateInputPlaceholder: () => undefined
   };
 
-  await derivePiConversationFromMessage(host, source, entryId);
+  await derivePiConversationFromMessage(host, source, assistantEntryId);
 
   assert.equal(plugin.settings.activeSessionId, targetId);
-  assert.equal(inputEl.value, "请重新看这张图");
-  assert.deepEqual(host.attachments, [{
+  assert.equal(inputEl.value, "");
+  assert.deepEqual(
+    host.attachments,
+    [],
+    "assistant derivation must not invent a user-message resend surface"
+  );
+  const derived = plugin.settings.sessions.find(
+    (session: StoredSession) => session.id === targetId
+  );
+  assert.deepEqual(derived?.piImageAttachments, {
+    [userEntryId]: [{
+      name: "derive.png",
+      path: "/missing/derive.png",
+      mimeType: "image/png"
+    }]
+  });
+  assert.deepEqual(derived?.messages[0]?.images, [{
     type: "image",
     name: "derive.png",
     path: "/missing/derive.png",
-    mimeType: "image/png"
+    mimeType: "image/png",
+    availability: "unavailable"
   }]);
   assert.equal(saveCalls, 1);
 }

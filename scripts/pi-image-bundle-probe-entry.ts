@@ -6,18 +6,25 @@ import {
 
 export { default } from "../src/main";
 
-const PNG_1X1 = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
-  "base64"
-);
-
 export async function runPiImageProductionBundleProbe(): Promise<{
   readonly resizedMimeType: string;
   readonly convertedMimeType: string;
+  readonly originalSize: string;
+  readonly resizedSize: string;
 }> {
-  const resized = await resizeImage(PNG_1X1, "image/png");
+  const resized = await resizeImage(
+    bmp(4, 2),
+    "image/bmp",
+    { maxWidth: 2, maxHeight: 2 }
+  );
   assert.ok(resized, "production bundle must execute Pi resizeImage");
+  assert.equal(resized.wasResized, true);
+  assert.equal(resized.originalWidth, 4);
+  assert.equal(resized.originalHeight, 2);
+  assert.equal(resized.width, 2);
+  assert.equal(resized.height, 1);
   assert.equal(resized.mimeType, "image/png");
+  assert.ok(resized.data.length > 0);
 
   const converted = await convertToPng(
     bmp(1, 1).toString("base64"),
@@ -29,7 +36,9 @@ export async function runPiImageProductionBundleProbe(): Promise<{
 
   return {
     resizedMimeType: resized.mimeType,
-    convertedMimeType: converted.mimeType
+    convertedMimeType: converted.mimeType,
+    originalSize: `${resized.originalWidth}x${resized.originalHeight}`,
+    resizedSize: `${resized.width}x${resized.height}`
   };
 }
 
