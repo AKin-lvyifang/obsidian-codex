@@ -106,7 +106,9 @@ export async function runComposerActionTests(): Promise<void> {
     assert.match(css, /\.codex-attachment-thumbnail-image \{[\s\S]*?object-fit:\s*cover;/u);
     assert.match(css, /\.codex-attachment-thumbnail-remove \{[\s\S]*?width:\s*26px;[\s\S]*?height:\s*26px;/u);
     assert.match(css, /@media \(max-width:\s*560px\)[\s\S]*?\.codex-attachment-thumbnail \{[\s\S]*?width:\s*64px;[\s\S]*?height:\s*64px;/u);
-    assert.match(turnRunnerSource, /Pi Chat 的附件入口尚未完成切换，本轮没有发送/u);
+    assert.doesNotMatch(turnRunnerSource, /Pi Chat 的附件入口尚未完成切换，本轮没有发送/u);
+    assert.match(turnRunnerSource, /preparePiChatImages/u);
+    assert.match(turnRunnerSource, /preparedImages\.length/u);
     console.log("PASS conversation-ui: composer actions and compact attachment presentation preserve send semantics");
   } finally {
     (globalThis as unknown as { document?: Document }).document = originalDocument;

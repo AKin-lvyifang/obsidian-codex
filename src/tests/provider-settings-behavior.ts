@@ -948,6 +948,19 @@ function assertConversationSettingsDiscardMessageBodies(): void {
       text: "This message must remain in the Pi Session, not settings.",
       createdAt: 1
     }],
+    piImageAttachments: {
+      "entry-image-metadata": [{
+        name: "first.png",
+        path: "/disposable-vault/first.png",
+        mimeType: "image/png",
+        data: "SETTINGS_BASE64_CANARY"
+      }, {
+        name: "second.jpg",
+        path: "/disposable-vault/second.jpg",
+        mimeType: "image/jpeg",
+        base64: "SETTINGS_SECOND_BASE64_CANARY"
+      }]
+    } as never,
     createdAt: 1,
     updatedAt: 2
   }];
@@ -956,6 +969,21 @@ function assertConversationSettingsDiscardMessageBodies(): void {
   const persisted = settingsForDataSave(settings);
   assert.equal(persisted.activeSessionId, settings.activeSessionId);
   assert.deepEqual(persisted.sessions[0]?.messages, []);
+  assert.deepEqual(persisted.sessions[0]?.piImageAttachments, {
+    "entry-image-metadata": [{
+      name: "first.png",
+      path: "/disposable-vault/first.png",
+      mimeType: "image/png"
+    }, {
+      name: "second.jpg",
+      path: "/disposable-vault/second.jpg",
+      mimeType: "image/jpeg"
+    }]
+  });
+  assert.deepEqual(
+    normalizeSettingsData(persisted).settings.sessions[0]?.piImageAttachments,
+    persisted.sessions[0]?.piImageAttachments
+  );
   assert.equal(
     settings.sessions[0]?.messages[0]?.id,
     "durable-message-body",
@@ -963,7 +991,12 @@ function assertConversationSettingsDiscardMessageBodies(): void {
   );
   assert.doesNotMatch(
     JSON.stringify(persisted),
-    /This message must remain in the Pi Session/u
+    /This message must remain in the Pi Session|SETTINGS_(?:SECOND_)?BASE64_CANARY/u
+  );
+  assert.match(
+    JSON.stringify(settings),
+    /SETTINGS_BASE64_CANARY/u,
+    "settings projection must not mutate live local metadata while sanitizing"
   );
 }
 

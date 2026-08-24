@@ -1,4 +1,5 @@
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { PiPreparedInlineImage } from "../pi/contracts";
 import type { PiContextLedger } from "./pi-context-budget";
 import type {
   ChatMessage,
@@ -15,6 +16,9 @@ import type {
 export type PiConversationMemoryMode = "normal" | "no_memory";
 export type PiChatMode = "agent" | "plan";
 export type PiConversationCatalogStatus = "active" | "archived" | "deleted";
+
+export const PI_IMAGE_INPUT_UNSUPPORTED_MESSAGE =
+  "当前模型不支持图片输入，请切换支持图片的模型。";
 
 export interface PiConversationCatalogEntry {
   conversationId: string;
@@ -318,6 +322,8 @@ export interface PiChatSubmitRequest {
   conversationId: string;
   text: string;
   submittedAt: number;
+  /** Ordered Pi-ready image content paired with local-only display metadata. */
+  images?: readonly Readonly<PiChatPreparedImage>[];
   /** The composer mode captured for this exact queued turn. */
   mode?: PiChatMode;
   memoryMode?: PiConversationMemoryMode;
@@ -326,6 +332,17 @@ export interface PiChatSubmitRequest {
   /** A durable queued draft explicitly selected by the user for resubmission. */
   draftId?: string;
   maintenanceScope?: PiKnowledgeMaintenanceScope;
+}
+
+export interface PiChatPreparedImage {
+  content: Readonly<PiPreparedInlineImage>;
+  attachment: Readonly<{
+    type: "image";
+    name: string;
+    path: string;
+    /** MIME detected from the local source, not a second model payload. */
+    mimeType: string;
+  }>;
 }
 
 export type PiKnowledgeMaintenanceScope = Readonly<

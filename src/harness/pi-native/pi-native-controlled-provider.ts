@@ -102,10 +102,13 @@ export function createPiNativeModelFromConfiguration(input: {
   };
 }): Model<Api> {
   if (input.catalogModel) {
-    return createPiNativeModelFromCatalog({
-      catalogModel: input.catalogModel,
-      provider: input.provider
-    });
+    return withResolvedPiModelImageCapability(
+      createPiNativeModelFromCatalog({
+        catalogModel: input.catalogModel,
+        provider: input.provider
+      }),
+      input.configured.imageInput
+    );
   }
   const configured = input.configured;
   if (
@@ -146,7 +149,43 @@ export function createPiNativeModelFromConfiguration(input: {
       requiresReasoningContentOnAssistantMessages: false
     };
   }
-  return deepFreeze(model);
+  return withResolvedPiModelImageCapability(
+    model,
+    configured.imageInput
+  );
+}
+
+/**
+ * The selected Pi Model is the single image-capability truth. Package catalog
+ * metadata uses `input`, while user-configured models expose `imageInput` before
+ * resolution; either affirmative signal enables image input.
+ */
+export function piModelSupportsImageInput(
+  model: Readonly<{
+    imageInput?: unknown;
+    input?: unknown;
+  }> | null | undefined
+): boolean {
+  return Boolean(
+    model
+    && (
+      model.imageInput === true
+      || (Array.isArray(model.input) && model.input.includes("image"))
+    )
+  );
+}
+
+function withResolvedPiModelImageCapability(
+  model: Model<Api>,
+  configuredImageInput: boolean
+): Model<Api> {
+  const supportsImageInput = configuredImageInput
+    || piModelSupportsImageInput(model);
+  if (!supportsImageInput || model.input.includes("image")) return model;
+  return deepFreeze({
+    ...structuredClone(model),
+    input: [...model.input, "image"]
+  });
 }
 
 /**

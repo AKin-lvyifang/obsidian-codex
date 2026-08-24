@@ -37,6 +37,7 @@ export async function runPiChatUiProjectorTests(): Promise<void> {
   assertLiveTaskUpdateResultsProjectOneStableHistoricalTask();
   assertAskSourceAttributionDecorationsAreTruthfulAndIsolated();
   assertDurableBranchRebuildsExistingUiCardsAndHidesReasoning();
+  assertImageUserEntriesProjectWithoutPayloadDuplication();
   assertLiveEventsMergeUntilTheProductSettlementBoundary();
   assertKnowledgeProgressAndToolPayloadsStayPrivate();
   assertKnowledgeMaintenanceResultCardIsLiveDurableAndStrict();
@@ -1049,6 +1050,104 @@ function assertDurableBranchRebuildsExistingUiCardsAndHidesReasoning(): void {
   assert.ok(reloginView.messages.some((message) =>
     message.status === "failed"
     && message.text === "OpenAI Codex 授权已失效，请在设置中重新登录。"
+  ));
+}
+
+function assertImageUserEntriesProjectWithoutPayloadDuplication(): void {
+  const pngPayloadCanary = "PRIVATE_PNG_BASE64_CANARY";
+  const jpegPayloadCanary = "PRIVATE_JPEG_BASE64_CANARY";
+  const entries: PiSessionBranchEntryView[] = [
+    messageEntry("user-image-only", null, 1, {
+      role: "user",
+      content: [
+        { type: "text", text: "" },
+        {
+          type: "image",
+          mimeType: "image/png",
+          data: pngPayloadCanary
+        }
+      ]
+    } as never),
+    messageEntry("assistant-image-ack", "user-image-only", 2, {
+      role: "assistant",
+      content: [{ type: "text", text: "已看到第一张图。" }],
+      stopReason: "stop",
+      timestamp: 2
+    }),
+    messageEntry("user-image-ordered", "assistant-image-ack", 3, {
+      role: "user",
+      content: [
+        { type: "text", text: "按顺序比较" },
+        {
+          type: "image",
+          mimeType: "image/jpeg",
+          data: jpegPayloadCanary
+        },
+        {
+          type: "image",
+          mimeType: "image/png",
+          data: pngPayloadCanary
+        }
+      ]
+    } as never)
+  ];
+  const input = {
+    piSessionId: "session-images",
+    activeLeafId: "user-image-ordered",
+    entries,
+    runState: "completed" as const,
+    productRunId: "run-images",
+    runIdentities: [{
+      productRunId: "run-images",
+      userEntryId: "user-image-ordered",
+      toolCallIds: []
+    }],
+    now: 4
+  };
+
+  const projected = new PiChatUiProjector().projectSessionBranch(input);
+  const pureImage = projected.messages.find((message) =>
+    message.id.endsWith(":entry:user-image-only")
+  );
+  assert.ok(pureImage, "a pure-image Pi user Entry must remain visible");
+  assert.equal(pureImage.role, "user");
+  assert.equal(pureImage.text, "");
+  assert.deepEqual(pureImage.images, [{
+    type: "image",
+    name: "图片 1",
+    path: "",
+    mimeType: "image/png",
+    availability: "unavailable"
+  }]);
+
+  const ordered = projected.messages.find((message) =>
+    message.id.endsWith(":entry:user-image-ordered")
+  );
+  assert.equal(ordered?.text, "按顺序比较");
+  assert.deepEqual(ordered?.images?.map((image) => image.mimeType), [
+    "image/jpeg",
+    "image/png"
+  ]);
+  assert.deepEqual(ordered?.images?.map((image) => image.name), [
+    "图片 1",
+    "图片 2"
+  ]);
+  assert.doesNotMatch(
+    JSON.stringify(projected),
+    /PRIVATE_(?:PNG|JPEG)_BASE64_CANARY/u,
+    "UI projection must never copy Pi image Base64"
+  );
+
+  const reopened = new PiChatUiProjector().projectSessionBranch(input);
+  assert.deepEqual(reopened.messages, projected.messages);
+  const earlierBranch = new PiChatUiProjector().projectSessionBranch({
+    ...input,
+    activeLeafId: "assistant-image-ack",
+    entries: entries.slice(0, 2)
+  });
+  assert.ok(earlierBranch.messages.some((message) =>
+    message.id.endsWith(":entry:user-image-only")
+    && message.images?.[0]?.mimeType === "image/png"
   ));
 }
 

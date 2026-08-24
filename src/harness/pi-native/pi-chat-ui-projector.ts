@@ -2,7 +2,7 @@ import {
   extractProcessFileRefs,
   summarizeProcessEvent
 } from "../../core/mapping";
-import type { ChatMessage } from "../../settings/settings";
+import type { ChatMessage, StoredAttachment } from "../../settings/settings";
 import type { KnowledgeReference } from "../../knowledge-base/types";
 import type { KnowledgeBaseMaintainReportPayload } from "../../knowledge-base/maintain-report-card";
 import {
@@ -55,6 +55,7 @@ export type {
 export interface PiSessionContentBlockView {
   readonly type: string;
   readonly text?: string;
+  readonly mimeType?: string;
   readonly thinking?: string;
   readonly id?: string;
   readonly toolCallId?: string;
@@ -629,12 +630,14 @@ export class PiChatUiProjector {
       context.currentRunId = context.entryRuns.get(entry.id)
         ?? syntheticRunId(context.scope, entry.id);
       const text = textFromContent(message.content);
-      if (!text) return;
+      const images = imageAttachmentsFromContent(message.content);
+      if (!text && !images.length) return;
       upsertMessage(messages, {
         id: entryMessageId(context.scope, entry.id),
         role: "user",
         itemType: "user",
         text,
+        ...(images.length ? { images } : {}),
         status: "completed",
         runId: context.currentRunId,
         turnId: context.currentRunId,
@@ -777,7 +780,20 @@ export class PiChatUiProjector {
     event: Extract<PiChatRuntimeEvent, { type: "message_start" }>
   ): void {
     const id = runtimeMessageId(scope, event.messageKey);
-    const existing = view.messages.find((message) => message.id === id);
+    let existing = view.messages.find((message) => message.id === id);
+    if (!existing && event.role === "user") {
+      const acceptedUser = view.messages.find((message) =>
+        message.role === "user"
+        && message.runId === event.productRunId
+        && projectionIdentity(message.id)?.kind === "entry"
+      );
+      if (acceptedUser) {
+        removeMessage(view.messages, acceptedUser.id);
+        removeProvisional(view, acceptedUser.id);
+        existing = { ...acceptedUser, id };
+        upsertMessage(view.messages, existing);
+      }
+    }
     if (!existing) {
       upsertMessage(view.messages, {
         id,
@@ -1590,6 +1606,24 @@ function textFromContent(
     .join("");
 }
 
+function imageAttachmentsFromContent(
+  content: PiSessionMessageView["content"]
+): StoredAttachment[] {
+  if (!Array.isArray(content)) return [];
+  return content
+    .filter((block) => normalizedToken(block.type) === "image")
+    .map((block, index) => {
+      const mimeType = visibleText(block.mimeType);
+      return {
+        type: "image" as const,
+        name: `图片 ${index + 1}`,
+        path: "",
+        ...(mimeType ? { mimeType } : {}),
+        availability: "unavailable" as const
+      };
+    });
+}
+
 function diagnosticFromCustomEntry(
   entry: PiSessionBranchEntryView,
   context: BranchProjectionContext
@@ -1872,6 +1906,17 @@ export function piToolCallIdFromProjectedMessageId(
   return identity?.kind === "tool" ? identity.value : undefined;
 }
 
+export function piProjectedEntryMessageId(
+  piSessionId: string,
+  activeLeafId: string | null,
+  entryId: string
+): string {
+  return entryMessageId(
+    projectionScope(requireIdentity(piSessionId, "piSessionId"), activeLeafId),
+    requireIdentity(entryId, "entryId")
+  );
+}
+
 function reScopeMessageId(id: string, scope: string): string {
   const identity = projectionIdentity(id);
   if (identity?.kind === "entry") return entryMessageId(scope, identity.value);
@@ -2121,6 +2166,12 @@ function cloneProjectedMessage(message: Readonly<ChatMessage>): ChatMessage {
   return {
     ...message,
     ...(message.approval ? { approval: { ...message.approval } } : {}),
+    ...(message.attachments
+      ? { attachments: message.attachments.map((attachment) => ({ ...attachment })) }
+      : {}),
+    ...(message.images
+      ? { images: message.images.map((image) => ({ ...image })) }
+      : {}),
     ...(message.personalMemorySources
       ? {
           personalMemorySources: message.personalMemorySources.map(

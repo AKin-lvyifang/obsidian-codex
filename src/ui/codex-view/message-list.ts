@@ -734,9 +734,18 @@ export class CodexMessageListRenderer {
     if (message.images?.length) {
       const images = bodyHost.createDiv({ cls: "codex-message-images" });
       for (const image of message.images) {
+        if (image.availability === "unavailable" || !image.path) {
+          renderUnavailablePiImage(images, image);
+          continue;
+        }
         const img = images.createEl("img", { attr: { alt: image.name } });
         img.src = toImageSrc(env.app, image.path);
         img.onload = () => env.onScheduleMeasure();
+        img.onerror = () => {
+          const unavailable = renderUnavailablePiImage(images, image);
+          img.replaceWith(unavailable);
+          env.onScheduleMeasure();
+        };
         img.onclick = () => openImageOverlay(img.src);
       }
     }
@@ -2497,6 +2506,27 @@ function isAttentionProcessStatus(status: string | undefined): boolean {
     || status === "failed"
     || status === "denied"
     || status === "uncertain";
+}
+
+function renderUnavailablePiImage(
+  container: HTMLElement,
+  image: Readonly<StoredAttachment>
+): HTMLElement {
+  const unavailable = container.createDiv({
+    cls: "codex-message-attachment-chip codex-message-attachment-image is-disabled",
+    attr: {
+      role: "status",
+      title: "图片附件不可在本地打开",
+      "aria-label": `${image.name}：图片附件不可在本地打开`
+    }
+  });
+  const icon = unavailable.createSpan({ cls: "codex-message-attachment-icon" });
+  setIcon(icon, "image-off");
+  unavailable.createSpan({
+    cls: "codex-message-attachment-name",
+    text: `${image.name} · 图片附件不可在本地打开`
+  });
+  return unavailable;
 }
 
 function labelForDiffKind(kind: string): string {

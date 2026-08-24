@@ -1,5 +1,6 @@
 import { Notice } from "obsidian";
 import type {
+  PiChatPreparedImage,
   PiChatRuntimeEvent,
   PiConversationMemoryMode,
   PiConversationProjection,
@@ -7,12 +8,19 @@ import type {
   PiProductRunTerminalState,
   PiTaskPlanTransitionRequest
 } from "../../harness/pi-native/contracts";
+import { PI_IMAGE_INPUT_UNSUPPORTED_MESSAGE } from "../../harness/pi-native/contracts";
 import {
   PiChatUiProjector,
+  piEntryIdFromProjectedMessageId,
+  piProjectedEntryMessageId,
   type PiChatUiRunState,
   type PiChatUiViewModel
 } from "../../harness/pi-native/pi-chat-ui-projector";
-import type { ChatMessage, StoredSession } from "../../settings/settings";
+import type {
+  ChatMessage,
+  StoredAttachment,
+  StoredSession
+} from "../../settings/settings";
 import { newId } from "../../settings/settings";
 import { composerPrimaryActionForState } from "../composer-state";
 import { canStartQueuedTurn, type QueuedTurnItem } from "../turn-queue";
@@ -20,10 +28,18 @@ import { enabledSkillResources } from "../../resources/registry";
 import type { EchoInkResource } from "../../resources/types";
 import type { CodexViewTurnContext, MessageRenderFollowContext, QueuedTurnOutcome, QueuedTurnSource } from "./runner-context";
 import {
+  projectPiImageAttachments,
+  recordPiImageAttachmentsForEntry,
   rememberPiConversationProjection,
   selectedPiConversationDraftId
 } from "./pi-conversation-support";
 import { routeKnowledgeConversationCommand } from "../../knowledge-base/commands";
+import { preparePiChatImages } from "./pi-image-input";
+
+const activeComposerTransfers = new WeakMap<
+  CodexViewTurnContext,
+  Readonly<QueuedTurnItem>
+>();
 
 export async function sendMessage(view: CodexViewTurnContext): Promise<void> {
   const session = view.ensureSession();
@@ -71,7 +87,30 @@ export async function enqueueComposerDraft(view: CodexViewTurnContext): Promise<
   if (!item) return;
   const session = view.sessionById(item.sessionId);
   if (isActivePiChatRun(view, session)) {
-    if (!item.text.trim() || item.attachments.length || item.skill) {
+    if (
+      routeKnowledgeConversationCommand(item.text.trim()).kind === "maintain"
+      && item.attachments.length
+    ) {
+      new Notice("运行中的 Pi Follow-up 只支持文字；附件或 Skill 请留到下一轮发送。");
+      return;
+    }
+    if (item.attachments.some((attachment) => attachment.type !== "image")) {
+      new Notice("普通 Pi Chat 只支持图片附件；其他文件请移除后再发送。");
+      return;
+    }
+    if (item.attachments.length) {
+      if (hasMatchingQueuedComposerTransfer(view, item)) {
+        new Notice("这条图片消息已在队列中，等待当前 Pi 任务结束后发送");
+        return;
+      }
+      item.clearComposerAfterPiAcceptance = true;
+      view.turnQueue.enqueue(item);
+      view.renderQueue();
+      view.renderToolbar();
+      new Notice("图片消息已加入队列，将在当前 Pi 任务结束后发送");
+      return;
+    }
+    if (!item.text.trim() || item.skill) {
       new Notice("运行中的 Pi Follow-up 只支持文字；附件或 Skill 请留到下一轮发送。");
       return;
     }
@@ -256,10 +295,19 @@ export async function startNextQueuedTurn(view: CodexViewTurnContext, sessionId:
   view.renderQueue();
   view.renderToolbar();
   let outcome: QueuedTurnOutcome = "failed";
+  if (item.clearComposerAfterPiAcceptance === true) {
+    activeComposerTransfers.set(view, item);
+  }
   try {
     outcome = await view.startQueuedTurnItemSafely(item, "queue");
   } finally {
+    if (activeComposerTransfers.get(view)?.id === item.id) {
+      activeComposerTransfers.delete(view);
+    }
     view.queueStartInProgress = false;
+  }
+  if (outcome === "failed" && item.piUserEntryAccepted !== true) {
+    view.turnQueue.enqueueFront(item);
   }
   if (outcome !== "running") {
     await view.afterTurnSettled(item.sessionId, outcome === "completed");
@@ -316,6 +364,7 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
   let maintenanceScope: Awaited<
     ReturnType<CodexViewTurnContext["plugin"]["prepareEchoInkKnowledgeMaintenanceScope"]>
   > | undefined;
+  let preparedImages: Awaited<ReturnType<typeof preparePiChatImages>> = [];
   if (knowledgeCommand.kind === "maintain") {
     if (item.turnOptions.mode === "plan") {
       new Notice("/maintain 只在 Agent 模式执行；请先退出 Plan 模式。");
@@ -331,8 +380,12 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
       return "failed";
     }
   } else if (item.attachments.length) {
-    new Notice("Pi Chat 的附件入口尚未完成切换，本轮没有发送。");
-    return "failed";
+    try {
+      preparedImages = await preparePiChatImages(item.attachments);
+    } catch (error) {
+      new Notice(normalizePiChatError(error).message);
+      return "failed";
+    }
   }
   let currentSkill: EchoInkResource | null = null;
   if (item.skill) {
@@ -355,7 +408,7 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
     new Notice("所选 Vault Skill 缺少可加载的 contentPath 或名称，本轮没有发送。");
     return "failed";
   }
-  if (!submittedText) return "failed";
+  if (!submittedText && !preparedImages.length) return "failed";
   const projector = new PiChatUiProjector();
   let handle: Awaited<
     ReturnType<CodexViewTurnContext["plugin"]["submitPiChat"]>
@@ -382,23 +435,43 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
   view.renderToolbar();
   view.applyStatus();
   try {
+    const submittedAt = Date.now();
     handle = await view.plugin.submitPiChat({
       conversationId: session.id,
       text: submittedText,
-      submittedAt: Date.now(),
+      submittedAt,
       mode: item.turnOptions.mode === "plan" ? "plan" : "agent",
       memoryMode: piChatMemoryModeForGlobalSetting(
         view.plugin.settings?.memory?.useLongTermMemory !== false
       ),
       ...(skillPath && skillName ? { skillPath, skillName } : {}),
       ...(item.piDraftId ? { draftId: item.piDraftId } : {}),
-      ...(maintenanceScope ? { maintenanceScope } : {})
+      ...(maintenanceScope ? { maintenanceScope } : {}),
+      ...(preparedImages.length ? { images: preparedImages } : {})
     });
+    item.piUserEntryAccepted = true;
+    if (preparedImages.length) {
+      recordPiImageAttachmentsForEntry(
+        session,
+        handle.userEntryId,
+        preparedImages
+      );
+      await view.plugin.persistPiNativeSettings().catch(() => {
+        new Notice("图片已发送，但本地缩略图信息保存失败；重启后可能无法打开原图。");
+      });
+    }
     view.activeRunId = handle.productRunId;
     view.activeRunKind = "chat";
     view.activeRunSessionId = session.id;
     view.activeTurnId = handle.productRunId;
-    liveProjection = piChatLiveProjectionFromSession(session, handle);
+    liveProjection = piChatLiveProjectionFromSession(
+      session,
+      handle,
+      submittedText,
+      preparedImages,
+      submittedAt
+    );
+    applyPiChatLiveProjection(session, liveProjection);
     approvalSubscription = view.plugin.subscribePiAgentApproval({
       conversationId: handle.conversationId,
       piSessionId: handle.piSessionId,
@@ -432,7 +505,7 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
           new Notice("审批状态刷新失败，请等待当前工具状态更新。");
         });
     });
-    if (source === "composer") view.clearComposerDraft();
+    clearComposerAfterPiAcceptance(view, item, source);
     view.renderTabs();
     view.renderMessagesIfActive(session);
     view.renderToolbar();
@@ -525,6 +598,21 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
     }
     return queuedTurnOutcomeForPiTerminal(settledEvent.terminalState);
   } catch (error) {
+    if (piUserEntryWasAccepted(error)) {
+      item.piUserEntryAccepted = true;
+      const acceptedEntryId = piAcceptedUserEntryId(error);
+      if (preparedImages.length && acceptedEntryId) {
+        recordPiImageAttachmentsForEntry(
+          session,
+          acceptedEntryId,
+          preparedImages
+        );
+        await view.plugin.persistPiNativeSettings().catch(() => {
+          new Notice("图片已发送，但本地缩略图信息保存失败；重启后可能无法打开原图。");
+        });
+      }
+      clearComposerAfterPiAcceptance(view, item, source);
+    }
     if (handle) {
       await view.plugin.abortPiConversation(session.id).catch(() => undefined);
       await handle.result.catch(() => undefined);
@@ -538,7 +626,11 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
       view.renderMessagesIfActive(session);
     }
     const message = normalizePiChatError(error).message;
-    new Notice(`EchoInk Pi Chat 发送失败：${message}`);
+    new Notice(
+      message === PI_IMAGE_INPUT_UNSUPPORTED_MESSAGE
+        ? message
+        : `EchoInk Pi Chat 发送失败：${message}`
+    );
     return "failed";
   } finally {
     try {
@@ -605,7 +697,10 @@ function applyPiConversationProjection(
   target.title = projection.catalog.title;
   target.piSessionId = projection.catalog.piSessionId;
   target.defaultMemoryMode = projection.catalog.defaultMemoryMode;
-  target.messages = clonePiChatMessages(projection.messages);
+  target.messages = projectPiImageAttachments(
+    target,
+    clonePiChatMessages(projection.messages)
+  );
   if (projection.contextLedger) {
     target.contextLedger = structuredClone(projection.contextLedger);
   } else {
@@ -620,21 +715,51 @@ function applyPiChatLiveProjection(
   projection: Readonly<PiChatUiViewModel>
 ): void {
   session.piSessionId = projection.piSessionId;
-  session.messages = clonePiChatMessages(projection.messages);
+  session.messages = projectPiImageAttachments(
+    session,
+    clonePiChatMessages(projection.messages)
+  );
 }
 
 function piChatLiveProjectionFromSession(
   session: Readonly<StoredSession>,
   handle: NonNullable<
     Awaited<ReturnType<CodexViewTurnContext["plugin"]["submitPiChat"]>>
-  >
+  >,
+  submittedText: string,
+  preparedImages: readonly Readonly<PiChatPreparedImage>[],
+  submittedAt: number
 ): PiChatUiViewModel {
+  const messages = clonePiChatMessages(session.messages);
+  if (preparedImages.length) {
+    const acceptedUserMessage: ChatMessage = {
+      id: piProjectedEntryMessageId(
+        handle.piSessionId,
+        null,
+        handle.userEntryId
+      ),
+      role: "user",
+      itemType: "user",
+      text: submittedText,
+      images: preparedImages.map(({ attachment }) => ({ ...attachment })),
+      status: "completed",
+      runId: handle.productRunId,
+      turnId: handle.productRunId,
+      createdAt: submittedAt,
+      completedAt: submittedAt
+    };
+    const existingIndex = messages.findIndex((message) =>
+      piEntryIdFromProjectedMessageId(message.id) === handle.userEntryId
+    );
+    if (existingIndex >= 0) messages[existingIndex] = acceptedUserMessage;
+    else messages.push(acceptedUserMessage);
+  }
   return {
     piSessionId: handle.piSessionId,
     activeLeafId: null,
     productRunId: handle.productRunId,
     runState: "running",
-    messages: clonePiChatMessages(session.messages),
+    messages,
     diagnostics: [],
     queuedSteering: [],
     queuedFollowUp: [],
@@ -716,6 +841,82 @@ function queuedTurnOutcomeForPiTerminal(
 
 function normalizePiChatError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
+}
+
+function piUserEntryWasAccepted(error: unknown): boolean {
+  return Boolean(
+    error
+    && typeof error === "object"
+    && (error as { piUserEntryAccepted?: unknown }).piUserEntryAccepted === true
+  );
+}
+
+function piAcceptedUserEntryId(error: unknown): string | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const value = (error as { piUserEntryId?: unknown }).piUserEntryId;
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function clearComposerAfterPiAcceptance(
+  view: CodexViewTurnContext,
+  item: Readonly<QueuedTurnItem>,
+  source: QueuedTurnSource
+): void {
+  if (
+    (source === "composer" || item.clearComposerAfterPiAcceptance === true)
+    && composerStillMatchesQueuedTurn(view, item)
+  ) {
+    view.clearComposerDraft();
+  }
+}
+
+function hasMatchingQueuedComposerTransfer(
+  view: CodexViewTurnContext,
+  item: Readonly<QueuedTurnItem>
+): boolean {
+  const active = activeComposerTransfers.get(view);
+  return Boolean(
+    active
+    && active.sessionId === item.sessionId
+    && queuedTurnDraftsMatch(active, item)
+  ) || view.turnQueue.itemsForSession(item.sessionId).some((queued) =>
+    queued.clearComposerAfterPiAcceptance === true
+    && queuedTurnDraftsMatch(queued, item)
+  );
+}
+
+function composerStillMatchesQueuedTurn(
+  view: CodexViewTurnContext,
+  item: Readonly<QueuedTurnItem>
+): boolean {
+  return view.plugin.settings.activeSessionId === item.sessionId
+    && view.inputEl.value.trim() === item.text
+    && attachmentListsMatch(view.attachments, item.attachments)
+    && (view.selectedSkill?.id ?? null) === (item.skill?.id ?? null);
+}
+
+function queuedTurnDraftsMatch(
+  left: Readonly<QueuedTurnItem>,
+  right: Readonly<QueuedTurnItem>
+): boolean {
+  return left.text === right.text
+    && attachmentListsMatch(left.attachments, right.attachments)
+    && (left.skill?.id ?? null) === (right.skill?.id ?? null);
+}
+
+function attachmentListsMatch(
+  left: readonly Readonly<StoredAttachment>[],
+  right: readonly Readonly<StoredAttachment>[]
+): boolean {
+  return left.length === right.length
+    && left.every((attachment, index) => {
+      const candidate = right[index];
+      return candidate !== undefined
+        && attachment.type === candidate.type
+        && attachment.name === candidate.name
+        && attachment.path === candidate.path
+        && attachment.mimeType === candidate.mimeType;
+    });
 }
 
 function isActivePiChatRun(

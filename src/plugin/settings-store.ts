@@ -6,6 +6,7 @@ import {
 } from "../harness/conversation/conversation-mutation-lane";
 import {
   normalizeSettingsData,
+  sanitizeStoredPiImageAttachments,
   sanitizeCredentialSettingsForDataSave,
   type ChatMessage,
   type ApiProviderConfig,
@@ -452,6 +453,14 @@ export function settingsForDataSave(settings: CodexForObsidianSettings): CodexFo
   sanitizeCredentialSettingsForDataSave(data);
   for (const session of data.sessions) {
     session.messages = [];
+    const normalizedImageMetadata = session.bodyAuthority === "pi_session_only"
+      ? sanitizeStoredPiImageAttachments(session.piImageAttachments)
+      : undefined;
+    if (normalizedImageMetadata) {
+      session.piImageAttachments = normalizedImageMetadata;
+    } else {
+      delete session.piImageAttachments;
+    }
   }
   return data;
 }

@@ -28,6 +28,7 @@ import {
 import {
   createPiNativeControlledProvider,
   createPiNativeModelFromConfiguration,
+  piModelSupportsImageInput,
   PiNativeModelMetadataError
 } from "../harness/pi-native/pi-native-controlled-provider";
 import {
@@ -1269,6 +1270,7 @@ async function createProductionAgentSession(input: {
       imageInput: configured.imageInput
     }
   });
+  const supportsImageInput = piModelSupportsImageInput(model);
   let contextBudget: PiEffectiveInputBudget;
   try {
     contextBudget = calculatePiEffectiveInputBudget({
@@ -1573,7 +1575,7 @@ async function createProductionAgentSession(input: {
     enableSkillCommands: true,
     enableInstallTelemetry: false,
     enableAnalytics: false,
-    images: { blockImages: !configured.imageInput }
+    images: { blockImages: !supportsImageInput }
   }, { projectTrusted: false });
   const agentDir = path.join(
     input.catalog.vaultRootPath,

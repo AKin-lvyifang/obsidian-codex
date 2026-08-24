@@ -1,9 +1,19 @@
+import { existsSync } from "node:fs";
 import type CodexForObsidianPlugin from "../../main";
 import type {
+  PiChatPreparedImage,
   PiConversationDraftRecord,
   PiConversationProjection,
   PiConversationSupportState
 } from "../../harness/pi-native/contracts";
+import { piEntryIdFromProjectedMessageId } from "../../harness/pi-native/pi-chat-ui-projector";
+import {
+  sanitizeStoredPiImageAttachments,
+  type ChatMessage,
+  type StoredAttachment,
+  type StoredPiImageAttachmentMetadata,
+  type StoredSession
+} from "../../settings/settings";
 
 interface PiConversationUiState {
   readonly supportByConversation: Map<string, PiConversationSupportState>;
@@ -118,6 +128,106 @@ export function isPiConversationRecovering(
   conversationId: string
 ): boolean {
   return requireState(plugin).recoveringConversations.has(conversationId);
+}
+
+export function recordPiImageAttachmentsForEntry(
+  session: StoredSession,
+  entryIdValue: string,
+  images: readonly Readonly<PiChatPreparedImage>[]
+): void {
+  const entryId = entryIdValue.trim();
+  if (!entryId || !images.length) return;
+  const metadata = images.map(({ attachment }) => Object.freeze({
+    name: attachment.name,
+    path: attachment.path,
+    mimeType: attachment.mimeType
+  }));
+  const normalized = sanitizeStoredPiImageAttachments({
+    ...(session.piImageAttachments ?? {}),
+    [entryId]: metadata
+  });
+  if (normalized) session.piImageAttachments = normalized;
+}
+
+export function projectPiImageAttachments(
+  session: Readonly<StoredSession>,
+  messages: readonly Readonly<ChatMessage>[]
+): ChatMessage[] {
+  return messages.map((message) => {
+    if (message.role !== "user" || !message.images?.length) {
+      return { ...message };
+    }
+    const entryId = piEntryIdFromProjectedMessageId(message.id);
+    const metadata = entryId
+      ? session.piImageAttachments?.[entryId]
+      : undefined;
+    return {
+      ...message,
+      images: message.images.map((fallback, index) =>
+        localPiImageAttachment(metadata?.[index], fallback, index)
+      )
+    };
+  });
+}
+
+export function copyPiImageAttachmentsForProjection(
+  source: Readonly<StoredSession>,
+  target: StoredSession,
+  messages: readonly Readonly<ChatMessage>[]
+): void {
+  const copied: Record<string, readonly StoredPiImageAttachmentMetadata[]> = {};
+  for (const message of messages) {
+    if (message.role !== "user" || !message.images?.length) continue;
+    const entryId = piEntryIdFromProjectedMessageId(message.id);
+    const metadata = entryId
+      ? source.piImageAttachments?.[entryId]
+      : undefined;
+    if (entryId && metadata?.length) {
+      copied[entryId] = metadata.map((attachment) => ({ ...attachment }));
+    }
+  }
+  const normalized = sanitizeStoredPiImageAttachments(copied);
+  if (normalized) target.piImageAttachments = normalized;
+  else delete target.piImageAttachments;
+}
+
+export function piComposerImageAttachmentsForEntry(
+  session: Readonly<StoredSession>,
+  entryIdValue: string
+): StoredAttachment[] {
+  const metadata = session.piImageAttachments?.[entryIdValue.trim()] ?? [];
+  return metadata.map((attachment) => ({
+    type: "image",
+    name: attachment.name,
+    path: attachment.path,
+    mimeType: attachment.mimeType
+  }));
+}
+
+function localPiImageAttachment(
+  metadata: Readonly<StoredPiImageAttachmentMetadata> | undefined,
+  fallback: Readonly<StoredAttachment>,
+  index: number
+): StoredAttachment {
+  if (!metadata) {
+    return {
+      ...fallback,
+      type: "image",
+      name: fallback.name || `图片 ${index + 1}`,
+      availability: fallback.path && existsSync(fallback.path)
+        ? "available"
+        : "unavailable"
+    };
+  }
+  return {
+    type: "image",
+    name: metadata.name,
+    path: metadata.path,
+    mimeType: metadata.mimeType,
+    availability: metadata.path && existsSync(metadata.path)
+      ? "available"
+      : "unavailable"
+  };
 }
 
 function requireState(plugin: CodexForObsidianPlugin): PiConversationUiState {

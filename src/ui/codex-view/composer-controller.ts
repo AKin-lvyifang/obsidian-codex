@@ -36,6 +36,7 @@ import {
   clearSelectedPiConversationDraft,
   isPiConversationRecovering,
   piConversationSupport,
+  projectPiImageAttachments,
   refreshPiConversationSupport,
   rememberPiConversationProjection,
   selectPiConversationDraft,
@@ -362,7 +363,10 @@ export async function recoverPiConversation(
     session.piSessionId = projection.catalog.piSessionId;
     session.defaultMemoryMode = projection.catalog.defaultMemoryMode;
     session.bodyAuthority = "pi_session_only";
-    session.messages = structuredClone(projection.messages);
+    session.messages = projectPiImageAttachments(
+      session,
+      structuredClone(projection.messages)
+    );
     if (projection.contextLedger) {
       session.contextLedger = structuredClone(projection.contextLedger);
     } else {
