@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { resizeImage } from "@earendil-works/pi-coding-agent";
+import { saveClipboardImageAttachment } from "../../core/clipboard-images";
 import {
   PiImageInputError,
   detectPiImageMimeType,
@@ -31,11 +32,31 @@ export async function runPiImageInputTests(): Promise<void> {
   const root = await mkdtemp(path.join(tmpdir(), "echoink-pi-image-"));
   try {
     await directFormatsStayOrderedAndUseContentDetection(root);
+    await clipboardImagesKeepInternalPathsOutOfDisplayMetadata(root);
     await publicConversionAndResizeProducePiContent(root);
     await unconvertibleAndOrdinaryFilesFailBeforePayload(root);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+}
+
+async function clipboardImagesKeepInternalPathsOutOfDisplayMetadata(
+  root: string
+): Promise<void> {
+  const attachment = await saveClipboardImageAttachment(
+    new File([PNG_1X1], "image.png", { type: "image/png" }),
+    {
+      vaultPath: root,
+      pluginDir: "echoink-test",
+      timestamp: 1_720_000_000_000,
+      index: 1
+    }
+  );
+  assert.equal(attachment.name, "粘贴图片 2.png");
+  assert.equal(attachment.mimeType, "image/png");
+  assert.equal(attachment.availability, "available");
+  assert.match(path.basename(attachment.path), /^clipboard-1720000000000-1\.png$/u);
+  assert.doesNotMatch(attachment.name, /clipboard-/u);
 }
 
 async function directFormatsStayOrderedAndUseContentDetection(
@@ -66,6 +87,10 @@ async function directFormatsStayOrderedAndUseContentDetection(
     prepared.map((image) => image.content.mimeType),
     fixtures.map(([, , mimeType]) => mimeType)
   );
+  assert.deepEqual(
+    prepared.map((image) => image.attachment.availability),
+    fixtures.map(() => "available")
+  );
   assert.equal(prepared[0]?.attachment.mimeType, "image/png");
   assert.equal(detectPiImageMimeType(PNG_1X1, "image/jpeg"), "image/png");
 }
@@ -82,6 +107,14 @@ async function publicConversionAndResizeProducePiContent(
   });
   assert.equal(converted.attachment.mimeType, "image/bmp");
   assert.equal(converted.content.mimeType, "image/png");
+
+  const pasted = await preparePiChatImage({
+    type: "image",
+    name: "clipboard-1720000000000-0.png",
+    path: path.join(root, "one.png")
+  }, 1);
+  assert.equal(pasted.attachment.name, "粘贴图片 2.png");
+  assert.doesNotMatch(pasted.attachment.name, /clipboard-/u);
 
   const oversizedPath = path.join(root, "oversized.bmp");
   await writeFile(oversizedPath, bmp(2_501, 1));
@@ -121,6 +154,17 @@ async function unconvertibleAndOrdinaryFilesFailBeforePayload(
     (error: unknown) => error instanceof PiImageInputError
       && error.code === "image_conversion_failed"
       && /本轮没有发送/u.test(error.message)
+  );
+  await assert.rejects(
+    preparePiChatImage({
+      type: "image",
+      name: "clipboard-1720000000000-0.png",
+      path: path.join(root, "missing.png")
+    }),
+    (error: unknown) => error instanceof PiImageInputError
+      && error.code === "image_unreadable"
+      && /粘贴图片 1\.png/u.test(error.message)
+      && !/clipboard-/u.test(error.message)
   );
   const fakeHeif = Buffer.from([
     0x00, 0x00, 0x00, 0x18,

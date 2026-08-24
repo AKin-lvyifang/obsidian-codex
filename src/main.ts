@@ -78,6 +78,10 @@ import type {
   PiAgentApprovalRunIdentity,
   PiAgentApprovalSubscription
 } from "./plugin/pi-agent-approval-broker";
+import type {
+  PiTurnInteractionDecisionBinding,
+  PiTurnInteractionIdentity
+} from "./plugin/pi-turn-interaction-broker";
 import { PiLocalDataService } from "./plugin/pi-local-data-service";
 import { pluginDataDir } from "./plugin/plugin-data-paths";
 import {
@@ -576,6 +580,11 @@ export default class CodexForObsidianPlugin extends Plugin {
     identity: Readonly<PiAgentApprovalIdentity>
   ): PiAgentApprovalDecisionBinding | null {
     return this.piRuntimeBundle?.approvalBroker.bindingFor(identity) ?? null;
+  }
+  piTurnInteractionBinding(
+    identity: Readonly<PiTurnInteractionIdentity>
+  ): PiTurnInteractionDecisionBinding | null {
+    return this.piRuntimeBundle?.interactionBroker.bindingFor(identity) ?? null;
   }
   subscribePiAgentApproval(
     identity: Readonly<PiAgentApprovalRunIdentity>,

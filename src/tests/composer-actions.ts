@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { TFile, type App } from "obsidian";
 import {
-  composerAttachmentImageSrc,
   renderComposerAttachments,
   renderComposerToolbar,
   type ComposerToolbarCallbacks,
   type ComposerToolbarState
 } from "../ui/codex-view/composer";
+import { createAttachmentResourceResolver } from "../ui/codex-view/attachment-resource";
 import {
   composerModelMenuState,
   composerProviderModelOptions,
@@ -26,11 +27,12 @@ export async function runComposerActionTests(): Promise<void> {
     const send = renderAction();
     assert.equal(send.primary.getAttribute("aria-label"), "发送");
     assert.equal(send.primary.hasClass("is-send-action"), true);
-    assert.equal(send.primary.querySelectorAll(".echoink-animate-icon-send").length, 1);
+    assert.equal(send.primary.querySelectorAll(".echoink-animate-icon-send-horizontal").length, 1);
     assert.equal(
       send.primary.querySelector("path")?.getAttribute("d"),
-      "M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z"
+      "M3.714 3.048a.498.498 0 0 0-.683.627l2.843 7.627a2 2 0 0 1 0 1.396l-2.842 7.627a.498.498 0 0 0 .682.627l18-8.5a.5.5 0 0 0 0-.904z"
     );
+    assert.equal(send.primary.querySelectorAll("path")[1]?.getAttribute("d"), "M6 12h16");
     send.primary.click();
     assert.equal(send.calls.send, 1, "ordinary send keeps onSendMessage");
     send.mic.click();
@@ -41,12 +43,15 @@ export async function runComposerActionTests(): Promise<void> {
 
     const enqueue = renderAction({ running: true, hasDraft: true });
     assert.equal(enqueue.primary.hasClass("is-queue-action"), true);
-    assert.equal(enqueue.primary.querySelector(".echoink-animate-icon-send"), null);
+    assert.equal(enqueue.primary.querySelector(".echoink-animate-icon-send-horizontal"), null);
     enqueue.primary.click();
     assert.equal(enqueue.calls.enqueue, 1);
 
     const stop = renderAction({ running: true, hasDraft: false });
     assert.equal(stop.primary.hasClass("is-stop-action"), true);
+    assert.equal(stop.primary.querySelectorAll(".echoink-animate-icon-circle-stop").length, 1);
+    assert.equal(stop.primary.querySelector("circle")?.getAttribute("r"), "10");
+    assert.equal(stop.primary.querySelector("rect")?.getAttribute("rx"), "1");
     stop.primary.click();
     assert.equal(stop.calls.stop, 1);
 
@@ -65,14 +70,25 @@ export async function runComposerActionTests(): Promise<void> {
 
     const attachmentContainer = new ComposerTestElement("div");
     const removedAttachments: string[] = [];
+    const vaultFile = Object.assign(Object.create(TFile.prototype), {
+      path: "cover #1.png"
+    }) as TFile;
+    const attachmentResolver = createAttachmentResourceResolver({
+      vault: {
+        getAbstractFileByPath: (path: string) => path === vaultFile.path ? vaultFile : null,
+        getResourcePath: (file: TFile) => `app://echoink-vault/${encodeURIComponent(file.path)}`
+      }
+    } as unknown as App, "/tmp/Echo Ink");
     renderComposerAttachments(
       attachmentContainer as unknown as HTMLElement,
       {
         selectedSkill: null,
         attachments: [
           { type: "image", name: "cover #1.png", path: "/tmp/Echo Ink/cover #1.png" },
-          { type: "file", name: "requirements.md", path: "/tmp/Echo Ink/requirements.md" }
-        ]
+          { type: "file", name: "requirements.md", path: "/tmp/Echo Ink/requirements.md" },
+          { type: "image", name: "clipboard-1720000000000-1.png", path: "/tmp/Echo Ink/missing.png" }
+        ],
+        attachmentResolver
       },
       {
         onRemoveSkill: () => undefined,
@@ -81,8 +97,9 @@ export async function runComposerActionTests(): Promise<void> {
     );
     const thumbnail = attachmentContainer.querySelector(".codex-attachment-thumbnail")!;
     const image = thumbnail.querySelector("img")!;
-    assert.equal(image.src, "file:///tmp/Echo%20Ink/cover%20%231.png");
-    assert.equal(thumbnail.getAttribute("title"), "/tmp/Echo Ink/cover #1.png");
+    assert.equal(image.src, "app://echoink-vault/cover%20%231.png");
+    assert.equal(thumbnail.getAttribute("title"), "cover #1.png");
+    assert.equal(thumbnail.getAttribute("role"), "listitem");
     image.onerror?.();
     assert.equal(thumbnail.hasClass("is-broken"), true, "unsupported image switches to its fallback");
     assert.ok(thumbnail.querySelector(".codex-attachment-thumbnail-fallback"));
@@ -91,31 +108,60 @@ export async function runComposerActionTests(): Promise<void> {
     imageRemove.click();
 
     const fileChip = attachmentContainer.querySelector(".codex-attachment-file-chip")!;
-    assert.equal(fileChip.getAttribute("title"), "/tmp/Echo Ink/requirements.md");
+    assert.equal(fileChip.getAttribute("title"), "requirements.md");
     assert.equal(fileChip.querySelector(".codex-attachment-name")?.textContent, "requirements.md");
     assert.ok(fileChip.querySelector(".codex-attachment-file-icon"));
     const fileRemove = fileChip.querySelector(".codex-attachment-file-remove")!;
     assert.equal(fileRemove.getAttribute("aria-label"), "移除文件：requirements.md");
     fileRemove.click();
+    const attachmentList = attachmentContainer.querySelector(".codex-ai-elements-attachments-list")!;
+    assert.equal(attachmentList.getAttribute("data-ai-elements-pattern"), "attachments");
+    assert.equal(attachmentList.getAttribute("data-attachment-variant"), "grid");
+    assert.equal(attachmentList.getAttribute("role"), "list");
+    const thumbnails = attachmentContainer.querySelectorAll(".codex-attachment-thumbnail");
+    const missingThumbnail = thumbnails[1]!;
+    assert.equal(missingThumbnail.hasClass("is-broken"), true);
+    assert.equal(missingThumbnail.getAttribute("aria-label"), "图片：粘贴图片 2.png，无法预览");
+    assert.equal(
+      missingThumbnail.querySelector(".codex-attachment-thumbnail-name")?.textContent,
+      "粘贴图片 2.png · 无法预览"
+    );
+    assert.doesNotMatch(renderedComposerText(attachmentContainer), /clipboard-/u);
     assert.deepEqual(removedAttachments, [
       "/tmp/Echo Ink/cover #1.png",
       "/tmp/Echo Ink/requirements.md"
     ]);
-    assert.equal(composerAttachmentImageSrc("file:///tmp/already.png"), "file:///tmp/already.png");
+
+    const missing = attachmentResolver.resolve({
+      type: "image",
+      name: "clipboard-1720000000000-0.png",
+      path: "/tmp/Echo Ink/missing.png"
+    });
+    assert.equal(missing.displayName, "粘贴图片 1.png");
+    assert.equal(missing.availability, "unavailable");
+    assert.equal(missing.resourceUri, undefined);
 
     const composerSource = readFileSync("src/ui/codex-view/composer.ts", "utf8");
     const iconSource = readFileSync("src/ui/animate-icon.ts", "utf8");
     const css = readFileSync("styles.css", "utf8");
     const turnRunnerSource = readFileSync("src/ui/codex-view/turn-runner.ts", "utf8");
-    assert.doesNotMatch(composerSource, /send-horizontal/u);
+    assert.match(composerSource, /renderAnimateIcon\(sendButton, "send-horizontal"\)/u);
+    assert.match(composerSource, /renderAnimateIcon\(sendButton, "circle-stop"\)/u);
+    assert.match(composerSource, /queueEl[\s\S]*workspaceEl[\s\S]*attachmentsEl[\s\S]*inputEl/u);
     assert.match(iconSource, /M19 10v2a7 7 0 0 1-14 0v-2/u);
-    assert.match(css, /@keyframes echoink-animate-send/u);
+    assert.match(iconSource, /M3\.714 3\.048/u);
+    assert.match(iconSource, /circle\("12", "12", "10"/u);
+    assert.match(css, /@keyframes echoink-animate-send-horizontal/u);
+    assert.match(css, /@keyframes echoink-animate-circle-stop-ring/u);
+    assert.match(css, /@keyframes echoink-animate-circle-stop-symbol/u);
     assert.match(css, /@keyframes echoink-animate-mic/u);
-    assert.match(css, /prefers-reduced-motion:\s*reduce/u);
-    assert.match(css, /\.codex-attachment-thumbnail \{[\s\S]*?width:\s*72px;[\s\S]*?height:\s*72px;/u);
+    assert.match(css, /prefers-reduced-motion:\s*no-preference/u);
+    assert.match(css, /\.codex-attachment-thumbnail \{[\s\S]*?width:\s*84px;[\s\S]*?height:\s*84px;/u);
     assert.match(css, /\.codex-attachment-thumbnail-image \{[\s\S]*?object-fit:\s*cover;/u);
-    assert.match(css, /\.codex-attachment-thumbnail-remove \{[\s\S]*?width:\s*26px;[\s\S]*?height:\s*26px;/u);
-    assert.match(css, /@media \(max-width:\s*560px\)[\s\S]*?\.codex-attachment-thumbnail \{[\s\S]*?width:\s*64px;[\s\S]*?height:\s*64px;/u);
+    assert.match(css, /\.codex-attachment-thumbnail-remove \{[\s\S]*?width:\s*28px;[\s\S]*?height:\s*28px;/u);
+    assert.match(css, /@media \(max-width:\s*560px\)[\s\S]*?\.codex-attachment-thumbnail \{[\s\S]*?width:\s*72px;[\s\S]*?height:\s*72px;/u);
+    assert.match(css, /\.codex-composer-send-button\.codex-send-button\.is-stop-action\s*\{[\s\S]*?color:\s*var\(--text-normal\);[\s\S]*?box-shadow:\s*none\s*!important;/u);
+    assert.match(css, /\.codex-composer-send-button\.codex-send-button\.is-stop-action:is\(:hover, :focus-visible\)[\s\S]*?--echoink-conversation-status-danger/u);
     assert.doesNotMatch(turnRunnerSource, /Pi Chat 的附件入口尚未完成切换，本轮没有发送/u);
     assert.match(turnRunnerSource, /preparePiChatImages/u);
     assert.match(turnRunnerSource, /preparedImages\.length/u);
@@ -124,6 +170,10 @@ export async function runComposerActionTests(): Promise<void> {
   } finally {
     (globalThis as unknown as { document?: Document }).document = originalDocument;
   }
+}
+
+function renderedComposerText(root: ComposerTestElement): string {
+  return [root.textContent, ...root.children.map(renderedComposerText)].join(" ");
 }
 
 async function assertExactComposerProviderModelSelection(): Promise<void> {

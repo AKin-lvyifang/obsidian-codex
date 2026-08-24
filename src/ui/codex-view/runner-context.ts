@@ -4,6 +4,7 @@ import type { ProviderErrorDiagnostic } from "../../core/provider-diagnostics";
 import type { TurnOptions } from "../turn-options";
 import type { EchoInkResource } from "../../resources/types";
 import type { ChatMessage, StoredAttachment, StoredSession } from "../../settings/settings";
+import type { EchoInkTurnInteraction } from "../../types/conversation-turn";
 import type { ComposerPrimaryActionState } from "../composer-state";
 import type { QueuedTurnItem, RuntimeTurnQueue } from "../turn-queue";
 
@@ -75,6 +76,11 @@ export interface CodexViewTurnContext extends CodexViewRunnerBaseContext, Messag
   renderTabs(): void;
   renderMessages(options?: RunnerMessageRenderOptions): void;
   renderMessagesIfActive(session: StoredSession, updatedMessage?: ChatMessage): void;
+  setPendingInteraction(
+    sessionId: string,
+    interaction: Readonly<EchoInkTurnInteraction> | null,
+    expectedTurnId?: string
+  ): void;
   ensureThinkingMessage(session: StoredSession, title: string, text: string): void;
   dismissThinkingMessage?(session: StoredSession): void;
   attachTurnIdToRun(session: StoredSession, turnId: string): void;

@@ -78,6 +78,23 @@ export class PiProviderProtocolDispatcher {
       }
     );
   }
+
+  streamSimple(input: {
+    model: Model<Api>;
+    context: Context;
+    apiKey: string;
+    options: Omit<SimpleStreamOptions, "apiKey">;
+  }): AssistantMessageEventStream {
+    const protocol = requireApiProviderProtocol(input.model.api);
+    return this.adapters[protocol].streamSimple(
+      input.model,
+      input.context,
+      {
+        ...input.options,
+        apiKey: input.apiKey
+      }
+    );
+  }
 }
 
 export class PiProviderProtocolTransport
@@ -112,12 +129,15 @@ implements ControlledPiStreamPort {
     let responseStatus: number | null = null;
     try {
       const upstream = (this.options.dispatcher
-        ?? new PiProviderProtocolDispatcher()).stream({
+        ?? new PiProviderProtocolDispatcher()).streamSimple({
         model: input.model,
         context: input.context,
         apiKey,
         options: {
           signal: input.options.signal,
+          ...(input.options.reasoning
+            ? { reasoning: input.options.reasoning }
+            : {}),
           maxTokens: input.options.maxTokens,
           temperature: input.options.temperature,
           cacheRetention: input.options.cacheRetention,

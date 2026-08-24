@@ -7,6 +7,7 @@ import type {
   Message,
   Model,
   TextContent,
+  ThinkingContent,
   ToolCall,
   Usage
 } from "@earendil-works/pi-ai";
@@ -42,7 +43,37 @@ export function buildDeepSeekBody(
       }
     }));
   }
+  applyProviderReasoningOptions(body, input);
   return deepFreeze(body);
+}
+
+function applyProviderReasoningOptions(
+  body: Record<string, unknown>,
+  input: ControlledPiStreamInput
+): void {
+  if (
+    input.model.api !== "openai-completions"
+    || !input.model.reasoning
+  ) return;
+  const model = input.model as Model<"openai-completions">;
+  const level = input.options.reasoning;
+  const mapped = level ? model.thinkingLevelMap?.[level] : undefined;
+  const effort = mapped === null ? undefined : mapped ?? level;
+  const format = model.compat?.thinkingFormat;
+  if (format === "deepseek") {
+    body.thinking = { type: effort ? "enabled" : "disabled" };
+  } else if (format === "qwen") {
+    body.enable_thinking = Boolean(effort);
+  }
+  if (
+    effort
+    && model.compat?.supportsReasoningEffort !== false
+  ) {
+    body.reasoning_effort = effort;
+  } else if (!effort) {
+    const off = model.thinkingLevelMap?.off;
+    if (typeof off === "string") body.reasoning_effort = off;
+  }
 }
 
 function contextMessages(context: Context): unknown[] {
@@ -71,6 +102,12 @@ function toDeepSeekMessage(message: Message): unknown {
     .filter((entry): entry is TextContent => entry.type === "text")
     .map((entry) => entry.text)
     .join("");
+  const reasoning = message.content
+    .filter((entry): entry is ThinkingContent =>
+      entry.type === "thinking" && entry.redacted !== true
+    )
+    .map((entry) => entry.thinking)
+    .join("\n");
   const toolCalls = message.content
     .filter((entry): entry is ToolCall => entry.type === "toolCall")
     .map((entry) => ({
@@ -84,6 +121,7 @@ function toDeepSeekMessage(message: Message): unknown {
   return {
     role: "assistant",
     content: text || null,
+    ...(reasoning ? { reasoning_content: reasoning } : {}),
     ...(toolCalls.length ? { tool_calls: toolCalls } : {})
   };
 }
@@ -122,6 +160,7 @@ export function parseDeepSeekSseResponse(
     throw new Error("deepseek_sse_invalid");
   }
   let text = "";
+  let reasoning = "";
   let finishReason = "";
   let responseId: string | undefined;
   let responseModel: string | undefined;
@@ -164,6 +203,13 @@ export function parseDeepSeekSseResponse(
     if (typeof choice.delta.content === "string") {
       text += choice.delta.content;
     }
+    for (const field of ["reasoning_content", "reasoning", "reasoning_text"] as const) {
+      const value = choice.delta[field];
+      if (typeof value === "string" && value.length > 0) {
+        reasoning += value;
+        break;
+      }
+    }
     if (Array.isArray(choice.delta.tool_calls)) {
       for (const candidate of choice.delta.tool_calls) {
         appendToolCallDelta(toolCalls, candidate);
@@ -174,7 +220,8 @@ export function parseDeepSeekSseResponse(
     throw new Error("deepseek_sse_incomplete");
   }
 
-  const content: Array<TextContent | ToolCall> = [];
+  const content: Array<TextContent | ThinkingContent | ToolCall> = [];
+  if (reasoning) content.push({ type: "thinking", thinking: reasoning });
   if (text) content.push({ type: "text", text });
   for (const [, tool] of [...toolCalls.entries()].sort(
     ([left], [right]) => left - right
@@ -263,6 +310,20 @@ export function emitBufferedMessage(
         type: "text_end",
         contentIndex: index,
         content: content.text,
+        partial
+      });
+    } else if (content.type === "thinking") {
+      stream.push({ type: "thinking_start", contentIndex: index, partial });
+      stream.push({
+        type: "thinking_delta",
+        contentIndex: index,
+        delta: content.thinking,
+        partial
+      });
+      stream.push({
+        type: "thinking_end",
+        contentIndex: index,
+        content: content.thinking,
         partial
       });
     } else if (content.type === "toolCall") {

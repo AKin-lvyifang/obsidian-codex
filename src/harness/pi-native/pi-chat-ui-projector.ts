@@ -37,6 +37,16 @@ import {
   type EchoInkReasoningSummarySnapshot
 } from "../../types/reasoning-summary";
 import { closeReasoningSummary } from "./pi-reasoning-summary";
+import {
+  ECHOINK_ASSISTANT_TURN_VIEW_VERSION,
+  cloneEchoInkAssistantTurn,
+  cloneEchoInkTurnInteraction,
+  turnInteractionRecordFromSessionEntry,
+  type EchoInkAssistantTurnStatus,
+  type EchoInkTurnInteraction,
+  type EchoInkTurnInteractionRecord
+} from "../../types/conversation-turn";
+import { PI_USER_QUESTION_TOOL_ID } from "./pi-user-question-tool";
 
 export type {
   PiChatUiToolApprovalStatus,
@@ -140,6 +150,8 @@ export interface PiChatUiViewModel {
   provisionalMessageIds: string[];
   /** Tool calls visible on the active Branch without a durable Tool Result. */
   pendingToolCallIds: string[];
+  /** Current-session request shown by the Composer Interaction Dock. */
+  pendingInteraction?: Readonly<EchoInkTurnInteraction>;
   updatedAt: number;
 }
 
@@ -359,6 +371,21 @@ export class PiChatUiProjector {
           event.summary
         );
         break;
+      case "provider_reasoning_start":
+        this.projectProviderReasoningStart(view, scope, event);
+        break;
+      case "provider_reasoning_delta":
+        this.projectProviderReasoningDelta(view, event);
+        break;
+      case "provider_reasoning_end":
+        this.projectProviderReasoningEnd(view, event);
+        break;
+      case "interaction_requested":
+        this.projectInteractionRequested(view, scope, event);
+        break;
+      case "interaction_resolved":
+        this.projectInteractionResolved(view, scope, event);
+        break;
       case "knowledge_progress":
         this.projectKnowledgeProgress(view, scope, event);
         break;
@@ -408,6 +435,12 @@ export class PiChatUiProjector {
         break;
       case "agent_settled":
         view.runState = "finalizing";
+        updateAssistantTurnStatus(
+          view,
+          event.productRunId,
+          "completing",
+          event.occurredAt
+        );
         break;
       case "diagnostic":
         this.projectRuntimeDiagnostic(view, scope, event.diagnostic);
@@ -466,6 +499,11 @@ export class PiChatUiProjector {
       })
     ]);
     rebuilt.updatedAt = Math.max(rebuilt.updatedAt, current.updatedAt);
+    if (current.pendingInteraction && isActiveRunState(current.runState)) {
+      rebuilt.pendingInteraction = cloneEchoInkTurnInteraction(
+        current.pendingInteraction
+      );
+    }
     rebuilt.messages = dedupeMessages(rebuilt.messages);
     applyToolProductStates(rebuilt, input);
     return rebuilt;
@@ -595,6 +633,20 @@ export class PiChatUiProjector {
       return;
     }
     if (entry.type === "custom") {
+      const interactionRecord = turnInteractionRecordFromSessionEntry(
+        entry,
+        context.piSessionId
+      );
+      if (interactionRecord) {
+        upsertInteractionRecordMessage(
+          messages,
+          context.scope,
+          interactionRecord.turnId,
+          interactionRecord.record,
+          createdAt
+        );
+        return;
+      }
       const reasoningSummary = reasoningSummaryFromSessionEntry(
         entry,
         context.piSessionId
@@ -667,7 +719,10 @@ export class PiChatUiProjector {
         });
       }
       for (const toolCall of toolCallsFromContent(message.content)) {
-        if (toolCall.toolName === PI_TASK_UPDATE_TOOL_ID) continue;
+        if (
+          toolCall.toolName === PI_TASK_UPDATE_TOOL_ID
+          || toolCall.toolName === PI_USER_QUESTION_TOOL_ID
+        ) continue;
         const toolRunId = context.toolRuns.get(toolCall.toolCallId) ?? runId;
         upsertMessage(messages, toolMessage({
           scope: context.scope,
@@ -687,7 +742,10 @@ export class PiChatUiProjector {
     if (role === "toolresult" || role === "tool") {
       const toolCallId = requireLooseIdentity(message.toolCallId, entry.id);
       const toolName = visibleText(message.toolName) || "tool";
-      if (toolName === PI_TASK_UPDATE_TOOL_ID) return;
+      if (
+        toolName === PI_TASK_UPDATE_TOOL_ID
+        || toolName === PI_USER_QUESTION_TOOL_ID
+      ) return;
       const resultText = textFromContent(message.content);
       const cancelled = isCancelledResult(message.details);
       const status = cancelled ? "interrupted" : message.isError ? "failed" : "completed";
@@ -772,6 +830,108 @@ export class PiChatUiProjector {
         completedAt: messageTime(message, createdAt)
       });
     }
+  }
+
+  private projectProviderReasoningStart(
+    view: PiChatUiViewModel,
+    scope: string,
+    event: Extract<PiChatRuntimeEvent, { type: "provider_reasoning_start" }>
+  ): void {
+    const carrier = ensureAssistantTurnCarrier(view, scope, event);
+    const turn = carrier.assistantTurn!;
+    const previous = turn.providerReasoning?.reasoningId === event.reasoningId
+      ? turn.providerReasoning
+      : undefined;
+    const activeSince = previous?.status === "running"
+      && previous.activeSince !== undefined
+      ? previous.activeSince
+      : event.occurredAt;
+    carrier.assistantTurn = {
+      ...turn,
+      status: "running",
+      updatedAt: Math.max(turn.updatedAt, event.occurredAt),
+      providerReasoning: Object.freeze({
+        reasoningId: event.reasoningId,
+        source: "provider_public" as const,
+        status: "running" as const,
+        text: previous?.text ?? "",
+        startedAt: previous?.startedAt ?? event.occurredAt,
+        activeSince,
+        updatedAt: event.occurredAt,
+        ...(previous?.durationMs === undefined
+          ? {}
+          : { durationMs: previous.durationMs })
+      })
+    };
+    view.runState = "running";
+  }
+
+  private projectProviderReasoningDelta(
+    view: PiChatUiViewModel,
+    event: Extract<PiChatRuntimeEvent, { type: "provider_reasoning_delta" }>
+  ): void {
+    const carrier = findAssistantTurnCarrier(
+      view,
+      event.productRunId,
+      event.reasoningId
+    );
+    const turn = carrier?.assistantTurn;
+    const previous = turn?.providerReasoning;
+    if (!carrier || !turn || !previous || !event.textDelta) return;
+    carrier.assistantTurn = {
+      ...turn,
+      status: "running",
+      updatedAt: Math.max(turn.updatedAt, event.occurredAt),
+      providerReasoning: Object.freeze({
+        ...previous,
+        status: "running" as const,
+        text: `${previous.text}${event.textDelta}`,
+        updatedAt: event.occurredAt
+      })
+    };
+    view.runState = "running";
+  }
+
+  private projectProviderReasoningEnd(
+    view: PiChatUiViewModel,
+    event: Extract<PiChatRuntimeEvent, { type: "provider_reasoning_end" }>
+  ): void {
+    const carrier = findAssistantTurnCarrier(
+      view,
+      event.productRunId,
+      event.reasoningId
+    );
+    const turn = carrier?.assistantTurn;
+    const previous = turn?.providerReasoning;
+    if (!carrier || !turn || !previous) return;
+    if (!event.text.trim()) {
+      const { providerReasoning: _discarded, ...withoutReasoning } = turn;
+      carrier.assistantTurn = {
+        ...withoutReasoning,
+        status: assistantTurnStatusDuringRun(view),
+        updatedAt: Math.max(turn.updatedAt, event.occurredAt)
+      };
+      return;
+    }
+    const activeDuration = previous.status === "running"
+      && previous.activeSince !== undefined
+      ? Math.max(0, event.occurredAt - previous.activeSince)
+      : 0;
+    carrier.assistantTurn = {
+      ...turn,
+      status: assistantTurnStatusDuringRun(view),
+      updatedAt: Math.max(turn.updatedAt, event.occurredAt),
+      providerReasoning: Object.freeze({
+        reasoningId: event.reasoningId,
+        source: "provider_public" as const,
+        status: event.status,
+        text: event.text,
+        startedAt: previous.startedAt,
+        updatedAt: event.occurredAt,
+        completedAt: event.occurredAt,
+        durationMs: (previous.durationMs ?? 0) + activeDuration
+      })
+    };
   }
 
   private projectRuntimeMessageStart(
@@ -956,6 +1116,10 @@ export class PiChatUiProjector {
     event: Extract<PiChatRuntimeEvent, { type: "tool_execution_start" }>,
     vaultPath: string
   ): void {
+    if (event.toolName === PI_USER_QUESTION_TOOL_ID) {
+      view.runState = "running";
+      return;
+    }
     if (event.toolName === PI_TASK_UPDATE_TOOL_ID) {
       view.runState = "running";
       return;
@@ -986,7 +1150,10 @@ export class PiChatUiProjector {
     event: Extract<PiChatRuntimeEvent, { type: "tool_execution_update" }>,
     vaultPath: string
   ): void {
-    if (event.toolName === PI_TASK_UPDATE_TOOL_ID) return;
+    if (
+      event.toolName === PI_TASK_UPDATE_TOOL_ID
+      || event.toolName === PI_USER_QUESTION_TOOL_ID
+    ) return;
     const existing = findByIdentity(view.messages, "tool", event.toolCallId);
     const projected = toolMessage({
       scope,
@@ -1012,6 +1179,7 @@ export class PiChatUiProjector {
     event: Extract<PiChatRuntimeEvent, { type: "tool_execution_end" }>,
     vaultPath: string
   ): void {
+    if (event.toolName === PI_USER_QUESTION_TOOL_ID) return;
     if (event.toolName === PI_TASK_UPDATE_TOOL_ID) {
       const taskPlan = taskPlanFromToolResult(event.result);
       if (taskPlan) {
@@ -1076,6 +1244,71 @@ export class PiChatUiProjector {
     view.runState = "running";
   }
 
+  private projectInteractionRequested(
+    view: PiChatUiViewModel,
+    scope: string,
+    event: Extract<PiChatRuntimeEvent, { type: "interaction_requested" }>
+  ): void {
+    const interaction = cloneEchoInkTurnInteraction(event.interaction);
+    if (
+      interaction.conversationId !== event.conversationId
+      || interaction.piSessionId !== event.piSessionId
+      || interaction.turnId !== event.productRunId
+    ) return;
+    view.pendingInteraction = interaction;
+    const questionCount = interaction.kind === "question"
+      ? interaction.questions.length
+      : 1;
+    upsertMessage(view.messages, {
+      id: interactionMessageId(scope, interaction.interactionId),
+      role: "system",
+      itemType: "interactionRecord",
+      processKind: "other",
+      title: interaction.kind === "question" ? "等待用户回答" : "等待用户确认",
+      details: interaction.kind === "question"
+        ? `${questionCount} 个结构化问题`
+        : "需要用户确认后继续",
+      text: interaction.kind === "question"
+        ? interaction.questions[0]?.prompt ?? "等待用户回答"
+        : interaction.preview ?? interaction.target ?? "等待用户确认",
+      status: "blocked",
+      runId: event.productRunId,
+      turnId: event.productRunId,
+      createdAt: interaction.createdAt
+    });
+    view.runState = "running";
+    updateAssistantTurnStatus(
+      view,
+      event.productRunId,
+      "waiting_for_user",
+      event.occurredAt
+    );
+  }
+
+  private projectInteractionResolved(
+    view: PiChatUiViewModel,
+    scope: string,
+    event: Extract<PiChatRuntimeEvent, { type: "interaction_resolved" }>
+  ): void {
+    if (
+      view.pendingInteraction?.interactionId === event.record.interactionId
+      && view.pendingInteraction.turnId === event.productRunId
+    ) delete view.pendingInteraction;
+    upsertInteractionRecordMessage(
+      view.messages,
+      scope,
+      event.productRunId,
+      event.record,
+      event.occurredAt
+    );
+    updateAssistantTurnStatus(
+      view,
+      event.productRunId,
+      "running",
+      event.occurredAt
+    );
+  }
+
   private projectRuntimeCompactionEnd(
     view: PiChatUiViewModel,
     scope: string,
@@ -1123,6 +1356,7 @@ export class PiChatUiProjector {
     occurredAt: number
   ): void {
     view.runState = terminalState;
+    delete view.pendingInteraction;
     const terminalStatus = terminalState === "completed"
       ? "completed"
       : terminalState === "cancelled"
@@ -1171,6 +1405,16 @@ export class PiChatUiProjector {
         completedAt: occurredAt
       });
     }
+    updateAssistantTurnStatus(
+      view,
+      runId,
+      terminalState === "completed"
+        ? "completed"
+        : terminalState === "cancelled"
+          ? "cancelled"
+          : "failed",
+      occurredAt
+    );
   }
 
   private projectBranchChange(
@@ -1178,8 +1422,10 @@ export class PiChatUiProjector {
     event: Extract<PiChatRuntimeEvent, { type: "branch_changed" }>
   ): PiChatUiViewModel {
     const scope = projectionScope(current.piSessionId, event.activeLeafId);
+    const next = cloneView(current);
+    delete next.pendingInteraction;
     return {
-      ...cloneView(current),
+      ...next,
       activeLeafId: event.activeLeafId,
       productRunId: event.productRunId,
       runState: "running",
@@ -1201,6 +1447,92 @@ export class PiChatUiProjector {
       provisionalMessageIds: [],
       pendingToolCallIds: [],
       updatedAt: Math.max(current.updatedAt, event.occurredAt)
+    };
+  }
+}
+
+function ensureAssistantTurnCarrier(
+  view: PiChatUiViewModel,
+  scope: string,
+  event: Pick<
+    PiChatRuntimeEvent,
+    "conversationId" | "productRunId" | "occurredAt"
+  >
+): ChatMessage {
+  let carrier = view.messages.find((message) =>
+    message.reasoningSummary?.productRunId === event.productRunId
+  ) ?? view.messages.find((message) =>
+    message.assistantTurn?.turnId === event.productRunId
+  );
+  if (!carrier) {
+    carrier = {
+      id: `${scope}:assistant-turn-state:${encodeIdentity(event.productRunId)}`,
+      role: "system",
+      itemType: "assistantTurnState",
+      text: "",
+      status: "running",
+      runId: event.productRunId,
+      turnId: event.productRunId,
+      createdAt: event.occurredAt
+    };
+    upsertMessage(view.messages, carrier);
+  }
+  if (!carrier.assistantTurn) {
+    carrier.assistantTurn = Object.freeze({
+      viewVersion: ECHOINK_ASSISTANT_TURN_VIEW_VERSION,
+      conversationId: event.conversationId,
+      turnId: event.productRunId,
+      status: assistantTurnStatusDuringRun(view),
+      startedAt: event.occurredAt,
+      updatedAt: event.occurredAt,
+      processNodes: Object.freeze([]),
+      interactionRecords: Object.freeze([])
+    });
+  }
+  return carrier;
+}
+
+function findAssistantTurnCarrier(
+  view: Readonly<PiChatUiViewModel>,
+  turnId: string,
+  reasoningId: string
+): ChatMessage | undefined {
+  return view.messages.find((message) =>
+    message.assistantTurn?.turnId === turnId
+    && message.assistantTurn.providerReasoning?.reasoningId === reasoningId
+  );
+}
+
+function assistantTurnStatusDuringRun(
+  view: Readonly<PiChatUiViewModel>
+): EchoInkAssistantTurnStatus {
+  if (view.runState === "finalizing") return "completing";
+  if (view.runState === "failed") return "failed";
+  if (view.runState === "cancelled") return "cancelled";
+  if (view.runState === "interrupted") return "interrupted";
+  if (view.runState === "completed") return "completed";
+  return "running";
+}
+
+function updateAssistantTurnStatus(
+  view: PiChatUiViewModel,
+  turnId: string,
+  status: EchoInkAssistantTurnStatus,
+  observedAt: number
+): void {
+  for (const message of view.messages) {
+    const turn = message.assistantTurn;
+    if (!turn || turn.turnId !== turnId) continue;
+    const terminal = status === "completed"
+      || status === "failed"
+      || status === "cancelled"
+      || status === "interrupted";
+    const { completedAt: _previousCompletedAt, ...base } = turn;
+    message.assistantTurn = {
+      ...base,
+      status,
+      updatedAt: Math.max(turn.updatedAt, observedAt),
+      ...(terminal ? { completedAt: observedAt } : {})
     };
   }
 }
@@ -1844,6 +2176,10 @@ function taskPlanMessageId(scope: string, planId: string): string {
   return `${scope}:task-plan:${encodeIdentity(planId)}`;
 }
 
+function interactionMessageId(scope: string, interactionId: string): string {
+  return `${scope}:interaction:${encodeIdentity(interactionId)}`;
+}
+
 function reasoningSummaryMessageId(scope: string, productRunId: string): string {
   return `${scope}:reasoning:${encodeIdentity(productRunId)}`;
 }
@@ -2139,6 +2475,63 @@ function upsertTaskPlanMessage(
   });
 }
 
+function upsertInteractionRecordMessage(
+  messages: ChatMessage[],
+  scope: string,
+  turnId: string,
+  record: Readonly<EchoInkTurnInteractionRecord>,
+  observedAt: number
+): void {
+  const id = interactionMessageId(scope, record.interactionId);
+  const existing = messages.find((message) =>
+    message.interactionRecord?.interactionId === record.interactionId
+    || message.id === id
+  );
+  if (
+    existing?.interactionRecord
+    && existing.interactionRecord.updatedAt > record.updatedAt
+  ) return;
+  if (existing && existing.id !== id) removeMessage(messages, existing.id);
+  const status = interactionRecordMessageStatus(record.outcome);
+  upsertMessage(messages, {
+    id,
+    role: "system",
+    itemType: "interactionRecord",
+    processKind: "other",
+    title: interactionRecordTitle(record),
+    details: record.summary,
+    text: record.summary,
+    status,
+    interactionRecord: Object.freeze({ ...record }),
+    runId: turnId,
+    turnId,
+    createdAt: existing?.createdAt ?? observedAt,
+    completedAt: record.updatedAt
+  });
+}
+
+function interactionRecordMessageStatus(
+  outcome: EchoInkTurnInteractionRecord["outcome"]
+): "completed" | "failed" | "cancelled" {
+  if (outcome === "failed") return "failed";
+  if (outcome === "cancelled" || outcome === "denied" || outcome === "expired") {
+    return "cancelled";
+  }
+  return "completed";
+}
+
+function interactionRecordTitle(
+  record: Readonly<EchoInkTurnInteractionRecord>
+): string {
+  if (record.kind === "question") return "用户已回答";
+  if (record.outcome === "approved") return "用户已批准";
+  if (record.outcome === "denied") return "用户已拒绝";
+  if (record.outcome === "completed") return "确认已执行";
+  if (record.outcome === "failed") return "交互失败";
+  if (record.outcome === "expired") return "交互已过期";
+  return "交互已取消";
+}
+
 function removeMessage(messages: ChatMessage[], id: string): void {
   const index = messages.findIndex((message) => message.id === id);
   if (index >= 0) messages.splice(index, 1);
@@ -2158,7 +2551,10 @@ function cloneView(current: Readonly<PiChatUiViewModel>): PiChatUiViewModel {
     queuedSteering: [...current.queuedSteering],
     queuedFollowUp: [...current.queuedFollowUp],
     provisionalMessageIds: [...current.provisionalMessageIds],
-    pendingToolCallIds: [...current.pendingToolCallIds]
+    pendingToolCallIds: [...current.pendingToolCallIds],
+    ...(current.pendingInteraction
+      ? { pendingInteraction: cloneEchoInkTurnInteraction(current.pendingInteraction) }
+      : {})
   };
 }
 
@@ -2196,6 +2592,12 @@ function cloneProjectedMessage(message: Readonly<ChatMessage>): ChatMessage {
             )
           }
         }
+      : {}),
+    ...(message.assistantTurn
+      ? { assistantTurn: cloneEchoInkAssistantTurn(message.assistantTurn) }
+      : {}),
+    ...(message.interactionRecord
+      ? { interactionRecord: Object.freeze({ ...message.interactionRecord }) }
       : {})
   };
 }

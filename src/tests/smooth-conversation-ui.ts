@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { TFile } from "obsidian";
 import type { ChatMessage } from "../settings/settings";
+import { PiAgentApprovalBroker } from "../plugin/pi-agent-approval-broker";
+import { PiTurnInteractionBroker } from "../plugin/pi-turn-interaction-broker";
 import { renderRichText } from "../ui/render-message";
 import {
   CodexMessageListRenderer,
@@ -26,6 +28,8 @@ import {
   type TaskPlanDockClock
 } from "../ui/codex-view/task-plan-dock";
 import type { EchoInkTaskPlanSnapshot } from "../types/task-plan";
+import type { EchoInkQuestionInteraction } from "../types/conversation-turn";
+import { InteractionDockController } from "../ui/codex-view/interaction-dock";
 
 type TestEventHandler = (event: {
   preventDefault(): void;
@@ -49,13 +53,20 @@ class FakeElement {
   className = "";
   clientHeight = 640;
   clientWidth = 420;
+  checked = false;
   disabled = false;
+  focused = false;
+  id = "";
   open = false;
   parent: FakeElement | null = null;
   scrollHeight = 640;
   scrollTop = 0;
+  src = "";
   textContent = "";
+  value = "";
   onclick: ((event: TestActivationEvent) => unknown) | null = null;
+  onchange: (() => unknown) | null = null;
+  oninput: (() => unknown) | null = null;
   onkeydown: ((event: TestActivationEvent) => unknown) | null = null;
   ontoggle: ((event: { readonly isTrusted: boolean }) => unknown) | null = null;
 
@@ -151,10 +162,49 @@ class FakeElement {
 
   setAttribute(name: string, value: string): void {
     this.attributes.set(name, value);
+    if (name === "id") this.id = value;
   }
 
   setAttr(name: string, value: string): void {
     this.setAttribute(name, value);
+  }
+
+  getAttribute(name: string): string | null {
+    return this.attributes.get(name) ?? null;
+  }
+
+  removeAttribute(name: string): void {
+    this.attributes.delete(name);
+    if (name === "id") this.id = "";
+  }
+
+  querySelector<T = FakeElement>(selector: string): T | null {
+    return this.querySelectorAll<T>(selector)[0] ?? null;
+  }
+
+  querySelectorAll<T = FakeElement>(selector: string): T[] {
+    const matches: FakeElement[] = [];
+    const visit = (node: FakeElement): void => {
+      for (const child of node.children) {
+        if (child.matchesSelector(selector)) matches.push(child);
+        visit(child);
+      }
+    };
+    visit(this);
+    return matches as unknown as T[];
+  }
+
+  closest<T = FakeElement>(selector: string): T | null {
+    let current: FakeElement | null = this;
+    while (current) {
+      if (current.matchesSelector(selector)) return current as unknown as T;
+      current = current.parent;
+    }
+    return null;
+  }
+
+  focus(): void {
+    this.focused = true;
   }
 
   setCssStyles(_styles: Record<string, string>): void {}
@@ -190,6 +240,15 @@ class FakeElement {
     visit(this);
     return matches;
   }
+
+  private matchesSelector(selector: string): boolean {
+    if (selector.startsWith(".")) return this.hasClass(selector.slice(1));
+    if (selector.startsWith("#")) {
+      const expected = selector.slice(1);
+      return this.id === expected || this.attributes.get("id") === expected;
+    }
+    return this.tag === selector.toLowerCase();
+  }
 }
 
 function renderedText(element: FakeElement): string {
@@ -207,14 +266,18 @@ interface TestContext {
 function createTestContext(): TestContext {
   const files = new Map([
     ["projects/Alpha.md", new TFile("projects/Alpha.md")],
-    ["outputs/Result.md", new TFile("outputs/Result.md")]
+    ["outputs/Result.md", new TFile("outputs/Result.md")],
+    ["images/cover #1.png", new TFile("images/cover #1.png")]
   ]);
   const openedPaths: string[] = [];
   const app = {
     vault: {
       adapter: { getBasePath: () => "/test-vault" },
       getAbstractFileByPath: (path: string) => files.get(path) ?? null,
-      getResourcePath: (file: TFile) => file.path
+      getResourcePath: (file: TFile) => `app://echoink-vault/${file.path
+        .split("/")
+        .map((part) => encodeURIComponent(part))
+        .join("/")}`
     },
     metadataCache: {
       getFirstLinkpathDest: () => null
@@ -289,6 +352,161 @@ function clickElement(element: FakeElement): void {
     preventDefault: () => undefined,
     stopPropagation: () => undefined
   } as never);
+}
+
+async function assertInteractionDockContracts(): Promise<void> {
+  const controller = new InteractionDockController();
+  const container = new FakeElement("div");
+  const questionBroker = new PiTurnInteractionBroker();
+  const interaction: EchoInkQuestionInteraction = {
+    kind: "question",
+    interactionId: "question-interaction",
+    conversationId: "conversation-question",
+    piSessionId: "pi-question",
+    turnId: "turn-question",
+    status: "pending",
+    questions: [{
+      questionId: "approach",
+      prompt: "采用哪种方案？",
+      selection: "single",
+      options: [{ optionId: "simple", label: "简单方案" }, {
+        optionId: "extended",
+        label: "扩展方案"
+      }],
+      allowSupplement: false
+    }, {
+      questionId: "evidence",
+      prompt: "需要哪些验收证据？",
+      selection: "multiple",
+      options: [{ optionId: "ui", label: "界面" }, {
+        optionId: "provider",
+        label: "Provider"
+      }],
+      allowSupplement: true
+    }],
+    createdAt: 1,
+    updatedAt: 1
+  };
+  const answerPromise = questionBroker.waitForAnswers({
+    conversationId: interaction.conversationId,
+    piSessionId: interaction.piSessionId,
+    productRunId: interaction.turnId,
+    interactionId: interaction.interactionId,
+    interaction
+  });
+  const questionBinding = questionBroker.bindingFor({
+    conversationId: interaction.conversationId,
+    piSessionId: interaction.piSessionId,
+    productRunId: interaction.turnId,
+    interactionId: interaction.interactionId
+  });
+  assert.ok(questionBinding);
+  let questionResolved = 0;
+  const questionInput = {
+    question: {
+      binding: questionBinding!,
+      onResolved: () => { questionResolved += 1; }
+    },
+    onStale: () => assert.fail("a live Question binding must not go stale"),
+    onScheduleMeasure: () => undefined
+  } as const;
+
+  controller.render(container as unknown as HTMLElement, {
+    sessionId: "ui-session-a",
+    ...questionInput
+  });
+  assert.equal(container.hasClass("is-visible"), true);
+  assert.equal(
+    container.findByClass("codex-ai-elements-question")?.attributes.get("data-ai-elements-pattern"),
+    "question"
+  );
+  assert.equal(container.findByClass("codex-interaction-progress")?.textContent, "1/2");
+  const firstSessionControls = container.findAllByClass("codex-interaction-option-control");
+  firstSessionControls[0]!.checked = true;
+  firstSessionControls[0]!.onchange?.();
+  clickElement(container.findByClass("codex-interaction-action")!);
+  assert.equal(container.findByClass("codex-interaction-progress")?.textContent, "2/2");
+
+  controller.render(container as unknown as HTMLElement, {
+    sessionId: "ui-session-b",
+    ...questionInput
+  });
+  assert.equal(container.findByClass("codex-interaction-progress")?.textContent, "1/2");
+  assert.equal(
+    container.findAllByClass("codex-interaction-option-control").some((control) => control.checked),
+    false,
+    "Question drafts are isolated by UI session"
+  );
+
+  controller.render(container as unknown as HTMLElement, {
+    sessionId: "ui-session-a",
+    ...questionInput
+  });
+  assert.equal(container.findByClass("codex-interaction-progress")?.textContent, "2/2");
+  const secondQuestionControls = container.findAllByClass("codex-interaction-option-control");
+  secondQuestionControls[1]!.checked = true;
+  secondQuestionControls[1]!.onchange?.();
+  const supplement = container.findByClass("codex-interaction-supplement-input")!;
+  supplement.value = "保留真实 Provider 证据";
+  supplement.oninput?.();
+  const submit = container.findAllByClass("codex-interaction-action").at(-1)!;
+  clickElement(submit);
+  clickElement(submit);
+  assert.equal(questionResolved, 1, "Question resolves exactly once");
+  assert.equal(container.hasClass("is-visible"), false, "answered Question leaves the Dock");
+  assert.equal(container.childElementCount, 0);
+  assert.deepEqual(await answerPromise, [{
+    questionId: "approach",
+    selectedOptionIds: ["simple"]
+  }, {
+    questionId: "evidence",
+    selectedOptionIds: ["provider"],
+    supplement: "保留真实 Provider 证据"
+  }]);
+  assert.equal(questionBinding!.submit([]), false, "resolved Question binding cannot be replayed");
+
+  const approvalBroker = new PiAgentApprovalBroker();
+  const approvalIdentity = {
+    conversationId: "conversation-confirmation",
+    piSessionId: "pi-confirmation",
+    productRunId: "turn-confirmation",
+    toolCallId: "tool-confirmation"
+  } as const;
+  const approvalPromise = approvalBroker.waitForDecision({
+    ...approvalIdentity,
+    requestId: "approval-request",
+    target: "写入 disposable.md",
+    preview: "仅写入一次"
+  });
+  const confirmationBinding = approvalBroker.bindingFor(approvalIdentity);
+  assert.ok(confirmationBinding);
+  let confirmationResolved = 0;
+  controller.render(container as unknown as HTMLElement, {
+    sessionId: "ui-session-confirmation",
+    confirmation: {
+      binding: confirmationBinding!,
+      onResolved: () => { confirmationResolved += 1; }
+    },
+    onStale: () => assert.fail("a live Confirmation binding must not go stale"),
+    onScheduleMeasure: () => undefined
+  });
+  assert.equal(
+    container.findByClass("codex-ai-elements-confirmation")?.attributes.get("data-ai-elements-pattern"),
+    "confirmation"
+  );
+  const approve = container.findByClass("is-approve")!;
+  clickElement(approve);
+  clickElement(approve);
+  assert.equal(await approvalPromise, true);
+  assert.equal(confirmationResolved, 1, "Confirmation resolves exactly once");
+  assert.equal(container.hasClass("is-visible"), false, "resolved Confirmation leaves the Dock");
+  assert.equal(container.childElementCount, 0);
+  assert.equal(confirmationBinding!.decide("reject"), false,
+    "resolved Confirmation binding cannot be replayed");
+
+  controller.dispose();
+  questionBroker.dispose();
+  approvalBroker.dispose();
 }
 
 class FakeTaskPlanDockClock implements TaskPlanDockClock {
@@ -673,6 +891,7 @@ export async function runSmoothConversationUiTests(): Promise<void> {
   bindRenderer(renderer, context);
   const previousDocument = (globalThis as unknown as { document?: unknown }).document;
   const previousHTMLElement = (globalThis as unknown as { HTMLElement?: unknown }).HTMLElement;
+  const previousWindow = (globalThis as unknown as { window?: unknown }).window;
   Object.defineProperty(globalThis, "document", {
     configurable: true,
     value: {
@@ -682,6 +901,21 @@ export async function runSmoothConversationUiTests(): Promise<void> {
   Object.defineProperty(globalThis, "HTMLElement", {
     configurable: true,
     value: FakeElement
+  });
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      setTimeout: (callback: () => void) => {
+        callback();
+        return 1;
+      },
+      clearTimeout: () => undefined,
+      requestAnimationFrame: (callback: (timestamp: number) => void) => {
+        callback(0);
+        return 1;
+      },
+      cancelAnimationFrame: () => undefined
+    }
   });
   try {
     const answer = renderMessage(renderer, {
@@ -712,6 +946,46 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     assert.equal(normalLink!.attributes.get("data-path"), "projects/Alpha.md");
     assert.equal(normalLink!.attributes.get("aria-label"), "打开笔记 Alpha");
     await clickRegistered(normalLink!);
+
+    const imageAttachments = renderMessage(renderer, {
+      id: "user-images",
+      role: "user",
+      text: "请比较两张图",
+      images: [{
+        type: "image",
+        name: "clipboard-1720000000000-0.png",
+        path: "images/cover #1.png",
+        mimeType: "image/png",
+        availability: "unavailable"
+      }, {
+        type: "image",
+        name: "clipboard-1720000000000-1.png",
+        path: "images/missing.png",
+        mimeType: "image/png",
+        availability: "available"
+      }],
+      createdAt: 1_700_000_000_500
+    }, { showAgentFooter: false, showAgentHeader: false });
+    const imageAttachmentList = imageAttachments.findByClass("codex-ai-elements-attachments")!;
+    assert.equal(imageAttachmentList.attributes.get("data-ai-elements-pattern"), "attachments");
+    assert.equal(imageAttachmentList.attributes.get("data-attachment-variant"), "grid");
+    assert.equal(imageAttachmentList.attributes.get("role"), "list");
+    const imagePreview = imageAttachments.findByClass("codex-message-image-preview")!;
+    assert.equal(imagePreview.tag, "button");
+    assert.equal(imagePreview.attributes.get("aria-label"), "打开图片：粘贴图片 1.png");
+    assert.equal(
+      imagePreview.findAllByTag("img")[0]?.src,
+      "app://echoink-vault/images/cover%20%231.png",
+      "message Attachments use the current Obsidian resource URI"
+    );
+    assert.match(
+      renderedText(imageAttachments),
+      /粘贴图片 2\.png · 图片附件不可在本地打开/u,
+      "missing images keep an explicit durable fallback"
+    );
+    assert.doesNotMatch(renderedText(imageAttachments), /clipboard-/u);
+
+    await assertInteractionDockContracts();
 
     const emptyRunningAnswer = renderMessage(renderer, {
       id: "answer-running-empty",
@@ -827,23 +1101,34 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       onScheduleMeasure: () => undefined,
       onScheduleRunProgress: () => undefined
     });
-    const renderedMessageIds = conversationVirtualList
-      .findAllByClass("codex-message")
-      .map((message) => message.dataset.messageId);
-    assert.equal(renderedMessageIds.includes(sameRunEmptyAnswer.id), false,
-      "dedicated running Reasoning suppresses only its same-run empty answer row");
-    assert.equal(renderedMessageIds.includes(otherRunEmptyAnswer.id), true,
-      "an unrelated run without Reasoning keeps its empty answer row");
+    const runningTurnKeys = conversationVirtualList
+      .findAllByClass("codex-message-type-assistantTurn")
+      .map((message) => message.dataset.turnKey);
+    assert.deepEqual(runningTurnKeys, ["run:run-structured", "run:run-without-reasoning"],
+      "same-run Process and empty Answer share one Assistant Turn while another run remains isolated");
     assert.equal(
-      renderedText(conversationVirtualList).match(/正在思考/gu)?.length,
-      1,
-      "the running conversation contains one Reasoning label"
+      conversationVirtualList.findAllByClass("codex-message-type-assistantTurn").length,
+      2
     );
-    assert.equal(conversationVirtualList.findAllByClass("codex-smooth-ai-loader").length, 1,
-      "only the unrelated run keeps a generating-answer Loader");
+    assert.equal(
+      conversationVirtualList.findAllByClass("codex-assistant-turn-node-title")
+        .filter((title) => title.textContent === "正在思考").length,
+      1,
+      "legacy reasoningSummary creates one Process node, not fake Provider Reasoning"
+    );
+    assert.match(
+      conversationVirtualList.findByClass("codex-assistant-turn-summary-copy")?.textContent ?? "",
+      /正在处理 · 正在思考/u
+    );
+    assert.equal(
+      conversationVirtualList.findAllByClass("codex-smooth-ai-reasoning").length,
+      0
+    );
+    assert.equal(conversationVirtualList.findAllByClass("codex-smooth-ai-loader").length, 2,
+      "each active Assistant Turn owns at most one generating-answer Loader");
     assert.equal(
       renderedText(conversationVirtualList).match(/正在生成回复/gu)?.length,
-      1
+      2
     );
     suppressionRenderer.render({
       app: context.app as never,
@@ -863,10 +1148,14 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       onScheduleRunProgress: () => undefined
     });
     assert.equal(
-      conversationVirtualList.findAllByClass("codex-message")
-        .some((message) => message.dataset.messageId === sameRunEmptyAnswer.id),
-      true,
-      "the same-run answer row returns with its first non-empty public text"
+      conversationVirtualList.findAllByClass("codex-message-type-assistantTurn").length,
+      1,
+      "the first public Answer delta updates the same Assistant Turn"
+    );
+    assert.equal(
+      conversationVirtualList.findByClass("codex-assistant-turn-final")?.dataset.messageId,
+      sameRunEmptyAnswer.id,
+      "the final Answer section retains the original message identity"
     );
     assert.ok(conversationVirtualList.findByClass("codex-smooth-ai-response"));
     assert.equal(conversationVirtualList.findAllByClass("codex-smooth-ai-loader").length, 0);
@@ -1114,6 +1403,7 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       sourceData: "SOURCE_DATA_DOM_PRIVATE_CANARY",
       diffContent: "DIFF_CONTENT_DOM_PRIVATE_CANARY",
       approvalPayload: "APPROVAL_PAYLOAD_DOM_PRIVATE_CANARY",
+      publicReasoning: "PUBLIC_PROVIDER_REASONING_DOM_CANARY",
       privateReasoning: "PRIVATE_REASONING_DOM_CANARY"
     } as const;
     const reasoningSibling = {
@@ -1121,20 +1411,55 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       id: "reasoning-separated",
       title: "正在思考",
       text: "请求模型",
+      status: "completed",
       details: siblingCanaries.privateReasoning,
       runId: "run-separated",
       turnId: "run-separated",
       reasoningSummary: {
         ...structuredRunning.reasoningSummary!,
         productRunId: "run-separated",
+        status: "completed",
+        updatedAt: 4,
         activities: [{
           id: "provider",
           kind: "provider",
-          status: "active",
+          status: "completed",
           stage: "requesting",
           startedAt: 2,
-          updatedAt: 2
+          updatedAt: 4
         }]
+      },
+      assistantTurn: {
+        viewVersion: 1,
+        turnId: "run-separated",
+        status: "completed",
+        startedAt: 2,
+        updatedAt: 10,
+        completedAt: 10,
+        processNodes: [],
+        providerReasoning: {
+          reasoningId: "provider-reasoning-separated",
+          source: "provider_public",
+          status: "completed",
+          text: siblingCanaries.publicReasoning,
+          startedAt: 2,
+          updatedAt: 4,
+          completedAt: 4,
+          durationMs: 2_000
+        },
+        interactionRecords: [{
+          interactionId: "approval-separated",
+          kind: "confirmation",
+          outcome: "approved",
+          summary: "已批准一次性写入",
+          updatedAt: 7
+        }],
+        finalAnswerMessageId: "answer-separated",
+        summary: {
+          completedSteps: 7,
+          toolCount: 2,
+          durationMs: 8_000
+        }
       }
     } as ChatMessage;
     const siblingMessages: ChatMessage[] = [
@@ -1225,15 +1550,17 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       },
       {
         id: "approval-separated",
-        role: "tool",
-        itemType: "dynamicToolCall",
-        title: "等待确认",
-        text: "等待审批",
-        status: "waiting_approval",
-        approval: {
-          status: "pending",
-          target: siblingCanaries.approvalPayload,
-          preview: siblingCanaries.approvalPayload,
+        role: "assistant",
+        itemType: "interactionRecord",
+        title: "用户已批准",
+        text: "",
+        details: "已批准一次性写入",
+        status: "completed",
+        interactionRecord: {
+          interactionId: "approval-separated",
+          kind: "confirmation",
+          outcome: "approved",
+          summary: "已批准一次性写入",
           updatedAt: 7
         },
         runId: "run-separated",
@@ -1264,10 +1591,25 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     assert.equal(
       separatedProjection.some((item) => item.kind === "completedProcess"),
       false,
-      "dedicated Reasoning prevents legacy whole-turn nesting"
+      "the legacy completedProcess projection is no longer emitted"
     );
-    assert.equal(separatedProjection.length, siblingMessages.length,
-      "Tool, Task, Sources, Diff, Approval, Loader, and Response remain dedicated siblings");
+    assert.equal(separatedProjection.length, 2,
+      "one user row plus one Assistant Turn are the only projected rows");
+    assert.equal(separatedProjection[0]?.kind, "message");
+    assert.equal(separatedProjection[1]?.kind, "assistantTurn");
+    const unifiedTurn = separatedProjection[1]?.kind === "assistantTurn"
+      ? separatedProjection[1].turn
+      : null;
+    assert.ok(unifiedTurn);
+    assert.equal(unifiedTurn!.messages.length, siblingMessages.length - 1);
+    assert.equal(unifiedTurn!.finalAnswer?.id, "answer-separated");
+    assert.equal(unifiedTurn!.status, "completed");
+    assert.equal(unifiedTurn!.currentNodeId, undefined);
+    assert.deepEqual(
+      new Set(unifiedTurn!.processNodes.map((node) => node.kind)),
+      new Set(["process", "reasoning", "tool", "task", "retrieval", "diff", "interaction"]),
+      "Reasoning, retrieval, Tool, Task, Diff, and interaction history share one process model"
+    );
 
     const processOutput = [
       "{",
@@ -1690,69 +2032,101 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     assert.equal(planMessage.findAllByTag("button").length, 0,
       "the durable history Task is read-only");
 
-    const siblingSurface = new FakeElement("div");
-    const siblingRoots = siblingMessages.map((message) => renderMessage(
-      renderer,
-      message,
-      {
-        showAgentFooter: false,
-        showAgentHeader: false,
-        processExpanded: true
-      }
-    ));
-    siblingSurface.append(...siblingRoots);
-    const actionTimelineRoot = new FakeElement("div");
+    const userRow = renderMessage(renderer, siblingMessages[0]!, {
+      showAgentFooter: false,
+      showAgentHeader: false
+    });
+    const assistantTurnSurface = new FakeElement("div");
     (renderer as unknown as {
-      renderActionStreamItem(
+      renderAssistantTurn(
         container: unknown,
-        message: ChatMessage,
+        turn: NonNullable<typeof unifiedTurn>,
         showAgentHeader: boolean
       ): void;
-    }).renderActionStreamItem(actionTimelineRoot, siblingMessages[2]!, false);
-    siblingSurface.append(actionTimelineRoot);
+    }).renderAssistantTurn(assistantTurnSurface, unifiedTurn!, false);
+    const assistantTurnRoot = assistantTurnSurface.findByClass("codex-message-type-assistantTurn")!;
+    assert.equal(assistantTurnRoot.attributes.get("data-bubble"), "false");
+    assert.equal(assistantTurnSurface.findAllByClass("codex-message-type-assistantTurn").length, 1);
+    assert.equal(assistantTurnRoot.findAllByClass("codex-assistant-turn-spine").length, 1);
+    assert.equal(
+      assistantTurnRoot.findByClass("codex-assistant-turn-process")?.open,
+      false,
+      "a terminal process spine is collapsed to one summary row"
+    );
+    assert.equal(
+      assistantTurnRoot.findByClass("codex-assistant-turn-summary-copy")?.textContent,
+      "处理完成 · 7 个步骤 · 2 个工具 · 8s"
+    );
+    assert.equal(
+      assistantTurnRoot.findAllByClass("codex-assistant-turn-node").some((node) => node.hasClass("is-current")),
+      false,
+      "a completed Assistant Turn has no animated current node"
+    );
+    assert.ok(
+      assistantTurnRoot.findAllByClass("codex-assistant-turn-node").some((node) => node.hasClass("is-completed")),
+      "completed nodes retain their low-contrast status class"
+    );
+    const primaryLabels = new Set(
+      assistantTurnRoot.findAllByClass("codex-assistant-turn-section-primary")
+        .map((label) => label.textContent)
+    );
+    const secondaryLabels = new Set(
+      assistantTurnRoot.findAllByClass("codex-assistant-turn-section-secondary")
+        .map((label) => label.textContent)
+    );
+    assert.deepEqual(primaryLabels, new Set(["处理过程", "模型推理", "执行动作", "最终回答"]));
+    assert.deepEqual(secondaryLabels, new Set(["Process", "Reasoning", "Tools & Sources", "Final Answer"]));
+
     for (const componentClass of [
       "codex-smooth-ai-tool-call",
-      "codex-ai-elements-task",
+      "codex-assistant-turn-task-summary",
       "codex-ai-elements-sources",
-      "codex-smooth-ai-diff",
-      "codex-smooth-ai-approval-card",
-      "codex-smooth-ai-loader",
-      "codex-smooth-ai-response",
-      "codex-action-stream"
+      "codex-smooth-ai-reasoning",
+      "codex-smooth-ai-response"
     ]) {
-      assert.ok(siblingSurface.findByClass(componentClass),
-        `${componentClass} remains a rendered sibling`);
+      assert.ok(assistantTurnRoot.findByClass(componentClass),
+        `${componentClass} stays inside the one Assistant Turn`);
     }
-    const reasoningSiblingDom = siblingRoots[1]!.findByClass(
+    assert.match(renderedText(assistantTurnRoot), /已批准一次性写入/u,
+      "resolved interaction leaves one compact process record");
+    assert.equal(assistantTurnRoot.findAllByClass("codex-smooth-ai-approval-card").length, 0,
+      "resolved Confirmation does not leave an interactive approval card in history");
+
+    for (const action of assistantTurnRoot.findAllByClass("codex-action-item-expandable")) {
+      action.open = true;
+      action.ontoggle?.({ isTrusted: false });
+    }
+    assert.ok(assistantTurnRoot.findByClass("codex-smooth-ai-diff"),
+      "expanded Diff stays reachable inside the one Assistant Turn");
+    const providerReasoningDom = assistantTurnRoot.findByClass(
       "codex-smooth-ai-reasoning"
     )!;
-    for (const nestedClass of [
-      "codex-smooth-ai-tool-call",
-      "codex-ai-elements-task",
-      "codex-ai-elements-sources",
-      "codex-smooth-ai-diff",
-      "codex-smooth-ai-approval-card",
-      "codex-smooth-ai-loader",
-      "codex-smooth-ai-response",
-      "codex-action-stream"
-    ]) {
-      assert.equal(reasoningSiblingDom.findAllByClass(nestedClass).length, 0,
-        `Reasoning never nests ${nestedClass}`);
+    assert.match(renderedText(providerReasoningDom), new RegExp(siblingCanaries.publicReasoning, "u"));
+    const visibleTurnCanaries = [
+      siblingCanaries.answer,
+      siblingCanaries.toolArgument,
+      siblingCanaries.toolResult,
+      siblingCanaries.sourceData,
+      siblingCanaries.diffContent,
+      siblingCanaries.publicReasoning
+    ];
+    for (const canary of visibleTurnCanaries) {
+      assert.match(renderedText(assistantTurnRoot), new RegExp(canary, "u"),
+        `${canary} remains reachable inside the unified Assistant Turn`);
     }
-    const visibleSiblingCanaries = [
+    assert.match(renderedText(userRow), new RegExp(siblingCanaries.prompt, "u"));
+    assert.doesNotMatch(renderedText(assistantTurnRoot), new RegExp(siblingCanaries.prompt, "u"),
+      "the user prompt remains outside the Assistant Turn");
+    for (const canary of [
       siblingCanaries.prompt,
       siblingCanaries.answer,
       siblingCanaries.toolArgument,
       siblingCanaries.toolResult,
       siblingCanaries.sourceData,
       siblingCanaries.diffContent,
-      siblingCanaries.approvalPayload
-    ];
-    for (const canary of visibleSiblingCanaries) {
-      assert.match(renderedText(siblingSurface), new RegExp(canary, "u"),
-        `${canary} reaches only its dedicated sibling fixture`);
-    }
-    for (const canary of [...visibleSiblingCanaries, siblingCanaries.privateReasoning]) {
+      siblingCanaries.approvalPayload,
+      siblingCanaries.privateReasoning
+    ]) {
       assert.doesNotMatch(
         JSON.stringify(reasoningSibling.reasoningSummary),
         new RegExp(canary, "u"),
@@ -1760,19 +2134,26 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       );
       assert.doesNotMatch(reasoningSibling.text, new RegExp(canary, "u"),
         `Reasoning message text excludes ${canary}`);
-      assert.doesNotMatch(renderedText(reasoningSiblingDom), new RegExp(canary, "u"),
-        `rendered Reasoning DOM excludes ${canary}`);
+      assert.doesNotMatch(renderedText(providerReasoningDom), new RegExp(canary, "u"),
+        `Provider Reasoning DOM excludes unrelated or private ${canary}`);
     }
     assert.doesNotMatch(
-      renderedText(siblingSurface),
+      renderedText(assistantTurnRoot),
       new RegExp(siblingCanaries.privateReasoning, "u"),
       "private reasoning canary is never rendered anywhere"
+    );
+    assert.doesNotMatch(
+      renderedText(assistantTurnRoot),
+      new RegExp(siblingCanaries.approvalPayload, "u"),
+      "resolved Confirmation history does not expose its live approval payload"
     );
   } finally {
     if (previousDocument === undefined) delete (globalThis as unknown as { document?: unknown }).document;
     else Object.defineProperty(globalThis, "document", { configurable: true, value: previousDocument });
     if (previousHTMLElement === undefined) delete (globalThis as unknown as { HTMLElement?: unknown }).HTMLElement;
     else Object.defineProperty(globalThis, "HTMLElement", { configurable: true, value: previousHTMLElement });
+    if (previousWindow === undefined) delete (globalThis as unknown as { window?: unknown }).window;
+    else Object.defineProperty(globalThis, "window", { configurable: true, value: previousWindow });
   }
 
   assert.deepEqual(context.openedPaths, [
@@ -1792,6 +2173,31 @@ export async function runSmoothConversationUiTests(): Promise<void> {
   assert.match(styles, /\.codex-ai-elements-sources-trigger \{/u);
   assert.match(styles, /\.codex-ai-elements-source-icon[\s\S]*?width:\s*16px;/u);
   assert.match(styles, /\.codex-ai-elements-source-title[\s\S]*?font-weight:\s*400;/u);
+  assert.match(styles, /--echoink-conversation-font-label-primary:\s*var\(--font-ui-small, 13px\);/u);
+  assert.match(styles, /--echoink-conversation-font-label-secondary:\s*var\(--font-ui-smaller, 12px\);/u);
+  assert.match(styles, /--echoink-conversation-font-status:\s*var\(--font-ui-small, 13px\);/u);
+  assert.match(styles, /--echoink-conversation-font-caption:\s*var\(--echoink-conversation-font-status\);/u);
+  assert.match(styles, /--echoink-conversation-line-label:\s*1\.4;/u);
+  assert.match(styles, /--echoink-conversation-line-status:\s*1\.4;/u);
+  assert.match(styles, /--echoink-conversation-line-caption:\s*var\(--echoink-conversation-line-status\);/u);
+  assert.match(styles, /--echoink-conversation-line-body:\s*1\.55;/u);
+  assert.match(styles, /--echoink-conversation-radius-md:\s*var\(--radius-m, 8px\);/u);
+  assert.match(styles, /\.codex-message-type-assistantTurn\s*\{[\s\S]*?border:\s*0;[\s\S]*?background:\s*transparent;/u);
+  assert.match(styles, /\.codex-assistant-turn-spine::before\s*\{[\s\S]*?width:\s*1px;/u);
+  assert.match(styles, /\.codex-assistant-turn-node\.is-completed,[\s\S]*?opacity:\s*0\.66;/u);
+  assert.match(styles, /@media \(prefers-reduced-motion:\s*no-preference\)[\s\S]*?\.codex-assistant-turn-node\.is-current[\s\S]*?codex-assistant-turn-current/u);
+  assert.match(styles, /@media \(prefers-reduced-motion:\s*reduce\)[\s\S]*?\.codex-assistant-turn-node\.is-current[\s\S]*?animation:\s*none;/u);
+  assert.match(styles, /\.codex-assistant-turn-section-secondary\s*\{[\s\S]*?font-weight:\s*400;/u);
+  assert.match(styles, /\.codex-assistant-turn-section-label\s*\{[\s\S]*?font-size:\s*var\(--echoink-conversation-font-label-primary\);/u);
+  assert.match(styles, /\.codex-assistant-turn-section-secondary\s*\{[\s\S]*?font-size:\s*var\(--echoink-conversation-font-label-secondary\);/u);
+  assert.match(styles, /\.codex-assistant-turn-summary-copy\s*\{[\s\S]*?font-variant-numeric:\s*tabular-nums;[\s\S]*?text-wrap:\s*pretty;/u);
+  assert.match(styles, /\.codex-assistant-turn-answer\s*\{[\s\S]*?max-width:\s*min\(72ch, 100%\);[\s\S]*?overflow-wrap:\s*anywhere;/u);
+  assert.match(styles, /details\.codex-action-item\.codex-smooth-ai-tool-call:not\(\[open\]\)[\s\S]*?border-color:\s*transparent;/u);
+  assert.match(styles, /details\.codex-action-item\.codex-smooth-ai-tool-call\[open\][\s\S]*?border:\s*1px solid var\(--background-modifier-border\);/u);
+  assert.match(styles, /\.codex-assistant-turn-resource\s*\{[\s\S]*?border:\s*0;/u);
+  assert.match(styles, /\.codex-assistant-turn-resource\[open\]\s*\{[\s\S]*?border:\s*1px solid var\(--background-modifier-border\);/u);
+  assert.match(styles, /\.codex-interaction-progress\s*\{[\s\S]*?font-variant-numeric:\s*tabular-nums;/u);
+  assert.match(styles, /\.codex-interaction-heading-secondary\s*\{[\s\S]*?font-weight:\s*400;/u);
 
   const helperSource = readFileSync("src/ui/codex-view/smooth-chat-ui.ts", "utf8");
   assert.doesNotMatch(helperSource, /from\s+["'](?:react|motion\/react|tailwindcss|lucide-react|@radix-ui\/react-collapsible)["']/u);
@@ -1812,15 +2218,20 @@ export async function runSmoothConversationUiTests(): Promise<void> {
   );
   assert.match(
     viewShellSource,
-    /host\.messagesEl[\s\S]*?host\.taskPlanDockEl[\s\S]*?renderComposerShell/u,
-    "the Task List dock stays outside the message scroller immediately above the composer"
+    /host\.messagesEl[\s\S]*?host\.taskPlanDockEl[\s\S]*?host\.interactionDockEl[\s\S]*?renderComposerShell/u,
+    "the Task and Interaction docks stay outside the message scroller immediately above the composer"
   );
   const notices = readFileSync("THIRD_PARTY_NOTICES.md", "utf8");
   assert.match(notices, /Copyright \(c\) 2024 Eduardo Calvo/u);
   assert.match(notices, /Blur Out Up.*AI Message.*AI Reasoning.*AI Tool Call.*AI Artifact.*AI Task List/su);
   assert.match(notices, /## Vercel AI Elements[\s\S]*?6a9d5b1822ffb10bba4bd97175f01edd7d8651cd/u);
   assert.match(notices, /Vercel AI Elements[\s\S]*?`Task`[\s\S]*?task\.tsx/u);
+  assert.match(notices, /Vercel AI Elements[\s\S]*?`Question`[\s\S]*?`Confirmation`[\s\S]*?`Attachments`/u);
+  assert.match(notices, /question\.tsx[\s\S]*?confirmation\.tsx[\s\S]*?attachments\.tsx/u);
   assert.match(notices, /Copyright 2023 Vercel, Inc\.[\s\S]*?Apache License, Version 2\.0/u);
+  assert.match(notices, /## AnimateIcons[\s\S]*?`Send Horizontal`[\s\S]*?`Circle Stop`/u);
+  assert.match(notices, /send-horizontal-icon\.tsx[\s\S]*?circle-stop-icon\.tsx/u);
+  assert.match(notices, /Copyright \(c\) 2025 Avijit Dey/u);
 
-  console.log("PASS conversation-ui: truthful SmoothUI and AI Elements sources, retained chrome, and Vault-note navigation");
+  console.log("PASS conversation-ui: one Assistant Turn, structured interaction Dock, durable Attachments, and truthful Provider Reasoning");
 }

@@ -10,6 +10,7 @@ import type {
 } from "../../harness/pi/contracts";
 import type { PiChatPreparedImage } from "../../harness/pi-native/contracts";
 import type { StoredAttachment } from "../../settings/settings";
+import { attachmentDisplayName } from "./attachment-resource";
 
 const DIRECT_IMAGE_MIME_TYPES = new Set<PiInlineImageMimeType>([
   "image/png",
@@ -70,25 +71,28 @@ export async function preparePiChatImages(
   attachments: readonly Readonly<StoredAttachment>[]
 ): Promise<readonly Readonly<PiChatPreparedImage>[]> {
   const prepared: PiChatPreparedImage[] = [];
-  for (const attachment of attachments) {
+  for (const [index, attachment] of attachments.entries()) {
+    const displayName = attachmentDisplayName(attachment, index);
     if (attachment.type !== "image") {
       throw new PiImageInputError(
         "ordinary_file_unsupported",
-        `普通 Pi Chat 只支持图片附件：“${attachment.name}”不会发送。`
+        `普通 Pi Chat 只支持图片附件：“${displayName}”不会发送。`
       );
     }
-    prepared.push(await preparePiChatImage(attachment));
+    prepared.push(await preparePiChatImage(attachment, index));
   }
   return Object.freeze(prepared);
 }
 
 export async function preparePiChatImage(
-  attachment: Readonly<StoredAttachment>
+  attachment: Readonly<StoredAttachment>,
+  displayIndex = 0
 ): Promise<Readonly<PiChatPreparedImage>> {
+  const displayName = attachmentDisplayName(attachment, displayIndex);
   if (attachment.type !== "image") {
     throw new PiImageInputError(
       "ordinary_file_unsupported",
-      `普通 Pi Chat 只支持图片附件：“${attachment.name}”不会发送。`
+      `普通 Pi Chat 只支持图片附件：“${displayName}”不会发送。`
     );
   }
 
@@ -98,7 +102,7 @@ export async function preparePiChatImage(
   } catch (error) {
     throw new PiImageInputError(
       "image_unreadable",
-      `无法读取图片附件“${attachment.name}”，请确认本地文件仍然存在。`,
+      `无法读取图片附件“${displayName}”，请确认本地文件仍然存在。`,
       { cause: error }
     );
   }
@@ -107,7 +111,7 @@ export async function preparePiChatImage(
   if (!detectedMimeType) {
     throw new PiImageInputError(
       "image_format_unsupported",
-      `无法识别图片附件“${attachment.name}”的真实格式。`
+      `无法识别图片附件“${displayName}”的真实格式。`
     );
   }
 
@@ -123,7 +127,7 @@ export async function preparePiChatImage(
     } catch (error) {
       throw new PiImageInputError(
         "image_conversion_failed",
-        `无法转换图片附件“${attachment.name}”，本轮没有发送。`,
+        `无法转换图片附件“${displayName}”，本轮没有发送。`,
         { cause: error }
       );
     }
@@ -134,7 +138,7 @@ export async function preparePiChatImage(
     ) {
       throw new PiImageInputError(
         "image_conversion_failed",
-        `无法转换图片附件“${attachment.name}”，本轮没有发送。`
+        `无法转换图片附件“${displayName}”，本轮没有发送。`
       );
     }
     resizeBytes = new Uint8Array(Buffer.from(converted.data, "base64"));
@@ -147,14 +151,14 @@ export async function preparePiChatImage(
   } catch (error) {
     throw new PiImageInputError(
       "image_resize_failed",
-      `无法处理图片附件“${attachment.name}”，图片可能已损坏或无法缩放。`,
+      `无法处理图片附件“${displayName}”，图片可能已损坏或无法缩放。`,
       { cause: error }
     );
   }
   if (!resized) {
     throw new PiImageInputError(
       "image_resize_failed",
-      `无法处理图片附件“${attachment.name}”，图片可能已损坏或无法缩放。`
+      `无法处理图片附件“${displayName}”，图片可能已损坏或无法缩放。`
     );
   }
 
@@ -162,7 +166,7 @@ export async function preparePiChatImage(
   if (!preparedMimeType || !validBase64Payload(resized.data)) {
     throw new PiImageInputError(
       "image_resize_failed",
-      `无法处理图片附件“${attachment.name}”，Pi 未返回有效图片内容。`
+      `无法处理图片附件“${displayName}”，Pi 未返回有效图片内容。`
     );
   }
 
@@ -175,9 +179,10 @@ export async function preparePiChatImage(
     }),
     attachment: Object.freeze({
       type: "image" as const,
-      name: attachment.name,
+      name: displayName,
       path: attachment.path,
-      mimeType: detectedMimeType
+      mimeType: detectedMimeType,
+      availability: "available" as const
     })
   });
 }

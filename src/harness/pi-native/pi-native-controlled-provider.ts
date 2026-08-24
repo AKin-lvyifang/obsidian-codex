@@ -302,6 +302,9 @@ function controlledProviderStream(
         context: providerContext,
         options: {
           signal: streamOptions?.signal,
+          ...(streamOptions?.reasoning
+            ? { reasoning: streamOptions.reasoning }
+            : {}),
           maxTokens: requestMaxTokens(
             streamOptions?.maxTokens,
             options.maxTokens,

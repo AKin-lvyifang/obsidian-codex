@@ -10,6 +10,10 @@ import type {
   TokenUsage,
   UiMode
 } from "../types/app-server";
+import {
+  cloneEchoInkTurnInteraction,
+  type EchoInkTurnInteraction
+} from "../types/conversation-turn";
 import { diagnoseProviderError, type ProviderErrorDiagnostic } from "../core/provider-diagnostics";
 import { buildUserInput } from "../core/mapping";
 import { composerPrimaryActionForState, type ComposerPrimaryActionState } from "./composer-state";
@@ -92,6 +96,7 @@ import {
   handleMessagesScroll as handleMessagesScrollAction,
   isMessagesAtBottom as isMessagesAtBottomAction,
   isMessagesNearBottom as isMessagesNearBottomAction,
+  jumpToLatest as jumpToLatestAction,
   moveMessageToEnd as moveMessageToEndAction,
   renderMessages as renderMessagesAction,
   renderMessagesIfActive as renderMessagesIfActiveAction,
@@ -118,6 +123,8 @@ import {
 } from "./codex-view/turn-lifecycle";
 import { renderViewShell, type CodexViewShellHost } from "./codex-view/view-shell";
 import { TaskPlanDockController } from "./codex-view/task-plan-dock";
+import { InteractionDockController } from "./codex-view/interaction-dock";
+import { piToolCallIdFromProjectedMessageId } from "../harness/pi-native/pi-chat-ui-projector";
 import { updateCodexHeaderIdentity } from "./codex-view/header";
 import { closeComposerParameterMenu } from "./codex-view/menus";
 import {
@@ -144,7 +151,9 @@ export class CodexView extends ItemView {
   private tabBarEl!: HTMLElement;
   private messagesEl!: HTMLElement;
   private virtualListEl!: HTMLElement;
+  private jumpToLatestEl!: HTMLButtonElement;
   private taskPlanDockEl!: HTMLElement;
+  private interactionDockEl!: HTMLElement;
   private workspaceEl!: HTMLElement;
   private inputEl!: HTMLTextAreaElement;
   private promptEnhanceReviewEl!: HTMLElement;
@@ -179,6 +188,11 @@ export class CodexView extends ItemView {
   private knowledgeBaseRunProgressTimer: number | null = null;
   private messageListRenderer = new CodexMessageListRenderer();
   private readonly taskPlanDock = new TaskPlanDockController();
+  private readonly interactionDock = new InteractionDockController();
+  private readonly pendingInteractionsBySession = new Map<
+    string,
+    Readonly<EchoInkTurnInteraction>
+  >();
   private selectedSkill: EchoInkResource | null = null;
   private attachments: StoredAttachment[] = [];
   private selectedProviderSettingsId = "";
@@ -233,7 +247,7 @@ export class CodexView extends ItemView {
       get turnQueue() { return view.turnQueue; }, get queueStartInProgress() { return view.queueStartInProgress; }, set queueStartInProgress(value) { view.queueStartInProgress = value; }, get turnStartedAt() { return view.turnStartedAt; }, set turnStartedAt(value) { view.turnStartedAt = value; }, get inputEl() { return view.inputEl; }, get attachments() { return view.attachments; }, get selectedSkill() { return view.selectedSkill; }, get selectedProviderSettingsId() { return view.selectedProviderSettingsId; }, set selectedProviderSettingsId(value) { view.selectedProviderSettingsId = value; }, get selectedModel() { return view.selectedModel; }, set selectedModel(value) { view.selectedModel = value; }, get messagesBottomFollowPaused() { return view.messagesBottomFollowPaused; }, set messagesBottomFollowPaused(value) { view.messagesBottomFollowPaused = value; },
       applyStatus: () => view.applyStatus(), armTurnWatchdog: (timeoutMs, timeoutText) => view.armTurnWatchdog(timeoutMs, timeoutText), clearTurnWatchdog: () => view.clearTurnWatchdog(), clearActiveRun: () => view.clearActiveRun(), renderToolbar: () => view.renderToolbar(), diagnoseCodexFailure: (error, model) => view.diagnoseCodexFailure(error, model), ensureSession: () => view.ensureSession(), composerStateForSession: (session) => view.composerStateForSession(session), enqueueComposerDraft: () => view.enqueueComposerDraft(), resumeQueuedTurns: (sessionId) => view.resumeQueuedTurns(sessionId), stopTurn: () => view.stopTurn(), pauseQueueForSession: (sessionId) => view.pauseQueueForSession(sessionId),
       createQueuedTurnFromComposer: (options) => view.createQueuedTurnFromComposer(options), startQueuedTurnItem: (item, source) => view.startQueuedTurnItem(item, source), startQueuedTurnItemSafely: (item, source) => view.startQueuedTurnItemSafely(item, source), afterTurnSettled: (sessionId, succeeded) => view.afterTurnSettled(sessionId, succeeded), startNextQueuedTurn: (sessionId) => view.startNextQueuedTurn(sessionId), startChatTurn: (session, item, source) => view.startChatTurn(session, item, source), clearComposerDraft: () => view.clearComposerDraft(),
-      ensureChatWorkspaceSelected: (session) => view.ensureChatWorkspaceSelected(session), currentTurnOptions: (session) => view.currentTurnOptions(session), sessionById: (sessionId) => view.sessionById(sessionId), renderQueue: () => view.renderQueue(), renderTabs: () => view.renderTabs(), renderMessages: (options) => view.renderMessages(options), renderMessagesIfActive: (session, updatedMessage) => view.renderMessagesIfActive(session, updatedMessage), ensureThinkingMessage: (session, title, text) => view.ensureThinkingMessage(session, title, text), dismissThinkingMessage: (session) => view.dismissThinkingMessage(session), attachTurnIdToRun: (session, turnId) => view.attachTurnIdToRun(session, turnId), finishThinkingMessage: (session, status) => view.finishThinkingMessage(session, status), finishRunningProcessMessages: (session, status) => view.finishRunningProcessMessages(session, status), finishPlanMessage: (session) => view.finishPlanMessage(session), addMessageToSession: (session, message) => view.addMessageToSession(session, message), moveMessageToEnd: (session, messageId) => view.moveMessageToEnd(session, messageId), fillKnowledgeBaseCommand: (command) => view.fillKnowledgeBaseCommand(command)
+      ensureChatWorkspaceSelected: (session) => view.ensureChatWorkspaceSelected(session), currentTurnOptions: (session) => view.currentTurnOptions(session), sessionById: (sessionId) => view.sessionById(sessionId), renderQueue: () => view.renderQueue(), renderTabs: () => view.renderTabs(), renderMessages: (options) => view.renderMessages(options), renderMessagesIfActive: (session, updatedMessage) => view.renderMessagesIfActive(session, updatedMessage), setPendingInteraction: (sessionId, interaction, expectedTurnId) => view.setPendingInteraction(sessionId, interaction, expectedTurnId), ensureThinkingMessage: (session, title, text) => view.ensureThinkingMessage(session, title, text), dismissThinkingMessage: (session) => view.dismissThinkingMessage(session), attachTurnIdToRun: (session, turnId) => view.attachTurnIdToRun(session, turnId), finishThinkingMessage: (session, status) => view.finishThinkingMessage(session, status), finishRunningProcessMessages: (session, status) => view.finishRunningProcessMessages(session, status), finishPlanMessage: (session) => view.finishPlanMessage(session), addMessageToSession: (session, message) => view.addMessageToSession(session, message), moveMessageToEnd: (session, messageId) => view.moveMessageToEnd(session, messageId), fillKnowledgeBaseCommand: (command) => view.fillKnowledgeBaseCommand(command)
     } satisfies CodexViewTurnContext;
   }
 
@@ -357,6 +371,8 @@ export class CodexView extends ItemView {
       }
     } finally {
       this.taskPlanDock.dispose();
+      this.interactionDock.dispose();
+      this.pendingInteractionsBySession.clear();
       this.messageListRenderer.dispose();
     }
   }
@@ -430,6 +446,86 @@ export class CodexView extends ItemView {
       onAction: (planId, action) => this.handlePiTaskPlanAction(planId, action),
       onModify: (planId, title) => this.preparePiTaskPlanModification(planId, title)
     });
+  }
+  private renderInteractionDock(session: StoredSession): void {
+    const pending = this.pendingInteractionsBySession.get(session.id);
+    const questionBinding = pending?.kind === "question"
+      && pending.status === "pending"
+      && pending.conversationId === session.id
+      && pending.piSessionId === session.piSessionId
+      ? this.plugin.piTurnInteractionBinding({
+          conversationId: session.id,
+          piSessionId: pending.piSessionId,
+          productRunId: pending.turnId,
+          interactionId: pending.interactionId
+        })
+      : null;
+    const confirmationBinding = session.bodyAuthority === "pi_session_only"
+      ? this.pendingApprovalBinding(session)
+      : null;
+    this.interactionDock.render(this.interactionDockEl, {
+      sessionId: session.id,
+      ...(questionBinding
+        ? {
+            question: {
+              binding: questionBinding,
+              onResolved: () => {
+                this.setPendingInteraction(session.id, null, pending?.turnId);
+              }
+            }
+          }
+        : {}),
+      ...(confirmationBinding
+        ? {
+            confirmation: {
+              binding: confirmationBinding,
+              onResolved: () => this.renderInteractionDock(session)
+            }
+          }
+        : {}),
+      onStale: () => {
+        new Notice("该交互已失效，请等待当前会话状态刷新。");
+        this.renderInteractionDock(session);
+      },
+      onScheduleMeasure: () => this.scheduleMeasureVirtualRows()
+    });
+  }
+  private pendingApprovalBinding(session: StoredSession) {
+    const piSessionId = session.piSessionId?.trim();
+    if (!piSessionId) return null;
+    for (const message of session.messages.slice().reverse()) {
+      const productRunId = message.runId?.trim();
+      const toolCallId = piToolCallIdFromProjectedMessageId(message.id);
+      if (!productRunId || !toolCallId) continue;
+      const binding = this.plugin.piAgentApprovalBinding({
+        conversationId: session.id,
+        piSessionId,
+        productRunId,
+        toolCallId
+      });
+      if (binding) return binding;
+    }
+    return null;
+  }
+  private setPendingInteraction(
+    sessionId: string,
+    interaction: Readonly<EchoInkTurnInteraction> | null,
+    expectedTurnId?: string
+  ): void {
+    const current = this.pendingInteractionsBySession.get(sessionId);
+    if (interaction) {
+      if (interaction.conversationId !== sessionId) return;
+      this.pendingInteractionsBySession.set(
+        sessionId,
+        cloneEchoInkTurnInteraction(interaction)
+      );
+    } else if (!expectedTurnId || current?.turnId === expectedTurnId) {
+      this.pendingInteractionsBySession.delete(sessionId);
+    }
+    if (this.plugin.settings.activeSessionId === sessionId) {
+      const session = this.sessionById(sessionId);
+      if (session) this.renderInteractionDock(session);
+    }
   }
   private renderToolbar(): void { renderToolbarAction(this.composerHost()); }
   private enhancePrompt(): void { void enhanceChatInputRunner(this.promptEnhancerRunnerContext); }
@@ -583,6 +679,7 @@ export class CodexView extends ItemView {
   private attachTurnIdToRun(session: StoredSession, turnId: string): void { attachTurnIdToRunAction(this.messageHost(), session, turnId); }
   private renderMessagesIfActive(session: StoredSession, updatedMessage?: ChatMessage): void { renderMessagesIfActiveAction(this.messageHost(), session, updatedMessage); }
   private handleMessagesScroll(): void { handleMessagesScrollAction(typeof (this as unknown as { messageHost?: unknown }).messageHost === "function" ? this.messageHost() : this as unknown as CodexMessageHost); }
+  private jumpToLatest(): void { jumpToLatestAction(this.messageHost()); }
   private scheduleRenderMessages(options: MessageRenderScheduleOptions = {}): void { scheduleRenderMessagesAction(this.messageHost(), options); }
   private scheduleMeasureVirtualRows(forceBottom = !this.messagesBottomFollowPaused): void { scheduleMeasureVirtualRowsAction(this.messageHost(), forceBottom); }
   private scheduleKnowledgeBaseRunProgress(): void { scheduleKnowledgeBaseRunProgressAction(this.messageHost()); }

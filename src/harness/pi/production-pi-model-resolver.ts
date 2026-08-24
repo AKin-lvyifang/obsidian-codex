@@ -2,7 +2,8 @@ import type {
   Api,
   AssistantMessageEventStream,
   Context,
-  Model
+  Model,
+  SimpleStreamOptions
 } from "@earendil-works/pi-ai";
 import type {
   ApiProviderAuthMode,
@@ -33,6 +34,7 @@ export interface ControlledPiStreamInput {
   context: Context;
   options: {
     signal?: AbortSignal;
+    reasoning?: SimpleStreamOptions["reasoning"];
     maxTokens: number;
     temperature: number;
     cacheRetention: "none";

@@ -23,6 +23,7 @@ import type {
 } from "../../settings/settings";
 import {
   activateApiProviderModel,
+  apiProviderModelSupportsImage,
   apiProviderHasUsableCredential,
   getApiProviderModel,
   newId,
@@ -41,6 +42,9 @@ import {
 } from "./pi-conversation-support";
 import { routeKnowledgeConversationCommand } from "../../knowledge-base/commands";
 import { preparePiChatImages } from "./pi-image-input";
+import {
+  cloneEchoInkAssistantTurn
+} from "../../types/conversation-turn";
 
 const activeComposerTransfers = new WeakMap<
   CodexViewTurnContext,
@@ -413,7 +417,7 @@ async function startPreparedQueuedTurnItemSafely(
 
 async function prepareTurnProviderModel(
   view: CodexViewTurnContext,
-  item: Pick<QueuedTurnItem, "turnOptions">,
+  item: Pick<QueuedTurnItem, "turnOptions" | "text" | "attachments">,
   retainQueueHead: boolean
 ): Promise<boolean> {
   const selection = item.turnOptions;
@@ -431,6 +435,14 @@ async function prepareTurnProviderModel(
     new Notice(retainQueueHead
       ? "队列所选 Provider 或模型已不可用；队首已保留并暂停，请检查 Provider 设置后继续。"
       : "所选 Provider 或模型已不可用，请检查 Provider 设置后重试。");
+    return false;
+  }
+  if (
+    item.attachments.some((attachment) => attachment.type === "image")
+    && routeKnowledgeConversationCommand(item.text.trim()).kind !== "maintain"
+    && !apiProviderModelSupportsImage(targetModel)
+  ) {
+    new Notice(PI_IMAGE_INPUT_UNSUPPORTED_MESSAGE);
     return false;
   }
   if (
@@ -554,6 +566,7 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
       text: submittedText,
       submittedAt,
       mode: item.turnOptions.mode === "plan" ? "plan" : "agent",
+      reasoning: item.turnOptions.reasoning,
       memoryMode: piChatMemoryModeForGlobalSetting(
         view.plugin.settings?.memory?.useLongTermMemory !== false
       ),
@@ -588,7 +601,7 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
       preparedImages,
       submittedAt
     );
-    applyPiChatLiveProjection(session, liveProjection);
+    applyPiChatLiveProjection(view, session, liveProjection);
     approvalSubscription = view.plugin.subscribePiAgentApproval({
       conversationId: handle.conversationId,
       piSessionId: handle.piSessionId,
@@ -611,7 +624,7 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
             "running"
           );
           applyPiConversationProjection(session, projection);
-          applyPiChatLiveProjection(session, liveProjection);
+          applyPiChatLiveProjection(view, session, liveProjection);
           view.renderMessagesIfActive(session);
           view.renderToolbar();
           view.applyStatus();
@@ -651,7 +664,7 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
             event,
             vaultPath: view.plugin.getVaultPath()
           });
-          applyPiChatLiveProjection(session, liveProjection);
+          applyPiChatLiveProjection(view, session, liveProjection);
           view.renderMessagesIfActive(session);
           view.renderToolbar();
           view.applyStatus();
@@ -669,7 +682,7 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
                   "finalizing"
                 );
                 applyPiConversationProjection(session, projection);
-                applyPiChatLiveProjection(session, liveProjection);
+                applyPiChatLiveProjection(view, session, liveProjection);
                 view.renderMessagesIfActive(session);
                 view.renderToolbar();
                 view.applyStatus();
@@ -762,6 +775,7 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
       // The canonical terminal/readback above remains authoritative.
     }
     if (handle) {
+      view.setPendingInteraction(session.id, null, handle.productRunId);
       view.plugin.releasePiProductionRun(handle.productRunId);
     }
     view.running = false;
@@ -828,6 +842,7 @@ function applyPiConversationProjection(
 }
 
 function applyPiChatLiveProjection(
+  view: CodexViewTurnContext,
   session: StoredSession,
   projection: Readonly<PiChatUiViewModel>
 ): void {
@@ -835,6 +850,11 @@ function applyPiChatLiveProjection(
   session.messages = projectPiImageAttachments(
     session,
     clonePiChatMessages(projection.messages)
+  );
+  view.setPendingInteraction(
+    session.id,
+    projection.pendingInteraction ?? null,
+    projection.productRunId
   );
 }
 
@@ -945,6 +965,12 @@ function clonePiChatMessages(messages: readonly ChatMessage[]): ChatMessage[] {
             )
           }
         }
+      : {}),
+    ...(message.assistantTurn
+      ? { assistantTurn: cloneEchoInkAssistantTurn(message.assistantTurn) }
+      : {}),
+    ...(message.interactionRecord
+      ? { interactionRecord: Object.freeze({ ...message.interactionRecord }) }
       : {})
   }));
 }

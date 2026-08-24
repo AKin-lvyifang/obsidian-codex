@@ -1,4 +1,4 @@
-import { Notice, normalizePath, Platform, setIcon, TFile, type App, type Component, type Editor } from "obsidian";
+import { Notice, normalizePath, setIcon, TFile, type App, type Component, type Editor } from "obsidian";
 import type {
   ChatMessage,
   DiffSummary,
@@ -19,9 +19,22 @@ import type { KnowledgeBaseMaintainReportPayload, KnowledgeBaseMaintainReportSec
 import { formatMessageHeaderTime } from "../message-time";
 import { openImageOverlay, renderPreformattedVaultNoteText, renderRichText } from "../render-message";
 import { buildActionTimeline, isActionTimelineItem, type ActionGroupKind, type ActionItemViewModel } from "./action-timeline";
-import { buildAgentTurnProjection, formatAgentTurnDuration, isAgentAnswerMessage, isAgentProcessItemType, type CompletedAgentTurn } from "./agent-turn-process";
+import {
+  buildAgentTurnProjection,
+  formatAgentTurnDuration,
+  formatAgentTurnSummary,
+  isAgentAnswerMessage,
+  isAgentProcessItemType,
+  isTerminalTurnStatus,
+  type AgentTurnView,
+  type CompletedAgentTurn
+} from "./agent-turn-process";
 import { copyAnswerMarkdown } from "./answer-copy";
 import { piEntryIdFromProjectedMessageId } from "../../harness/pi-native/pi-chat-ui-projector";
+import {
+  createAttachmentResourceResolver,
+  type EchoInkAttachmentResourceResolver
+} from "./attachment-resource";
 import type { KnowledgeReference } from "../../knowledge-base/types";
 import {
   knowledgeUsageMessageData,
@@ -33,6 +46,10 @@ import {
   type EchoInkTaskPlanStepStatus,
   type EchoInkTaskPlanStatus
 } from "../../types/task-plan";
+import {
+  ECHOINK_ASSISTANT_TURN_SECTION_LABELS,
+  type EchoInkTurnProcessNode
+} from "../../types/conversation-turn";
 import { renderProviderBrandIcon, type ProviderBrandId } from "../../settings/provider-brand-icons";
 import { API_PROVIDER_PRESETS } from "../../settings/provider-presets";
 import {
@@ -48,6 +65,8 @@ import {
   markSmoothAIReasoning,
   markSmoothAIResponse,
   markSmoothAIToolCall,
+  markAIElementsAttachmentItem,
+  markAIElementsAttachments,
   renderSmoothAILoader,
   renderSmoothAISuggestions,
   renderSmoothAIToolStatus,
@@ -59,6 +78,7 @@ import {
 type MessageRenderRow =
   | { id: string; kind: "message"; message: ChatMessage; showAgentHeader: boolean; showAgentFooter: boolean; processExpanded: boolean }
   | { id: string; kind: "actionItem"; message: ChatMessage; showAgentHeader: boolean }
+  | { id: string; kind: "assistantTurn"; turn: AgentTurnView; showAgentHeader: boolean }
   | { id: string; kind: "turnProcess"; turn: CompletedAgentTurn; showAgentHeader: boolean };
 
 interface LocalVaultDocumentSource {
@@ -313,6 +333,7 @@ export class CodexMessageListRenderer {
   private virtualSessionId = "";
   private virtualRowHeights = new Map<string, number>();
   private viewportResizeObserver: ResizeObserver | null = null;
+  private visibleRowsResizeObserver: ResizeObserver | null = null;
   private observedMessagesEl: HTMLElement | null = null;
   private viewportWidth = 0;
   private viewportHeight = 0;
@@ -320,6 +341,7 @@ export class CodexMessageListRenderer {
   private openProcessItems = new Map<string, boolean>();
   private openActionItemDetails = new Map<string, boolean>();
   private openCompletedTurns = new Map<string, boolean>();
+  private assistantTurnDisclosureStates = new Map<string, ReasoningDisclosureState>();
   private openKnowledgeBaseCitations = new Map<string, boolean>();
   private openKnowledgeBaseReportSections = new Map<string, boolean>();
   private openTaskPlans = new Map<string, boolean>();
@@ -346,6 +368,7 @@ export class CodexMessageListRenderer {
     }
     const previousScrollTop = messagesEl.scrollTop;
     const shouldPinBottom = shouldPinMessageListBottom(env.options, this.isNearBottom(messagesEl, virtualListEl));
+    this.disconnectVisibleRowsObserver();
     virtualListEl.empty();
     if (messages.length === 0) {
       virtualListEl.setCssStyles({ height: "100%" });
@@ -386,6 +409,7 @@ export class CodexMessageListRenderer {
       this.renderVirtualRow(rowEl, row);
     }
 
+    this.observeVisibleVirtualRows(messagesEl, virtualListEl);
     this.measureVisibleVirtualRows(messagesEl, virtualListEl, shouldPinBottom);
     if (shouldPinBottom) {
       messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -430,12 +454,16 @@ export class CodexMessageListRenderer {
     const target = this.findRenderedMessageElement(message.id);
     const wrapper = target?.hasClass("codex-message") ? target : target?.closest<HTMLElement>(".codex-message");
     if (!wrapper) return false;
+    const renderedRow = wrapper.closest<HTMLElement>(".codex-virtual-row");
+    // Unified turns update several sibling regions at once, so their deltas
+    // must take the full keyed-row projection path instead of the legacy
+    // single-message patchers below.
+    if (renderedRow?.dataset.rowId?.startsWith("assistantTurn:")) return false;
     const shouldPinBottom = env.shouldFollowBottom
       ? env.shouldFollowBottom()
       : this.isAtBottom(env.messagesEl, env.virtualListEl);
     if (processMessage) {
-      const virtualRow = wrapper.closest<HTMLElement>(".codex-virtual-row");
-      if (!isDirectProcessVirtualRow(virtualRow?.dataset.rowId, message)) return false;
+      if (!isDirectProcessVirtualRow(renderedRow?.dataset.rowId, message)) return false;
       this.processMessageBatcher.enqueue(
         message.id,
         { message, sessionId: env.sessionId, shouldPinBottom },
@@ -478,6 +506,7 @@ export class CodexMessageListRenderer {
   }
 
   dispose(): void {
+    this.disconnectVisibleRowsObserver();
     this.disconnectViewportObserver();
     this.env = null;
     this.resetVirtualWindow();
@@ -527,6 +556,31 @@ export class CodexMessageListRenderer {
     this.observedMessagesEl = null;
     this.viewportWidth = 0;
     this.viewportHeight = 0;
+  }
+
+  private observeVisibleVirtualRows(
+    messagesEl: HTMLElement,
+    virtualListEl: HTMLElement
+  ): void {
+    const ownerWindow = messagesEl.ownerDocument?.defaultView as (Window & {
+      ResizeObserver?: typeof ResizeObserver;
+    }) | null;
+    const ResizeObserverCtor = ownerWindow?.ResizeObserver
+      ?? (typeof globalThis.ResizeObserver === "function" ? globalThis.ResizeObserver : null);
+    if (!ResizeObserverCtor) return;
+    this.visibleRowsResizeObserver = new ResizeObserverCtor(() => {
+      if (!this.env || this.env.messagesEl !== messagesEl || this.env.virtualListEl !== virtualListEl) return;
+      const forceBottom = this.env.shouldFollowBottom?.() ?? false;
+      this.measureVisibleVirtualRows(messagesEl, virtualListEl, forceBottom);
+    });
+    for (const child of Array.from(virtualListEl.children)) {
+      if (child instanceof HTMLElement) this.visibleRowsResizeObserver.observe(child);
+    }
+  }
+
+  private disconnectVisibleRowsObserver(): void {
+    this.visibleRowsResizeObserver?.disconnect();
+    this.visibleRowsResizeObserver = null;
   }
 
   private resetVirtualRerenderThrottle(): void {
@@ -648,9 +702,21 @@ export class CodexMessageListRenderer {
     const rows: MessageRenderRow[] = [];
     const agentHeaderKeys = new Set<string>();
     const footerMessageIds = terminalAnswerFooterMessageIds(messages);
-    for (const item of buildAgentTurnProjection(
-      messagesWithoutSameRunEmptyAnswerLoader(messages)
-    )) {
+    for (const item of buildAgentTurnProjection(messages)) {
+      if (item.kind === "assistantTurn") {
+        const turn = item.turn;
+        const identityMessage = turn.messages[0] ?? turn.finalAnswer;
+        const headerKey = identityMessage ? agentRunHeaderKey(identityMessage) : turn.key;
+        const showAgentHeader = !agentHeaderKeys.has(headerKey);
+        if (showAgentHeader) agentHeaderKeys.add(headerKey);
+        rows.push({
+          id: assistantTurnRowId(turn),
+          kind: "assistantTurn",
+          turn,
+          showAgentHeader
+        });
+        continue;
+      }
       if (item.kind === "completedProcess") {
         const completedTurn = item.turn;
         const headerKey = agentRunHeaderKey(completedTurn.processMessages[0] ?? completedTurn.finalAnswer);
@@ -683,6 +749,10 @@ export class CodexMessageListRenderer {
   }
 
   private renderVirtualRow(container: HTMLElement, row: MessageRenderRow): void {
+    if (row.kind === "assistantTurn") {
+      this.renderAssistantTurn(container, row.turn, row.showAgentHeader);
+      return;
+    }
     if (row.kind === "turnProcess") {
       this.renderCompletedTurnProcess(container, row.turn, row.showAgentHeader);
       return;
@@ -729,24 +799,44 @@ export class CodexMessageListRenderer {
       }
     }
     if (message.attachments?.length) {
-      this.renderUserAttachmentChips(bodyHost.createDiv({ cls: "codex-message-attachments" }), message.attachments);
+      this.renderUserAttachmentChips(
+        bodyHost.createDiv({ cls: "codex-message-attachments" }),
+        message.attachments,
+        createAttachmentResourceResolver(env.app, env.vaultPath)
+      );
     }
     if (message.images?.length) {
       const images = bodyHost.createDiv({ cls: "codex-message-images" });
-      for (const image of message.images) {
-        if (image.availability === "unavailable" || !image.path) {
-          renderUnavailablePiImage(images, image);
+      markAIElementsAttachments(images, "grid", "消息图片");
+      const attachmentResolver = createAttachmentResourceResolver(
+        env.app,
+        env.vaultPath
+      );
+      for (const [index, image] of message.images.entries()) {
+        const resource = attachmentResolver.resolve(image, index);
+        const item = images.createDiv({ cls: "codex-message-image-item" });
+        markAIElementsAttachmentItem(item, "image");
+        if (resource.availability === "unavailable" || !resource.resourceUri) {
+          renderUnavailablePiImage(item, resource.displayName);
           continue;
         }
-        const img = images.createEl("img", { attr: { alt: image.name } });
-        img.src = toImageSrc(env.app, image.path);
+        const preview = item.createEl("button", {
+          cls: "codex-message-image-preview",
+          attr: {
+            type: "button",
+            title: `打开 ${resource.displayName}`,
+            "aria-label": `打开图片：${resource.displayName}`
+          }
+        });
+        const img = preview.createEl("img", { attr: { alt: "", draggable: "false" } });
+        img.src = resource.resourceUri;
         img.onload = () => env.onScheduleMeasure();
         img.onerror = () => {
-          const unavailable = renderUnavailablePiImage(images, image);
-          img.replaceWith(unavailable);
+          preview.remove();
+          renderUnavailablePiImage(item, resource.displayName);
           env.onScheduleMeasure();
         };
-        img.onclick = () => openImageOverlay(img.src);
+        preview.onclick = () => openImageOverlay(resource.resourceUri!);
       }
     }
     const content = bodyHost.createDiv({ cls: "codex-message-content" });
@@ -1420,6 +1510,397 @@ export class CodexMessageListRenderer {
     note.createSpan({ cls: "codex-kb-context-note-text", text: normalized });
   }
 
+  private renderAssistantTurn(
+    container: HTMLElement,
+    turn: AgentTurnView,
+    showAgentHeader: boolean
+  ): void {
+    const env = this.requireEnv();
+    const identityMessage = turn.finalAnswer ?? turn.messages[0];
+    const wrapper = container.createDiv({
+      cls: `codex-message codex-message-assistant codex-message-type-assistantTurn is-${turn.status}`
+    });
+    wrapper.dataset.turnKey = turn.key;
+    wrapper.setAttribute("data-bubble", "false");
+    if (showAgentHeader && identityMessage) {
+      this.renderAgentHeader(wrapper, {
+        message: identityMessage,
+        statusLabel: "",
+        compact: false
+      });
+    }
+    const bodyHost = createSmoothAIMessageBody(wrapper);
+    bodyHost.addClass("codex-assistant-turn");
+
+    if (turn.processNodes.length) {
+      this.renderAssistantTurnProcess(bodyHost, turn);
+    }
+
+    const answer = turn.finalAnswer;
+    if (answer && (displayTextForMessage(answer).trim() || answer.status === "running")) {
+      const answerSection = bodyHost.createDiv({ cls: "codex-assistant-turn-final" });
+      answerSection.dataset.messageId = answer.id;
+      this.renderAssistantTurnSectionLabel(
+        answerSection,
+        ECHOINK_ASSISTANT_TURN_SECTION_LABELS.answer
+      );
+      const answerContent = answerSection.createDiv({
+        cls: "codex-message-content codex-assistant-turn-answer",
+        attr: { "data-message-content": "true" }
+      });
+      this.renderAgentAnswerContent(answerContent, answer);
+      if (isTerminalTurnStatus(turn.status)) {
+        const footerActions = this.renderAgentFooter(answerSection, answer);
+        this.renderPiConversationDeriveAction(footerActions, answer, true);
+      }
+    }
+
+    if (!turn.processNodes.length && !answer) {
+      const empty = bodyHost.createDiv({ cls: "codex-assistant-turn-empty" });
+      renderSmoothAILoader(empty, "正在准备回复");
+      env.onScheduleRunProgress();
+    }
+  }
+
+  private renderAssistantTurnProcess(
+    container: HTMLElement,
+    turn: AgentTurnView
+  ): void {
+    const env = this.requireEnv();
+    const stateKey = `${env.sessionId}\0${turn.key}`;
+    const disclosureStatus = isTerminalTurnStatus(turn.status) ? turn.status : "running";
+    const disclosure = nextReasoningDisclosureState(
+      this.assistantTurnDisclosureStates.get(stateKey),
+      disclosureStatus
+    );
+    this.assistantTurnDisclosureStates.set(stateKey, disclosure);
+
+    const bodyId = stableDomId(`codex-assistant-turn-process-${stateKey}`);
+    const details = container.createEl("details", {
+      cls: `codex-assistant-turn-process is-${turn.status}`,
+      attr: {
+        "data-turn-status": turn.status,
+        "data-smooth-ui-pattern": "ai-reasoning"
+      }
+    });
+    details.open = disclosure.open;
+    const summary = details.createEl("summary", {
+      cls: "codex-assistant-turn-process-summary",
+      attr: {
+        "aria-controls": bodyId,
+        "aria-expanded": String(disclosure.open)
+      }
+    });
+    this.renderAssistantTurnSectionLabel(
+      summary,
+      ECHOINK_ASSISTANT_TURN_SECTION_LABELS.process
+    );
+    summary.createSpan({
+      cls: "codex-assistant-turn-summary-copy",
+      text: formatAgentTurnSummary(turn)
+    });
+    const caret = summary.createSpan({
+      cls: "codex-assistant-turn-summary-caret",
+      attr: { "aria-hidden": "true" }
+    });
+    setIcon(caret, details.open ? "chevron-up" : "chevron-down");
+
+    let pendingUserDisclosureIntent = false;
+    summary.onclick = (event) => {
+      if (event.isTrusted) pendingUserDisclosureIntent = true;
+    };
+    summary.onkeydown = (event) => {
+      if (
+        event.isTrusted
+        && (event.key === "Enter" || event.key === " " || event.code === "Space")
+      ) pendingUserDisclosureIntent = true;
+    };
+    details.ontoggle = () => {
+      const current = this.assistantTurnDisclosureStates.get(stateKey) ?? disclosure;
+      if (pendingUserDisclosureIntent) {
+        this.assistantTurnDisclosureStates.set(stateKey, Object.freeze({
+          ...current,
+          open: details.open,
+          manual: true
+        }));
+      }
+      pendingUserDisclosureIntent = false;
+      summary.setAttribute("aria-expanded", String(details.open));
+      caret.empty();
+      setIcon(caret, details.open ? "chevron-up" : "chevron-down");
+      env.onScheduleMeasure();
+    };
+
+    const body = details.createDiv({
+      cls: "codex-assistant-turn-process-body",
+      attr: { id: bodyId }
+    });
+    const spine = body.createDiv({ cls: "codex-assistant-turn-spine" });
+    for (const node of turn.processNodes) {
+      this.renderAssistantTurnProcessNode(spine, turn, node);
+    }
+  }
+
+  private renderAssistantTurnProcessNode(
+    container: HTMLElement,
+    turn: AgentTurnView,
+    node: Readonly<EchoInkTurnProcessNode>
+  ): void {
+    const row = container.createDiv({
+      cls: `codex-assistant-turn-node is-${node.status} is-${node.kind}`
+    });
+    row.dataset.nodeId = node.nodeId;
+    row.toggleClass("is-current", node.nodeId === turn.currentNodeId);
+    if (node.sourceMessageId) row.dataset.messageId = node.sourceMessageId;
+
+    const marker = row.createSpan({
+      cls: "codex-assistant-turn-node-marker",
+      attr: {
+        "aria-hidden": "true",
+        title: assistantTurnNodeStatusLabel(node.status)
+      }
+    });
+    setIcon(marker, assistantTurnNodeStatusIcon(node.status));
+
+    const content = row.createDiv({ cls: "codex-assistant-turn-node-content" });
+    const heading = content.createDiv({ cls: "codex-assistant-turn-node-heading" });
+    this.renderAssistantTurnSectionLabel(heading, sectionLabelForProcessNode(node));
+    const title = heading.createSpan({
+      cls: "codex-assistant-turn-node-title",
+      text: node.title,
+      attr: { title: node.title }
+    });
+    if (node.status === "running") title.setAttribute("aria-label", `${node.title}，进行中`);
+    if (node.summary) {
+      heading.createSpan({
+        cls: "codex-assistant-turn-node-summary",
+        text: node.summary,
+        attr: { title: node.summary }
+      });
+    }
+
+    this.renderAssistantTurnNodeDetail(content, turn, node);
+  }
+
+  private renderAssistantTurnNodeDetail(
+    container: HTMLElement,
+    turn: AgentTurnView,
+    node: Readonly<EchoInkTurnProcessNode>
+  ): void {
+    if (node.kind === "reasoning" && turn.providerReasoning) {
+      this.renderProviderReasoningNode(container, turn);
+      return;
+    }
+    const source = node.sourceMessageId
+      ? turn.messages.find((message) => message.id === node.sourceMessageId)
+      : undefined;
+    if (!source) return;
+    if (node.nodeId.startsWith("process-activity:")) return;
+    if (node.kind === "interaction") return;
+    if (node.kind === "task" && source.taskPlan) {
+      this.renderCompactTaskPlanNode(container, source);
+      return;
+    }
+    if (node.kind === "retrieval" && node.nodeId.startsWith("sources:")) {
+      const usage = knowledgeUsageMessageData(source);
+      this.renderKnowledgeUsageCards(
+        container,
+        `${turn.key}:${node.nodeId}`,
+        { ...usage, producedPaths: [] },
+        source.citations
+      );
+      return;
+    }
+    if (node.kind === "artifact" && node.nodeId.startsWith("artifacts:")) {
+      this.renderProducedArtifactsNode(container, turn, node, source);
+      return;
+    }
+    if (source.itemType === "thinking") {
+      if (source.status === "running") renderSmoothAILoader(container, source.text || COLD_START_STATUS_TEXT);
+      return;
+    }
+    if (source.reasoningSummary) return;
+    if (isActionTimelineItem(source)) {
+      const item = buildActionTimeline([source]).groups[0]?.items[0];
+      if (item) this.renderActionItem(
+        container.createDiv({ cls: "codex-action-region codex-action-stream" }),
+        item,
+        { standalone: false, showApprovalCard: false }
+      );
+      return;
+    }
+    if (isAgentProcessItemType(source.itemType)) {
+      this.renderProcessMessage(container, source, true, false, false);
+      return;
+    }
+    if (source.itemType === "knowledgeBase") {
+      const details = this.createAssistantTurnResourceDisclosure(
+        container,
+        `${turn.key}:${node.nodeId}`,
+        node.title
+      );
+      this.renderKnowledgeBaseResultContent(details.body, source, displayTextForMessage(source));
+    }
+  }
+
+  private renderProviderReasoningNode(
+    container: HTMLElement,
+    turn: AgentTurnView
+  ): void {
+    const env = this.requireEnv();
+    const reasoning = turn.providerReasoning;
+    if (!reasoning) return;
+    const disclosureKey = `${env.sessionId}\0${turn.key}\0provider-reasoning`;
+    const disclosure = nextReasoningDisclosureState(
+      this.reasoningDisclosureStates.get(disclosureKey),
+      reasoning.status
+    );
+    this.reasoningDisclosureStates.set(disclosureKey, disclosure);
+    const bodyId = stableDomId(`codex-provider-reasoning-${disclosureKey}`);
+    const elements = createSmoothAIReasoning(container, {
+      bodyId,
+      open: disclosure.open,
+      status: reasoning.status === "failed" || reasoning.status === "cancelled" || reasoning.status === "interrupted"
+        ? "error"
+        : smoothAIStatus(reasoning.status),
+      summary: reasoning.status === "running"
+        ? "公开推理进行中"
+        : reasoning.durationMs === undefined
+          ? "公开推理已完成"
+          : `公开推理 · ${formatCompactDuration(reasoning.durationMs)}`
+    });
+    let pendingUserDisclosureIntent = false;
+    elements.summary.onclick = (event) => {
+      if (event.isTrusted) pendingUserDisclosureIntent = true;
+    };
+    elements.summary.onkeydown = (event) => {
+      if (
+        event.isTrusted
+        && (event.key === "Enter" || event.key === " " || event.code === "Space")
+      ) pendingUserDisclosureIntent = true;
+    };
+    elements.root.ontoggle = () => {
+      const current = this.reasoningDisclosureStates.get(disclosureKey) ?? disclosure;
+      if (pendingUserDisclosureIntent) {
+        this.reasoningDisclosureStates.set(disclosureKey, Object.freeze({
+          ...current,
+          open: elements.root.open,
+          manual: true
+        }));
+      }
+      pendingUserDisclosureIntent = false;
+      elements.summary.setAttribute("aria-expanded", String(elements.root.open));
+      env.onScheduleMeasure();
+    };
+    if (reasoning.text.trim()) {
+      renderRichText(env.app, env.component, elements.body, reasoning.text);
+    } else if (reasoning.status === "running") {
+      renderSmoothAILoader(elements.body, "正在接收 Provider 公开推理");
+    }
+  }
+
+  private renderCompactTaskPlanNode(container: HTMLElement, message: ChatMessage): void {
+    const plan = message.taskPlan;
+    if (!plan) return;
+    const progress = taskPlanProgress(plan);
+    const current = plan.steps.find((step) => step.stepId === plan.currentStepId);
+    const compact = container.createDiv({
+      cls: `codex-assistant-turn-task-summary is-${plan.status}`,
+      attr: {
+        "aria-label": `任务 ${plan.title}，${progress.completed}/${progress.total} 已完成`
+      }
+    });
+    this.renderTaskPlanStatusIcon(
+      compact.createSpan({ cls: "codex-assistant-turn-task-status" }),
+      plan.status
+    );
+    const copy = compact.createDiv({ cls: "codex-assistant-turn-task-copy" });
+    copy.createSpan({
+      cls: "codex-assistant-turn-task-progress",
+      text: `${progress.completed}/${progress.total} 已完成`
+    });
+    if (current?.text) {
+      copy.createSpan({
+        cls: "codex-assistant-turn-task-current",
+        text: current.text,
+        attr: { title: current.text }
+      });
+    } else if (plan.lastUpdateSummary?.trim()) {
+      copy.createSpan({
+        cls: "codex-assistant-turn-task-current",
+        text: plan.lastUpdateSummary.trim(),
+        attr: { title: plan.lastUpdateSummary.trim() }
+      });
+    }
+  }
+
+  private renderProducedArtifactsNode(
+    container: HTMLElement,
+    turn: AgentTurnView,
+    node: Readonly<EchoInkTurnProcessNode>,
+    message: ChatMessage
+  ): void {
+    const usage = knowledgeUsageMessageData(message);
+    if (!usage.producedPaths.length) return;
+    const disclosure = this.createAssistantTurnResourceDisclosure(
+      container,
+      `${turn.key}:${node.nodeId}`,
+      `${usage.producedPaths.length} 个产物`
+    );
+    for (const producedPath of usage.producedPaths) {
+      this.renderKnowledgeProducedPath(disclosure.body, producedPath);
+    }
+  }
+
+  private createAssistantTurnResourceDisclosure(
+    container: HTMLElement,
+    stateKey: string,
+    label: string
+  ): { root: HTMLDetailsElement; body: HTMLElement } {
+    const env = this.requireEnv();
+    const bodyId = stableDomId(`codex-assistant-turn-resource-${stateKey}`);
+    const root = container.createEl("details", { cls: "codex-assistant-turn-resource" });
+    root.open = this.openProcessItems.get(stateKey) ?? false;
+    const summary = root.createEl("summary", {
+      cls: "codex-assistant-turn-resource-summary",
+      text: label,
+      attr: {
+        "aria-controls": bodyId,
+        "aria-expanded": String(root.open),
+        title: label
+      }
+    });
+    const body = root.createDiv({
+      cls: "codex-assistant-turn-resource-body",
+      attr: { id: bodyId }
+    });
+    root.ontoggle = () => {
+      rememberOpenState(this.openProcessItems, stateKey, root.open);
+      summary.setAttribute("aria-expanded", String(root.open));
+      env.onScheduleMeasure();
+    };
+    return { root, body };
+  }
+
+  private renderAssistantTurnSectionLabel(
+    container: HTMLElement,
+    label: Readonly<{ primary: string; secondary: string }>
+  ): HTMLElement {
+    const heading = container.createSpan({
+      cls: "codex-assistant-turn-section-label",
+      attr: { role: "heading", "aria-level": "3" }
+    });
+    heading.createSpan({
+      cls: "codex-assistant-turn-section-primary",
+      text: label.primary
+    });
+    heading.createSpan({
+      cls: "codex-assistant-turn-section-secondary",
+      text: label.secondary
+    });
+    return heading;
+  }
+
   private renderActionStreamItem(container: HTMLElement, message: ChatMessage, showAgentHeader: boolean): void {
     const timeline = buildActionTimeline([message]);
     const item = timeline.groups[0]?.items[0];
@@ -1487,7 +1968,11 @@ export class CodexMessageListRenderer {
     });
   }
 
-  private renderActionItem(container: HTMLElement, item: ActionItemViewModel, options: { standalone: boolean }): void {
+  private renderActionItem(
+    container: HTMLElement,
+    item: ActionItemViewModel,
+    options: { standalone: boolean; showApprovalCard?: boolean }
+  ): void {
     if (hasActionItemDetails(item)) {
       this.renderExpandableActionItem(container, item, options);
       return;
@@ -1501,10 +1986,14 @@ export class CodexMessageListRenderer {
     row.toggleClass("is-running", isActiveActionStatus(item.status));
     const head = row.createDiv({ cls: "codex-action-item-head" });
     this.renderActionItemHead(head, item);
-    this.renderApprovalCard(row, item.source);
+    if (options.showApprovalCard !== false) this.renderApprovalCard(row, item.source);
   }
 
-  private renderExpandableActionItem(container: HTMLElement, item: ActionItemViewModel, options: { standalone: boolean }): void {
+  private renderExpandableActionItem(
+    container: HTMLElement,
+    item: ActionItemViewModel,
+    options: { standalone: boolean; showApprovalCard?: boolean }
+  ): void {
     const detailId = stableDomId(`codex-action-detail-${item.id}`);
     const details = container.createEl("details", { cls: `codex-action-item codex-action-item-${item.kind} codex-action-item-expandable` });
     markSmoothAIToolCall(details, item.status);
@@ -1544,7 +2033,9 @@ export class CodexMessageListRenderer {
     this.renderActionItemHead(summary, item);
     caret = summary.createSpan({ cls: "codex-action-item-caret" });
     setIcon(caret, details.open ? "chevron-up" : "chevron-down");
-    this.renderApprovalCard(container, item.source);
+    if (options.showApprovalCard !== false) {
+      this.renderApprovalCard(container, item.source);
+    }
     if (details.open) renderBody();
   }
 
@@ -1635,31 +2126,63 @@ export class CodexMessageListRenderer {
     this.render({ ...env, options: { ...env.options, preserveScroll: true } });
   }
 
-  private renderUserAttachmentChips(container: HTMLElement, attachments: StoredAttachment[]): void {
-    for (const attachment of attachments) {
-      const chip = container.createEl("button", {
+  private renderUserAttachmentChips(
+    container: HTMLElement,
+    attachments: readonly Readonly<StoredAttachment>[],
+    attachmentResolver: EchoInkAttachmentResourceResolver
+  ): void {
+    markAIElementsAttachments(container, "inline", "消息附件");
+    for (const [index, attachment] of attachments.entries()) {
+      const resource = attachmentResolver.resolve(attachment, index);
+      const item = container.createDiv({ cls: "codex-message-attachment-item" });
+      markAIElementsAttachmentItem(
+        item,
+        attachment.type === "image" ? "image" : "document"
+      );
+      if (attachment.type === "image" && resource.availability === "unavailable") {
+        renderUnavailablePiImage(item, resource.displayName);
+        continue;
+      }
+      const chip = item.createEl("button", {
         cls: `codex-message-attachment-chip codex-message-attachment-${attachment.type}`,
         attr: {
           type: "button",
-          title: attachment.path,
-          "aria-label": `打开附件 ${attachment.name}`
+          title: `打开 ${resource.displayName}`,
+          "aria-label": `打开附件 ${resource.displayName}`
         }
       });
-      const icon = chip.createSpan({ cls: "codex-message-attachment-icon" });
+      const icon = chip.createSpan({
+        cls: "codex-message-attachment-icon",
+        attr: { "aria-hidden": "true" }
+      });
       setIcon(icon, attachment.type === "image" ? "image" : "file-text");
-      chip.createSpan({ cls: "codex-message-attachment-name", text: attachment.name });
+      chip.createSpan({
+        cls: "codex-message-attachment-name",
+        text: resource.displayName,
+        attr: { title: resource.displayName }
+      });
       chip.onclick = (event) => {
         event.preventDefault();
         event.stopPropagation();
-        void this.openAttachment(attachment);
+        void this.openAttachment(attachment, resource.resourceUri);
       };
     }
   }
 
-  private async openAttachment(attachment: StoredAttachment): Promise<void> {
+  private async openAttachment(
+    attachment: Readonly<StoredAttachment>,
+    resourceUri?: string
+  ): Promise<void> {
     const env = this.requireEnv();
     if (attachment.type === "image") {
-      openImageOverlay(toImageSrc(env.app, attachment.path));
+      const resolved = resourceUri
+        ? { resourceUri }
+        : createAttachmentResourceResolver(env.app, env.vaultPath).resolve(attachment);
+      if (!resolved.resourceUri) {
+        new Notice("图片附件不可在本地打开");
+        return;
+      }
+      openImageOverlay(resolved.resourceUri);
       return;
     }
     const ref = normalizeProcessFileRef(attachment.path, env.vaultPath);
@@ -1680,7 +2203,13 @@ export class CodexMessageListRenderer {
     shell.createEl("em", { cls: "codex-response-footer", text: message.text || "思考完成" });
   }
 
-  private renderProcessMessage(container: HTMLElement, message: ChatMessage, nested = false, forceOpen = false): void {
+  private renderProcessMessage(
+    container: HTMLElement,
+    message: ChatMessage,
+    nested = false,
+    forceOpen = false,
+    showApprovalCard = true
+  ): void {
     const details = container.createEl("details", { cls: `codex-structured codex-process codex-process-${message.itemType ?? "item"}` });
     markSmoothAIToolCall(details, message.status);
     const approvalState = approvalStateForMessage(message);
@@ -1721,7 +2250,7 @@ export class CodexMessageListRenderer {
       if (message.itemType === "fileChange" && message.files?.length) this.renderProcessFileChips(main.createDiv({ cls: "codex-process-files" }), message.files);
     }
     if (message.status) summary.createSpan({ cls: "codex-structured-status", text: labelForStatus(message.status) });
-    this.renderApprovalCard(container, message);
+    if (showApprovalCard) this.renderApprovalCard(container, message);
     if (details.open) renderBody();
   }
 
@@ -2121,26 +2650,6 @@ export function terminalAnswerFooterMessageIds(messages: ChatMessage[]): Set<str
     .map(([, message]) => message.id));
 }
 
-function messagesWithoutSameRunEmptyAnswerLoader(
-  messages: readonly ChatMessage[]
-): ChatMessage[] {
-  const runningReasoningRunIds = new Set(messages.flatMap((message) =>
-    message.itemType === "reasoning"
-    && message.reasoningSummary?.status === "running"
-    && message.runId
-      ? [message.runId]
-      : []
-  ));
-  if (!runningReasoningRunIds.size) return [...messages];
-  return messages.filter((message) => !(
-    message.runId
-    && runningReasoningRunIds.has(message.runId)
-    && isAgentAnswerMessage(message)
-    && message.status === "running"
-    && !displayTextForMessage(message).trim()
-  ));
-}
-
 function agentRunHeaderKey(message: ChatMessage): string {
   if (message.runId) return `run:${message.runId}`;
   if (message.turnId) return `turn:${message.turnId}`;
@@ -2257,12 +2766,60 @@ function actionItemRowId(message: Pick<ChatMessage, "id">): string {
   return `actionItem:${message.id}`;
 }
 
+function assistantTurnRowId(turn: Pick<AgentTurnView, "key">): string {
+  return `assistantTurn:${turn.key}`;
+}
+
 export function isDirectProcessVirtualRow(rowId: string | undefined, message: Pick<ChatMessage, "id" | "itemType" | "role">): boolean {
   return rowId === (isActionTimelineItem(message) ? actionItemRowId(message) : messageRowId(message));
 }
 
 function completedTurnRowId(turn: CompletedAgentTurn): string {
   return `turnProcess:${turn.key}:${turn.finalAnswer.id}`;
+}
+
+function sectionLabelForProcessNode(
+  node: Readonly<EchoInkTurnProcessNode>
+): Readonly<{ primary: string; secondary: string }> {
+  if (node.kind === "reasoning") return ECHOINK_ASSISTANT_TURN_SECTION_LABELS.reasoning;
+  if (
+    node.kind === "retrieval"
+    || node.kind === "tool"
+    || node.kind === "task"
+    || node.kind === "artifact"
+    || node.kind === "diff"
+  ) return ECHOINK_ASSISTANT_TURN_SECTION_LABELS.tools;
+  return ECHOINK_ASSISTANT_TURN_SECTION_LABELS.process;
+}
+
+function assistantTurnNodeStatusLabel(
+  status: Readonly<EchoInkTurnProcessNode>["status"]
+): string {
+  if (status === "running") return "进行中";
+  if (status === "completed") return "已完成";
+  if (status === "failed") return "失败";
+  if (status === "cancelled") return "已取消";
+  if (status === "skipped") return "已跳过";
+  return "等待中";
+}
+
+function assistantTurnNodeStatusIcon(
+  status: Readonly<EchoInkTurnProcessNode>["status"]
+): string {
+  if (status === "running") return "loader-circle";
+  if (status === "completed") return "check";
+  if (status === "failed") return "triangle-alert";
+  if (status === "cancelled") return "circle-slash";
+  if (status === "skipped") return "minus";
+  return "circle";
+}
+
+function formatCompactDuration(durationMs: number): string {
+  const totalSeconds = Math.max(1, Math.round(Math.max(0, durationMs) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes > 0) return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+  return `${seconds}s`;
 }
 
 function actionItemMeta(item: ActionItemViewModel): string {
@@ -2510,21 +3067,22 @@ function isAttentionProcessStatus(status: string | undefined): boolean {
 
 function renderUnavailablePiImage(
   container: HTMLElement,
-  image: Readonly<StoredAttachment>
+  displayName: string
 ): HTMLElement {
   const unavailable = container.createDiv({
     cls: "codex-message-attachment-chip codex-message-attachment-image is-disabled",
     attr: {
       role: "status",
       title: "图片附件不可在本地打开",
-      "aria-label": `${image.name}：图片附件不可在本地打开`
+      "aria-label": `${displayName}：图片附件不可在本地打开`
     }
   });
   const icon = unavailable.createSpan({ cls: "codex-message-attachment-icon" });
   setIcon(icon, "image-off");
   unavailable.createSpan({
     cls: "codex-message-attachment-name",
-    text: `${image.name} · 图片附件不可在本地打开`
+    text: `${displayName} · 图片附件不可在本地打开`,
+    attr: { title: displayName }
   });
   return unavailable;
 }
@@ -2720,12 +3278,4 @@ function countLines(text: string): number {
 function rememberOpenState(store: Map<string, boolean>, id: string, open: boolean): void {
   if (open) store.set(id, true);
   else store.delete(id);
-}
-
-function toImageSrc(app: App, imagePath: string): string {
-  if (imagePath.startsWith("/")) return `file://${imagePath}`;
-  const file = app.vault.getAbstractFileByPath(imagePath);
-  if (file instanceof TFile) return app.vault.getResourcePath(file);
-  if (Platform.isDesktopApp) return `file://${imagePath}`;
-  return imagePath;
 }

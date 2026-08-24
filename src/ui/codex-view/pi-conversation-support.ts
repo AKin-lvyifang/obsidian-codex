@@ -14,6 +14,7 @@ import {
   type StoredPiImageAttachmentMetadata,
   type StoredSession
 } from "../../settings/settings";
+import { attachmentDisplayName } from "./attachment-resource";
 
 interface PiConversationUiState {
   readonly supportByConversation: Map<string, PiConversationSupportState>;
@@ -137,10 +138,11 @@ export function recordPiImageAttachmentsForEntry(
 ): void {
   const entryId = entryIdValue.trim();
   if (!entryId || !images.length) return;
-  const metadata = images.map(({ attachment }) => Object.freeze({
-    name: attachment.name,
+  const metadata = images.map(({ attachment }, index) => Object.freeze({
+    name: attachmentDisplayName(attachment, index),
     path: attachment.path,
-    mimeType: attachment.mimeType
+    mimeType: attachment.mimeType,
+    availability: localAttachmentAvailability(attachment.path)
   }));
   const normalized = sanitizeStoredPiImageAttachments({
     ...(session.piImageAttachments ?? {}),
@@ -196,12 +198,19 @@ export function piComposerImageAttachmentsForEntry(
   entryIdValue: string
 ): StoredAttachment[] {
   const metadata = session.piImageAttachments?.[entryIdValue.trim()] ?? [];
-  return metadata.map((attachment) => ({
-    type: "image",
-    name: attachment.name,
-    path: attachment.path,
-    mimeType: attachment.mimeType
-  }));
+  return metadata.map((attachment, index) => {
+    const projected: StoredAttachment = {
+      type: "image",
+      name: attachment.name,
+      path: attachment.path,
+      mimeType: attachment.mimeType,
+      availability: localAttachmentAvailability(attachment.path)
+    };
+    return {
+      ...projected,
+      name: attachmentDisplayName(projected, index)
+    };
+  });
 }
 
 function localPiImageAttachment(
@@ -210,24 +219,36 @@ function localPiImageAttachment(
   index: number
 ): StoredAttachment {
   if (!metadata) {
-    return {
+    const projected: StoredAttachment = {
       ...fallback,
       type: "image",
       name: fallback.name || `图片 ${index + 1}`,
-      availability: fallback.path && existsSync(fallback.path)
-        ? "available"
-        : "unavailable"
+      availability: localAttachmentAvailability(fallback.path)
+    };
+    return {
+      ...projected,
+      name: attachmentDisplayName(projected, index)
     };
   }
-  return {
+  const projected: StoredAttachment = {
     type: "image",
     name: metadata.name,
     path: metadata.path,
     mimeType: metadata.mimeType,
-    availability: metadata.path && existsSync(metadata.path)
-      ? "available"
-      : "unavailable"
+    availability: localAttachmentAvailability(metadata.path)
   };
+  return {
+    ...projected,
+    name: attachmentDisplayName(projected, index)
+  };
+}
+
+function localAttachmentAvailability(
+  attachmentPath: string
+): NonNullable<StoredAttachment["availability"]> {
+  return attachmentPath.trim() && existsSync(attachmentPath)
+    ? "available"
+    : "unavailable";
 }
 
 function requireState(plugin: CodexForObsidianPlugin): PiConversationUiState {

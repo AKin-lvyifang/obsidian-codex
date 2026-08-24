@@ -22,6 +22,7 @@ import {
   enqueueComposerDraft,
   piChatMemoryModeForGlobalSetting,
   startChatTurn,
+  startQueuedTurnItem,
   startNextQueuedTurn
 } from "../../ui/codex-view/turn-runner";
 import { classifyLocalAttachmentType } from "../../ui/codex-view/attachments";
@@ -68,6 +69,7 @@ export async function runPiNativeTurnRunnerTests(): Promise<void> {
   await activeRunImagesUseTheNormalQueue();
   await queuedImageFailuresAreRetainedOnlyBeforePiAcceptance();
   await inFlightComposerImageTransferCannotDuplicate();
+  await imageCapabilityPreflightPreservesCompletedTurn();
   await imageCapabilityFailurePreservesComposerAndAcceptedFailureRecordsMetadata();
   await agentSettlementOnlyFinalizesPiChatTurn();
   await pendingSubmitKeepsRunningConversationResidentAcrossSessionSwitch();
@@ -253,7 +255,7 @@ function imageMetadataProjectsAndCopiesByPiEntryIdentity(): void {
     piImageAttachments: {
       [entryId]: [
         {
-          name: "原图一.png",
+          name: "clipboard-1720000000000-0.png",
           path: "/missing/ordered-one.png",
           mimeType: "image/png"
         },
@@ -292,7 +294,7 @@ function imageMetadataProjectsAndCopiesByPiEntryIdentity(): void {
   assert.equal(projected.length, 1, "missing local files must not drop the user message");
   assert.deepEqual(projected[0]?.images, [{
     type: "image",
-    name: "原图一.png",
+    name: "粘贴图片 1.png",
     path: "/missing/ordered-one.png",
     mimeType: "image/png",
     availability: "unavailable"
@@ -320,15 +322,17 @@ function imageMetadataProjectsAndCopiesByPiEntryIdentity(): void {
   assert.deepEqual(piComposerImageAttachmentsForEntry(source, entryId), [
     {
       type: "image",
-      name: "原图一.png",
+      name: "粘贴图片 1.png",
       path: "/missing/ordered-one.png",
-      mimeType: "image/png"
+      mimeType: "image/png",
+      availability: "unavailable"
     },
     {
       type: "image",
       name: "原图二.jpg",
       path: "/missing/ordered-two.jpg",
-      mimeType: "image/jpeg"
+      mimeType: "image/jpeg",
+      availability: "unavailable"
     }
   ]);
 }
@@ -554,7 +558,8 @@ Promise<void> {
       [{
         name: "composer.png",
         path: imagePath,
-        mimeType: "image/png"
+        mimeType: "image/png",
+        availability: "available"
       }]
     );
     assert.doesNotMatch(
@@ -625,6 +630,69 @@ Promise<void> {
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+}
+
+async function imageCapabilityPreflightPreservesCompletedTurn(): Promise<void> {
+  const session = piSessionShell("conversation-image-capability-preflight");
+  session.messages = [{
+    id: "assistant-completed-before-image-preflight",
+    role: "assistant",
+    itemType: "assistant",
+    text: "上一轮已经完成",
+    status: "completed",
+    runId: "product-run-completed",
+    turnId: "product-run-completed",
+    assistantTurn: {
+      viewVersion: 1,
+      conversationId: session.id,
+      turnId: "product-run-completed",
+      status: "completed",
+      startedAt: 2,
+      updatedAt: 5,
+      completedAt: 5,
+      processNodes: [],
+      interactionRecords: [],
+      finalAnswerMessageId: "assistant-completed-before-image-preflight",
+      summary: {
+        completedSteps: 3,
+        toolCount: 2,
+        durationMs: 24_000
+      }
+    },
+    createdAt: 2,
+    completedAt: 5
+  }];
+  const beforeMessages = structuredClone(session.messages);
+  const item = queuedImageTurn(session.id, "/fixture/unsupported.png");
+  const settings = createQueueImageProviderSettings(false);
+  let startCalls = 0;
+  let clearCalls = 0;
+  const view: any = {
+    plugin: { settings },
+    selectedProviderSettingsId: item.turnOptions.providerSettingsId,
+    selectedModel: item.turnOptions.model,
+    inputEl: { value: item.text },
+    attachments: item.attachments.map((attachment) => ({ ...attachment })),
+    selectedSkill: null,
+    renderToolbar: () => undefined,
+    clearComposerDraft: () => { clearCalls += 1; },
+    sessionById: (sessionId: string) => sessionId === session.id ? session : null,
+    startChatTurn: async () => {
+      startCalls += 1;
+      return "completed" as const;
+    }
+  };
+
+  assert.equal(await startQueuedTurnItem(view, item, "composer"), "failed");
+  assert.equal(startCalls, 0, "unsupported images must not enter Pi submit");
+  assert.equal(clearCalls, 0, "unsupported images must retain the Composer draft");
+  assert.equal(view.inputEl.value, item.text);
+  assert.deepEqual(view.attachments, item.attachments);
+  assert.deepEqual(
+    session.messages,
+    beforeMessages,
+    "capability preflight must not rewrite a completed Assistant Turn"
+  );
 }
 
 function emptyPersonalMemorySourceDisplayDoesNotClaimInjection(): void {
@@ -1167,6 +1235,7 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
     inputEl: { value: item.text },
     attachments: item.attachments.map((attachment) => ({ ...attachment })),
     selectedSkill: { ...item.skill! },
+    setPendingInteraction: () => undefined,
     clearComposerDraft: () => { composerCleared = true; },
     renderTabs: () => undefined,
     renderMessagesIfActive: () => {
@@ -1456,6 +1525,7 @@ Promise<void> {
     renderMessagesIfActive: () => undefined,
     renderToolbar: () => undefined,
     applyStatus: () => undefined,
+    setPendingInteraction: () => undefined,
     clearComposerDraft: () => undefined,
     armTurnWatchdog: () => undefined,
     clearTurnWatchdog: () => undefined,
@@ -1581,15 +1651,15 @@ function queuedImageTurn(sessionId: string, imagePath: string): QueuedTurnItem {
   };
 }
 
-function createQueueImageProviderSettings() {
+function createQueueImageProviderSettings(imageInput = true) {
   const settings = structuredClone(DEFAULT_SETTINGS);
   const provider = createApiProviderConfig("custom", "queue-image-provider");
   provider.name = "Queue image provider";
   provider.baseUrl = "https://queue-image.example/v1";
   provider.apiKey = "fixture-queue-image-key";
-  provider.models = [
-    createApiProviderModelConfig("custom", "queue-image-model")
-  ];
+  const model = createApiProviderModelConfig("custom", "queue-image-model");
+  model.input = imageInput ? ["text", "image"] : ["text"];
+  provider.models = [model];
   provider.defaultModelId = "queue-image-model";
   settings.apiProviders = [provider];
   activateApiProviderModel(settings, provider, "queue-image-model");

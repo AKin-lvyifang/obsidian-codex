@@ -86,6 +86,10 @@ import {
   createPiTaskPlanToolDefinition
 } from "../harness/pi-native/pi-task-plan";
 import {
+  PiUserQuestionToolSecurity,
+  createPiUserQuestionToolDefinition
+} from "../harness/pi-native/pi-user-question-tool";
+import {
   isEchoInkTaskPlanTerminal,
   type EchoInkTaskPlanSnapshot
 } from "../types/task-plan";
@@ -181,6 +185,7 @@ import {
   recoverPiMcpDomainReceipts
 } from "./pi-mcp-tool-production";
 import { PiAgentApprovalBroker } from "./pi-agent-approval-broker";
+import { PiTurnInteractionBroker } from "./pi-turn-interaction-broker";
 import { stablePathToken } from "../harness/pi-native/file-store-utils";
 import {
   buildEchoInkSystemConstitutionPrompt,
@@ -236,6 +241,7 @@ export interface PiProductionPluginHost {
 export interface PiProductionRuntimeBundle {
   readonly runtime: PiNativeConversationRuntime;
   readonly approvalBroker: PiAgentApprovalBroker;
+  readonly interactionBroker: PiTurnInteractionBroker;
   readonly catalog: FileConversationCatalog;
   readonly approvals: FileApprovalTicketStore;
   readonly receipts: FileDomainReceiptStore;
@@ -397,6 +403,7 @@ export async function createPiProductionRuntimeBundle(
     plugin.settings
   );
   const approvalBroker = new PiAgentApprovalBroker();
+  const interactionBroker = new PiTurnInteractionBroker();
   let runtime: PiNativeConversationRuntime | null = null;
   try {
     const initializedRuntime = new PiNativeConversationRuntime({
@@ -426,7 +433,8 @@ export async function createPiProductionRuntimeBundle(
             knowledgeMaintenance,
             knowledgeAgentIndex,
             personalMemory,
-            approvalBroker
+            approvalBroker,
+            interactionBroker
           });
         } catch (error) {
           if (error instanceof PiNativeModelMetadataError) {
@@ -468,7 +476,10 @@ export async function createPiProductionRuntimeBundle(
           conversationId: state.conversationId,
           productRunId: state.productRunId
         }),
-      disposeRuntimeResources: () => approvalBroker.dispose()
+      disposeRuntimeResources: () => {
+        interactionBroker.dispose();
+        approvalBroker.dispose();
+      }
     });
     runtime = initializedRuntime;
     await initializedRuntime.initialize();
@@ -481,6 +492,7 @@ export async function createPiProductionRuntimeBundle(
     return Object.freeze({
       runtime: initializedRuntime,
       approvalBroker,
+      interactionBroker,
       catalog,
       approvals,
       receipts,
@@ -495,7 +507,10 @@ export async function createPiProductionRuntimeBundle(
       settingsBeforeCutover
     );
     if (runtime) await runtime.shutdown().catch(() => undefined);
-    else approvalBroker.dispose();
+    else {
+      interactionBroker.dispose();
+      approvalBroker.dispose();
+    }
     throw error;
   }
 }
@@ -1283,6 +1298,7 @@ async function createProductionAgentSession(input: {
   knowledgeAgentIndex: KnowledgeAgentIndex;
   personalMemory: PersonalMemoryRepository;
   approvalBroker: PiAgentApprovalBroker;
+  interactionBroker: PiTurnInteractionBroker;
 }): Promise<PiNativeAgentSessionFactoryResult> {
   const preparedProvider = await preparePiProductionProvider(input);
   const { configured, binding, controlledConfig, provider } = preparedProvider;
@@ -1411,6 +1427,7 @@ async function createProductionAgentSession(input: {
       });
     }
   });
+  const userQuestionSecurity = new PiUserQuestionToolSecurity();
   const personalMemorySecurity = new PiPersonalMemoryToolSecurity({
     currentRuntime: () => {
       const execution = input.input.currentToolExecutionContext();
@@ -1464,6 +1481,7 @@ async function createProductionAgentSession(input: {
     additionalToolSecurities: [
       mcpSecurity,
       taskPlanSecurity,
+      userQuestionSecurity,
       personalMemorySecurity,
       knowledgeReadSecurity
     ],
@@ -1483,6 +1501,31 @@ async function createProductionAgentSession(input: {
   const taskPlanTool = createPiTaskPlanToolDefinition({
     sessionManager: input.input.sessionManager,
     security: taskPlanSecurity
+  });
+  const userQuestionTool = createPiUserQuestionToolDefinition({
+    sessionManager: input.input.sessionManager,
+    broker: input.interactionBroker,
+    security: userQuestionSecurity,
+    currentRun: () => {
+      const execution = input.input.currentToolExecutionContext();
+      return Object.freeze({
+        conversationId: execution.conversationId,
+        piSessionId: execution.piSessionId,
+        productRunId: execution.productRunId
+      });
+    },
+    reportRequested: async (interaction) => {
+      if (!input.input.reportInteractionRequested) {
+        throw new Error("turn_interaction_requested_reporter_unavailable");
+      }
+      await input.input.reportInteractionRequested(interaction);
+    },
+    reportResolved: async (record) => {
+      if (!input.input.reportInteractionResolved) {
+        throw new Error("turn_interaction_resolved_reporter_unavailable");
+      }
+      await input.input.reportInteractionResolved(record);
+    }
   });
   const personalMemoryTools = createPiPersonalMemoryToolDefinitions({
     repository: input.personalMemory,
@@ -1578,6 +1621,7 @@ async function createProductionAgentSession(input: {
     ...vaultTools,
     maintenanceTool,
     taskPlanTool,
+    userQuestionTool,
     ...personalMemoryTools,
     ...knowledgeReadTools,
     ...mcpSnapshot.customTools
@@ -1634,6 +1678,7 @@ async function createProductionAgentSession(input: {
   created.session.setActiveToolsByName([
     ...PI_VAULT_TOOL_IDS,
     taskPlanTool.name,
+    userQuestionTool.name,
     ...(configured.toolCalling ? [...PI_PERSONAL_MEMORY_TOOL_IDS] : []),
     ...mcpSnapshot.toolNames
   ]);
@@ -1643,7 +1688,8 @@ async function createProductionAgentSession(input: {
     ...mcpSnapshot.toolSecurity
       .filter((descriptor) => descriptor.readOnly)
       .map((descriptor) => descriptor.name),
-    taskPlanTool.name
+    taskPlanTool.name,
+    userQuestionTool.name
   ];
   const warnings = [
     created.modelFallbackMessage,

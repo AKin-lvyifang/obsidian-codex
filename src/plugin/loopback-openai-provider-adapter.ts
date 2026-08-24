@@ -11,6 +11,7 @@ import {
   type Context,
   type Model,
   type ProviderStreams,
+  type SimpleStreamOptions,
   type StreamOptions
 } from "@earendil-works/pi-ai";
 import {
@@ -28,6 +29,8 @@ import {
 
 const MAX_LOOPBACK_RESPONSE_BYTES = 16 * 1024 * 1024;
 const DEFAULT_LOOPBACK_TIMEOUT_MS = 30_000;
+type LoopbackStreamOptions = StreamOptions &
+  Pick<SimpleStreamOptions, "reasoning">;
 
 export interface LoopbackProviderResponse {
   readonly status: number;
@@ -42,10 +45,10 @@ export interface LoopbackProviderResponse {
  * only target localhost/loopback. It is never selected for cloud Providers.
  */
 export function createLoopbackOpenAICompletionsAdapter(): ProviderStreams {
-  const stream = (
+  const start = (
     model: Model<Api>,
     context: Context,
-    options: StreamOptions = {}
+    options: LoopbackStreamOptions
   ): AssistantMessageEventStream => {
     const output = createAssistantMessageEventStream();
     void executeLoopbackCompletion({
@@ -57,8 +60,10 @@ export function createLoopbackOpenAICompletionsAdapter(): ProviderStreams {
     return output;
   };
   return Object.freeze({
-    stream,
-    streamSimple: stream
+    stream: (model, context, options = {}) =>
+      start(model, context, options),
+    streamSimple: (model, context, options = {}) =>
+      start(model, context, options)
   });
 }
 
@@ -189,7 +194,7 @@ export async function requestLoopbackProvider(input: {
 async function executeLoopbackCompletion(input: {
   model: Model<Api>;
   context: Context;
-  options: StreamOptions;
+  options: LoopbackStreamOptions;
   output: AssistantMessageEventStream;
 }): Promise<void> {
   let status: number | null = null;
@@ -257,7 +262,7 @@ async function executeLoopbackCompletion(input: {
 function loopbackControlledInput(
   model: Model<Api>,
   context: Context,
-  options: StreamOptions
+  options: LoopbackStreamOptions
 ): ControlledPiStreamInput {
   return {
     runId: "loopback-provider-run",
@@ -275,6 +280,7 @@ function loopbackControlledInput(
     context,
     options: {
       ...(options.signal ? { signal: options.signal } : {}),
+      ...(options.reasoning ? { reasoning: options.reasoning } : {}),
       maxTokens: boundedInteger(
         options.maxTokens,
         1,

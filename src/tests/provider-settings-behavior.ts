@@ -680,7 +680,10 @@ function assertMemoryComposerVisualCssContract(): void {
     /\.codex-composer-send-button\.codex-send-button\s*\{([^}]*)\}/u
   )?.[1] ?? "";
   const sendIconRule = css.match(
-    /\.codex-composer-send-icon-wrap svg,\s*\.codex-composer-send-button \.echoink-animate-icon-send\s*\{([^}]*)\}/u
+    /\.codex-composer-send-icon-wrap svg,\s*\.codex-composer-send-button \.echoink-animate-icon-send-horizontal,\s*\.codex-composer-send-button \.echoink-animate-icon-circle-stop\s*\{([^}]*)\}/u
+  )?.[1] ?? "";
+  const stopButtonRule = css.match(
+    /\.codex-composer-send-button\.codex-send-button\.is-stop-action\s*\{([^}]*)\}/u
   )?.[1] ?? "";
   const permissionKeyboardFocusRule = css.match(
     /\.codex-permission-control \.codex-composer-native-select\.codex-select:is\(:focus, :focus-visible\)\s*\{([^}]*)\}/u
@@ -712,6 +715,9 @@ function assertMemoryComposerVisualCssContract(): void {
   assert.doesNotMatch(sendButtonRule, /interactive-accent|text-on-accent/u);
   assert.match(sendIconRule, /width:\s*20px;/u);
   assert.match(sendIconRule, /height:\s*20px;/u);
+  assert.match(stopButtonRule, /color:\s*var\(--text-normal\);/u);
+  assert.match(stopButtonRule, /box-shadow:\s*none\s*!important;/u);
+  assert.doesNotMatch(stopButtonRule, /text-error|status-danger/u);
   assert.match(permissionKeyboardFocusRule, /outline:\s*none\s*!important;/u);
   assert.match(permissionKeyboardFocusRule, /border:\s*0\s*!important;/u);
   assert.match(permissionKeyboardFocusRule, /box-shadow:\s*none\s*!important;/u);
@@ -723,8 +729,13 @@ function assertMemoryComposerVisualCssContract(): void {
   );
   assert.match(
     css,
-    /\.echoink-animate-icon-host\.is-send-icon:is\(:hover, :focus-visible\) \.echoink-animate-icon-send\s*\{[\s\S]*?1400ms ease-in-out/u,
-    "the ordinary send action uses the pinned Animate Icons send timing"
+    /@media\s*\(prefers-reduced-motion:\s*no-preference\)[\s\S]*?\.echoink-animate-icon-host\.is-send-horizontal-icon:is\(:hover, :focus-visible\)[\s\S]*?\.echoink-animate-icon-send-horizontal\s*\{[\s\S]*?1400ms ease-in-out/u,
+    "the ordinary send action uses the pinned AnimateIcons send-horizontal timing"
+  );
+  assert.match(
+    css,
+    /\.echoink-animate-icon-host\.is-circle-stop-icon:is\(:hover, :focus-visible\)[\s\S]*?\.echoink-animate-circle-stop-ring/u,
+    "the stop action uses the pinned AnimateIcons circle-stop motion"
   );
   assert.doesNotMatch(css, /codex-composer-send-icon-confirm/u);
   assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*?animation:\s*none\s*!important/u);
@@ -1094,11 +1105,13 @@ function assertConversationSettingsDiscardMessageBodies(): void {
         name: "first.png",
         path: "/disposable-vault/first.png",
         mimeType: "image/png",
+        availability: "available",
         data: "SETTINGS_BASE64_CANARY"
       }, {
         name: "second.jpg",
         path: "/disposable-vault/second.jpg",
         mimeType: "image/jpeg",
+        availability: "unavailable",
         base64: "SETTINGS_SECOND_BASE64_CANARY"
       }]
     } as never,
@@ -1114,11 +1127,13 @@ function assertConversationSettingsDiscardMessageBodies(): void {
     "entry-image-metadata": [{
       name: "first.png",
       path: "/disposable-vault/first.png",
-      mimeType: "image/png"
+      mimeType: "image/png",
+      availability: "available"
     }, {
       name: "second.jpg",
       path: "/disposable-vault/second.jpg",
-      mimeType: "image/jpeg"
+      mimeType: "image/jpeg",
+      availability: "unavailable"
     }]
   });
   assert.deepEqual(

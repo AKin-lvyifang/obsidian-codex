@@ -38,6 +38,10 @@ import {
 } from "../types/reasoning-summary";
 import type { EchoInkConversationSessionShell } from "./current-conversation";
 import { resolveEchoInkPiCatalogModel } from "./pi-model-catalog";
+import type {
+  EchoInkAssistantTurnSnapshot,
+  EchoInkTurnInteractionRecord
+} from "../types/conversation-turn";
 
 export interface StoredAttachment {
   type: "file" | "image";
@@ -53,6 +57,8 @@ export interface StoredPiImageAttachmentMetadata {
   readonly name: string;
   readonly path: string;
   readonly mimeType: string;
+  /** Last observed local state; every projection revalidates it against the resource. */
+  readonly availability?: "available" | "unavailable";
 }
 
 export type StoredPiImageAttachmentsByEntry = Readonly<
@@ -172,6 +178,10 @@ export interface ChatMessage {
   taskPlan?: Readonly<EchoInkTaskPlanSnapshot>;
   /** Bounded, privacy-safe projection of one Pi ProductRun lifecycle. */
   reasoningSummary?: Readonly<EchoInkReasoningSummarySnapshot>;
+  /** Display-only unified Assistant Turn projection; Pi Session remains authoritative. */
+  assistantTurn?: Readonly<EchoInkAssistantTurnSnapshot>;
+  /** Compact, non-interactive Question/Confirmation history on the process spine. */
+  interactionRecord?: Readonly<EchoInkTurnInteractionRecord>;
   createdAt: number;
   completedAt?: number;
 }
@@ -1495,7 +1505,15 @@ export function sanitizeStoredPiImageAttachments(
         const path = normalizeOptionalText(item.path);
         const mimeType = normalizeStoredPiImageMimeType(item.mimeType);
         if (!name || !path || !mimeType) return null;
-        return Object.freeze({ name, path, mimeType });
+        const availability = normalizeStoredAttachmentAvailability(
+          item.availability
+        );
+        return Object.freeze({
+          name,
+          path,
+          mimeType,
+          ...(availability ? { availability } : {})
+        });
       })
       .filter((item): item is StoredPiImageAttachmentMetadata => Boolean(item));
     if (attachments.length) {
@@ -1504,6 +1522,14 @@ export function sanitizeStoredPiImageAttachments(
   }
   return entries.length
     ? Object.freeze(Object.fromEntries(entries))
+    : undefined;
+}
+
+function normalizeStoredAttachmentAvailability(
+  value: unknown
+): StoredAttachment["availability"] {
+  return value === "available" || value === "unavailable"
+    ? value
     : undefined;
 }
 

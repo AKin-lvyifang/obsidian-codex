@@ -225,6 +225,37 @@ export function markSmoothAIApproval(container: HTMLElement, state: SmoothAIAppr
   container.setAttribute("data-approval-state", state);
 }
 
+/** Native Obsidian DOM marker for Vercel AI Elements Question semantics. */
+export function markAIElementsQuestion(container: HTMLElement): void {
+  container.addClass("codex-ai-elements-question");
+  container.setAttribute("data-ai-elements-pattern", "question");
+}
+
+export type AIElementsAttachmentVariant = "grid" | "inline" | "list";
+
+/** Native Obsidian DOM marker for Vercel AI Elements Attachments semantics. */
+export function markAIElementsAttachments(
+  container: HTMLElement,
+  variant: AIElementsAttachmentVariant,
+  accessibleLabel: string
+): void {
+  container.addClass("codex-ai-elements-attachments");
+  container.addClass(`is-${variant}`);
+  container.setAttribute("data-ai-elements-pattern", "attachments");
+  container.setAttribute("data-attachment-variant", variant);
+  container.setAttribute("role", "list");
+  container.setAttribute("aria-label", accessibleLabel);
+}
+
+export function markAIElementsAttachmentItem(
+  container: HTMLElement,
+  mediaCategory: "image" | "document"
+): void {
+  container.addClass("codex-ai-elements-attachment");
+  container.setAttribute("data-attachment-media", mediaCategory);
+  container.setAttribute("role", "listitem");
+}
+
 export function createSmoothAIApprovalCard(
   container: HTMLElement,
   options: Readonly<{
@@ -279,6 +310,22 @@ export function createSmoothAIApprovalCard(
     attr: { type: "button" }
   });
   return { root, approveButton, rejectButton };
+}
+
+/** AI Elements Confirmation semantics with EchoInk's existing Smooth approval motion. */
+export function createAIElementsConfirmation(
+  container: HTMLElement,
+  options: Readonly<{
+    state: SmoothAIApprovalState;
+    target?: string;
+    preview?: string;
+    controlled?: boolean;
+  }>
+): SmoothAIApprovalCardElements {
+  const elements = createSmoothAIApprovalCard(container, options);
+  elements.root.addClass("codex-ai-elements-confirmation");
+  elements.root.setAttribute("data-ai-elements-pattern", "confirmation");
+  return elements;
 }
 
 export function markSmoothAISources(container: HTMLElement): void {

@@ -25,7 +25,9 @@ export interface CodexMessageHost {
   knowledgeBaseRunProgressTimer: number | null;
   messagesEl: HTMLElement;
   virtualListEl: HTMLElement;
+  jumpToLatestEl: HTMLButtonElement;
   taskPlanDockEl: HTMLElement;
+  interactionDockEl: HTMLElement;
   inputEl: HTMLTextAreaElement;
   messageListRenderer: CodexMessageListRenderer;
   messageScrollFollow: MessageScrollFollowController;
@@ -41,6 +43,7 @@ export interface CodexMessageHost {
   ): Promise<void>;
   preparePiTaskPlanModification(planId: string, title: string): void;
   renderTaskPlanDock(session: StoredSession): void;
+  renderInteractionDock(session: StoredSession): void;
   renderMessages(options?: { forceBottom?: boolean; fromScroll?: boolean; preserveScroll?: boolean }): void;
   scheduleRenderMessages(options?: MessageRenderScheduleOptions): void;
   scheduleMeasureVirtualRows(forceBottom?: boolean): void;
@@ -142,6 +145,8 @@ export function renderMessages(host: CodexMessageHost, options: { forceBottom?: 
     options: renderOptions
   });
   host.renderTaskPlanDock(session);
+  host.renderInteractionDock(session);
+  updateJumpToLatestVisibility(host);
 }
 
 export function settleStaleMessages(host: CodexMessageHost, session: StoredSession): void {
@@ -240,6 +245,7 @@ export function renderMessagesIfActive(host: CodexMessageHost, session: StoredSe
   if (session.id !== host.plugin.settings.activeSessionId) return;
   if (updatedMessage && host.messageListRenderer.tryUpdateMessage(updatedMessage)) {
     host.renderTaskPlanDock(session);
+    host.renderInteractionDock(session);
     return;
   }
   host.scheduleRenderMessages();
@@ -247,6 +253,22 @@ export function renderMessagesIfActive(host: CodexMessageHost, session: StoredSe
 
 export function handleMessagesScroll(host: CodexMessageHost): void {
   host.scheduleRenderMessages(host.messageScrollFollow.handleScroll(host.isMessagesAtBottom()));
+  updateJumpToLatestVisibility(host);
+}
+
+export function jumpToLatest(host: CodexMessageHost): void {
+  host.messageScrollFollow.reset();
+  host.messagesBottomFollowPaused = false;
+  host.renderMessages({ forceBottom: true });
+  host.messagesEl.scrollTop = host.messagesEl.scrollHeight;
+  updateJumpToLatestVisibility(host);
+}
+
+export function updateJumpToLatestVisibility(host: CodexMessageHost): void {
+  if (!host.jumpToLatestEl) return;
+  const visible = host.messagesBottomFollowPaused && !host.isMessagesAtBottom();
+  host.jumpToLatestEl.hidden = !visible;
+  host.jumpToLatestEl.setAttribute("aria-hidden", String(!visible));
 }
 
 export function scheduleRenderMessages(host: CodexMessageHost, options: MessageRenderScheduleOptions = {}): void {
@@ -293,4 +315,5 @@ export function resetVirtualWindow(host: CodexMessageHost): void {
   host.messageListRenderer.resetVirtualWindow();
   host.messageScrollFollow.reset();
   if (host.messagesEl) host.messagesEl.scrollTop = 0;
+  updateJumpToLatestVisibility(host);
 }
