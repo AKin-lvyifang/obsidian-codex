@@ -94,6 +94,7 @@ export async function runPiNativeConversationRuntimeTests(): Promise<void> {
   await assertConversationDerivationCreatesIndependentDurablePrefixes();
   await assertDerivationExcludesIdentityBoundOperationalState();
   await assertDerivedActivationFailureRemainsAVisibleDurableConversation();
+  await runPiNativeTaskPlanRuntimeTests();
 }
 
 async function assertProjectionAndCatalogManagementStayAgentSessionFree():
@@ -1712,6 +1713,70 @@ export async function runPiNativeTaskPlanRuntimeTests(): Promise<void> {
         fixture.runtime.releaseProductRun(autoPauseRun.productRunId),
         true
       );
+
+      await fixture.runtime.transitionTaskPlan({
+        conversationId,
+        planId: pending.planId,
+        action: "continue"
+      });
+      const abortedRun = await fixture.runtime.submit({
+        conversationId,
+        text: "Provider 自行中断时收口计划",
+        mode: "agent",
+        submittedAt: 8
+      });
+      session.finishAborted();
+      assert.equal((await abortedRun.result).terminalState, "cancelled");
+      const interrupted = latestTaskPlanFromBranch(
+        session.sessionManager.getBranch(),
+        pending.planId
+      );
+      assert.equal(interrupted?.status, "paused");
+      assert.equal(interrupted?.steps[0]?.status, "paused");
+      assert.match(interrupted?.lastUpdateSummary ?? "", /已中断/u);
+      assert.equal(
+        fixture.runtime.releaseProductRun(abortedRun.productRunId),
+        true
+      );
+
+      await fixture.runtime.transitionTaskPlan({
+        conversationId,
+        planId: pending.planId,
+        action: "continue"
+      });
+      const failedRun = await fixture.runtime.submit({
+        conversationId,
+        text: "本轮 Provider 失败时收口计划",
+        mode: "agent",
+        submittedAt: 9
+      });
+      session.finishFailed("fixture provider failure");
+      assert.equal((await failedRun.result).terminalState, "failed");
+      const failed = latestTaskPlanFromBranch(
+        session.sessionManager.getBranch(),
+        pending.planId
+      );
+      assert.equal(failed?.status, "failed");
+      assert.equal(failed?.currentStepId, undefined);
+      assert.equal(failed?.steps[0]?.status, "interrupted");
+      assert.equal(failed?.steps[1]?.status, "pending");
+      assert.equal(
+        failed?.steps.some((step) => step.status === "failed"),
+        false,
+        "whole-run failure must not fabricate a failed step"
+      );
+      assert.equal(
+        fixture.runtime.releaseProductRun(failedRun.productRunId),
+        true
+      );
+
+      await fixture.runtime.releaseConversation(conversationId);
+      const reopened = await fixture.runtime.activateConversation(conversationId);
+      const reopenedPlan = reopened.messages.find((message) =>
+        message.taskPlan?.planId === pending.planId
+      )?.taskPlan;
+      assert.equal(reopenedPlan?.status, "failed");
+      assert.equal(reopenedPlan?.steps[0]?.status, "interrupted");
     }
   );
 }
@@ -2886,6 +2951,20 @@ class ControlledAgentSession {
       ...assistantMessage("", 300_000 + this.promptSequence),
       stopReason: "error",
       errorMessage
+    });
+    this.emit({ type: "agent_settled" });
+    this.isStreaming = false;
+    this.resolvePrompt = null;
+    this.rejectPrompt = null;
+    resolve();
+  }
+
+  finishAborted(): void {
+    const resolve = this.resolvePrompt;
+    assert.ok(resolve, "expected a pending prompt");
+    this.sessionManager.appendMessage({
+      ...assistantMessage("", 300_000 + this.promptSequence),
+      stopReason: "aborted"
     });
     this.emit({ type: "agent_settled" });
     this.isStreaming = false;

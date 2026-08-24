@@ -81,6 +81,7 @@ import type {
 import { runtimeInterruptedDiagnosticId } from "./file-store-utils";
 import {
   appendTaskPlanEntry,
+  failTaskPlanForProductRun,
   pauseTaskPlanForRuntime,
   taskPlanSteeringSnapshot,
   transitionTaskPlanByUser
@@ -1555,15 +1556,34 @@ export class PiNativeConversationRuntime {
     );
   }
 
-  private pauseTaskPlanAfterRun(
+  private settleTaskPlanAfterRun(
     active: ActiveConversation,
-    execution: ActiveProductRun
+    execution: ActiveProductRun,
+    terminalState: PiProductRunTerminalState
   ): void {
-    if (execution.mode !== "agent" || execution.abortRequested) return;
+    if (execution.abortRequested) return;
     const plan = activeTaskPlanFromBranch(
       active.sessionManager.getBranch()
     );
-    if (plan?.status !== "in_progress") return;
+    if (!plan) return;
+    if (terminalState === "failed") {
+      if (
+        plan.status !== "in_progress"
+        && plan.productRunId !== execution.productRunId
+      ) return;
+      appendTaskPlanEntry(
+        active.sessionManager,
+        active.catalog,
+        failTaskPlanForProductRun({
+          plan,
+          updatedAt: Math.max(plan.updatedAt, this.now()),
+          productRunId: execution.productRunId,
+          reason: "任务执行失败"
+        })
+      );
+      return;
+    }
+    if (execution.mode !== "agent" || plan.status !== "in_progress") return;
     appendTaskPlanEntry(
       active.sessionManager,
       active.catalog,
@@ -1571,7 +1591,9 @@ export class PiNativeConversationRuntime {
         plan,
         updatedAt: Math.max(plan.updatedAt, this.now()),
         productRunId: execution.productRunId,
-        summary: "本轮执行已结束，计划暂停等待继续"
+        summary: terminalState === "cancelled"
+          ? "本轮执行已中断，计划暂停等待继续"
+          : "本轮执行已结束，计划暂停等待继续"
       })
     );
   }
@@ -2032,9 +2054,34 @@ export class PiNativeConversationRuntime {
         );
       }
 
-      this.pauseTaskPlanAfterRun(active, execution);
       let entries = active.sessionManager.getEntries();
       let runEntries = entries.filter(
+        (entry) => !execution.baselineEntryIds.has(entry.id)
+      );
+      let terminalState = classifyTerminalState(
+        runEntries,
+        execution.abortRequested,
+        promptError
+      );
+      const maintenance = execution.knowledgeWorkflow?.kind === "maintain"
+        ? execution.knowledgeWorkflow
+        : null;
+      const maintenanceResult = maintenance
+        ? classifyKnowledgeMaintenanceResult(runEntries)
+        : null;
+      const maintenanceResultInvalid = maintenanceResult?.kind === "invalid";
+      if (
+        terminalState === "completed"
+        && (
+          maintenanceResultInvalid
+          || maintenanceResult?.kind === "trusted_failure"
+        )
+      ) {
+        terminalState = "failed";
+      }
+      this.settleTaskPlanAfterRun(active, execution, terminalState);
+      entries = active.sessionManager.getEntries();
+      runEntries = entries.filter(
         (entry) => !execution.baselineEntryIds.has(entry.id)
       );
       const verifiedReadback = assertPiSessionPreAssistantDurable({
@@ -2058,27 +2105,6 @@ export class PiNativeConversationRuntime {
           "projection_unsettled",
           "Plan 模式未通过 task_update 写入结构化任务计划"
         );
-      }
-      let terminalState = classifyTerminalState(
-        runEntries,
-        execution.abortRequested,
-        promptError
-      );
-      const maintenance = execution.knowledgeWorkflow?.kind === "maintain"
-        ? execution.knowledgeWorkflow
-        : null;
-      const maintenanceResult = maintenance
-        ? classifyKnowledgeMaintenanceResult(runEntries)
-        : null;
-      const maintenanceResultInvalid = maintenanceResult?.kind === "invalid";
-      if (
-        terminalState === "completed"
-        && (
-          maintenanceResultInvalid
-          || maintenanceResult?.kind === "trusted_failure"
-        )
-      ) {
-        terminalState = "failed";
       }
       let assistantEntryId = lastAssistantEntryId(runEntries);
       let toolCallIds = collectToolCallIds(

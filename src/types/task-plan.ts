@@ -13,10 +13,18 @@ export const ECHOINK_TASK_PLAN_STATUSES = [
 export type EchoInkTaskPlanStatus =
   typeof ECHOINK_TASK_PLAN_STATUSES[number];
 
+export const ECHOINK_TASK_PLAN_STEP_STATUSES = [
+  ...ECHOINK_TASK_PLAN_STATUSES,
+  "interrupted"
+] as const;
+
+export type EchoInkTaskPlanStepStatus =
+  typeof ECHOINK_TASK_PLAN_STEP_STATUSES[number];
+
 export interface EchoInkTaskPlanStep {
   readonly stepId: string;
   readonly text: string;
-  readonly status: EchoInkTaskPlanStatus;
+  readonly status: EchoInkTaskPlanStepStatus;
   readonly reason?: string;
 }
 
@@ -70,6 +78,13 @@ export function isEchoInkTaskPlanStatus(
 ): value is EchoInkTaskPlanStatus {
   return typeof value === "string"
     && (ECHOINK_TASK_PLAN_STATUSES as readonly string[]).includes(value);
+}
+
+export function isEchoInkTaskPlanStepStatus(
+  value: unknown
+): value is EchoInkTaskPlanStepStatus {
+  return typeof value === "string"
+    && (ECHOINK_TASK_PLAN_STEP_STATUSES as readonly string[]).includes(value);
 }
 
 export function isEchoInkTaskPlanTerminal(
@@ -286,9 +301,16 @@ export function taskPlanCurrentStep(
     );
     if (explicit) return explicit;
   }
+  if (
+    plan.status === "completed"
+    || plan.status === "failed"
+    || plan.status === "cancelled"
+  ) return null;
   return plan.steps.find((step) =>
-    step.status !== "completed" && step.status !== "cancelled"
-  ) ?? plan.steps.at(-1) ?? null;
+    step.status !== "completed"
+    && step.status !== "cancelled"
+    && step.status !== "interrupted"
+  ) ?? null;
 }
 
 export function taskPlanProgress(
@@ -373,7 +395,7 @@ function normalizeTaskPlanSteps(
     const stepId = taskPlanIdentifier(record.stepId, "stepId");
     if (seen.has(stepId)) throw new TypeError("task_plan_step_id_duplicate");
     seen.add(stepId);
-    if (!isEchoInkTaskPlanStatus(record.status)) {
+    if (!isEchoInkTaskPlanStepStatus(record.status)) {
       throw new TypeError("task_plan_step_status_invalid");
     }
     const reason = optionalBoundedText(
@@ -440,7 +462,13 @@ function assertTaskPlanState(
     return;
   }
   if (plan.status === "failed") {
-    if (!plan.reason || (current && current.status !== "failed")) {
+    if (
+      !plan.reason
+      || (current && current.status !== "failed")
+      || plan.steps.some((step) =>
+        step.status === "in_progress" || step.status === "paused"
+      )
+    ) {
       throw new TypeError("task_plan_failure_reason_required");
     }
     return;

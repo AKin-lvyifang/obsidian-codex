@@ -118,6 +118,7 @@ import {
   type CodexTurnLifecycleHost
 } from "./codex-view/turn-lifecycle";
 import { renderViewShell, type CodexViewShellHost } from "./codex-view/view-shell";
+import { TaskPlanDockController } from "./codex-view/task-plan-dock";
 import { updateCodexHeaderIdentity } from "./codex-view/header";
 import { closeComposerParameterMenu } from "./codex-view/menus";
 import {
@@ -144,6 +145,7 @@ export class CodexView extends ItemView {
   private tabBarEl!: HTMLElement;
   private messagesEl!: HTMLElement;
   private virtualListEl!: HTMLElement;
+  private taskPlanDockEl!: HTMLElement;
   private workspaceEl!: HTMLElement;
   private inputEl!: HTMLTextAreaElement;
   private promptEnhanceReviewEl!: HTMLElement;
@@ -177,6 +179,7 @@ export class CodexView extends ItemView {
   private readonly messageScrollFollow = new MessageScrollFollowController();
   private knowledgeBaseRunProgressTimer: number | null = null;
   private messageListRenderer = new CodexMessageListRenderer();
+  private readonly taskPlanDock = new TaskPlanDockController();
   private selectedSkill: EchoInkResource | null = null;
   private attachments: StoredAttachment[] = [];
   private selectedModel = "";
@@ -352,6 +355,7 @@ export class CodexView extends ItemView {
         });
       }
     } finally {
+      this.taskPlanDock.dispose();
       this.messageListRenderer.dispose();
     }
   }
@@ -415,6 +419,16 @@ export class CodexView extends ItemView {
   private openPluginSettings(): void { openPluginSettingsAction(this.headerHost()); }
   private renderTabs(): void { renderTabsView(this.sessionHost()); }
   private renderMessages(options: { forceBottom?: boolean; fromScroll?: boolean; preserveScroll?: boolean } = {}): void { renderMessagesAction(this.messageHost(), options); }
+  private renderTaskPlanDock(session: StoredSession): void {
+    this.taskPlanDock.render(this.taskPlanDockEl, {
+      sessionId: session.id,
+      messages: session.bodyAuthority === "pi_session_only"
+        ? session.messages
+        : [],
+      onAction: (planId, action) => this.handlePiTaskPlanAction(planId, action),
+      onModify: (planId, title) => this.preparePiTaskPlanModification(planId, title)
+    });
+  }
   private renderToolbar(): void { renderToolbarAction(this.composerHost()); }
   private enhancePrompt(): void { void enhanceChatInputRunner(this.promptEnhancerRunnerContext); }
   private renderQueue(): void { renderQueueAction(this.composerHost()); }

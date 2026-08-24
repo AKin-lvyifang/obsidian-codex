@@ -14,8 +14,16 @@ import {
   type PiChatUiViewModel,
   type PiSessionBranchEntryView
 } from "../../harness/pi-native/pi-chat-ui-projector";
+import {
+  ECHOINK_TASK_PLAN_ENTRY_TYPE,
+  ECHOINK_TASK_PLAN_SCHEMA_VERSION,
+  freezeEchoInkTaskPlan,
+  taskPlanSessionEntryData
+} from "../../types/task-plan";
 
 export async function runPiChatUiProjectorTests(): Promise<void> {
+  assertTaskPlansProjectOneStableDurableMessage();
+  assertLiveTaskUpdateResultsProjectOneStableHistoricalTask();
   assertAskSourceAttributionDecorationsAreTruthfulAndIsolated();
   assertDurableBranchRebuildsExistingUiCardsAndHidesReasoning();
   assertLiveEventsMergeUntilTheProductSettlementBoundary();
@@ -28,6 +36,186 @@ export async function runPiChatUiProjectorTests(): Promise<void> {
   assertPhaseTwoWriteTerminalStatesRemainDistinct();
   assertSessionRunAndBranchScopesDoNotCross();
   assertInterruptedReadbackNeverPretendsTheRunCompleted();
+}
+
+function assertTaskPlansProjectOneStableDurableMessage(): void {
+  const projector = new PiChatUiProjector();
+  const piSessionId = "session-task-plan-history";
+  const conversationId = "conversation-task-plan-history";
+  const first = freezeEchoInkTaskPlan({
+    schemaVersion: ECHOINK_TASK_PLAN_SCHEMA_VERSION,
+    planId: "durable-plan",
+    title: "真实结构化计划",
+    status: "in_progress",
+    version: 1,
+    steps: [{ stepId: "step-1", text: "第一步", status: "in_progress" }],
+    currentStepId: "step-1",
+    source: "agent",
+    productRunId: "run-task-plan",
+    createdAt: 10,
+    updatedAt: 10
+  });
+  const second = freezeEchoInkTaskPlan({
+    ...first,
+    status: "completed",
+    version: 2,
+    steps: [{ stepId: "step-1", text: "第一步", status: "completed" }],
+    currentStepId: undefined,
+    updatedAt: 20
+  });
+  const entries: PiSessionBranchEntryView[] = [
+    messageEntry("assistant-plan-copy", null, 5, {
+      role: "assistant",
+      content: "计划：第一步，然后完成。"
+    }),
+    {
+      type: "custom",
+      id: "task-plan-entry-v1",
+      parentId: "assistant-plan-copy",
+      timestamp: isoTime(10),
+      customType: ECHOINK_TASK_PLAN_ENTRY_TYPE,
+      data: taskPlanSessionEntryData({ conversationId, piSessionId, plan: first })
+    },
+    {
+      type: "custom",
+      id: "task-plan-entry-v2",
+      parentId: "task-plan-entry-v1",
+      timestamp: isoTime(20),
+      customType: ECHOINK_TASK_PLAN_ENTRY_TYPE,
+      data: taskPlanSessionEntryData({ conversationId, piSessionId, plan: second })
+    }
+  ];
+  const projected = projector.projectSessionBranch({
+    piSessionId,
+    activeLeafId: "task-plan-entry-v2",
+    entries,
+    runState: "completed",
+    productRunId: "run-task-plan",
+    now: 30
+  });
+  const tasks = projected.messages.filter((message) => message.taskPlan);
+  assert.equal(tasks.length, 1,
+    "later versions update one stable history Task instead of adding another row");
+  assert.equal(tasks[0]?.taskPlan?.version, 2);
+  assert.equal(tasks[0]?.taskPlan?.status, "completed");
+  assert.equal(tasks[0]?.id.includes("durable-plan"), true);
+  assert.equal(
+    projected.messages.filter((message) => message.taskPlan).length,
+    1,
+    "natural-language plan copy creates no additional taskPlan"
+  );
+
+  const reopened = projector.projectSessionBranch({
+    piSessionId,
+    activeLeafId: "task-plan-entry-v2",
+    entries,
+    runState: "completed",
+    productRunId: "run-task-plan",
+    now: 40
+  });
+  const reopenedTask = reopened.messages.find((message) => message.taskPlan);
+  assert.equal(reopenedTask?.id, tasks[0]?.id);
+  assert.equal(reopenedTask?.taskPlan?.version, 2,
+    "reopen restores the latest durable version without regeneration");
+}
+
+function assertLiveTaskUpdateResultsProjectOneStableHistoricalTask(): void {
+  const projector = new PiChatUiProjector();
+  const first = freezeEchoInkTaskPlan({
+    schemaVersion: ECHOINK_TASK_PLAN_SCHEMA_VERSION,
+    planId: "live-task-update-plan",
+    title: "实时结构化计划",
+    status: "pending",
+    version: 1,
+    steps: [
+      { stepId: "step-1", text: "读取状态", status: "pending" },
+      { stepId: "step-2", text: "更新结果", status: "pending" }
+    ],
+    source: "agent",
+    productRunId: "run-task-update-live",
+    createdAt: 10,
+    updatedAt: 10
+  });
+  const second = freezeEchoInkTaskPlan({
+    ...first,
+    status: "in_progress",
+    version: 2,
+    steps: [
+      { stepId: "step-1", text: "读取状态", status: "completed" },
+      { stepId: "step-2", text: "更新结果", status: "in_progress" }
+    ],
+    currentStepId: "step-2",
+    updatedAt: 20
+  });
+  let view = projector.createEmpty({
+    piSessionId: "session-task-update-live",
+    activeLeafId: "assistant-task-update-live",
+    now: 1
+  });
+  view = project(projector, view, runtimeEvent("tool_execution_end", 10, {
+    toolCallId: "task-update-v1",
+    toolName: "task_update",
+    result: {
+      content: [{ type: "text", text: "task_plan_update_pending" }],
+      details: { source: "echoink-task-plan", plan: first }
+    },
+    isError: false
+  }, "session-task-update-live", "run-task-update-live", "task-plan-entry-v1"));
+  const firstTasks = view.messages.filter((message) => message.taskPlan);
+  assert.equal(firstTasks.length, 1,
+    "the first valid live task_update immediately inserts one historical Task");
+  assert.equal(firstTasks[0]?.taskPlan?.version, 1);
+  const stableMessageId = firstTasks[0]?.id;
+  assert.ok(stableMessageId,
+    "the first live task_update assigns the historical Task a stable message ID");
+
+  view = project(projector, view, runtimeEvent("tool_execution_end", 20, {
+    toolCallId: "task-update-v2",
+    toolName: "task_update",
+    result: {
+      content: [{ type: "text", text: "task_plan_update_pending" }],
+      details: { source: "echoink-task-plan", plan: second }
+    },
+    isError: false
+  }, "session-task-update-live", "run-task-update-live", "task-plan-entry-v2"));
+  const updatedTasks = view.messages.filter((message) => message.taskPlan);
+  assert.equal(updatedTasks.length, 1,
+    "a same-plan live task_update replaces rather than duplicates the Task");
+  assert.equal(updatedTasks[0]?.id, stableMessageId);
+  assert.equal(updatedTasks[0]?.taskPlan?.version, 2);
+  assert.equal(updatedTasks[0]?.taskPlan?.steps[0]?.status, "completed");
+  assert.equal(updatedTasks[0]?.taskPlan?.steps[1]?.status, "in_progress");
+
+  let invalid = projector.createEmpty({
+    piSessionId: "session-task-update-invalid",
+    activeLeafId: "assistant-task-update-invalid",
+    now: 1
+  });
+  invalid = project(projector, invalid, runtimeEvent("tool_execution_end", 30, {
+    toolCallId: "task-update-invalid",
+    toolName: "task_update",
+    result: {
+      content: [{ type: "text", text: "task_plan_update_pending" }],
+      details: {
+        source: "echoink-task-plan",
+        plan: { ...first, schemaVersion: 999 }
+      }
+    },
+    isError: false
+  }, "session-task-update-invalid", "run-task-update-invalid", null));
+  assert.equal(invalid.messages.some((message) => message.taskPlan), false,
+    "an invalid live task_update plan creates no historical Task");
+  invalid = project(projector, invalid, runtimeEvent("tool_execution_end", 31, {
+    toolCallId: "task-update-missing-plan",
+    toolName: "task_update",
+    result: {
+      content: [{ type: "text", text: "task_plan_update_pending" }],
+      details: { source: "echoink-task-plan" }
+    },
+    isError: false
+  }, "session-task-update-invalid", "run-task-update-invalid", null));
+  assert.equal(invalid.messages.some((message) => message.taskPlan), false,
+    "a live task_update without plan data creates no historical Task");
 }
 
 function assertAskSourceAttributionDecorationsAreTruthfulAndIsolated(): void {

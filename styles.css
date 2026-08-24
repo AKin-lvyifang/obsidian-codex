@@ -1482,6 +1482,36 @@ button.codex-user-message-copy {
 }
 
 /* Phase 2 Pi-native Task/Plan: one thin projection inside the chat timeline. */
+.codex-task-plan-dock {
+  display: none;
+  flex: 0 0 auto;
+  min-width: 0;
+  margin: 0 14px 8px;
+}
+
+.codex-task-plan-dock.is-visible {
+  display: block;
+}
+
+.codex-task-plan-dock-card {
+  max-height: min(42vh, 360px);
+  overflow-y: auto;
+  border-radius: 12px;
+  background: color-mix(
+    in srgb,
+    var(--background-primary) 90%,
+    var(--background-secondary)
+  );
+}
+
+.codex-task-plan-dock-content:empty {
+  display: none;
+}
+
+.codex-task-plan-dock-card .codex-task-plan-step-current {
+  margin: 0 11px 10px;
+}
+
 .codex-message-task-plan {
   min-width: 0;
   margin-bottom: 14px;
@@ -1499,6 +1529,55 @@ button.codex-user-message-copy {
     var(--background-secondary) 72%,
     var(--background-primary)
   );
+}
+
+.codex-ai-elements-task {
+  width: 100%;
+  min-width: 0;
+  color: var(--text-normal);
+}
+
+.codex-ai-elements-task-trigger {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) 18px;
+  align-items: start;
+  gap: 9px;
+  width: 100%;
+  padding: 4px 0;
+  color: var(--text-muted);
+  cursor: pointer;
+  list-style: none;
+}
+
+.codex-ai-elements-task-trigger::-webkit-details-marker {
+  display: none;
+}
+
+.codex-ai-elements-task-trigger:focus-visible {
+  border-radius: 5px;
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
+
+.codex-ai-elements-task-trigger .codex-task-plan-title {
+  color: var(--text-normal);
+  font-weight: 500;
+}
+
+.codex-ai-elements-task-content {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 0 9px;
+  padding: 0 0 2px 14px;
+  border-left: 2px solid var(--background-modifier-border);
+}
+
+.codex-ai-elements-task-content .codex-task-plan-reason {
+  margin: 0;
+}
+
+.codex-ai-elements-task:not([open]) .codex-task-plan-disclosure svg {
+  transform: rotate(-90deg);
 }
 
 .codex-task-plan-header {
@@ -1670,12 +1749,14 @@ button.codex-user-message-copy {
 }
 
 .codex-task-plan-status.is-paused,
-.codex-task-plan-step-status.is-paused {
+.codex-task-plan-step-status.is-paused,
+.codex-task-plan-step-status.is-interrupted {
   color: color-mix(in srgb, var(--text-warning) 72%, var(--text-muted));
 }
 
 .codex-task-plan-status.is-cancelled,
 .codex-task-plan-step-status.is-cancelled,
+.codex-task-plan-step.is-interrupted .codex-task-plan-step-text,
 .codex-task-plan-step.is-cancelled .codex-task-plan-step-text {
   color: var(--text-faint);
 }

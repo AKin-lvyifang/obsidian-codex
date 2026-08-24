@@ -25,6 +25,7 @@ export interface CodexMessageHost {
   knowledgeBaseRunProgressTimer: number | null;
   messagesEl: HTMLElement;
   virtualListEl: HTMLElement;
+  taskPlanDockEl: HTMLElement;
   inputEl: HTMLTextAreaElement;
   messageListRenderer: CodexMessageListRenderer;
   messageScrollFollow: MessageScrollFollowController;
@@ -39,6 +40,7 @@ export interface CodexMessageHost {
     action: "execute" | "continue" | "pause" | "cancel"
   ): Promise<void>;
   preparePiTaskPlanModification(planId: string, title: string): void;
+  renderTaskPlanDock(session: StoredSession): void;
   renderMessages(options?: { forceBottom?: boolean; fromScroll?: boolean; preserveScroll?: boolean }): void;
   scheduleRenderMessages(options?: MessageRenderScheduleOptions): void;
   scheduleMeasureVirtualRows(forceBottom?: boolean): void;
@@ -139,6 +141,7 @@ export function renderMessages(host: CodexMessageHost, options: { forceBottom?: 
     shouldFollowBottom: () => !host.messagesBottomFollowPaused,
     options: renderOptions
   });
+  host.renderTaskPlanDock(session);
 }
 
 export function settleStaleMessages(host: CodexMessageHost, session: StoredSession): void {
@@ -235,7 +238,10 @@ export function attachTurnIdToRun(host: CodexMessageHost, session: StoredSession
 
 export function renderMessagesIfActive(host: CodexMessageHost, session: StoredSession, updatedMessage?: ChatMessage): void {
   if (session.id !== host.plugin.settings.activeSessionId) return;
-  if (updatedMessage && host.messageListRenderer.tryUpdateMessage(updatedMessage)) return;
+  if (updatedMessage && host.messageListRenderer.tryUpdateMessage(updatedMessage)) {
+    host.renderTaskPlanDock(session);
+    return;
+  }
   host.scheduleRenderMessages();
 }
 

@@ -46,8 +46,9 @@ SOFTWARE.
 
 ## Vercel AI Elements
 
-EchoInk includes a modified native Obsidian TypeScript DOM and CSS adaptation
-of the Vercel AI Elements `Sources` component for local document provenance.
+EchoInk includes modified native Obsidian TypeScript DOM and CSS adaptations
+of the Vercel AI Elements `Sources` component for local document provenance
+and the read-only `Task` component used for durable task-plan history.
 The adaptation replaces React, Radix Collapsible, Tailwind CSS, and Lucide with
 the existing Obsidian DOM and icon APIs, and it intentionally omits the
 upstream external-link behavior.
@@ -55,6 +56,7 @@ upstream external-link behavior.
 Adapted upstream source at commit `6a9d5b1822ffb10bba4bd97175f01edd7d8651cd`:
 
 - [Sources](https://github.com/vercel/ai-elements/blob/6a9d5b1822ffb10bba4bd97175f01edd7d8651cd/packages/elements/src/sources.tsx)
+- [Task](https://github.com/vercel/ai-elements/blob/6a9d5b1822ffb10bba4bd97175f01edd7d8651cd/packages/elements/src/task.tsx)
 
 Copyright 2023 Vercel, Inc.
 

@@ -39,6 +39,12 @@ export interface AIElementsDocumentSourcesElements {
   summary: HTMLElement;
 }
 
+export interface AIElementsTaskElements {
+  body: HTMLElement;
+  root: HTMLDetailsElement;
+  summary: HTMLElement;
+}
+
 export interface SmoothAIApprovalCardElements {
   readonly root: HTMLElement;
   readonly approveButton?: HTMLButtonElement;
@@ -159,6 +165,36 @@ export function renderSmoothAIToolStatus(
 
 export function markSmoothAITaskList(container: HTMLElement): void {
   markSmoothPattern(container, "ai-task-list", "codex-smooth-ai-task-list");
+}
+
+export function createAIElementsTask(
+  container: HTMLElement,
+  options: Readonly<{
+    bodyId: string;
+    label: string;
+    open: boolean;
+  }>
+): AIElementsTaskElements {
+  const root = container.createEl("details", {
+    cls: "codex-ai-elements-task",
+    attr: {
+      "aria-label": options.label,
+      "data-ai-elements-pattern": "task"
+    }
+  });
+  root.open = options.open;
+  const summary = root.createEl("summary", {
+    cls: "codex-ai-elements-task-trigger",
+    attr: {
+      "aria-controls": options.bodyId,
+      "aria-expanded": String(options.open)
+    }
+  });
+  const body = root.createDiv({
+    cls: "codex-ai-elements-task-content",
+    attr: { id: options.bodyId }
+  });
+  return { body, root, summary };
 }
 
 export function createSmoothAIArtifact(

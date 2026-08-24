@@ -15,6 +15,13 @@ import {
   SMOOTH_BLUR_OUT_UP_EASING,
   SMOOTH_BLUR_OUT_UP_STAGGER_MS
 } from "../ui/codex-view/smooth-chat-ui";
+import {
+  TASK_PLAN_DOCK_CLOSEOUT_MS,
+  TaskPlanDockController,
+  selectTaskPlanForDock,
+  type TaskPlanDockClock
+} from "../ui/codex-view/task-plan-dock";
+import type { EchoInkTaskPlanSnapshot } from "../types/task-plan";
 
 type TestEventHandler = (event: {
   preventDefault(): void;
@@ -268,6 +275,45 @@ function clickElement(element: FakeElement): void {
   } as never);
 }
 
+class FakeTaskPlanDockClock implements TaskPlanDockClock {
+  nowValue = 10_000;
+  nextHandle = 0;
+  readonly timers = new Map<number, { callback: () => void; delayMs: number }>();
+  readonly cleared = new Set<number>();
+
+  now(): number {
+    return this.nowValue;
+  }
+
+  setTimeout(callback: () => void, delayMs: number): number {
+    const handle = ++this.nextHandle;
+    this.timers.set(handle, { callback, delayMs });
+    return handle;
+  }
+
+  clearTimeout(handle: number): void {
+    this.cleared.add(handle);
+  }
+
+  fire(handle: number): void {
+    this.timers.get(handle)?.callback();
+  }
+}
+
+function taskPlanMessage(
+  plan: Readonly<EchoInkTaskPlanSnapshot>,
+  id = `task-plan-${plan.version}`
+): ChatMessage {
+  return {
+    id,
+    role: "assistant",
+    itemType: "taskPlan",
+    text: "",
+    taskPlan: plan,
+    createdAt: plan.createdAt
+  };
+}
+
 export async function runSmoothConversationUiTests(): Promise<void> {
   const chineseHost = new FakeElement("div");
   const chinese = renderSmoothBlurOutUp(
@@ -310,6 +356,232 @@ export async function runSmoothConversationUiTests(): Promise<void> {
   const tasks = primitiveHost.createDiv();
   markSmoothAITaskList(tasks as unknown as HTMLElement);
   assert.equal(tasks.attributes.get("data-smooth-ui-pattern"), "ai-task-list");
+
+  const dockClock = new FakeTaskPlanDockClock();
+  const inProgressPlan: Readonly<EchoInkTaskPlanSnapshot> = Object.freeze({
+    schemaVersion: 1,
+    planId: "shared-plan",
+    title: "共享计划",
+    status: "in_progress",
+    version: 1,
+    steps: Object.freeze([
+      Object.freeze({ stepId: "step-1", text: "读取真实状态", status: "completed" as const }),
+      Object.freeze({ stepId: "step-2", text: "更新界面", status: "in_progress" as const })
+    ]),
+    currentStepId: "step-2",
+    source: "agent",
+    createdAt: 9_000,
+    updatedAt: 9_500
+  });
+  const inProgressMessage = taskPlanMessage(inProgressPlan, "stable-plan-message");
+  assert.equal(
+    selectTaskPlanForDock([inProgressMessage])?.plan,
+    inProgressPlan,
+    "the dock selector returns the exact projected taskPlan reference"
+  );
+  assert.equal(selectTaskPlanForDock([{
+    id: "natural-language-plan",
+    role: "assistant",
+    text: "计划：先读，再写",
+    createdAt: 9_600
+  }]), null, "natural-language planning copy must not create a dock plan");
+
+  const versionTwoPlan: Readonly<EchoInkTaskPlanSnapshot> = Object.freeze({
+    ...inProgressPlan,
+    version: 2,
+    steps: Object.freeze([
+      Object.freeze({ stepId: "step-1", text: "读取真实状态", status: "completed" as const }),
+      Object.freeze({ stepId: "step-2", text: "界面已同步到 v2", status: "in_progress" as const })
+    ]),
+    updatedAt: 9_700
+  });
+  const dock = new TaskPlanDockController(dockClock);
+  const dockHost = new FakeElement("div");
+  dock.render(dockHost as unknown as HTMLElement, {
+    sessionId: "session-a",
+    messages: [inProgressMessage]
+  });
+  assert.equal(dockHost.dataset.sessionTaskPlanId, "shared-plan");
+  assert.ok(dockHost.findByClass("codex-smooth-ai-task-list"));
+  assert.equal(
+    dockHost.findByClass("codex-task-plan-progress")?.textContent,
+    "2/2 · 进行中",
+    "compact progress reports the real current step and whole-plan state"
+  );
+  assert.match(renderedText(dockHost), /更新界面/u);
+  dock.render(dockHost as unknown as HTMLElement, {
+    sessionId: "session-a",
+    messages: [taskPlanMessage(versionTwoPlan, "stable-plan-message")]
+  });
+  assert.match(renderedText(dockHost), /界面已同步到 v2/u,
+    "a same-message plan version replaces the dock immediately");
+  clickElement(dockHost.findByClass("codex-task-plan-header")!);
+  assert.equal(
+    dockHost.findAllByClass("codex-task-plan-step").length,
+    2,
+    "expanded dock renders every real step"
+  );
+  dock.dispose();
+
+  const completionClock = new FakeTaskPlanDockClock();
+  const completedPlan: Readonly<EchoInkTaskPlanSnapshot> = Object.freeze({
+    ...versionTwoPlan,
+    status: "completed",
+    version: 3,
+    steps: Object.freeze(versionTwoPlan.steps.map((step) => Object.freeze({
+      ...step,
+      status: "completed" as const
+    }))),
+    currentStepId: undefined,
+    updatedAt: completionClock.now()
+  });
+  const completionDock = new TaskPlanDockController(completionClock);
+  const completionHost = new FakeElement("div");
+  const completionInput = {
+    sessionId: "session-completed",
+    messages: [
+      taskPlanMessage({
+        ...inProgressPlan,
+        planId: "older-plan",
+        updatedAt: 8_000
+      }, "older-plan-message"),
+      taskPlanMessage(completedPlan)
+    ]
+  };
+  completionDock.render(completionHost as unknown as HTMLElement, completionInput);
+  completionDock.render(completionHost as unknown as HTMLElement, completionInput);
+  assert.match(renderedText(completionHost), /2\/2 · 已完成/u);
+  assert.equal(completionClock.timers.size, 1,
+    "repeated renders schedule one completion closeout");
+  const completionHandle = [...completionClock.timers.keys()][0];
+  assert.equal(completionClock.timers.get(completionHandle)?.delayMs, TASK_PLAN_DOCK_CLOSEOUT_MS);
+  completionClock.fire(completionHandle);
+  assert.equal(completionHost.hasClass("is-visible"), false);
+  assert.equal(completionHost.dataset.sessionTaskPlanId, undefined,
+    "hiding the latest completed plan never falls back to an older plan");
+  completionDock.render(completionHost as unknown as HTMLElement, completionInput);
+  assert.equal(completionClock.timers.size, 1,
+    "a hidden completed plan never schedules again");
+
+  const manualClock = new FakeTaskPlanDockClock();
+  const manualDock = new TaskPlanDockController(manualClock);
+  const manualHost = new FakeElement("div");
+  const manualInput = {
+    sessionId: "session-manual",
+    messages: [taskPlanMessage({ ...completedPlan, updatedAt: manualClock.now() })]
+  };
+  manualDock.render(manualHost as unknown as HTMLElement, manualInput);
+  const manualHandle = [...manualClock.timers.keys()][0];
+  clickElement(manualHost.findByClass("codex-task-plan-header")!);
+  assert.equal(manualClock.cleared.has(manualHandle), true);
+  manualClock.fire(manualHandle);
+  assert.equal(manualHost.hasClass("is-visible"), true,
+    "manual expansion protects a completed dock from collapse or hiding");
+
+  const switchClock = new FakeTaskPlanDockClock();
+  const switchDock = new TaskPlanDockController(switchClock);
+  const switchHost = new FakeElement("div");
+  switchDock.render(switchHost as unknown as HTMLElement, {
+    sessionId: "session-old",
+    messages: [taskPlanMessage({ ...completedPlan, updatedAt: switchClock.now() })]
+  });
+  const staleHandle = [...switchClock.timers.keys()][0];
+  switchDock.render(switchHost as unknown as HTMLElement, {
+    sessionId: "session-new",
+    messages: [inProgressMessage]
+  });
+  assert.equal(switchClock.cleared.has(staleHandle), true);
+  switchClock.fire(staleHandle);
+  assert.equal(switchHost.dataset.sessionTaskPlanId, "shared-plan",
+    "a late callback from the old session cannot hide the new session plan");
+  switchDock.render(switchHost as unknown as HTMLElement, {
+    sessionId: "session-old",
+    messages: [taskPlanMessage({ ...completedPlan, updatedAt: switchClock.now() })]
+  });
+  assert.equal(switchHost.hasClass("is-visible"), false,
+    "switching back restores that session's handled presentation without replaying it");
+
+  const oldClock = new FakeTaskPlanDockClock();
+  oldClock.nowValue = completedPlan.updatedAt + TASK_PLAN_DOCK_CLOSEOUT_MS + 1;
+  const oldHost = new FakeElement("div");
+  new TaskPlanDockController(oldClock).render(oldHost as unknown as HTMLElement, {
+    sessionId: "session-reopened",
+    messages: [taskPlanMessage(completedPlan)]
+  });
+  assert.equal(oldHost.hasClass("is-visible"), false);
+  assert.equal(oldClock.timers.size, 0,
+    "an old completed plan does not replay its closeout on reopen");
+
+  const failedPlan: Readonly<EchoInkTaskPlanSnapshot> = Object.freeze({
+    ...inProgressPlan,
+    status: "failed",
+    version: 4,
+    steps: Object.freeze([
+      Object.freeze({ stepId: "step-1", text: "中断的步骤", status: "interrupted" as const }),
+      Object.freeze({ stepId: "step-2", text: "尚未开始", status: "pending" as const })
+    ]),
+    currentStepId: undefined,
+    reason: "任务执行失败",
+    updatedAt: 9_900
+  });
+  const failedHost = new FakeElement("div");
+  new TaskPlanDockController(dockClock).render(failedHost as unknown as HTMLElement, {
+    sessionId: "session-failed",
+    messages: [taskPlanMessage(failedPlan)]
+  });
+  assert.match(renderedText(failedHost), /任务失败/u);
+  assert.equal(failedHost.findAllByClass("codex-task-plan-step-current").length, 0,
+    "whole-task failure never fabricates a current or failed step");
+
+  const pausedPlan: Readonly<EchoInkTaskPlanSnapshot> = Object.freeze({
+    ...inProgressPlan,
+    status: "paused",
+    version: 5,
+    steps: Object.freeze([
+      Object.freeze({ stepId: "step-1", text: "已完成步骤", status: "completed" as const }),
+      Object.freeze({ stepId: "step-2", text: "中断步骤", status: "paused" as const })
+    ]),
+    currentStepId: "step-2",
+    updatedAt: 10_100
+  });
+  const pausedHost = new FakeElement("div");
+  new TaskPlanDockController(dockClock).render(pausedHost as unknown as HTMLElement, {
+    sessionId: "session-paused",
+    messages: [taskPlanMessage(pausedPlan)]
+  });
+  assert.match(renderedText(pausedHost), /已中断，可继续/u);
+  assert.doesNotMatch(renderedText(pausedHost), /进行中/u);
+  assert.equal(
+    pausedHost.findAllByClass("codex-task-plan-step")
+      .some((step) => step.hasClass("is-failed")),
+    false,
+    "a paused Dock never fabricates a failed step"
+  );
+
+  const cancelledPlan: Readonly<EchoInkTaskPlanSnapshot> = Object.freeze({
+    ...inProgressPlan,
+    status: "cancelled",
+    version: 6,
+    steps: Object.freeze([
+      Object.freeze({ stepId: "step-1", text: "已完成步骤", status: "completed" as const }),
+      Object.freeze({ stepId: "step-2", text: "取消步骤", status: "cancelled" as const })
+    ]),
+    currentStepId: undefined,
+    updatedAt: 10_200
+  });
+  const cancelledHost = new FakeElement("div");
+  new TaskPlanDockController(dockClock).render(cancelledHost as unknown as HTMLElement, {
+    sessionId: "session-cancelled",
+    messages: [taskPlanMessage(cancelledPlan)]
+  });
+  assert.match(renderedText(cancelledHost), /已取消/u);
+  assert.doesNotMatch(renderedText(cancelledHost), /进行中/u);
+  assert.equal(
+    cancelledHost.findAllByClass("codex-task-plan-step")
+      .some((step) => step.hasClass("is-failed")),
+    false,
+    "a cancelled Dock never fabricates a failed step"
+  );
 
   const localSources = createAIElementsDocumentSources(
     primitiveHost as unknown as HTMLElement,
@@ -844,7 +1116,10 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       },
       createdAt: 1_700_000_004_000
     }, { showAgentFooter: false, showAgentHeader: false });
-    assert.ok(planMessage.findByClass("codex-smooth-ai-task-list"));
+    assert.ok(planMessage.findByClass("codex-ai-elements-task"));
+    assert.equal(planMessage.findAllByClass("codex-smooth-ai-task-list").length, 0);
+    assert.equal(planMessage.findAllByTag("button").length, 0,
+      "the durable history Task is read-only");
   } finally {
     if (previousDocument === undefined) delete (globalThis as unknown as { document?: unknown }).document;
     else Object.defineProperty(globalThis, "document", { configurable: true, value: previousDocument });
@@ -876,6 +1151,7 @@ export async function runSmoothConversationUiTests(): Promise<void> {
   const composerSource = readFileSync("src/ui/codex-view/composer.ts", "utf8");
   const headerSource = readFileSync("src/ui/codex-view/header-controller.ts", "utf8");
   const messageControllerSource = readFileSync("src/ui/codex-view/message-controller.ts", "utf8");
+  const viewShellSource = readFileSync("src/ui/codex-view/view-shell.ts", "utf8");
   assert.match(composerSource, /placeholder:\s*""/u);
   assert.match(headerSource, /setAttr\("placeholder",\s*""\)/u);
   assert.match(messageControllerSource, /onSuggestionSelect:[\s\S]*?dispatchEvent\(new Event\("input"[\s\S]*?inputEl\.focus\(\)/u);
@@ -884,10 +1160,16 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     /sendMessage|onSend/u,
     "suggestion selection must not enter the send chain"
   );
+  assert.match(
+    viewShellSource,
+    /host\.messagesEl[\s\S]*?host\.taskPlanDockEl[\s\S]*?renderComposerShell/u,
+    "the Task List dock stays outside the message scroller immediately above the composer"
+  );
   const notices = readFileSync("THIRD_PARTY_NOTICES.md", "utf8");
   assert.match(notices, /Copyright \(c\) 2024 Eduardo Calvo/u);
   assert.match(notices, /Blur Out Up.*AI Message.*AI Reasoning.*AI Tool Call.*AI Artifact.*AI Task List/su);
   assert.match(notices, /## Vercel AI Elements[\s\S]*?6a9d5b1822ffb10bba4bd97175f01edd7d8651cd/u);
+  assert.match(notices, /Vercel AI Elements[\s\S]*?`Task`[\s\S]*?task\.tsx/u);
   assert.match(notices, /Copyright 2023 Vercel, Inc\.[\s\S]*?Apache License, Version 2\.0/u);
 
   console.log("PASS conversation-ui: truthful SmoothUI and AI Elements sources, retained chrome, and Vault-note navigation");

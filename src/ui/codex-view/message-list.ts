@@ -29,14 +29,15 @@ import {
   type KnowledgeUsageMessageData
 } from "../../knowledge-base/usage";
 import {
-  taskPlanCurrentStep,
   taskPlanProgress,
+  type EchoInkTaskPlanStepStatus,
   type EchoInkTaskPlanStatus
 } from "../../types/task-plan";
 import { renderProviderBrandIcon, type ProviderBrandId } from "../../settings/provider-brand-icons";
 import { API_PROVIDER_PRESETS } from "../../settings/provider-presets";
 import {
   createAIElementsDocumentSources,
+  createAIElementsTask,
   createSmoothAIApprovalCard,
   createSmoothAIArtifact,
   createSmoothAIMessageBody,
@@ -46,7 +47,6 @@ import {
   markSmoothAIDiff,
   markSmoothAIReasoning,
   markSmoothAIResponse,
-  markSmoothAITaskList,
   markSmoothAIToolCall,
   renderSmoothAILoader,
   renderSmoothAISuggestions,
@@ -776,30 +776,15 @@ export class CodexMessageListRenderer {
     if (!plan) return;
     container.addClass("codex-message-task-plan");
     const progress = taskPlanProgress(plan);
-    const currentStep = taskPlanCurrentStep(plan);
-    const defaultExpanded = plan.status === "pending"
-      ? plan.steps.length <= 8
-      : plan.status === "in_progress"
-        ? plan.steps.length <= 6
-        : false;
-    const expanded = this.openTaskPlans.get(message.id) ?? defaultExpanded;
+    const expanded = this.openTaskPlans.get(message.id) ?? true;
     const stepsId = `codex-task-plan-steps-${safeDomIdentity(message.id)}`;
-    const card = container.createDiv({
-      cls: `codex-task-plan-card is-${plan.status}`,
-      attr: {
-        "aria-label": `任务计划：${plan.title}`
-      }
+    const task = createAIElementsTask(container, {
+      bodyId: stepsId,
+      label: `任务计划：${plan.title}`,
+      open: expanded
     });
-    markSmoothAITaskList(card);
-    const header = card.createEl("button", {
-      cls: "codex-task-plan-header",
-      attr: {
-        type: "button",
-        "aria-expanded": String(expanded),
-        "aria-controls": stepsId,
-        title: expanded ? "收起任务步骤" : "展开任务步骤"
-      }
-    });
+    task.root.addClass(`is-${plan.status}`);
+    const header = task.summary;
     this.renderTaskPlanStatusIcon(
       header.createSpan({ cls: "codex-task-plan-status" }),
       plan.status
@@ -808,131 +793,50 @@ export class CodexMessageListRenderer {
     heading.createSpan({ cls: "codex-task-plan-title", text: plan.title });
     heading.createSpan({
       cls: "codex-task-plan-progress",
-      text: `第 ${progress.current} / ${progress.total} 步`
+      text: taskPlanHistoryStatus(plan.status, progress.completed, progress.total)
     });
     const disclosure = header.createSpan({
       cls: "codex-task-plan-disclosure",
       attr: { "aria-hidden": "true" }
     });
     setIcon(disclosure, expanded ? "chevron-up" : "chevron-down");
-    header.onclick = () => {
-      this.openTaskPlans.set(message.id, !expanded);
+    task.root.ontoggle = () => {
+      this.openTaskPlans.set(message.id, task.root.open);
+      header.setAttribute("aria-expanded", String(task.root.open));
       env.onScheduleMeasure();
-      this.render({
-        ...env,
-        options: { preserveScroll: true }
-      });
     };
 
-    const steps = card.createDiv({
-      cls: "codex-task-plan-steps",
-      attr: { id: stepsId }
-    });
-    if (expanded) {
-      for (const step of plan.steps) {
-        const row = steps.createDiv({
-          cls: `codex-task-plan-step is-${step.status}`
-        });
-        this.renderTaskPlanStatusIcon(
-          row.createSpan({ cls: "codex-task-plan-step-status" }),
-          step.status
-        );
-        const copy = row.createDiv({ cls: "codex-task-plan-step-copy" });
-        copy.createDiv({ cls: "codex-task-plan-step-text", text: step.text });
-        if (step.reason) {
-          copy.createDiv({
-            cls: "codex-task-plan-step-reason",
-            text: step.reason
-          });
-        }
-      }
-    } else if (currentStep) {
+    const steps = task.body;
+    for (const step of plan.steps) {
       const row = steps.createDiv({
-        cls: `codex-task-plan-step codex-task-plan-step-current is-${currentStep.status}`
+        cls: `codex-task-plan-step is-${step.status}`
       });
       this.renderTaskPlanStatusIcon(
         row.createSpan({ cls: "codex-task-plan-step-status" }),
-        currentStep.status
+        step.status
       );
       const copy = row.createDiv({ cls: "codex-task-plan-step-copy" });
-      copy.createDiv({
-        cls: "codex-task-plan-step-text",
-        text: currentStep.text
-      });
-      if (currentStep.reason) {
+      copy.createDiv({ cls: "codex-task-plan-step-text", text: step.text });
+      if (step.reason) {
         copy.createDiv({
           cls: "codex-task-plan-step-reason",
-          text: currentStep.reason
+          text: step.reason
         });
       }
     }
     if (plan.reason) {
-      card.createDiv({ cls: "codex-task-plan-reason", text: plan.reason });
+      steps.createDiv({ cls: "codex-task-plan-reason", text: plan.reason });
     }
-    this.renderTaskPlanActions(card, plan.planId, plan.title, plan.status);
   }
 
   private renderTaskPlanStatusIcon(
     container: HTMLElement,
-    status: EchoInkTaskPlanStatus
+    status: EchoInkTaskPlanStatus | EchoInkTaskPlanStepStatus
   ): void {
     container.addClass(`is-${status}`);
     container.setAttribute("role", "img");
     container.setAttribute("aria-label", taskPlanStatusLabel(status));
     setIcon(container, taskPlanStatusIcon(status));
-  }
-
-  private renderTaskPlanActions(
-    card: HTMLElement,
-    planId: string,
-    title: string,
-    status: EchoInkTaskPlanStatus
-  ): void {
-    const env = this.requireEnv();
-    const actions = card.createDiv({ cls: "codex-task-plan-actions" });
-    const addAction = (
-      label: string,
-      action: "execute" | "continue" | "pause" | "cancel",
-      tone: "primary" | "secondary" | "danger"
-    ) => {
-      if (!env.onTaskPlanAction) return;
-      const button = actions.createEl("button", {
-        cls: `codex-task-plan-action is-${tone}`,
-        text: label,
-        attr: { type: "button" }
-      });
-      button.onclick = async () => {
-        if (button.disabled) return;
-        setTaskPlanActionsBusy(actions, true);
-        try {
-          await env.onTaskPlanAction?.(planId, action);
-        } finally {
-          setTaskPlanActionsBusy(actions, false);
-        }
-      };
-    };
-    const addModify = () => {
-      if (!env.onModifyTaskPlan) return;
-      const button = actions.createEl("button", {
-        cls: "codex-task-plan-action is-secondary",
-        text: "修改计划",
-        attr: { type: "button" }
-      });
-      button.onclick = () => env.onModifyTaskPlan?.(planId, title);
-    };
-
-    if (status === "pending") {
-      addAction("执行", "execute", "primary");
-      addModify();
-      addAction("取消", "cancel", "danger");
-    } else if (status === "in_progress") {
-      addAction("暂停/中止", "pause", "danger");
-    } else if (status === "paused") {
-      addAction("继续", "continue", "primary");
-      addModify();
-      addAction("取消", "cancel", "danger");
-    }
-    if (!actions.childElementCount) actions.remove();
   }
 
   private renderPiConversationDeriveAction(
@@ -2134,32 +2038,41 @@ function isAgentHeaderCandidate(message: ChatMessage): boolean {
   return message.itemType !== "thinking" && message.itemType !== "contextCompaction";
 }
 
-function taskPlanStatusLabel(status: EchoInkTaskPlanStatus): string {
+function taskPlanStatusLabel(
+  status: EchoInkTaskPlanStatus | EchoInkTaskPlanStepStatus
+): string {
   if (status === "pending") return "待执行";
   if (status === "in_progress") return "进行中";
   if (status === "completed") return "已完成";
   if (status === "failed") return "失败";
   if (status === "paused") return "已暂停";
+  if (status === "interrupted") return "已中断";
   return "已取消";
 }
 
-function taskPlanStatusIcon(status: EchoInkTaskPlanStatus): string {
+function taskPlanStatusIcon(
+  status: EchoInkTaskPlanStatus | EchoInkTaskPlanStepStatus
+): string {
   if (status === "pending") return "circle";
   if (status === "in_progress") return "loader-circle";
   if (status === "completed") return "circle-check";
   if (status === "failed") return "circle-alert";
   if (status === "paused") return "circle-pause";
+  if (status === "interrupted") return "circle-pause";
   return "circle-x";
 }
 
-function setTaskPlanActionsBusy(
-  container: HTMLElement,
-  busy: boolean
-): void {
-  container.toggleClass("is-busy", busy);
-  for (const button of Array.from(
-    container.querySelectorAll<HTMLButtonElement>("button")
-  )) button.disabled = busy;
+function taskPlanHistoryStatus(
+  status: EchoInkTaskPlanStatus,
+  completed: number,
+  total: number
+): string {
+  if (status === "completed") return `${total}/${total} 已完成`;
+  if (status === "failed") return "任务失败";
+  if (status === "cancelled") return "已取消";
+  if (status === "paused") return "已中断，可继续";
+  if (status === "pending") return "等待开始";
+  return `${completed}/${total} 已完成`;
 }
 
 function safeDomIdentity(value: string): string {
