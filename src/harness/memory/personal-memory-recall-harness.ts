@@ -19,7 +19,7 @@ export type PersonalMemoryRecallCandidate = Pick<PersonalMemorySearchItem,
 export interface PersonalMemoryPreparedTurnContext {
   readonly revision: number;
   readonly agent: string;
-  readonly user: string;
+  readonly user: string | null;
   readonly memory: string | null;
   readonly recall: Readonly<{
     readonly candidates: readonly Readonly<PersonalMemoryRecallCandidate>[];

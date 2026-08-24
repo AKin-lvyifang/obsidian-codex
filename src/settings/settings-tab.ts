@@ -1,4 +1,4 @@
-import { Notice, PluginSettingTab, Setting, setIcon } from "obsidian";
+import { Notice, PluginSettingTab, Setting, TFile, normalizePath, setIcon } from "obsidian";
 import type CodexForObsidianPlugin from "../main";
 import type { PiConversationCatalogEntry } from "../harness/pi-native/contracts";
 import {
@@ -58,6 +58,7 @@ import {
   normalizeSettingsLanguage,
   validateApiProvider,
   type ApiProviderConfig,
+  type KnowledgeBaseMaintenanceHistoryEntry,
   type ReviewReportKind,
   type ResourceManagementTab,
   type SettingsTab,
@@ -124,6 +125,14 @@ import {
   type EchoInkOnboardingStep
 } from "./onboarding";
 import { openExternalInElectron } from "../core/electron";
+import type { KnowledgeBaseDashboardSnapshot } from "../knowledge-base/dashboard";
+import {
+  clearKnowledgeDashboardHealthTooltips,
+  createKnowledgeDashboardTooltipState,
+  disposeKnowledgeDashboardTooltipState,
+  renderKnowledgeDashboardView,
+  type KnowledgeDashboardTooltipState
+} from "../ui/codex-view/knowledge-dashboard";
 
 type PersonalMemoryControlState = Awaited<
   ReturnType<CodexForObsidianPlugin["getEchoInkPersonalMemoryState"]>
@@ -171,6 +180,14 @@ export class CodexSettingTab extends PluginSettingTab {
   private knowledgePreferenceLoadError: string | null = null;
   private knowledgeInitSection: KnowledgeInitializationSection | null = null;
   private knowledgePreferenceClosePromptRunning = false;
+  private knowledgeDashboardEl: HTMLElement | null = null;
+  private knowledgeDashboardSnapshot: KnowledgeBaseDashboardSnapshot | null = null;
+  private knowledgeDashboardExpanded = true;
+  private knowledgeDashboardLoading = false;
+  private knowledgeDashboardError = "";
+  private knowledgeDashboardRequestId = 0;
+  private readonly knowledgeDashboardTooltipState: KnowledgeDashboardTooltipState =
+    createKnowledgeDashboardTooltipState();
   private displayFrame: number | null = null;
   private settingsTitleEl: HTMLElement | null = null;
   private settingsTabsEl: HTMLElement | null = null;
@@ -234,6 +251,12 @@ export class CodexSettingTab extends PluginSettingTab {
     this.settingsVisible = false;
     this.clearOnboardingCoachmark(true);
     this.knowledgeInitSection?.dispose();
+    this.knowledgeDashboardRequestId += 1;
+    this.knowledgeDashboardEl = null;
+    this.knowledgeDashboardSnapshot = null;
+    this.knowledgeDashboardLoading = false;
+    this.knowledgeDashboardError = "";
+    disposeKnowledgeDashboardTooltipState(this.knowledgeDashboardTooltipState);
     this.disconnectSettingsTabsResizeObserver();
     if (this.displayFrame !== null) {
       window.cancelAnimationFrame(this.displayFrame);
@@ -293,6 +316,8 @@ export class CodexSettingTab extends PluginSettingTab {
       const tabsEl = this.settingsTabsEl;
       const bodyEl = this.settingsBodyEl;
       if (!titleEl || !tabsEl || !bodyEl) return;
+      clearKnowledgeDashboardHealthTooltips(this.knowledgeDashboardTooltipState);
+      this.knowledgeDashboardEl = null;
       titleEl.empty();
       tabsEl.empty();
       bodyEl.empty();
@@ -612,8 +637,8 @@ export class CodexSettingTab extends PluginSettingTab {
     applySettingsRow(new Setting(memoryGroup)
       .setName(zh ? "使用长期记忆" : "Use long-term memory")
       .setDesc(zh
-        ? "开启后，所有新旧对话都会读取长期记忆；关闭后，每次请求都强制不读写历史 Memory。身份与用户画像文件始终生效。"
-        : "When enabled, every new and existing conversation can recall long-term memory. When disabled, every request is forced to skip historical Memory. Identity and user profile files always remain active.")
+        ? "开启后，Agent 可在所有新旧对话中自主记住、更新、忘掉和整理长期记忆。关闭后仍保留 Agent 名称、头像与基础人格，但不会读取或写入记忆、不会做梦，也不会加载从长期协作中形成的用户画像或 Agent 学习内容。"
+        : "When enabled, the Agent can remember, update, forget, and consolidate long-term memory in every conversation. When disabled, its name, avatar, and base personality remain, but it does not read or write memory, dream, or load user-profile or Agent learning content formed through long-term collaboration.")
       .addToggle((toggle) => {
         labelSettingsToggle(toggle, zh ? "使用长期记忆" : "Use long-term memory");
         toggle.setValue(this.plugin.settings.memory.useLongTermMemory).onChange(async (enabled) => {
@@ -1398,22 +1423,130 @@ export class CodexSettingTab extends PluginSettingTab {
     this.knowledgeInitSection.render(page, zh);
   }
 
+  private mountKnowledgeDashboard(page: HTMLElement, zh: boolean): void {
+    const section = createSettingsSection(page, {
+      title: zh ? "知识库 Dashboard" : "Knowledge Dashboard",
+      description: zh
+        ? "集中查看知识库状态、统计、健康度、体检新鲜度与热力图。"
+        : "See Knowledge status, statistics, health, check freshness, and the heatmap in one place.",
+      surface: "flat"
+    });
+    this.knowledgeDashboardEl = section.createDiv({
+      cls: "codex-kb-dashboard codex-kb-settings-dashboard"
+    });
+    this.renderKnowledgeSettingsDashboard();
+    if (!this.knowledgeDashboardSnapshot && !this.knowledgeDashboardLoading) {
+      void this.refreshKnowledgeSettingsDashboard();
+    }
+  }
+
+  private renderKnowledgeSettingsDashboard(): void {
+    const container = this.knowledgeDashboardEl;
+    if (!container) return;
+    const manager = this.plugin.getKnowledgeSurfaceService?.();
+    const recovery = manager?.maintenanceRecoveryStatus ?? {
+      state: "ready" as const,
+      message: ""
+    };
+    renderKnowledgeDashboardView(
+      container,
+      {
+        visible: true,
+        snapshot: this.knowledgeDashboardSnapshot,
+        expanded: this.knowledgeDashboardExpanded,
+        loading: this.knowledgeDashboardLoading,
+        error: this.knowledgeDashboardError,
+        recovery
+      },
+      {
+        onRefresh: () => void this.refreshKnowledgeSettingsDashboard(true),
+        onToggleExpanded: () => {
+          this.knowledgeDashboardExpanded = !this.knowledgeDashboardExpanded;
+          this.renderKnowledgeSettingsDashboard();
+        }
+      },
+      this.knowledgeDashboardTooltipState
+    );
+  }
+
+  private async refreshKnowledgeSettingsDashboard(force = false): Promise<void> {
+    if (this.knowledgeDashboardLoading && !force) return;
+    const manager = this.plugin.getKnowledgeSurfaceService?.();
+    if (!manager) {
+      this.knowledgeDashboardError = this.plugin.settings.settingsLanguage === "en"
+        ? "Knowledge status is not ready yet."
+        : "知识库状态服务尚未就绪。";
+      this.renderKnowledgeSettingsDashboard();
+      return;
+    }
+    const requestId = ++this.knowledgeDashboardRequestId;
+    this.knowledgeDashboardLoading = true;
+    this.knowledgeDashboardError = "";
+    this.renderKnowledgeSettingsDashboard();
+    try {
+      const snapshot = await manager.getDashboardSnapshot();
+      if (requestId !== this.knowledgeDashboardRequestId) return;
+      this.knowledgeDashboardSnapshot = snapshot;
+    } catch (error) {
+      if (requestId !== this.knowledgeDashboardRequestId) return;
+      this.knowledgeDashboardError = error instanceof Error ? error.message : String(error);
+    } finally {
+      if (requestId === this.knowledgeDashboardRequestId) {
+        this.knowledgeDashboardLoading = false;
+        this.renderKnowledgeSettingsDashboard();
+      }
+    }
+  }
+
+  private renderKnowledgeMaintenanceHistory(page: HTMLElement, zh: boolean): void {
+    const section = createSettingsSection(page, {
+      title: zh ? "维护日志" : "Maintenance log",
+      description: zh
+        ? "每次维护都沿用现有记录；打开报告可查看本轮新增、移动与提炼明细。"
+        : "Each run uses the existing history. Open its report to inspect added, moved, and refined items.",
+      surface: "group"
+    });
+    const group = createSettingsGroup(section);
+    const entries = [...this.plugin.settings.knowledgeBase.maintenanceHistory]
+      .sort((left, right) => right.at - left.at || right.date.localeCompare(left.date));
+    if (!entries.length) {
+      createSettingsState(group, zh ? "还没有知识库维护记录。" : "No Knowledge maintenance runs yet.");
+      return;
+    }
+    for (const entry of entries) {
+      const row = new Setting(group)
+        .setName(knowledgeMaintenanceHistoryTitle(entry, zh))
+        .setDesc(knowledgeMaintenanceHistoryDescription(entry, zh));
+      if (entry.reportPath) {
+        row.addButton((button) => {
+          const label = zh ? "查看明细" : "View details";
+          button
+            .setButtonText(label)
+            .onClick(() => void this.openKnowledgeMaintenanceReport(entry.reportPath));
+          button.buttonEl.setAttr(
+            "aria-label",
+            `${label} ${knowledgeMaintenanceHistoryTitle(entry, zh)}`
+          );
+        });
+      }
+      applySettingsRow(row);
+    }
+  }
+
+  private async openKnowledgeMaintenanceReport(relativePath: string): Promise<void> {
+    const file = this.app.vault.getAbstractFileByPath(normalizePath(relativePath));
+    if (file instanceof TFile) {
+      await this.app.workspace.getLeaf("tab").openFile(file, { active: true });
+      return;
+    }
+    new Notice(this.plugin.settings.settingsLanguage === "en"
+      ? `The report was not found in this Vault: ${relativePath}`
+      : `当前 Vault 中没有找到维护报告：${relativePath}`);
+  }
+
   private renderKnowledgeBaseSettings(container: HTMLElement): void {
     const copy = this.copy;
     const zh = this.plugin.settings.settingsLanguage !== "en";
-    if (this.settingsDetail === "knowledge-memory") {
-      const page = createSettingsPage(container, {
-        title: zh ? "长期记忆" : "Long-term memory",
-        description: copy.knowledge.memoryNote1,
-        detail: true,
-        backLabel: zh ? "返回知识库" : "Back to Knowledge",
-        onBack: () => void this.closeSettingsDetail()
-      });
-      this.renderSettingsActionError(page, "knowledge");
-      const section = createSettingsSection(page, { surface: "group" });
-      this.addKnowledgeBaseMemoryRecommendation(createSettingsGroup(section));
-      return;
-    }
     if (this.settingsDetail === "knowledge-preferences") {
       this.renderKnowledgeMaintenancePreferences(container);
       return;
@@ -1435,6 +1568,7 @@ export class CodexSettingTab extends PluginSettingTab {
     this.renderSettingsActionError(page, "knowledge");
 
     this.mountKnowledgeInitializationSection(page, zh);
+    this.mountKnowledgeDashboard(page, zh);
 
     const runSection = createSettingsSection(page, {
       title: zh ? "模型" : "Model",
@@ -1527,6 +1661,8 @@ export class CodexSettingTab extends PluginSettingTab {
         .onClick(() => void this.activateSettingsTab("providers", true))));
     modelSetting.settingEl.dataset.echoinkFocusKey = "knowledge:provider";
 
+    this.renderKnowledgeMaintenanceHistory(page, zh);
+
     const management = createSettingsSection(page, {
       title: zh ? "管理" : "Management",
       surface: "group"
@@ -1548,14 +1684,6 @@ export class CodexSettingTab extends PluginSettingTab {
       focusKey: "knowledge:preferences",
       onActivate: () => this.openSettingsDetail("knowledge-preferences")
     });
-    createSettingsNavigationRow(managementGroup, {
-      title: zh ? "长期记忆" : "Long-term memory",
-      description: copy.knowledge.memoryEnabledDesc,
-      value: this.plugin.settings.memory.enabled ? copy.common.enabled : copy.common.disabled,
-      actionLabel: zh ? "管理" : "Manage",
-      focusKey: "knowledge:memory",
-      onActivate: () => this.openSettingsDetail("knowledge-memory")
-    });
   }
 
   private renderKnowledgeMaintenancePreferences(container: HTMLElement): void {
@@ -1573,8 +1701,8 @@ export class CodexSettingTab extends PluginSettingTab {
     const protocolSection = createSettingsSection(page, {
       title: zh ? "固定提炼步骤" : "Fixed refinement steps",
       description: zh
-        ? "EchoInk 始终按以下六步执行，偏好文本不能改变显式命令授权、来源、写入目录、Raw 保护或 Personal Memory 禁用状态。"
-        : "EchoInk always follows these six steps. Preference text cannot change explicit-command authorization, sources, write targets, Raw protection, or the Personal Memory boundary.",
+        ? "EchoInk 始终按以下六步执行，偏好文本不能改变显式命令授权、来源、写入目录或 Raw 保护。"
+        : "EchoInk always follows these six steps. Preference text cannot change explicit-command authorization, sources, write targets, or Raw protection.",
       surface: "group"
     });
     const protocolGroup = createSettingsGroup(protocolSection);
@@ -2100,6 +2228,17 @@ export class CodexSettingTab extends PluginSettingTab {
       });
       correct.disabled = this.memoryActionRunning;
       correct.onclick = () => void this.correctPersonalMemoryRecord(record);
+      const forget = actions.createEl("button", {
+        cls: "mod-warning",
+        text: zh ? "忘掉" : "Forget",
+        attr: {
+          type: "button",
+          "aria-label": `${zh ? "忘掉" : "Forget"} ${record.title}`,
+          "data-echoink-focus-key": `review:memory:${category.id}:forget:${recordIndex}`
+        }
+      });
+      forget.disabled = this.memoryActionRunning;
+      forget.onclick = () => void this.forgetPersonalMemoryRecord(record);
 
       const fields = row.createDiv({ cls: "echoink-memory-card-fields" });
       const content = fields.createDiv({
@@ -2204,6 +2343,70 @@ export class CodexSettingTab extends PluginSettingTab {
       new Notice(zh
         ? "Memory 修正未写入；请重新加载后重试。"
         : "Memory correction was not written. Reload and try again.");
+    } finally {
+      this.memoryActionRunning = false;
+      this.scheduleDisplay();
+    }
+  }
+
+  private async forgetPersonalMemoryRecord(
+    record: Readonly<PersonalMemoryRecord>
+  ): Promise<void> {
+    if (this.memoryActionRunning) return;
+    const zh = this.plugin.settings.settingsLanguage !== "en";
+    const state = this.personalMemoryState;
+    if (!state || record.status !== "current") return;
+    this.memoryActionRunning = true;
+    this.personalMemoryError = null;
+    this.scheduleDisplay();
+    let forgotten = false;
+    try {
+      const accepted = await confirmModal(
+        this.app,
+        zh ? "确认忘掉这条 Memory？" : "Forget this Memory?",
+        zh
+          ? `忘掉“${record.title}”后，它不会再被召回；相关用户画像与 Agent 长期学习内容会同步更新。`
+          : `After “${record.title}” is forgotten, it will no longer be recalled. Related user-profile and Agent learning projections will be updated too.`,
+        zh ? "忘掉" : "Forget",
+        this.copy.common.cancel
+      );
+      if (!accepted) return;
+      await this.plugin.forgetEchoInkPersonalMemory(
+        record.id,
+        zh
+          ? `用户在复盘记忆管理中明确要求忘掉“${record.title}”`
+          : `User explicitly requested forgetting “${record.title}” in Review`,
+        state.revision
+      );
+      forgotten = true;
+      this.personalMemoryState = await this.plugin.getEchoInkPersonalMemoryState();
+      new Notice(zh ? "Memory 已忘掉" : "Memory forgotten");
+    } catch (error) {
+      if (isPersonalMemoryRevisionConflict(error)) {
+        try {
+          this.personalMemoryState = await this.plugin.getEchoInkPersonalMemoryState();
+          this.personalMemoryError = null;
+          new Notice(zh
+            ? "Memory 已变化，列表已刷新；请从最新记录重新操作。"
+            : "Memory changed. The list was refreshed; retry from the latest record.");
+        } catch (reloadError) {
+          this.personalMemoryError = reloadError instanceof Error
+            ? reloadError.message
+            : String(reloadError);
+          new Notice(zh
+            ? "Memory 已变化，但列表刷新失败；请重新打开复盘。"
+            : "Memory changed, but the list could not refresh. Reopen Review.");
+        }
+      } else {
+        this.personalMemoryError = error instanceof Error ? error.message : String(error);
+        new Notice(forgotten
+          ? (zh
+            ? "Memory 已忘掉，但列表刷新失败；请重新打开复盘。"
+            : "Memory was forgotten, but the list could not refresh. Reopen Review.")
+          : (zh
+            ? "Memory 未能忘掉；请重新加载后重试。"
+            : "Memory was not forgotten. Reload and try again."));
+      }
     } finally {
       this.memoryActionRunning = false;
       this.scheduleDisplay();
@@ -2485,8 +2688,6 @@ export class CodexSettingTab extends PluginSettingTab {
       && detail?.kind === "review-memory-category"
     ) {
       this.settingsFocusIntent = `explicit:review:memory:${detail.category}`;
-    } else if (detail === "knowledge-memory") {
-      this.settingsFocusIntent = "explicit:knowledge:memory";
     } else if (detail === "knowledge-preferences") {
       this.settingsFocusIntent = "explicit:knowledge:preferences";
     } else if (detail === "review-archives") {
@@ -2897,127 +3098,6 @@ export class CodexSettingTab extends PluginSettingTab {
     }
   }
 
-  private addKnowledgeBaseMemoryRecommendation(container: HTMLElement): void {
-    this.addPersonalMemoryControl(container);
-    return;
-  }
-
-  private addPersonalMemoryControl(container: HTMLElement): void {
-    const zh = this.plugin.settings.settingsLanguage !== "en";
-    if (!this.personalMemoryState && !this.personalMemoryLoading && !this.personalMemoryError) {
-      void this.loadPersonalMemoryState();
-    }
-    if (this.personalMemoryLoading) {
-      createSettingsState(container, zh ? "正在读取长期 Memory…" : "Loading long-term Memory…", "neutral");
-      return;
-    }
-    const state = this.personalMemoryState;
-    if (!state) {
-      createSettingsState(
-        container,
-        zh ? "长期 Memory 暂时无法读取。" : "Long-term Memory is temporarily unavailable.",
-        "error"
-      );
-      const retry = container.createEl("button", { text: zh ? "重新加载" : "Reload", attr: { type: "button" } });
-      retry.onclick = () => void this.loadPersonalMemoryState(true);
-      return;
-    }
-
-    applySettingsRow(new Setting(container)
-      .setName(zh ? "允许学习新 Memory" : "Allow new Memory learning")
-      .setDesc(zh
-        ? "关闭后已有历史仍可读取，但 memory_write 会被拒绝。"
-        : "Existing history remains readable when off, while memory_write is rejected.")
-      .addToggle((toggle) => {
-        labelSettingsToggle(
-          toggle,
-          zh ? "允许学习新 Memory" : "Allow new Memory learning"
-        );
-        toggle.setValue(state.learningEnabled).onChange(async (enabled) => {
-          await this.runPersonalMemoryAction(async () => {
-            await this.plugin.setEchoInkPersonalMemoryLearningEnabled(enabled);
-          });
-        });
-      }));
-
-    const summary = new Setting(container)
-      .setName(zh ? "文件状态" : "File status")
-      .setDesc(zh
-        ? `Revision ${state.revision} · 当前记录 ${state.records.filter((item) => item.status === "current").length} · 已忘记 ${state.forgottenIds.length}`
-        : `Revision ${state.revision} · ${state.records.filter((item) => item.status === "current").length} current · ${state.forgottenIds.length} forgotten`);
-    applySettingsRow(summary.addButton((button) => button
-      .setButtonText(zh ? "导出" : "Export")
-      .onClick(async () => {
-        await this.runPersonalMemoryAction(async () => {
-          const result = await this.plugin.exportEchoInkPersonalMemory();
-          new Notice(zh ? `已导出：${result.path}` : `Exported: ${result.path}`);
-        });
-      })));
-
-    const ordered = [...state.records].sort((left, right) =>
-      left.kind.localeCompare(right.kind)
-      || right.date.localeCompare(left.date)
-      || left.id.localeCompare(right.id)
-    );
-    if (!ordered.length) {
-      createSettingsState(
-        container,
-        zh ? "还没有历史记录。对话会在确有长期价值且学习开启时写入。" : "No history yet. Conversations write only durable value while learning is enabled.",
-        "neutral"
-      );
-    }
-    for (const record of ordered.slice(0, 50)) {
-      const row = new Setting(container)
-        .setName(`${record.title} · ${record.kind}`)
-        .setDesc([
-          record.content,
-          `${record.status} · ${record.basis} · revision ${record.revision}`,
-          record.scope ? `scope: ${record.scope}` : undefined,
-          `source: ${record.source}`,
-          record.supersedes ? `supersedes: ${record.supersedes}` : undefined
-        ].filter(Boolean).join("\n"));
-      if (record.status === "current") {
-        row.addButton((button) => button
-          .setWarning()
-          .setButtonText(zh ? "忘记" : "Forget")
-          .onClick(async () => {
-            const confirmed = await confirmModal(
-              this.app,
-              zh ? "可恢复地忘记" : "Recoverable forget",
-              zh ? `忘记“${record.title}”？原文件会进入本地备份，可稍后恢复。` : `Forget “${record.title}”? A local backup remains available for restore.`,
-              zh ? "忘记" : "Forget",
-              this.copy.common.cancel
-            );
-            if (!confirmed) return;
-            await this.runPersonalMemoryAction(async () => {
-              await this.plugin.forgetEchoInkPersonalMemory(
-                record.id,
-                zh ? "用户在 Memory 设置页明确要求忘记" : "User explicitly requested forget in Memory settings",
-                state.revision
-              );
-            });
-          }));
-      }
-      applySettingsRow(row);
-    }
-
-    for (const id of state.forgottenIds.slice(-20).reverse()) {
-      applySettingsRow(new Setting(container)
-        .setName(`${zh ? "已忘记" : "Forgotten"} · ${id}`)
-        .setDesc(zh ? "保留可恢复备份。" : "A recoverable backup is retained.")
-        .addButton((button) => button
-          .setButtonText(zh ? "恢复" : "Restore")
-          .onClick(async () => {
-            await this.runPersonalMemoryAction(async () => {
-              await this.plugin.restoreEchoInkPersonalMemory(id, state.revision);
-            });
-          })));
-    }
-
-  }
-
-
-
   private async loadPersonalMemoryState(force = false): Promise<void> {
     if (this.personalMemoryLoading || (!force && this.personalMemoryState)) return;
     this.personalMemoryLoading = true;
@@ -3029,29 +3109,6 @@ export class CodexSettingTab extends PluginSettingTab {
       this.personalMemoryError = error instanceof Error ? error.message : String(error);
     } finally {
       this.personalMemoryLoading = false;
-      this.scheduleDisplay();
-    }
-  }
-
-  private async runPersonalMemoryAction(
-    action: () => Promise<void>,
-    reload = true
-  ): Promise<void> {
-    if (this.memoryActionRunning) return;
-    this.memoryActionRunning = true;
-    try {
-      await action();
-      if (reload) {
-        this.personalMemoryState = await this.plugin.getEchoInkPersonalMemoryState();
-      }
-      this.personalMemoryError = null;
-    } catch (error) {
-      this.personalMemoryError = error instanceof Error ? error.message : String(error);
-      new Notice(this.plugin.settings.settingsLanguage === "en"
-        ? "Memory action did not finish. Reload and try again."
-        : "Memory 操作未完成，请重新加载后重试。");
-    } finally {
-      this.memoryActionRunning = false;
       this.scheduleDisplay();
     }
   }
@@ -4022,7 +4079,6 @@ type VisibleSettingsTab = SettingsTab;
 type SettingsActionContext = "knowledge" | "review" | "resources";
 
 type SettingsDetail =
-  | "knowledge-memory"
   | "knowledge-preferences"
   | "review-archives"
   | "review-memory"
@@ -4082,6 +4138,71 @@ function isPersonalMemoryRevisionConflict(error: unknown): boolean {
   return record.code === "revision_conflict"
     || (typeof record.message === "string"
       && record.message.includes("revision_conflict"));
+}
+
+function knowledgeMaintenanceHistoryTitle(
+  entry: Readonly<KnowledgeBaseMaintenanceHistoryEntry>,
+  zh: boolean
+): string {
+  const modeLabels = zh
+    ? {
+        maintain: "知识提炼",
+        lint: "知识体检",
+        reingest: "重新提炼",
+        outputs: "输出整理",
+        inbox: "Inbox 整理",
+        unknown: "知识维护"
+      }
+    : {
+        maintain: "Knowledge refinement",
+        lint: "Knowledge check",
+        reingest: "Re-refinement",
+        outputs: "Output organization",
+        inbox: "Inbox organization",
+        unknown: "Knowledge maintenance"
+      };
+  return `${formatKnowledgeMaintenanceTime(entry.at, entry.date, zh)} · ${modeLabels[entry.mode]}`;
+}
+
+function knowledgeMaintenanceHistoryDescription(
+  entry: Readonly<KnowledgeBaseMaintenanceHistoryEntry>,
+  zh: boolean
+): string {
+  const status = knowledgeMaintenanceHistoryStatus(entry, zh);
+  const pending = entry.pendingSources?.length
+    ? (zh
+      ? `${entry.pendingSources.length} 项待处理`
+      : `${entry.pendingSources.length} pending`)
+    : "";
+  const warnings = entry.warnings?.length
+    ? (zh
+      ? `${entry.warnings.length} 条提醒`
+      : `${entry.warnings.length} warnings`)
+    : "";
+  return [status, pending, warnings, entry.reportPath].filter(Boolean).join(" · ");
+}
+
+function knowledgeMaintenanceHistoryStatus(
+  entry: Readonly<KnowledgeBaseMaintenanceHistoryEntry>,
+  zh: boolean
+): string {
+  if (entry.status === "failed") return zh ? "失败" : "Failed";
+  if (entry.status === "canceled") return zh ? "已取消" : "Canceled";
+  if (entry.completion === "partial") return zh ? "部分完成" : "Partially completed";
+  if (entry.completion === "recovered") return zh ? "恢复后完成" : "Completed after recovery";
+  if (entry.completion === "noop") return zh ? "已检查，无新内容" : "Checked, no new content";
+  return zh ? "已完成" : "Completed";
+}
+
+function formatKnowledgeMaintenanceTime(at: number, date: string, zh: boolean): string {
+  if (!Number.isFinite(at) || at <= 0) return date;
+  return new Date(at).toLocaleString(zh ? "zh-CN" : "en-US", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
 }
 
 const SETTINGS_PANEL_ID = "echoink-settings-panel";

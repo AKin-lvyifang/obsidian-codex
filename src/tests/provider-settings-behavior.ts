@@ -1,6 +1,6 @@
 import * as assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { App, openTestModals } from "obsidian";
+import { App, TFile, openTestModals } from "obsidian";
 import type {
   AssistantMessage,
   ProviderStreams,
@@ -175,7 +175,7 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   await assertKnowledgeSettingsDetailRetiresLegacyControls();
   await assertKnowledgeInitializationExperienceContract();
   await assertAnimatedSettingsTabIcons();
-  assertSettingsAccessibleNamesAndOverflow();
+  await assertSettingsAccessibleNamesAndOverflow();
   await assertMemoryCorrectionModalContract();
   assertMemoryComposerVisualCssContract();
   await assertMcpPanelUsesTurnResourceTruth();
@@ -344,7 +344,6 @@ async function assertAnimatedSettingsTabIcons(): Promise<void> {
       user: "# User",
       memory: "# Memory",
       revision: 0,
-      learningEnabled: true,
       records: [],
       forgottenIds: []
     }),
@@ -1575,7 +1574,7 @@ function createCognitiveSystemStub(): Record<string, any> {
   };
 }
 
-function assertSettingsAccessibleNamesAndOverflow(): void {
+async function assertSettingsAccessibleNamesAndOverflow(): Promise<void> {
   installProviderModalDomFixture();
   const settings = structuredClone(DEFAULT_SETTINGS);
   const provider = createApiProviderConfig("deepseek", "ui-contract");
@@ -1591,12 +1590,41 @@ function assertSettingsAccessibleNamesAndOverflow(): void {
   settings.apiProviders = [provider, missingCredential, credentialFree];
   activateApiProvider(settings, provider);
   settings.settingsTab = "providers";
+  const maintenanceReportPath = "outputs/maintenance-2026-08-25.md";
+  const maintenanceAt = Date.UTC(2026, 7, 25, 6, 30);
+  settings.knowledgeBase.maintenanceHistory = [{
+    date: "2026-08-25",
+    status: "success",
+    at: maintenanceAt,
+    runId: "run-settings-dashboard",
+    mode: "maintain",
+    reportPath: maintenanceReportPath,
+    completion: "partial",
+    pendingSources: ["raw/pending.md"]
+  }];
+  const openedReports: string[] = [];
+  const reportFile = Object.assign(Object.create(TFile.prototype) as TFile, {
+    path: maintenanceReportPath
+  });
+  const app = Object.assign(new App(), {
+    vault: {
+      getAbstractFileByPath: (value: string) => value === maintenanceReportPath
+        ? reportFile
+        : null
+    },
+    workspace: {
+      getLeaf: () => ({
+        openFile: async (file: TFile) => {
+          openedReports.push(file.path);
+        }
+      })
+    }
+  });
   const identityState = Object.freeze({
     agent: "# Agent",
     user: "# User",
     memory: "# Memory",
     revision: 1,
-    learningEnabled: true,
     records: Object.freeze([Object.freeze({
       schema: "echoink.memory.v1",
       id: "mem_ui_private_id",
@@ -1614,13 +1642,112 @@ function assertSettingsAccessibleNamesAndOverflow(): void {
     })]),
     forgottenIds: Object.freeze([])
   });
+  const forgetCalls: Array<readonly [string, string, number]> = [];
+  const dashboardSnapshot = {
+    generatedAt: maintenanceAt,
+    vaultName: "Settings Dashboard Vault",
+    vaultPath: "/tmp/settings-dashboard-vault",
+    lastRun: {
+      status: "success",
+      completion: "partial",
+      attemptCount: 1,
+      pendingSourceCount: 1,
+      at: maintenanceAt,
+      reportPath: maintenanceReportPath,
+      reportExists: true,
+      error: ""
+    },
+    tracker: { path: "outputs/.ingest-tracker.md", exists: true, trackedCount: 3 },
+    raw: {
+      path: "raw",
+      exists: true,
+      fileCount: 4,
+      folderCount: 1,
+      totalSize: 400,
+      recentFiles: [],
+      changedCount: 1,
+      todayCount: 1,
+      digestStatus: { pending: 1, changed: 0, calibration: 0 }
+    },
+    wiki: {
+      path: "wiki",
+      exists: true,
+      fileCount: 6,
+      folderCount: 2,
+      totalSize: 600,
+      recentFiles: [],
+      indexExists: true,
+      domainCount: 1,
+      todayCount: 2,
+      groups: [{ path: "wiki/product", label: "产品", totalCount: 5, sharePercent: 83, todayCount: 2 }]
+    },
+    outputs: {
+      path: "outputs",
+      exists: true,
+      fileCount: 2,
+      folderCount: 0,
+      totalSize: 200,
+      recentFiles: [],
+      latestReportPath: maintenanceReportPath,
+      latestReportExists: true,
+      latestReportTitle: "维护报告",
+      latestReportSummary: "本轮完成知识提炼。",
+      latestReportMtime: maintenanceAt
+    },
+    inbox: {
+      path: "inbox",
+      exists: true,
+      fileCount: 1,
+      folderCount: 0,
+      totalSize: 100,
+      recentFiles: [],
+      todayCount: 1
+    },
+    health: {
+      status: "healthy",
+      label: "健康",
+      score: 92,
+      reasons: [],
+      scoreSummary: "健康",
+      scoreReasons: [],
+      scoreCheckNote: "体检完成。",
+      scoreThresholdText: "85+ 健康。",
+      lastCheckAt: maintenanceAt,
+      streakDays: 2
+    },
+    checkFreshness: {
+      status: "fresh",
+      label: "新鲜",
+      score: 100,
+      lastCheckAt: maintenanceAt,
+      daysSinceCheck: 0,
+      reasons: []
+    },
+    checkHeatmap: [{ date: "2026-08-25", status: "success" }],
+    activity: { days: [], heatmapRows: [], logs: [] },
+    recommendations: { cards: [] },
+    warnings: []
+  } as const;
   const plugin = {
-    app: new App(),
+    app,
     manifest: { id: "codex-echoink" },
     settings,
     saveSettings: async () => undefined,
     getCognitiveSystem: async () => createCognitiveSystemStub(),
     getEchoInkPersonalMemoryState: async () => identityState,
+    getEchoInkKnowledgeMaintenancePreferenceState: async () => ({
+      profileVersion: ECHOINK_KNOWLEDGE_PREFERENCE_PROFILE_VERSION,
+      state: "default" as const,
+      revision: `sha256:${"b".repeat(64)}`,
+      content: ECHOINK_DEFAULT_KNOWLEDGE_MAINTENANCE_PREFERENCES
+    }),
+    forgetEchoInkPersonalMemory: async (id: string, reason: string, revision: number) => {
+      forgetCalls.push([id, reason, revision]);
+    },
+    getKnowledgeSurfaceService: () => ({
+      maintenanceRecoveryStatus: { state: "ready" as const, message: "" },
+      getDashboardSnapshot: async () => dashboardSnapshot
+    }),
     listPiConversations: async () => [],
     setPiConversationStatus: async () => undefined,
     getCodexView: () => null
@@ -1708,7 +1835,6 @@ function assertSettingsAccessibleNamesAndOverflow(): void {
     personalMemoryState: typeof identityState;
     archivedConversations: readonly typeof archivedEntry[];
     settingsDetail:
-      | "knowledge-memory"
       | "review-archives"
       | "review-memory"
       | { kind: "review-memory-category"; category: "facts" }
@@ -1775,8 +1901,10 @@ function assertSettingsAccessibleNamesAndOverflow(): void {
     ]
   );
   const correctionActions = correctionCard.querySelectorAll<ProviderModalTestElement>("button");
-  assert.deepEqual(correctionActions.map((button) => button.textContent), ["修正"]);
+  assert.deepEqual(correctionActions.map((button) => button.textContent), ["修正", "忘掉"]);
   assert.equal(correctionActions[0]?.closest(".echoink-memory-card-header"), cardHeader);
+  assert.equal(correctionActions[1]?.closest(".echoink-memory-card-header"), cardHeader);
+  assert.equal(correctionActions[1]?.hasClass("mod-warning"), true);
   assert.equal(correctionCard.querySelectorAll("input, textarea, select").length, 0);
   assert.equal(
     correctionCard.querySelectorAll("*")
@@ -1792,6 +1920,39 @@ function assertSettingsAccessibleNamesAndOverflow(): void {
     /mem_ui_private_id|private-source|records\/facts|revision/u
   );
 
+  correctionActions[1]!.click();
+  await settleMicrotasks();
+  const cancelForget = openTestModals.at(-1);
+  assert.ok(cancelForget, "Review forget opens a confirmation modal");
+  assert.match(cancelForget!.contentEl.textContent, /不会再被召回/u);
+  const cancelForgetButton = (cancelForget!.contentEl as unknown as ProviderModalTestElement)
+    .querySelectorAll<ProviderModalTestElement>("button")
+    .find((button) => button.textContent === "取消");
+  assert.ok(cancelForgetButton);
+  cancelForgetButton!.click();
+  await settleMicrotasks();
+  assert.equal(forgetCalls.length, 0, "canceling Review forget keeps zero writes");
+
+  tab.display();
+  const confirmForgetButton = tab.containerEl
+    .querySelectorAll<ProviderModalTestElement>("button")
+    .find((button) => button.textContent === "忘掉");
+  assert.ok(confirmForgetButton);
+  confirmForgetButton!.click();
+  await settleMicrotasks();
+  const confirmForget = openTestModals.at(-1);
+  assert.ok(confirmForget);
+  const acceptForgetButton = (confirmForget!.contentEl as unknown as ProviderModalTestElement)
+    .querySelectorAll<ProviderModalTestElement>("button")
+    .find((button) => button.hasClass("mod-cta"));
+  assert.equal(acceptForgetButton?.textContent, "忘掉");
+  acceptForgetButton!.click();
+  await settleMicrotasks();
+  assert.equal(forgetCalls.length, 1, "confirmed Review forget writes once");
+  assert.equal(forgetCalls[0]?.[0], "mem_ui_private_id");
+  assert.match(forgetCalls[0]?.[1] ?? "", /复盘记忆管理中明确要求忘掉/u);
+  assert.equal(forgetCalls[0]?.[2], 1, "the host supplies the current revision");
+
   settings.settingsLanguage = "en";
   tab.display();
   const englishCard = tab.containerEl.querySelector<ProviderModalTestElement>(
@@ -1805,7 +1966,7 @@ function assertSettingsAccessibleNamesAndOverflow(): void {
   );
   assert.deepEqual(
     englishCard.querySelectorAll("button").map((button) => button.textContent),
-    ["Correct"]
+    ["Correct", "Forget"]
   );
   assert.doesNotMatch(englishCard.textContent, /Association clues|AI inferred/iu);
   settings.settingsLanguage = "zh-CN";
@@ -1849,6 +2010,21 @@ function assertSettingsAccessibleNamesAndOverflow(): void {
 
   settings.settingsTab = "knowledgeBase";
   tab.display();
+  await settleMicrotasks();
+  tab.display();
+  const dashboardControl = tab as unknown as {
+    knowledgeDashboardSnapshot: typeof dashboardSnapshot | null;
+    refreshKnowledgeSettingsDashboard(force?: boolean): Promise<void>;
+    renderKnowledgeSettingsDashboard(): void;
+  };
+  await dashboardControl.refreshKnowledgeSettingsDashboard(true);
+  await settleMicrotasks();
+  assert.equal(
+    dashboardControl.knowledgeDashboardSnapshot,
+    dashboardSnapshot,
+    "the settings Dashboard keeps the loaded snapshot"
+  );
+  dashboardControl.renderKnowledgeSettingsDashboard();
   assertSettingControlAccessibleName(tab.containerEl, "EchoInk 当前模型", "select");
   const modelOptions = Array.from(
     tab.containerEl.querySelectorAll<HTMLOptionElement>("option")
@@ -1869,10 +2045,46 @@ function assertSettingsAccessibleNamesAndOverflow(): void {
     optionForProvider(credentialFree.id)?.disabled,
     false
   );
-  mutable.settingsDetail = "knowledge-memory";
-  tab.display();
-  assertSettingsToggleAccessibleName(tab.containerEl, "允许学习新 Memory");
-  mutable.settingsDetail = null;
+  const dashboard = tab.containerEl.querySelector<ProviderModalTestElement>(
+    ".codex-kb-settings-dashboard"
+  );
+  assert.ok(dashboard, "Knowledge settings mounts the shared Dashboard renderer");
+  for (const label of [
+    "知识库状态",
+    "健康概览",
+    "体检新鲜度",
+    "Wiki 状态",
+    "Raw / Inbox 状态",
+    "体检热力图"
+  ]) {
+    assert.match(dashboard!.textContent, new RegExp(label, "u"));
+  }
+  assert.equal(
+    dashboard!.querySelector('button[aria-label="收起详情"]') !== null,
+    true,
+    "the settings Dashboard is expanded by default"
+  );
+  assert.match(tab.containerEl.textContent, /维护日志/u);
+  assert.match(tab.containerEl.textContent, /部分完成/u);
+  assert.match(tab.containerEl.textContent, /1 项待处理/u);
+  assert.match(tab.containerEl.textContent, new RegExp(maintenanceReportPath, "u"));
+  const detailsButton = tab.containerEl
+    .querySelectorAll<ProviderModalTestElement>("button")
+    .find((button) => button.textContent === "查看明细");
+  assert.ok(detailsButton);
+  detailsButton!.click();
+  await settleMicrotasks();
+  assert.deepEqual(openedReports, [maintenanceReportPath]);
+  assert.doesNotMatch(tab.containerEl.textContent, /长期记忆|Personal Memory/u);
+  for (const retiredAction of ["导出", "恢复", "忘记"]) {
+    assert.equal(
+      tab.containerEl.querySelectorAll<ProviderModalTestElement>("button")
+        .some((button) => button.textContent === retiredAction),
+      false,
+      `Knowledge settings retires the Personal Memory ${retiredAction} action`
+    );
+  }
+  assert.doesNotMatch(settingsTabSource, /knowledge-memory|addPersonalMemoryControl/u);
   tab.hide();
   assert.equal(providerModalResizeObservers.at(-1)?.disconnected, true);
 }
@@ -3154,6 +3366,11 @@ async function assertKnowledgeSettingsDetailRetiresLegacyControls(): Promise<voi
   assert.equal(steps.length, 6);
   assert.match(tab.containerEl.textContent, /固定提炼步骤/u);
   assert.match(tab.containerEl.textContent, /自检、安全写入与回读/u);
+  assert.doesNotMatch(
+    tab.containerEl.textContent,
+    /长期记忆|Personal Memory/u,
+    "the reachable Knowledge refinement detail must not expose Personal Memory state or boundaries"
+  );
   assert.doesNotMatch(tab.containerEl.textContent, /待确认预览|确认时仍提交原预览/u);
   const textarea = tab.containerEl.querySelector<HTMLTextAreaElement>(
     ".echoink-knowledge-preference-textarea"
@@ -5321,7 +5538,6 @@ function createIdentityFixtureState(overrides: Record<string, unknown> = {}): Re
     user: "# User",
     memory: "# Memory",
     revision: 3,
-    learningEnabled: true,
     records: Object.freeze([]),
     forgottenIds: Object.freeze([]),
     agentIdentity: {
@@ -6893,6 +7109,12 @@ class ProviderModalTestElement {
       if (value !== undefined && value !== null) {
         this.style.setProperty(name, String(value));
       }
+    }
+  }
+
+  setCssProps(properties: Record<string, string>): void {
+    for (const [name, value] of Object.entries(properties)) {
+      this.style.setProperty(name, value);
     }
   }
 

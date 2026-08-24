@@ -495,6 +495,73 @@ export function reconcileProfileSources(
 }
 
 /**
+ * Generic Memory supersede keeps an existing USER projection attached to the
+ * replacement record. The carried processed revision intentionally remains
+ * the old Memory revision so Dream treats the replacement as reprocessed and
+ * can replace or revoke the inherited projection after successful analysis.
+ */
+export function rebindProfileSource(
+  previous: UserProfileState,
+  input: Readonly<{
+    previousMemoryId: string;
+    replacementMemoryId: string;
+    previousMemoryRevision: number;
+    replacementText: string;
+    now: number;
+  }>
+): UserProfileState {
+  if (input.previousMemoryId === input.replacementMemoryId) return previous;
+  let changed = false;
+  const revision = previous.revision + 1;
+  const items = previous.items.map((item) => {
+    if (item.status !== "current" || !item.sourceMemoryIds.includes(input.previousMemoryId)) {
+      return item;
+    }
+    changed = true;
+    return Object.freeze({
+      ...item,
+      ...(item.basis === "observed_memory" ? {} : { text: input.replacementText }),
+      sourceMemoryIds: Object.freeze(uniqueTail(item.sourceMemoryIds.map((memoryId) =>
+        memoryId === input.previousMemoryId ? input.replacementMemoryId : memoryId
+      ), 3)),
+      revision,
+      updatedAt: input.now
+    });
+  });
+  if (!changed) return previous;
+
+  const processedById = new Map<string, ProcessedProfileSource>();
+  let reboundProcessed = false;
+  for (const source of previous.processedSources) {
+    if (source.memoryId === input.previousMemoryId) {
+      reboundProcessed = true;
+      processedById.set(input.replacementMemoryId, Object.freeze({
+        ...source,
+        memoryId: input.replacementMemoryId
+      }));
+    } else {
+      processedById.set(source.memoryId, source);
+    }
+  }
+  if (!reboundProcessed) {
+    processedById.set(input.replacementMemoryId, Object.freeze({
+      memoryId: input.replacementMemoryId,
+      memoryRevision: input.previousMemoryRevision,
+      processedAt: input.now
+    }));
+  }
+  return Object.freeze({
+    schema: USER_PROFILE_STATE_SCHEMA,
+    revision,
+    items: Object.freeze(items),
+    processedSources: Object.freeze(boundProcessedSources([...processedById.values()], items)),
+    legacyUserMigration: previous.legacyUserMigration,
+    lastProjectedUserHash: previous.lastProjectedUserHash,
+    updatedAt: input.now
+  });
+}
+
+/**
  * Round 6 修复五：找出本轮以「更高 revision」重新处理的同一批 Memory
  * （与人格侧 computeReprocessedMemoryIds 同一判断标准）。
  */

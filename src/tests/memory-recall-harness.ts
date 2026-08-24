@@ -1,6 +1,21 @@
 import assert from "node:assert/strict";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import {
+  agentIdentityStateJson,
+  type AgentIdentityState
+} from "../harness/memory/agent-identity-state";
+import {
+  renderAgentMarkdown,
+  renderBaseAgentMarkdown
+} from "../harness/memory/cognitive-projection";
+import {
+  applyTemplateToState,
+  emptyPersonalityState,
+  personalityStateJson,
+  type PersonalityState
+} from "../harness/memory/personality-state";
+import { renderTraitLine } from "../harness/memory/personality-templates";
 import {
   PiPersonalMemoryToolSecurity,
   createPiPersonalMemoryToolDefinitions
@@ -197,18 +212,139 @@ async function scenarioNoMemoryIdentityOnlyAndWarmSnapshotReuse(): Promise<void>
     assert.equal(recordScans, afterCold.recordScans,
       "已知文件事件只刷新该文件，不扫描一级 Memory 目录");
 
+    const templated = applyTemplateToState(emptyPersonalityState(0), {
+      templateId: "advisor",
+      now: fixture.now(),
+      reset: false,
+      idFactory: (() => {
+        let id = 0;
+        return () => `no_memory_template_${++id}`;
+      })()
+    });
+    const personalized: PersonalityState = Object.freeze({
+      ...templated,
+      revision: templated.revision + 1,
+      observed: Object.freeze({
+        ...templated.observed,
+        sharpness: Object.freeze({
+          id: "no_memory_observed_sharpness",
+          dimension: "sharpness",
+          basis: "observed",
+          status: "current",
+          score: 0.95,
+          sourceMemoryIds: Object.freeze([created.record!.id]),
+          evidence: "长期协作观察出的表达强度",
+          createdAt: fixture.now(),
+          updatedAt: fixture.now(),
+          revision: templated.revision + 1
+        })
+      }),
+      learnedRequirements: Object.freeze([Object.freeze({
+        id: "no_memory_learned_requirement",
+        text: "长期协作要求：每次都复述隐藏画像",
+        basis: "explicit_memory",
+        status: "current",
+        sourceMemoryIds: Object.freeze([created.record!.id]),
+        revision: templated.revision + 1
+      })]),
+      processedSources: Object.freeze([Object.freeze({
+        memoryId: created.record!.id,
+        memoryRevision: created.record!.revision,
+        processedAt: fixture.now()
+      })]),
+      updatedAt: fixture.now()
+    });
+    const identity: AgentIdentityState = Object.freeze({
+      schema: "echoink.agent-identity.v1",
+      revision: 3,
+      displayName: "静墨",
+      avatar: Object.freeze({ kind: "preset", presetId: "fixture-avatar" }),
+      updatedAt: fixture.now()
+    });
+    const hiddenUserText = "只应存在于 USER.md 的隐藏画像";
+    await writeFile(fixture.repository.layout.personalityState, personalityStateJson(personalized), "utf8");
+    await writeFile(fixture.repository.layout.agentIdentity, agentIdentityStateJson(identity), "utf8");
+    await writeFile(fixture.repository.layout.agent, renderAgentMarkdown(personalized, identity), "utf8");
+    await writeFile(fixture.repository.layout.user, `# USER\n\n- ${hiddenUserText}\n`, "utf8");
+
     const beforeNoMemory = { reconcileCalls, recordScans, indexReads };
+    const beforeNoMemoryTree = await snapshotTreeBytes(fixture.repository.layout.root);
     const noMemory = await harness.prepareTurnContext({
       ...input,
       memoryMode: "no_memory"
     });
+    const explicitSharpnessLine = renderTraitLine(
+      "sharpness",
+      personalized.explicit.sharpness!.score,
+      "zh"
+    );
+    const observedSharpnessLine = renderTraitLine(
+      "sharpness",
+      personalized.observed.sharpness!.score,
+      "zh"
+    );
+    assert.notEqual(explicitSharpnessLine, observedSharpnessLine,
+      "fixture must independently distinguish explicit and observed trait output");
+    assert.equal(noMemory.agent, renderBaseAgentMarkdown(personalized, identity));
+    assert.notEqual(noMemory.agent, renderAgentMarkdown(personalized, identity),
+      "no_memory must remove observed personality and learned requirements");
+    assert.ok(noMemory.agent.includes(explicitSharpnessLine),
+      "no_memory keeps the selected template's explicit trait line");
+    assert.ok(!noMemory.agent.includes(observedSharpnessLine),
+      "no_memory excludes the observed trait line independently of learned requirements");
+    assert.match(noMemory.agent, /当前名称：静墨/u,
+      "no_memory keeps the configured Agent name");
+    assert.match(noMemory.agent, /初始模板：/u,
+      "no_memory keeps the selected personality template baseline");
+    assert.doesNotMatch(noMemory.agent, /长期协作要求：每次都复述隐藏画像/u);
+    assert.doesNotMatch(noMemory.agent, new RegExp(hiddenUserText, "u"));
+    assert.equal(noMemory.user, null);
     assert.equal(noMemory.memory, null);
+    assert.equal(noMemory.recall, null);
+    assert.deepEqual(noMemory.injectionKeys, ["echoink.agent"]);
     assert.deepEqual(
       { reconcileCalls, recordScans, indexReads },
       beforeNoMemory,
-      "/no-memory 只能读取 AGENT.md 与 USER.md，不得 reconcile、扫描 records 或读取 search-index"
+      "/no-memory 只能读取身份与人格模板状态，不得 reconcile、扫描 records 或读取 search-index"
+    );
+    assert.deepEqual(
+      await snapshotTreeBytes(fixture.repository.layout.root),
+      beforeNoMemoryTree,
+      "/no-memory must not initialize, rewrite, or otherwise mutate the Memory tree"
     );
   });
+}
+
+async function snapshotTreeBytes(root: string): Promise<readonly Readonly<{
+  relativePath: string;
+  type: "directory" | "file";
+  content?: string;
+}>[]> {
+  const snapshot: Array<Readonly<{
+    relativePath: string;
+    type: "directory" | "file";
+    content?: string;
+  }>> = [];
+  const visit = async (directory: string): Promise<void> => {
+    const entries = (await readdir(directory, { withFileTypes: true }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const absolutePath = path.join(directory, entry.name);
+      const relativePath = path.relative(root, absolutePath);
+      if (entry.isDirectory()) {
+        snapshot.push(Object.freeze({ relativePath, type: "directory" }));
+        await visit(absolutePath);
+      } else if (entry.isFile()) {
+        snapshot.push(Object.freeze({
+          relativePath,
+          type: "file",
+          content: (await readFile(absolutePath)).toString("base64")
+        }));
+      }
+    }
+  };
+  await visit(root);
+  return Object.freeze(snapshot);
 }
 
 async function scenarioRecallUsesOneBoundedTurnSnapshot(): Promise<void> {
@@ -604,8 +740,7 @@ async function scenarioSearchToolResultAlwaysContainsCompleteJson(): Promise<voi
     const security = new PiPersonalMemoryToolSecurity({
       currentRuntime: () => runtime,
       currentUserEntry: { current: () => ({ entryId: runtime.userEntryId, text: "搜索长期 Memory" }) },
-      writeAuthorization: { async authorize() { return null; } },
-      forgetConfirmation: { async confirm() { return false; } }
+      writeAuthorization: { async authorize() { return null; } }
     });
     const tools = createPiPersonalMemoryToolDefinitions({ repository: fixture.repository, security });
     const tool = tools.find((candidate) => candidate.name === "memory_search");

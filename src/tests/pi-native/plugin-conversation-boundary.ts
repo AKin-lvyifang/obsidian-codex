@@ -876,7 +876,6 @@ async function localManagementAndMemoryStayProviderIndependent(): Promise<void> 
     {
       identity: { agent: "Agent", user: "User" },
       records: [{ id: "memory-local" }],
-      learningEnabled: true,
       agentIdentity: defaultAgentIdentityState(),
       personalityState: null
     }

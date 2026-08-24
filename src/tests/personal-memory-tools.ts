@@ -10,16 +10,19 @@ import {
   type MemoryWriteToolArguments,
   type PersonalMemoryWriteAuthorizationPort
 } from "../harness/pi-native/pi-personal-memory-tools";
+import { PersonalMemoryRecallHarness } from "../harness/memory/personal-memory-recall-harness";
 import type { PersonalMemoryRuntimeContext } from "../harness/memory/personal-memory-contracts";
 import { PersonalMemoryAccessError } from "../harness/memory/personal-memory-repository";
+import { USER_PROFILE_SLOTS } from "../harness/memory/user-profile-state";
 import { withPersonalMemoryFixture, type PersonalMemoryFixture } from "./personal-memory-fixture";
 
 export async function runPersonalMemoryToolContractScenarios(): Promise<void> {
   assertOpenAiCompatibleMemoryToolSchemas();
   await scenarioRuntimeIdentityIsNotModelControlled();
-  await scenarioModeAndLearningGates();
-  await scenarioTrustedEntryAndProvenanceAuthorization();
-  await scenarioRevisionIsRequiredAndStaleWritesFail();
+  await scenarioInvalidArgumentsAndMemoryModeErrors();
+  await scenarioSearchBeforeAutonomousWriteAndEvidenceBinding();
+  await scenarioHostRevisionUpdateForgetAndErrors();
+  await scenarioProfileUpdateIsIdempotentAndReplacesSource();
   await scenarioConcurrentWritersUseCas();
   await scenarioExternalPrimaryTruthWinsWithoutWatchers();
   await scenarioRepositoryDisposeStopsExternalWatchers();
@@ -39,24 +42,103 @@ function assertOpenAiCompatibleMemoryToolSchemas(): void {
       `${toolId} function.parameters must have a top-level object schema`
     );
   }
+  assert.deepEqual(schemas.memory_write.required, ["request"]);
   const writeProperties = schemas.memory_write.properties as Readonly<Record<
     string,
     Readonly<Record<string, unknown>>
   >>;
-  const operationVariants = writeProperties.operation.anyOf as ReadonlyArray<
+  assert.deepEqual(Object.keys(writeProperties), ["request"]);
+  const operationVariants = writeProperties.request.anyOf as ReadonlyArray<
     Readonly<Record<string, unknown>>
   >;
-  assert.deepEqual(operationVariants.map((variant) => variant.const), [
+  const operationNames = operationVariants.map((variant) => {
+    const properties = variant.properties as Readonly<Record<
+      string,
+      Readonly<Record<string, unknown>>
+    >>;
+    return properties.operation.const;
+  });
+  assert.deepEqual(operationNames, [
     "create",
-    "supersede",
-    "close",
+    "update",
     "profile_update",
     "forget"
   ]);
-  assert.match(String(writeProperties.recallWhen.description ?? ""), /create.*supersede.*必填/iu);
-  assert.match(String(schemas.memory_write.description ?? ""), /recallWhen.*必填/iu);
+  assert.deepEqual(operationVariants.map((variant) => variant.additionalProperties), [
+    false, false, false, false
+  ]);
+  assert.deepEqual(operationVariants.map((variant) => variant.required), [
+    ["operation", "title", "content", "recallWhen", "evidenceQuote"],
+    ["operation", "targetId", "title", "content", "recallWhen", "reason", "evidenceQuote"],
+    ["operation", "profileKey", "text", "evidenceQuote"],
+    ["operation", "targetId", "reason", "evidenceQuote"]
+  ]);
+  const profileVariant = operationVariants[2]!;
+  const profileProperties = profileVariant.properties as Readonly<Record<
+    string,
+    Readonly<Record<string, unknown>>
+  >>;
+  const profileKeyVariants = profileProperties.profileKey.anyOf as ReadonlyArray<
+    Readonly<Record<string, unknown>>
+  >;
+  assert.deepEqual(
+    profileKeyVariants.map((variant) => variant.const),
+    USER_PROFILE_SLOTS.map((slot) => slot.profileKey),
+    "profile_update.profileKey must expose the complete closed profile taxonomy"
+  );
+  for (const hiddenHostField of [
+    "kind",
+    "basis",
+    "contentOrigin",
+    "expectedRevision"
+  ]) {
+    assert.equal(
+      JSON.stringify(writeProperties).includes(`\"${hiddenHostField}\"`),
+      false,
+      `${hiddenHostField} must be host-controlled rather than model-visible`
+    );
+  }
+  const createProperties = operationVariants[0]!.properties as Readonly<Record<
+    string,
+    Readonly<Record<string, unknown>>
+  >>;
+  assert.match(String(createProperties.recallWhen.description ?? ""), /未来.*召回/iu);
+  assert.match(String(schemas.memory_write.description ?? ""), /先.*memory_search.*同义.*跳过.*变化.*更新/iu);
   assert.match(String(schemas.memory_search.description ?? ""), /exhausted=false.*nextCursor/iu);
-  assert.equal(writeProperties.text.maxLength, 120);
+  assert.equal(profileProperties.text.maxLength, 120);
+
+  assert.deepEqual(normalizePiPersonalMemoryToolArguments("memory_write", {
+    request: {
+      operation: "create",
+      title: "沟通偏好",
+      content: "用户希望先给结论。",
+      recallWhen: "需要组织回答时",
+      evidenceQuote: "请记住：以后先给结论。"
+    }
+  }), {
+    request: {
+      operation: "create",
+      title: "沟通偏好",
+      content: "用户希望先给结论。",
+      recallWhen: "需要组织回答时",
+      evidenceQuote: "请记住：以后先给结论。"
+    }
+  });
+  assert.deepEqual(normalizePiPersonalMemoryToolArguments("memory_write", {
+    request: {
+      operation: "forget",
+      targetId: "mem_target",
+      reason: "用户明确要求忘掉",
+      evidenceQuote: "忘掉我以前偏好表格这件事。"
+    }
+  }), {
+    request: {
+      operation: "forget",
+      targetId: "mem_target",
+      reason: "用户明确要求忘掉",
+      evidenceQuote: "忘掉我以前偏好表格这件事。"
+    }
+  });
 }
 
 async function scenarioOversizedReadFailsExplicitly(): Promise<void> {
@@ -104,173 +186,242 @@ async function scenarioRuntimeIdentityIsNotModelControlled(): Promise<void> {
     vaultId: "forged-vault"
   }));
   assert.throws(() => normalizePiPersonalMemoryToolArguments("memory_write", {
-    ...createArguments("请记住这条规则。"),
+    request: createArguments("请记住这条规则。").request,
     explicitlyAuthorized: true
   }));
   assert.throws(() => normalizePiPersonalMemoryToolArguments("memory_write", {
-    operation: "close",
-    targetId: "mem_target",
-    reason: "已完成"
+    request: {
+      operation: "close",
+      targetId: "mem_target",
+      reason: "已完成"
+    }
   }));
   assert.throws(() => normalizePiPersonalMemoryToolArguments("memory_write", {
-    operation: "supersede",
-    targetId: "mem_target",
-    title: "新观点",
-    content: "新内容",
-    basis: "explicit",
-    contentOrigin: "user_statement",
-    evidenceQuote: "我改变了想法。",
-    reason: "用户改变观点"
+    request: {
+      operation: "update",
+      targetId: "mem_target",
+      title: "新观点",
+      content: "新内容",
+      evidenceQuote: "我改变了想法。",
+      reason: "用户改变观点"
+    }
   }));
   assert.throws(() => normalizePiPersonalMemoryToolArguments("memory_write", {
-    operation: "profile_update",
-    profileKey: "preference.unknown",
-    text: "用户偏好中文",
-    basis: "explicit",
-    contentOrigin: "user_statement",
-    evidenceQuote: "请更新我的资料。"
+    request: {
+      operation: "profile_update",
+      profileKey: "preference.unknown",
+      text: "用户偏好中文",
+      evidenceQuote: "请更新我的资料。"
+    }
   }));
   const boundedProfileText = "甲".repeat(120);
   assert.deepEqual(normalizePiPersonalMemoryToolArguments("memory_write", {
-    operation: "profile_update",
-    profileKey: "preference.language",
-    text: boundedProfileText,
-    basis: "explicit",
-    contentOrigin: "user_statement",
-    evidenceQuote: "请更新我的资料。",
-    expectedRevision: 3
+    request: {
+      operation: "profile_update",
+      targetId: "mem_existing_profile_fact",
+      profileKey: "preference.language",
+      text: boundedProfileText,
+      evidenceQuote: "请更新我的资料。"
+    }
   }), {
-    operation: "profile_update",
-    profileKey: "preference.language",
-    text: boundedProfileText,
-    basis: "explicit",
-    contentOrigin: "user_statement",
-    evidenceQuote: "请更新我的资料。",
-    expectedRevision: 3
+    request: {
+      operation: "profile_update",
+      targetId: "mem_existing_profile_fact",
+      profileKey: "preference.language",
+      text: boundedProfileText,
+      evidenceQuote: "请更新我的资料。"
+    }
   });
   assert.throws(() => normalizePiPersonalMemoryToolArguments("memory_write", {
-    operation: "profile_update",
-    profileKey: "preference.language",
-    text: "甲".repeat(121),
-    basis: "explicit",
-    contentOrigin: "user_statement",
-    evidenceQuote: "请更新我的资料。",
-    expectedRevision: 3
+    request: {
+      operation: "profile_update",
+      profileKey: "preference.language",
+      text: "甲".repeat(121),
+      evidenceQuote: "请更新我的资料。"
+    }
   }));
   assert.throws(() => normalizePiPersonalMemoryToolArguments("memory_write", {
-    operation: "profile_update",
-    profileKey: "preference.language",
-    text: "用户偏好中文",
-    content: "旧的 16000/24000 字段路径不得继续存在",
-    basis: "explicit",
-    contentOrigin: "user_statement",
-    evidenceQuote: "请更新我的资料。",
-    expectedRevision: 3
+    request: {
+      operation: "profile_update",
+      profileKey: "preference.language",
+      text: "用户偏好中文",
+      content: "旧的 16000/24000 字段路径不得继续存在",
+      evidenceQuote: "请更新我的资料。"
+    }
   }));
   assert.throws(() => normalizePiPersonalMemoryToolArguments("memory_write", {
-    operation: "forget",
-    targetId: "mem_target",
-    reason: "请忘记"
-  }));
-  assert.deepEqual(normalizePiPersonalMemoryToolArguments("memory_write", {
-    operation: "close",
-    targetId: "mem_target",
-    reason: "任务已完成",
-    expectedRevision: 3
-  }), {
-    operation: "close",
-    targetId: "mem_target",
-    reason: "任务已完成",
-    expectedRevision: 3
-  });
-  assert.throws(() => normalizePiPersonalMemoryToolArguments("memory_write", {
-    ...createArguments("请记住这条规则。"),
-    targetId: "mem_cross_operation"
+    request: {
+      operation: "forget",
+      targetId: "mem_target",
+      reason: "请忘记"
+    }
   }));
   assert.throws(() => normalizePiPersonalMemoryToolArguments("memory_write", {
-    operation: "close",
-    targetId: "mem_target",
-    reason: "任务已完成",
-    expectedRevision: 3,
-    content: "close 不接受 create 字段"
+    request: {
+      ...createArguments("请记住这条规则。").request,
+      targetId: "mem_cross_operation"
+    }
+  }));
+  assert.throws(() => normalizePiPersonalMemoryToolArguments("memory_write", {
+    request: {
+      operation: "close",
+      targetId: "mem_target",
+      reason: "任务已完成",
+      expectedRevision: 3,
+      content: "close 不接受 create 字段"
+    }
   }));
 }
 
-async function scenarioModeAndLearningGates(): Promise<void> {
+async function scenarioInvalidArgumentsAndMemoryModeErrors(): Promise<void> {
   await withPersonalMemoryFixture(async (fixture) => {
     const entry = { entryId: "user-entry-fixture", text: "请记住这条规则。" };
     const noMemory = createSecurity(fixture, entry, fixture.runtime({ memoryMode: "no_memory" }));
+    const tools = createPiPersonalMemoryToolDefinitions({ repository: fixture.repository, security: noMemory });
     const calls = [
       { toolName: "memory_search", input: { query: "规则" } },
       { toolName: "memory_read", input: { id: "mem_target" } },
       { toolName: "memory_write", input: createArguments(entry.text) }
     ] as const;
     for (const [index, call] of calls.entries()) {
-      const blocked = await noMemory.handleToolCall({
-        ...call,
-        toolCallId: `no-memory-${index}`
-      } as never, undefined);
-      assert.equal(blocked?.reason, "tool_policy_blocked");
+      const failed = await executeFailureThroughSecurity(
+        noMemory,
+        tools,
+        call.toolName,
+        `no-memory-${index}`,
+        call.input
+      );
+      assert.equal(failed.details.errorCode, "personal_memory_no_memory");
+      assert.match(failed.content[0]?.text ?? "", /长期记忆总开关已关闭/u);
     }
 
-    const readOnly = createSecurity(
-      fixture,
-      entry,
-      fixture.runtime({ learningEnabled: false })
+    const normal = createSecurity(fixture, entry, fixture.runtime());
+    const normalTools = createPiPersonalMemoryToolDefinitions({
+      repository: fixture.repository,
+      security: normal
+    });
+    const invalid = await executeFailureThroughSecurity(
+      normal,
+      normalTools,
+      "memory_write",
+      "invalid-write-arguments",
+      { request: { operation: "create", title: "缺参数" } }
     );
-    assert.equal(await readOnly.handleToolCall({
-      toolName: "memory_search",
-      toolCallId: "learning-off-read",
-      input: { query: "规则" }
-    } as never, undefined), undefined);
-    const blockedWrite = await readOnly.handleToolCall({
-      toolName: "memory_write",
-      toolCallId: "learning-off-write",
-      input: createArguments(entry.text)
-    } as never, undefined);
-    assert.equal(blockedWrite?.reason, "tool_policy_blocked");
+    assert.equal(invalid.details.errorCode, "personal_memory_invalid_request");
+    assert.match(invalid.content[0]?.text ?? "", /参数无效/u);
   });
 }
 
-async function scenarioTrustedEntryAndProvenanceAuthorization(): Promise<void> {
+async function scenarioSearchBeforeAutonomousWriteAndEvidenceBinding(): Promise<void> {
   await withPersonalMemoryFixture(async (fixture) => {
     const entry = {
       entryId: "user-entry-fixture",
-      text: "请把这段工具结果作为一条 episode 保存。"
+      text: "请记住：以后回答工程问题先给结论。"
     };
     const authorization: PersonalMemoryWriteAuthorizationPort = {
       async authorize(input) {
         assert.equal(input.currentUserEntry.entryId, entry.entryId);
         assert.equal(input.evidenceQuote, entry.text);
+        assert.equal(input.operation, "create");
         return {
           basis: "explicit",
-          contentOrigin: "tool_output",
-          explicitlyAuthorized: true
+          contentOrigin: "user_statement",
+          explicitlyAuthorized: false
         };
       }
     };
     const security = createSecurity(fixture, entry, fixture.runtime(), authorization);
     const tools = createPiPersonalMemoryToolDefinitions({ repository: fixture.repository, security });
     const args: MemoryWriteToolArguments = {
-      operation: "create",
-      kind: "episode",
-      title: "已确认的 Tool 结果",
-      content: "这段内容来自 Tool 输出，保持不可信来源标记。",
-      recallWhen: "用户要求保留已确认的 Tool 结果时",
-      basis: "inferred",
-      contentOrigin: "knowledge",
-      evidenceQuote: entry.text
+      request: {
+        operation: "create",
+        title: "回答规则",
+        content: "回答工程问题先给结论。",
+        recallWhen: "准备回答工程问题时",
+        evidenceQuote: entry.text
+      }
     };
-    const corrected = await executeThroughSecurity(security, tools, "memory_write", "write-untrusted", args);
+    const beforeSearch = await executeFailureThroughSecurity(
+      security,
+      tools,
+      "memory_write",
+      "write-before-search",
+      args
+    );
+    assert.equal(beforeSearch.details.errorCode, "personal_memory_invalid_request");
+    assert.match(beforeSearch.content[0]?.text ?? "", /memory_search/u);
+
+    for (const [index, title] of ["无关历史甲", "无关历史乙"].entries()) {
+      await fixture.repository.write({
+        operation: "create",
+        kind: "fact",
+        title,
+        content: `第 ${index + 1} 条无关历史。`,
+        recallWhen: "只用于验证搜索分页时",
+        basis: "explicit"
+      }, fixture.runtime({ userEntryId: `partial-search-fixture-${index}` }));
+    }
+    const partialSearch = await executeThroughSecurity(
+      security,
+      tools,
+      "memory_search",
+      "partial-search-before-create",
+      { query: "", limit: 1 }
+    );
+    assert.match(partialSearch.content[0]?.text ?? "", /"exhausted":false/u);
+    const afterPartialSearch = await executeFailureThroughSecurity(
+      security,
+      tools,
+      "memory_write",
+      "write-after-partial-search",
+      args
+    );
+    assert.equal(afterPartialSearch.details.errorCode, "personal_memory_invalid_request");
+
+    await executeThroughSecurity(
+      security,
+      tools,
+      "memory_search",
+      "search-before-create",
+      { query: "回答规则" }
+    );
+    const corrected = await executeThroughSecurity(
+      security,
+      tools,
+      "memory_write",
+      "create-after-search",
+      args
+    );
     assert.equal(corrected.isError, false);
     assert.match(corrected.content[0]?.text ?? "", /untrusted-background/u);
 
     const reopened = await fixture.reopen();
-    const found = await reopened.search({ query: "不可信 来源" }, fixture.runtime());
+    const found = await reopened.search({ query: "回答 工程 结论" }, fixture.runtime());
     assert.equal(found.items.length, 1);
     const read = await reopened.read(found.items[0]!.id, fixture.runtime());
+    assert.equal(read.record.kind, "fact");
     assert.equal(read.record.basis, "explicit");
-    assert.equal(read.record.contentOrigin, "tool_output");
+    assert.equal(read.record.contentOrigin, "user_statement");
+    assert.match(
+      read.record.file,
+      /(?:^|\/)facts\//u,
+      "host-managed fact classification uses the existing facts catalog"
+    );
+    const runtime = fixture.runtime();
+    const recalled = await new PersonalMemoryRecallHarness(reopened).prepareTurnContext({
+      memoryMode: "normal",
+      query: "准备回答工程问题",
+      tokenBudget: 320,
+      vaultId: runtime.vaultId,
+      conversationId: runtime.conversationId,
+      piSessionId: runtime.piSessionId,
+      productRunId: runtime.productRunId
+    });
+    assert.equal(
+      recalled.recall?.candidates.some((candidate) => candidate.id === read.record.id),
+      true,
+      "host-managed fact creates remain reachable through the existing recall harness"
+    );
 
     const mismatched = createSecurity(fixture, {
       entryId: "different-entry",
@@ -291,49 +442,50 @@ async function scenarioTrustedEntryAndProvenanceAuthorization(): Promise<void> {
     } as never, undefined);
     assert.equal(absentQuoteBlocked?.reason, "authorization_failed");
 
-    const forgedRuntimeAuthorization = createSecurity(
-      fixture,
-      entry,
-      fixture.runtime({ explicitlyAuthorized: true }),
-      {
-        async authorize() {
-          return {
-            basis: "explicit",
-            contentOrigin: "tool_output",
-            explicitlyAuthorized: false
-          };
-        }
-      }
+    const deniedByPolicy = createSecurity(fixture, entry, fixture.runtime(), {
+      async authorize() { return null; }
+    });
+    const deniedTools = createPiPersonalMemoryToolDefinitions({
+      repository: fixture.repository,
+      security: deniedByPolicy
+    });
+    await executeThroughSecurity(
+      deniedByPolicy,
+      deniedTools,
+      "memory_search",
+      "search-before-policy-denial",
+      { query: "回答规则" }
     );
-    const forgedAuthorizationBlocked = await forgedRuntimeAuthorization.handleToolCall({
+    const policyBlocked = await deniedByPolicy.handleToolCall({
       toolName: "memory_write",
-      toolCallId: "forged-runtime-authorization",
-      input: {
-        operation: "create",
-        kind: "episode",
-        title: "未经确认的 Tool 输出",
-        content: "不能写入。",
-        recallWhen: "未来处理同类 Tool 输出时",
-        basis: "explicit",
-        contentOrigin: "tool_output",
-        evidenceQuote: entry.text
-      }
+      toolCallId: "real-policy-denial",
+      input: args
     } as never, undefined);
-    assert.equal(forgedAuthorizationBlocked?.reason, "tool_policy_blocked");
+    assert.equal(policyBlocked?.reason, "tool_policy_blocked");
   });
 }
 
-async function scenarioRevisionIsRequiredAndStaleWritesFail(): Promise<void> {
+async function scenarioHostRevisionUpdateForgetAndErrors(): Promise<void> {
   await withPersonalMemoryFixture(async (fixture) => {
-    const entry = { entryId: "user-entry-fixture", text: "请记住这条规则。" };
+    const entry = {
+      entryId: "user-entry-fixture",
+      text: "请记住这条规则。我现在改成先给结论再给依据。忘掉这条回答规则。"
+    };
     const security = createSecurity(fixture, entry, fixture.runtime());
     const tools = createPiPersonalMemoryToolDefinitions({ repository: fixture.repository, security });
+    await executeThroughSecurity(
+      security,
+      tools,
+      "memory_search",
+      "search-before-current-create",
+      { query: "回答规则" }
+    );
     const createdResult = await executeThroughSecurity(
       security,
       tools,
       "memory_write",
       "create-current",
-      createArguments(entry.text)
+      createArguments("请记住这条规则。")
     );
     const createdId = (createdResult.details.recordIds as readonly string[] | undefined)?.[0];
     assert.ok(createdId);
@@ -363,26 +515,239 @@ async function scenarioRevisionIsRequiredAndStaleWritesFail(): Promise<void> {
       JSON.stringify(failedRead.details).includes("does not exist"),
       false
     );
-    const deniedForget = await security.handleToolCall({
-      toolName: "memory_write",
-      toolCallId: "forget-without-confirmation",
-      input: {
-        operation: "forget",
+    await executeThroughSecurity(
+      security,
+      tools,
+      "memory_search",
+      "search-before-update",
+      { query: "回答规则" }
+    );
+    const updatedResult = await executeThroughSecurity(
+      security,
+      tools,
+      "memory_write",
+      "update-current",
+      memoryWriteArguments({
+        operation: "update",
         targetId: createdId,
-        reason: "模型不能自证忘记权限",
-        expectedRevision: 1
-      }
-    } as never, undefined);
-    assert.equal(deniedForget?.reason, "tool_policy_blocked");
-    await assert.rejects(async () => {
-      await executeThroughSecurity(security, tools, "memory_write", "stale-close", {
-        operation: "close",
-        targetId: createdId,
+        title: "回答规则",
+        content: "回答时先给结论，再给依据。",
+        recallWhen: "准备回答工程问题时",
+        reason: "用户改变了回答偏好",
+        evidenceQuote: "我现在改成先给结论再给依据。"
+      })
+    );
+    const updatedId = (updatedResult.details.recordIds as readonly string[] | undefined)?.[0];
+    assert.ok(updatedId);
+    const updated = await fixture.repository.read(updatedId, fixture.runtime());
+    assert.equal(updated.record.kind, "fact", "update preserves the host-managed kind");
+    assert.equal(updated.record.supersedes, createdId);
+
+    await executeThroughSecurity(
+      security,
+      tools,
+      "memory_search",
+      "search-before-stale-update",
+      { query: "回答规则" }
+    );
+    await fixture.repository.write({
+      operation: "create",
+      kind: "fact",
+      title: "并发变化",
+      content: "这条写入只用于推进 manifest revision。",
+      recallWhen: "测试并发 revision 时",
+      basis: "explicit"
+    }, fixture.runtime({ userEntryId: "concurrent-writer" }));
+    const stale = await executeFailureThroughSecurity(
+      security,
+      tools,
+      "memory_write",
+      "stale-host-revision",
+      memoryWriteArguments({
+        operation: "update",
+        targetId: updatedId,
+        title: "回答规则",
+        content: "不应落盘的陈旧更新。",
+        recallWhen: "不应生效",
         reason: "测试陈旧 revision",
-        expectedRevision: 0
-      });
-    }, /personal_memory_revision_conflict/u);
-    assert.equal((await fixture.repository.read(createdId, fixture.runtime())).record.status, "current");
+        evidenceQuote: "我现在改成先给结论再给依据。"
+      })
+    );
+    assert.equal(stale.details.errorCode, "personal_memory_revision_conflict");
+    assert.match(stale.content[0]?.text ?? "", /重新 memory_search/u);
+
+    await executeThroughSecurity(
+      security,
+      tools,
+      "memory_search",
+      "search-before-forget",
+      { query: "回答规则" }
+    );
+    const forgotten = await executeThroughSecurity(
+      security,
+      tools,
+      "memory_write",
+      "forget-directly-from-conversation",
+      memoryWriteArguments({
+        operation: "forget",
+        targetId: updatedId,
+        reason: "用户明确要求忘掉",
+        evidenceQuote: "忘掉这条回答规则。"
+      })
+    );
+    assert.equal(forgotten.isError, false);
+    assert.deepEqual(forgotten.details.recordIds, [updatedId]);
+
+    await executeThroughSecurity(
+      security,
+      tools,
+      "memory_search",
+      "search-before-missing-forget",
+      { query: "回答规则" }
+    );
+    const missingForget = await executeFailureThroughSecurity(
+      security,
+      tools,
+      "memory_write",
+      "forget-missing-target",
+      memoryWriteArguments({
+        operation: "forget",
+        targetId: updatedId,
+        reason: "再次忘掉不存在的目标",
+        evidenceQuote: "忘掉这条回答规则。"
+      })
+    );
+    assert.equal(missingForget.details.errorCode, "personal_memory_not_found");
+    assert.match(missingForget.content[0]?.text ?? "", /不存在/u);
+  });
+}
+
+async function scenarioProfileUpdateIsIdempotentAndReplacesSource(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    const entry = {
+      entryId: "user-entry-fixture",
+      text: "请记住我偏好中文。现在更新为我偏好英文。"
+    };
+    const security = createSecurity(fixture, entry, fixture.runtime());
+    const tools = createPiPersonalMemoryToolDefinitions({ repository: fixture.repository, security });
+    const writeProfile = async (
+      toolCallId: string,
+      text: string,
+      evidenceQuote: string
+    ) => {
+      await executeThroughSecurity(
+        security,
+        tools,
+        "memory_search",
+        `search-${toolCallId}`,
+        { query: "用户画像 语言偏好" }
+      );
+      return await executeThroughSecurity(
+        security,
+        tools,
+        "memory_write",
+        toolCallId,
+        memoryWriteArguments({
+          operation: "profile_update",
+          profileKey: "preference.language",
+          text,
+          evidenceQuote
+        })
+      );
+    };
+
+    const created = await writeProfile(
+      "profile-create",
+      "用户偏好中文",
+      "请记住我偏好中文。"
+    );
+    const createdId = (created.details.recordIds as readonly string[])[0]!;
+    const duplicate = await writeProfile(
+      "profile-idempotent",
+      "用户偏好中文",
+      "请记住我偏好中文。"
+    );
+    assert.match(duplicate.content[0]?.text ?? "", /"status":"idempotent"/u);
+    assert.deepEqual(duplicate.details.recordIds, [createdId]);
+
+    const replaced = await writeProfile(
+      "profile-replace",
+      "用户偏好英文",
+      "现在更新为我偏好英文。"
+    );
+    const replacementId = (replaced.details.recordIds as readonly string[])[0]!;
+    assert.notEqual(replacementId, createdId);
+    const state = await fixture.repository.readUserControlState();
+    const profileRecords = state.records.filter((record) =>
+      record.title === "用户画像：语言"
+    );
+    assert.equal(profileRecords.filter((record) => record.status === "current").length, 1);
+    assert.equal(profileRecords.find((record) => record.id === createdId)?.status, "superseded");
+    assert.equal(profileRecords.find((record) => record.id === replacementId)?.status, "current");
+    const user = await readFile(fixture.repository.layout.user, "utf8");
+    assert.match(user, /用户偏好英文/u);
+    assert.doesNotMatch(user, /用户偏好中文/u);
+  });
+
+  await withPersonalMemoryFixture(async (fixture) => {
+    const generic = await fixture.repository.write({
+      operation: "create",
+      kind: "fact",
+      title: "用户称呼",
+      content: "用户希望称为方哥",
+      recallWhen: "称呼用户时",
+      basis: "explicit",
+      contentOrigin: "user_statement"
+    }, fixture.runtime());
+    const promoted = await fixture.repository.write({
+      operation: "profile_update",
+      profileKey: "identity.name",
+      text: "用户希望称为方哥",
+      basis: "explicit",
+      contentOrigin: "user_statement",
+      expectedRevision: generic.revision
+    }, fixture.runtime());
+    assert.equal(promoted.record?.id, generic.record?.id,
+      "an exact generic fact is promoted as the profile source instead of duplicated");
+    const afterPromotion = await fixture.repository.inspect();
+    assert.equal(afterPromotion.records.filter((record) => record.status === "current").length, 1);
+    assert.match(await readFile(fixture.repository.layout.user, "utf8"), /用户希望称为方哥/u);
+  });
+
+  await withPersonalMemoryFixture(async (fixture) => {
+    const wrong = await fixture.repository.write({
+      operation: "create",
+      kind: "fact",
+      title: "用户称呼",
+      content: "用户希望称为老王",
+      recallWhen: "称呼用户时",
+      basis: "explicit",
+      contentOrigin: "user_statement"
+    }, fixture.runtime());
+    const corrected = await fixture.repository.write({
+      operation: "profile_update",
+      targetId: wrong.record!.id,
+      profileKey: "identity.name",
+      text: "用户希望称为方哥",
+      basis: "explicit",
+      contentOrigin: "confirmed_change",
+      expectedRevision: wrong.revision
+    }, fixture.runtime());
+    assert.notEqual(corrected.record?.id, wrong.record?.id);
+    const afterCorrection = await fixture.repository.readUserControlState();
+    assert.equal(
+      afterCorrection.records.find((record) => record.id === wrong.record!.id)?.status,
+      "superseded",
+      "the searched generic wrong fact must leave current when profile_update corrects it"
+    );
+    assert.equal(
+      afterCorrection.records.filter((record) => record.status === "current").length,
+      1,
+      "profile correction leaves one current primary Memory for the user fact"
+    );
+    const user = await readFile(fixture.repository.layout.user, "utf8");
+    assert.match(user, /用户希望称为方哥/u);
+    assert.doesNotMatch(user, /用户希望称为老王/u);
   });
 }
 
@@ -647,9 +1012,11 @@ function createSecurity(
   writeAuthorization: PersonalMemoryWriteAuthorizationPort = {
     async authorize(input) {
       return {
-        basis: input.proposedBasis,
-        contentOrigin: input.proposedContentOrigin,
-        explicitlyAuthorized: false
+        basis: "explicit",
+        contentOrigin: input.operation === "create"
+          ? "user_statement"
+          : "confirmed_change",
+        explicitlyAuthorized: input.operation === "forget"
       };
     }
   }
@@ -657,22 +1024,24 @@ function createSecurity(
   return new PiPersonalMemoryToolSecurity({
     currentRuntime: () => runtime,
     currentUserEntry: { current: () => entry },
-    writeAuthorization,
-    forgetConfirmation: { async confirm() { return false; } }
+    writeAuthorization
   });
 }
 
 function createArguments(evidenceQuote: string): MemoryWriteToolArguments {
-  return {
+  return memoryWriteArguments({
     operation: "create",
-    kind: "decision",
     title: "回答规则",
     content: "回答先给结论。",
     recallWhen: "准备回答工程问题时",
-    basis: "explicit",
-    contentOrigin: "user_statement",
     evidenceQuote
-  };
+  });
+}
+
+function memoryWriteArguments(
+  request: MemoryWriteToolArguments["request"]
+): MemoryWriteToolArguments {
+  return Object.freeze({ request: Object.freeze({ ...request }) });
 }
 
 async function executeThroughSecurity(

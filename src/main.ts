@@ -910,7 +910,6 @@ export default class CodexForObsidianPlugin extends Plugin {
         : null);
     return Object.freeze({
       ...await localData.personalMemory.readUserControlState(),
-      learningEnabled: this.settings.memory.enabled,
       agentIdentity: system
         ? await system.readAgentIdentity()
         : defaultAgentIdentityState(),
@@ -967,10 +966,6 @@ export default class CodexForObsidianPlugin extends Plugin {
       await (await this.ensurePiLocalData()).personalMemory
         .supersedeFromUserCorrection(input)
     );
-  }
-  async setEchoInkPersonalMemoryLearningEnabled(enabled: boolean): Promise<void> {
-    this.settings.memory.enabled = enabled;
-    await this.saveSettings(true);
   }
   async exportEchoInkPersonalMemory() {
     return await (await this.ensurePiLocalData()).personalMemory.exportMemory();
@@ -1169,13 +1164,12 @@ export default class CodexForObsidianPlugin extends Plugin {
         const system = await CognitiveSystem.create({
           repository: localData.personalMemory,
           llm: () => this.createDreamLlmPort(),
-          // Scheduler 同时读取四个开关（做梦 PRD §4.1 + 最新决定）：做梦、
-          // Memory 总开关、长期记忆与每日次数。关闭学习或长期 Memory 后做梦
+          // Scheduler 只读取做梦子功能、长期记忆总开关与每日次数。
+          // 关闭长期 Memory 后做梦
           // 整体暂停：不调 Provider、不生成二级事实、不更新 USER/AGENT/trait，
           // pending 队列保持不变；重新开启后继续未完成的 pending。
           getDreamConfig: () => ({
             enabled: this.settings.memory.dreamEnabled
-              && this.settings.memory.enabled
               && this.settings.memory.useLongTermMemory,
             runsPerDay: this.settings.memory.dreamRunsPerDay
           }),

@@ -9,6 +9,7 @@
 
 import { TRAIT_DIMENSIONS, renderTraitLine, getPersonalityTemplate } from "./personality-templates";
 import {
+  emptyPersonalityState,
   renderableRequirements,
   type PersonalityState
 } from "./personality-state";
@@ -77,6 +78,25 @@ export function renderAgentMarkdown(
     ""
   );
   return lines.join("\n");
+}
+
+/**
+ * Long-term Memory 关闭时只保留用户选择的人格模板基线与 Agent 身份。
+ * observed 六维和 learnedRequirements 都来自长期协作，不能进入本轮上下文。
+ */
+export function renderBaseAgentMarkdown(
+  state: PersonalityState | null,
+  identity?: AgentIdentityState | null
+): string {
+  const current = state ?? emptyPersonalityState(0);
+  const observed = Object.freeze(Object.fromEntries(
+    TRAIT_DIMENSIONS.map((dimension) => [dimension, null])
+  )) as PersonalityState["observed"];
+  return renderAgentMarkdown(Object.freeze({
+    ...current,
+    observed,
+    learnedRequirements: Object.freeze([])
+  }), identity);
 }
 
 /**

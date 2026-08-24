@@ -53,7 +53,6 @@ export async function withPersonalMemoryFixture<T>(
       productRunId: "product-run-fixture",
       userEntryId: "user-entry-fixture",
       memoryMode: "normal",
-      learningEnabled: true,
       ...input
     }),
     reopen: async () => {

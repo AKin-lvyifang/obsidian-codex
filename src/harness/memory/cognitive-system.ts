@@ -146,7 +146,6 @@ class RepositoryDreamPort implements DreamRepositoryPort {
       productRunId: "echoink-dream-migration",
       userEntryId: "dream",
       memoryMode: "normal",
-      learningEnabled: true,
       explicitlyAuthorized: true
     });
     return Object.freeze({ id: result.record!.id, revision: result.revision });
