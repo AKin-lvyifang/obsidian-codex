@@ -10,7 +10,14 @@ import type {
   PiProductRunRecord
 } from "../../harness/pi-native/contracts";
 import { PI_IMAGE_INPUT_UNSUPPORTED_MESSAGE } from "../../harness/pi-native/contracts";
-import type { ChatMessage, StoredSession } from "../../settings/settings";
+import {
+  activateApiProviderModel,
+  createApiProviderConfig,
+  createApiProviderModelConfig,
+  DEFAULT_SETTINGS,
+  type ChatMessage,
+  type StoredSession
+} from "../../settings/settings";
 import {
   enqueueComposerDraft,
   piChatMemoryModeForGlobalSetting,
@@ -66,6 +73,147 @@ export async function runPiNativeTurnRunnerTests(): Promise<void> {
   await pendingSubmitKeepsRunningConversationResidentAcrossSessionSwitch();
   await disabledOrStaleSkillCannotStartTurn();
   await maintainScopeIsResolvedBeforeProviderSubmit();
+  await queuedTurnsKeepExactProviderModelAndRetainUnavailableHead();
+}
+
+async function queuedTurnsKeepExactProviderModelAndRetainUnavailableHead(): Promise<void> {
+  const settings = structuredClone(DEFAULT_SETTINGS);
+  const first = createApiProviderConfig("custom", "queue-provider-first");
+  first.name = "Queue First";
+  first.baseUrl = "https://queue-first.example/v1";
+  first.apiKey = "fixture-first-key";
+  first.models = [createApiProviderModelConfig("custom", "model-a")];
+  first.defaultModelId = "model-a";
+  const second = createApiProviderConfig("custom", "queue-provider-second");
+  second.name = "Queue Second";
+  second.baseUrl = "https://queue-second.example/v1";
+  second.apiKey = "fixture-second-key";
+  second.models = [createApiProviderModelConfig("custom", "model-b")];
+  second.defaultModelId = "model-b";
+  settings.apiProviders = [first, second];
+  settings.providerMode = "custom-api";
+  settings.activeApiProviderId = first.id;
+  settings.defaultModel = "model-a";
+  const session: StoredSession = {
+    id: "queue-exact-combinations",
+    title: "Queue exact combinations",
+    kind: "chat",
+    piSessionId: "pi-queue-exact-combinations",
+    bodyAuthority: "pi_session_only",
+    cwd: "/vault",
+    messages: [],
+    createdAt: 1,
+    updatedAt: 1
+  };
+  const queue = new RuntimeTurnQueue();
+  const queued = (
+    id: string,
+    providerSettingsId: string,
+    model: string
+  ): QueuedTurnItem => ({
+    id,
+    sessionId: session.id,
+    text: id,
+    attachments: [],
+    skill: null,
+    turnOptions: {
+      providerSettingsId,
+      model,
+      reasoning: "high",
+      serviceTier: "fast",
+      permission: "workspace-write",
+      mode: "agent",
+      mcpEnabled: false
+    },
+    kind: "chat",
+    createdAt: 1
+  });
+  queue.enqueue(queued("turn-a", first.id, "model-a"));
+  queue.enqueue(queued("turn-b", second.id, "model-b"));
+  const activations: string[] = [];
+  const sends: string[] = [];
+  let failBeforePiAcceptance = false;
+  const view: any = {
+    plugin: {
+      settings,
+      activateApiProviderSettings: async (
+        applyCandidate: (candidate: typeof settings) => void
+      ) => {
+        applyCandidate(settings);
+        activations.push(`${settings.activeApiProviderId}:${settings.defaultModel}`);
+      }
+    },
+    turnQueue: queue,
+    queueStartInProgress: false,
+    running: false,
+    selectedProviderSettingsId: first.id,
+    selectedModel: "model-a",
+    renderQueue: () => undefined,
+    renderToolbar: () => undefined,
+    sessionById: (sessionId: string) => sessionId === session.id ? session : null,
+    startChatTurn: async (_session: StoredSession, item: QueuedTurnItem) => {
+      if (failBeforePiAcceptance) return "failed" as const;
+      sends.push(`${item.turnOptions.providerSettingsId}:${item.turnOptions.model}`);
+      queue.acceptPiUserEntry(item.sessionId, item.id);
+      return "completed" as const;
+    },
+    afterTurnSettled: async (sessionId: string, succeeded: boolean) => {
+      queue.settleSessionQueue(sessionId, succeeded);
+    }
+  };
+
+  await startNextQueuedTurn(view, session.id);
+  await startNextQueuedTurn(view, session.id);
+  assert.deepEqual(sends, [
+    `${first.id}:model-a`,
+    `${second.id}:model-b`
+  ]);
+  assert.deepEqual(activations, [`${second.id}:model-b`]);
+  assert.equal(queue.hasQueuedItems(session.id), false);
+
+  queue.enqueue(queued("turn-retained", first.id, "model-a"));
+  first.apiKey = "";
+  await startNextQueuedTurn(view, session.id);
+  assert.equal(queue.isSessionQueuePaused(session.id), true);
+  assert.deepEqual(
+    queue.itemsForSession(session.id).map((item) => item.id),
+    ["turn-retained"]
+  );
+  assert.equal(sends.length, 2, "an unavailable selection must not send or fall back");
+  assert.equal(settings.activeApiProviderId, second.id);
+  assert.equal(settings.defaultModel, "model-b");
+
+  first.apiKey = "fixture-first-key";
+  queue.resumeSessionQueue(session.id);
+  await startNextQueuedTurn(view, session.id);
+  assert.deepEqual(sends, [
+    `${first.id}:model-a`,
+    `${second.id}:model-b`,
+    `${first.id}:model-a`
+  ]);
+  assert.equal(queue.hasQueuedItems(session.id), false);
+
+  queue.enqueue(queued("turn-pre-accept-failure", second.id, "model-b"));
+  failBeforePiAcceptance = true;
+  await startNextQueuedTurn(view, session.id);
+  assert.equal(queue.isSessionQueuePaused(session.id), true);
+  assert.deepEqual(
+    queue.itemsForSession(session.id).map((item) => item.id),
+    ["turn-pre-accept-failure"]
+  );
+  assert.equal(sends.length, 3, "a pre-accept failure must retain one unsent Prompt");
+
+  failBeforePiAcceptance = false;
+  queue.resumeSessionQueue(session.id);
+  await startNextQueuedTurn(view, session.id);
+  assert.deepEqual(sends, [
+    `${first.id}:model-a`,
+    `${second.id}:model-b`,
+    `${first.id}:model-a`,
+    `${second.id}:model-b`
+  ]);
+  assert.equal(queue.hasQueuedItems(session.id), false);
+  console.log("PASS conversation-ui: Queue switches exact combinations and retains an unavailable head");
 }
 
 function localAttachmentClassificationUsesMimeOrExtension(): void {
@@ -237,16 +385,22 @@ Promise<void> {
     const sessionId = accepted
       ? "conversation-accepted-image-failure"
       : "conversation-pre-accept-image-failure";
+    const session = piSessionShell(sessionId);
     const queue = new RuntimeTurnQueue();
     queue.enqueue(queuedImageTurn(sessionId, `/fixture/${sessionId}.png`));
     const view: any = {
+      plugin: { settings: createQueueImageProviderSettings() },
       turnQueue: queue,
       queueStartInProgress: false,
       running: false,
       renderQueue: () => undefined,
       renderToolbar: () => undefined,
-      startQueuedTurnItemSafely: async (turn: QueuedTurnItem) => {
-        if (accepted) turn.piUserEntryAccepted = true;
+      sessionById: () => session,
+      startChatTurn: async (_session: StoredSession, turn: QueuedTurnItem) => {
+        if (accepted) {
+          turn.piUserEntryAccepted = true;
+          queue.acceptPiUserEntry(sessionId, turn.id);
+        }
         return "failed" as const;
       },
       afterTurnSettled: async (id: string, succeeded: boolean) => {
@@ -284,6 +438,7 @@ async function inFlightComposerImageTransferCannotDuplicate(): Promise<void> {
   let running = false;
   const view: any = {
     plugin: {
+      settings: createQueueImageProviderSettings(),
       followUpPiConversation: async () => {
         throw new Error("image transfers must not use follow-up");
       }
@@ -296,7 +451,8 @@ async function inFlightComposerImageTransferCannotDuplicate(): Promise<void> {
     activeRunSessionId: "",
     renderQueue: () => undefined,
     renderToolbar: () => undefined,
-    startQueuedTurnItemSafely: async () => {
+    sessionById: () => session,
+    startChatTurn: async () => {
       running = true;
       view.activeRunKind = "chat";
       view.activeRunSessionId = session.id;
@@ -314,10 +470,10 @@ async function inFlightComposerImageTransferCannotDuplicate(): Promise<void> {
   const flight = startNextQueuedTurn(view, session.id);
   await waitFor(() => view.queueStartInProgress === true && running);
   await enqueueComposerDraft(view);
-  assert.deepEqual(
-    queue.itemsForSession(session.id),
-    [],
-    "the in-flight transferred snapshot must not be queued a second time"
+  assert.equal(
+    queue.itemsForSession(session.id).length,
+    1,
+    "the leased queue head must remain unique until Pi durably accepts it"
   );
 
   running = false;
@@ -552,6 +708,7 @@ async function maintainScopeIsResolvedBeforeProviderSubmit(): Promise<void> {
     attachments,
     skill: null,
     turnOptions: {
+      providerSettingsId: "fixture-provider",
       model: "",
       reasoning: "high",
       serviceTier: "fast",
@@ -822,6 +979,7 @@ async function disabledOrStaleSkillCannotStartTurn(): Promise<void> {
     attachments: [],
     skill: selectedSkill,
     turnOptions: {
+      providerSettingsId: "fixture-provider",
       model: "",
       reasoning: "high",
       serviceTier: "fast",
@@ -914,6 +1072,7 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
       contentPath: "skills/review/SKILL.md"
     },
     turnOptions: {
+      providerSettingsId: "fixture-provider",
       model: "",
       reasoning: "high",
       serviceTier: "fast",
@@ -1213,6 +1372,7 @@ Promise<void> {
     attachments: [],
     skill: null,
     turnOptions: {
+      providerSettingsId: "fixture-provider",
       model: "",
       reasoning: "high",
       serviceTier: "fast",
@@ -1408,7 +1568,8 @@ function queuedImageTurn(sessionId: string, imagePath: string): QueuedTurnItem {
     }],
     skill: null,
     turnOptions: {
-      model: "",
+      providerSettingsId: "queue-image-provider",
+      model: "queue-image-model",
       reasoning: "high",
       serviceTier: "fast",
       permission: "read-only",
@@ -1418,6 +1579,21 @@ function queuedImageTurn(sessionId: string, imagePath: string): QueuedTurnItem {
     kind: "chat",
     createdAt: 2
   };
+}
+
+function createQueueImageProviderSettings() {
+  const settings = structuredClone(DEFAULT_SETTINGS);
+  const provider = createApiProviderConfig("custom", "queue-image-provider");
+  provider.name = "Queue image provider";
+  provider.baseUrl = "https://queue-image.example/v1";
+  provider.apiKey = "fixture-queue-image-key";
+  provider.models = [
+    createApiProviderModelConfig("custom", "queue-image-model")
+  ];
+  provider.defaultModelId = "queue-image-model";
+  settings.apiProviders = [provider];
+  activateApiProviderModel(settings, provider, "queue-image-model");
+  return settings;
 }
 
 function imageFailureView(input: Readonly<{

@@ -8,6 +8,7 @@ import type {
 
 export interface TurnOptions {
   cwd?: string;
+  providerSettingsId: string;
   model: string;
   developerInstructions?: string;
   ephemeral?: boolean;

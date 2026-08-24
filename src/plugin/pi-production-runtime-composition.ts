@@ -11,7 +11,9 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
   InMemoryCredentialStore,
-  InMemoryModelsStore
+  InMemoryModelsStore,
+  type Api,
+  type Model
 } from "@earendil-works/pi-ai";
 import type { App } from "obsidian";
 import {
@@ -135,7 +137,8 @@ import type {
   PiProviderRuntimeConfigPort
 } from "../harness/pi/production-pi-model-resolver";
 import {
-  getActiveApiProvider,
+  apiProviderModelSupportsImage,
+  getActiveApiProviderModel,
   selectActiveConversationSession,
   type ApiProviderConfig,
   type CodexForObsidianSettings,
@@ -143,9 +146,10 @@ import {
   type StoredSession
 } from "../settings/settings";
 import {
+  resolveEchoInkPiCatalogModel
+} from "../settings/pi-model-catalog";
+import {
   apiProviderApiKeyRequired,
-  apiProviderMaxOutputReserve,
-  apiProviderModelMaxTokens,
   isLoopbackApiProviderUrl,
   normalizeApiProviderBaseUrl,
   normalizeApiProviderId,
@@ -265,6 +269,52 @@ export function hasPiProductionProviderConfiguration(
   } catch {
     return false;
   }
+}
+
+/** Builds the same configured Pi model shape used by AgentSession before a
+ * Provider transaction is allowed to persist or replace the active Runtime. */
+export function createPiProductionModelDefinition(
+  settings: CodexForObsidianSettings
+): Model<Api> {
+  const configured = resolveProvider(settings);
+  return createPiProductionModelDefinitionFromResolved(configured);
+}
+
+function createPiProductionModelDefinitionFromResolved(
+  configured: ReturnType<typeof resolveProvider>
+): Model<Api> {
+  const model = createPiNativeModelFromConfiguration({
+    catalogModel: resolveEchoInkPiCatalogModel(
+      configured.providerId,
+      configured.modelRef
+    ) ?? undefined,
+    provider: providerRuntimeConfig(configured),
+    configured: {
+      apiProtocol: configured.apiProtocol,
+      contextWindow: configured.contextWindow,
+      maxOutputTokens: configured.modelMaxTokens,
+      reasoning: configured.reasoning,
+      imageInput: configured.imageInput
+    }
+  });
+  try {
+    calculatePiEffectiveInputBudget({
+      contextWindow: model.contextWindow,
+      maxOutputReserve: Math.min(
+        configured.maxOutputTokens,
+        model.maxTokens
+      )
+    });
+  } catch (error) {
+    if (error instanceof PiContextBudgetError) {
+      throw new PiNativeModelMetadataError(
+        "model_metadata_incompatible",
+        error.message
+      );
+    }
+    throw error;
+  }
+  return model;
 }
 
 export async function createPiProductionRuntimeBundle(
@@ -1256,20 +1306,7 @@ async function createProductionAgentSession(input: {
     modelsStore: new InMemoryModelsStore(),
     allowModelNetwork: false
   });
-  const model = createPiNativeModelFromConfiguration({
-    catalogModel: modelRuntime.getModel(
-      provider.providerId,
-      provider.modelRef
-    ),
-    provider,
-    configured: {
-      apiProtocol: configured.apiProtocol,
-      contextWindow: configured.contextWindow,
-      maxOutputTokens: configured.modelMaxTokens,
-      reasoning: configured.reasoning,
-      imageInput: configured.imageInput
-    }
-  });
+  const model = createPiProductionModelDefinitionFromResolved(configured);
   const supportsImageInput = piModelSupportsImageInput(model);
   let contextBudget: PiEffectiveInputBudget;
   try {
@@ -1980,13 +2017,14 @@ function resolveProvider(
   modelMaxTokens: number;
   maxOutputTokens: number;
 } {
-  const provider = getActiveApiProvider(settings);
-  if (!provider || settings.providerMode !== "custom-api") {
+  const active = getActiveApiProviderModel(settings);
+  if (!active || settings.providerMode !== "custom-api") {
     throw new PiProductionConfigurationError(
       "provider_not_configured",
       "请先在 EchoInk 设置中配置 Provider、API URL 和 API Key。"
     );
   }
+  const { provider, model } = active;
   const productProviderId = normalizeApiProviderId(
     provider.providerId,
     provider.baseUrl,
@@ -2047,7 +2085,7 @@ function resolveProvider(
       "当前 Provider runtime identity 无效。"
     );
   }
-  const modelRef = provider.model.trim();
+  const modelRef = model.id.trim();
   if (!modelRef) {
     throw new PiProductionConfigurationError(
       "provider_unsupported",
@@ -2055,13 +2093,17 @@ function resolveProvider(
     );
   }
   if (
-    !Number.isSafeInteger(provider.contextWindow)
-    || provider.contextWindow < 1_024
-    || provider.contextWindow > 2_000_000
-    || !Number.isSafeInteger(provider.maxOutputTokens)
-    || provider.maxOutputTokens < 1
-    || provider.maxOutputTokens > Math.min(
-      provider.contextWindow,
+    !Number.isSafeInteger(model.contextWindow)
+    || model.contextWindow < 1_024
+    || model.contextWindow > 2_000_000
+    || !Number.isSafeInteger(model.modelMaxTokens)
+    || model.modelMaxTokens < 1
+    || model.modelMaxTokens > 1_000_000
+    || !Number.isSafeInteger(model.maxOutputTokens)
+    || model.maxOutputTokens < 1
+    || model.maxOutputTokens > Math.min(
+      model.contextWindow,
+      model.modelMaxTokens,
       1_000_000
     )
   ) {
@@ -2078,20 +2120,12 @@ function resolveProvider(
     baseUrl,
     modelRef,
     apiKey,
-    toolCalling: provider.toolCalling,
-    imageInput: provider.imageInput,
-    reasoning: provider.reasoning,
-    contextWindow: provider.contextWindow,
-    modelMaxTokens: apiProviderModelMaxTokens(
-      productProviderId,
-      modelRef,
-      provider.maxOutputTokens
-    ),
-    maxOutputTokens: apiProviderMaxOutputReserve(
-      productProviderId,
-      modelRef,
-      provider.maxOutputTokens
-    )
+    toolCalling: model.toolCalling,
+    imageInput: apiProviderModelSupportsImage(model),
+    reasoning: model.reasoning,
+    contextWindow: model.contextWindow,
+    modelMaxTokens: model.modelMaxTokens,
+    maxOutputTokens: model.maxOutputTokens
   };
 }
 

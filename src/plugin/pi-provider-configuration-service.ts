@@ -18,7 +18,6 @@ import {
 import {
   apiProviderAuthMode,
   apiProviderApiKeyRequired,
-  apiProviderMaxOutputReserve,
   apiProviderModelsUrl,
   isLoopbackApiProviderUrl,
   normalizeApiProviderBaseUrl,
@@ -49,6 +48,7 @@ export interface PiProviderConfigurationDraft {
   readonly imageInput: boolean;
   readonly reasoning: boolean;
   readonly contextWindow: number;
+  readonly modelMaxTokens: number;
   readonly maxOutputTokens: number;
 }
 
@@ -194,9 +194,9 @@ export class PiProviderConfigurationService {
           baseUrl: normalized.baseUrl,
           modelRef: normalized.modelId,
           contextWindow: normalized.contextWindow,
-          maxOutputTokens: normalized.maxOutputTokens,
+          maxOutputTokens: normalized.modelMaxTokens,
           reasoning: normalized.reasoning,
-          imageInput: false
+          imageInput: normalized.imageInput
         }),
         context: {
           systemPrompt: input.systemPrompt,
@@ -344,7 +344,7 @@ export async function testProviderConnection(input: {
         baseUrl: input.draft.baseUrl,
         modelRef: input.draft.modelId,
         contextWindow: input.draft.contextWindow,
-        maxOutputTokens: input.draft.maxOutputTokens,
+        maxOutputTokens: input.draft.modelMaxTokens,
         reasoning: input.draft.reasoning,
         imageInput: input.draft.imageInput
       }),
@@ -421,10 +421,14 @@ function normalizeDraft(
     || !Number.isSafeInteger(draft.contextWindow)
     || draft.contextWindow < 1_024
     || draft.contextWindow > 2_000_000
+    || !Number.isSafeInteger(draft.modelMaxTokens)
+    || draft.modelMaxTokens < 1
+    || draft.modelMaxTokens > 1_000_000
     || !Number.isSafeInteger(draft.maxOutputTokens)
     || draft.maxOutputTokens < 1
     || draft.maxOutputTokens > Math.min(
       draft.contextWindow,
+      draft.modelMaxTokens,
       1_000_000
     )
   ) {
@@ -446,11 +450,8 @@ function normalizeDraft(
     imageInput: draft.imageInput,
     reasoning: draft.reasoning,
     contextWindow: draft.contextWindow,
-    maxOutputTokens: apiProviderMaxOutputReserve(
-      draft.providerId,
-      modelId,
-      draft.maxOutputTokens
-    )
+    modelMaxTokens: draft.modelMaxTokens,
+    maxOutputTokens: draft.maxOutputTokens
   });
 }
 

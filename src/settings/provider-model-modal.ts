@@ -11,9 +11,15 @@ import type {
   OpenAICodexAuthStatus
 } from "../plugin/openai-codex-oauth-service";
 import {
-  applyApiProviderModelPreset,
+  apiProviderModelSupportsImage,
   createApiProviderConfig,
+  createApiProviderModelConfig,
+  getApiProviderModel,
+  getDefaultApiProviderModel,
+  isValidApiProviderModelConfig,
   isValidApiProviderModelId,
+  setApiProviderDefaultModel,
+  type ApiProviderModelConfig,
   type ApiProviderConfig
 } from "./settings";
 import type { SettingsCopy } from "./i18n";
@@ -40,9 +46,7 @@ type ProviderFormField =
   | "apiKey"
   | "endpoint"
   | "model"
-  | "protocol"
-  | "contextWindow"
-  | "maxOutputTokens";
+  | "protocol";
 
 export type ProviderModelSaveResult =
   | { readonly saved: true }
@@ -92,6 +96,7 @@ export class ProviderModelModal extends Modal {
   private codexManualReject: ((error: Error) => void) | null = null;
   private codexAuthUrl = "";
   private codexAuthError = "";
+  private manualModelId = "";
   private readonly accessibilityId = `echoink-provider-model-${++providerModelModalInstance}`;
   private readonly handleEscapeCapture = (event: KeyboardEvent): void => {
     if (event.key !== "Escape") return;
@@ -125,15 +130,6 @@ export class ProviderModelModal extends Modal {
       options.preflight,
       (state) => {
         if (this.closed) return;
-        if (state.operation === "model_list" && state.status === "available") {
-          const models = unique(
-            state.models.filter(isValidApiProviderModelId)
-          );
-          this.draft.models = unique([
-            ...models,
-            this.draft.model
-          ].filter(Boolean));
-        }
         this.announce(this.modelStatusText());
         if (this.invalidatingPreflightInPlace && state.status === "idle") {
           this.refreshPreflightStatus();
@@ -157,7 +153,6 @@ export class ProviderModelModal extends Modal {
     });
     window.addEventListener("keydown", this.handleEscapeCapture, true);
     this.render();
-    this.startInitialModelPreflight();
     if (this.providerId === "openai-codex") {
       void this.loadCodexAuthStatus();
     }
@@ -194,7 +189,7 @@ export class ProviderModelModal extends Modal {
     this.cancelCodexLogin();
     this.dismissProviderUrlTooltips();
     window.removeEventListener("keydown", this.handleEscapeCapture, true);
-    this.preflight.cancel();
+    this.preflight.reset();
     this.modalEl.onclick = null;
     this.liveRegionEl = null;
     this.modalEl.removeClass("codex-provider-model-modal");
@@ -223,7 +218,6 @@ export class ProviderModelModal extends Modal {
     this.captureFocusIntent();
     const focusedTriggerId = this.focusedComboboxTriggerId();
     const providerId = this.providerId;
-    const preset = getApiProviderPreset(providerId);
     this.modalEl.toggleClass("is-custom-provider", providerId === "custom");
     this.titleEl.empty();
     this.titleEl.addClass("codex-provider-modal-title");
@@ -262,7 +256,7 @@ export class ProviderModelModal extends Modal {
       if (apiProviderApiKeyRequired(providerId)) {
         this.renderApiKeyField(form);
       }
-      this.renderPresetModelField(form, preset.model);
+      this.renderModelSelectionField(form);
     }
 
     const footer = this.contentEl.createDiv({ cls: "codex-provider-modal-footer" });
@@ -296,14 +290,16 @@ export class ProviderModelModal extends Modal {
           this.focusField(field);
           return;
         }
-        const maxOutputTokens = apiProviderMaxOutputReserve(
-          this.providerId,
-          this.draft.model,
-          this.draft.maxOutputTokens
-        );
-        if (maxOutputTokens !== this.draft.maxOutputTokens) {
-          this.draft.maxOutputTokens = maxOutputTokens;
-          this.invalidatePreflight();
+        for (const model of this.draft.models) {
+          model.maxOutputTokens = Math.min(
+            model.contextWindow,
+            model.modelMaxTokens,
+            apiProviderMaxOutputReserve(
+              this.providerId,
+              model.id,
+              model.maxOutputTokens
+            )
+          );
         }
         this.saving = true;
         save.disabled = true;
@@ -533,7 +529,6 @@ export class ProviderModelModal extends Modal {
     this.apiKeyInput = "";
     this.customProtocolEnabled = false;
     this.preflight.reset();
-    this.startInitialModelPreflight();
     if (providerId === "openai-codex") {
       void this.loadCodexAuthStatus();
     }
@@ -562,10 +557,6 @@ export class ProviderModelModal extends Modal {
       this.apiKeyInput = input.value;
       this.invalidatePreflight();
       this.clearFieldError("apiKey", input);
-    };
-    input.onchange = () => {
-      if (!input.value.trim()) return;
-      void this.discoverModels();
     };
     const reveal = controls.createEl("button", {
       cls: "codex-provider-modal-icon-button",
@@ -853,22 +844,286 @@ export class ProviderModelModal extends Modal {
       || this.codexAuthStatus.state !== "disconnected";
   }
 
-  private renderPresetModelField(
-    container: HTMLElement,
-    automaticModel: string
-  ): void {
+  private renderModelSelectionField(container: HTMLElement): void {
     const field = this.createField(
       container,
-      this.label("模型名称", "Model"),
+      this.label("已启用模型", "Enabled models"),
       this.modelTriggerId
     );
-    this.renderModelPicker(field, automaticModel);
+    const actions = field.createDiv({ cls: "codex-provider-model-actions" });
+    const discover = actions.createEl("button", {
+      text: this.preflight.state.status === "idle"
+        ? this.label("获取模型", "Get models")
+        : this.label("刷新模型", "Refresh models"),
+      attr: {
+        type: "button",
+        "data-modal-focus-key": "model-discover"
+      }
+    });
+    discover.id = this.modelTriggerId;
+    discover.disabled = !this.canDiscoverModels()
+      || this.preflight.state.status === "loading";
+    discover.onclick = () => {
+      this.focusIntent = "model-discover";
+      void this.discoverModels();
+    };
     const statusRow = field.createDiv({
       cls: `codex-provider-model-status is-${this.preflight.state.status}`,
       attr: { role: "status", "aria-live": "off" }
     });
     this.renderPreflightStatus(statusRow);
+    const list = field.createDiv({ cls: "codex-provider-model-checklist" });
+    for (const modelId of this.modelChoices()) {
+      this.renderModelChoice(list, modelId);
+    }
+    this.renderManualModelFallback(field);
     this.renderFieldError(field, "model");
+  }
+
+  private renderModelChoice(container: HTMLElement, modelId: string): void {
+    const enabled = getApiProviderModel(this.draft, modelId);
+    const model = enabled ?? createApiProviderModelConfig(
+      this.providerId,
+      modelId,
+      this.draft.runtimeProviderId
+    );
+    const row = container.createDiv({
+      cls: `codex-provider-model-choice ${enabled ? "is-enabled" : ""}`
+    });
+    const selection = row.createDiv({ cls: "codex-provider-model-choice-selection" });
+    const enabledLabel = selection.createEl("label", {
+      cls: "codex-provider-model-choice-enabled"
+    });
+    const checkbox = enabledLabel.createEl("input", {
+      attr: {
+        type: "checkbox",
+        "data-modal-focus-key": `model-enabled:${modelId}`
+      }
+    }) as HTMLInputElement;
+    checkbox.checked = Boolean(enabled);
+    checkbox.onchange = () => {
+      this.focusIntent = `model-enabled:${modelId}`;
+      this.setModelEnabled(modelId, checkbox.checked);
+    };
+    enabledLabel.createSpan({ text: model.displayName || model.id });
+    const defaultLabel = selection.createEl("label", {
+      cls: "codex-provider-model-choice-default"
+    });
+    const radio = defaultLabel.createEl("input", {
+      attr: {
+        type: "radio",
+        name: `${this.accessibilityId}-default-model`,
+        "data-modal-focus-key": `model-default:${modelId}`
+      }
+    }) as HTMLInputElement;
+    radio.checked = this.draft.defaultModelId === modelId;
+    radio.disabled = !enabled;
+    radio.onchange = () => {
+      if (!radio.checked || !setApiProviderDefaultModel(this.draft, modelId)) return;
+      this.focusIntent = `model-default:${modelId}`;
+      this.invalidatePreflight();
+      this.render();
+    };
+    defaultLabel.createSpan({
+      text: this.label("默认", "Default")
+    });
+    row.createDiv({
+      cls: `codex-provider-model-capabilities is-${model.metadataSource}`,
+      text: this.modelCapabilityText(model)
+    });
+    if (enabled) this.renderModelAdvancedSettings(row, enabled);
+  }
+
+  private setModelEnabled(modelId: string, enabled: boolean): void {
+    const index = this.draft.models.findIndex((model) => model.id === modelId);
+    if (enabled && index < 0) {
+      this.draft.models.push(createApiProviderModelConfig(
+        this.providerId,
+        modelId,
+        this.draft.runtimeProviderId
+      ));
+      if (!this.draft.defaultModelId) this.draft.defaultModelId = modelId;
+    } else if (!enabled && index >= 0) {
+      this.draft.models.splice(index, 1);
+      if (this.draft.defaultModelId === modelId) {
+        this.draft.defaultModelId = this.draft.models[0]?.id ?? "";
+      }
+    }
+    this.invalidatePreflight();
+    this.render();
+  }
+
+  private renderManualModelFallback(container: HTMLElement): void {
+    const fallback = container.createDiv({ cls: "codex-provider-manual-model" });
+    fallback.createDiv({
+      cls: "codex-provider-manual-model-copy",
+      text: this.label(
+        "模型列表不可用或缺少目标模型时，可手动添加准确的 Model ID。",
+        "If model discovery is unavailable or incomplete, add the exact Model ID manually."
+      )
+    });
+    const controls = fallback.createDiv({ cls: "codex-provider-manual-model-controls" });
+    const input = controls.createEl("input", {
+      cls: "codex-provider-modal-input",
+      attr: {
+        type: "text",
+        value: this.manualModelId,
+        placeholder: this.label("输入 Model ID", "Enter Model ID"),
+        autocomplete: "off",
+        "data-modal-focus-key": "manual-model"
+      }
+    }) as HTMLInputElement;
+    input.oninput = () => {
+      this.manualModelId = input.value;
+      this.clearFieldError("model", input);
+    };
+    const add = controls.createEl("button", {
+      text: this.label("添加", "Add"),
+      attr: {
+        type: "button",
+        "data-modal-focus-key": "manual-model-add"
+      }
+    });
+    add.onclick = () => {
+      const modelId = this.manualModelId.trim();
+      if (!isValidApiProviderModelId(modelId)) {
+        this.formErrors.model = this.options.copy.providers.invalidModel;
+        this.focusIntent = "manual-model";
+        this.render();
+        return;
+      }
+      this.focusIntent = `model-enabled:${modelId}`;
+      this.manualModelId = "";
+      this.setModelEnabled(modelId, true);
+    };
+  }
+
+  private renderModelAdvancedSettings(
+    container: HTMLElement,
+    model: ApiProviderModelConfig
+  ): void {
+    const advanced = container.createEl("details", {
+      cls: "codex-provider-model-advanced"
+    });
+    advanced.createEl("summary", {
+      text: this.label("高级设置", "Advanced settings")
+    });
+    const toggles = advanced.createDiv({ cls: "codex-provider-custom-toggles" });
+    this.renderToggle(
+      toggles,
+      this.label("工具调用", "Tool calling"),
+      `model:${model.id}:tool-calling`,
+      model.toolCalling,
+      (value) => {
+        model.toolCalling = value;
+        model.metadataSource = "manual";
+      }
+    );
+    this.renderToggle(
+      toggles,
+      this.label("图片输入", "Image input"),
+      `model:${model.id}:image-input`,
+      apiProviderModelSupportsImage(model),
+      (value) => {
+        model.input = value ? ["text", "image"] : ["text"];
+        model.metadataSource = "manual";
+      }
+    );
+    this.renderToggle(
+      toggles,
+      this.label("思考模式", "Reasoning mode"),
+      `model:${model.id}:reasoning`,
+      model.reasoning,
+      (value) => {
+        model.reasoning = value;
+        model.metadataSource = "manual";
+      }
+    );
+    const tokens = advanced.createDiv({ cls: "codex-provider-context-grid" });
+    this.renderModelNumberField(
+      tokens,
+      model,
+      "contextWindow",
+      this.label("上下文窗口", "Context window"),
+      1_024,
+      2_000_000
+    );
+    this.renderModelNumberField(
+      tokens,
+      model,
+      "modelMaxTokens",
+      this.label("模型最大输出", "Model max output"),
+      1,
+      1_000_000
+    );
+    this.renderModelNumberField(
+      tokens,
+      model,
+      "maxOutputTokens",
+      this.label("实际最大输出", "Actual max output"),
+      1,
+      1_000_000
+    );
+  }
+
+  private renderModelNumberField(
+    container: HTMLElement,
+    model: ApiProviderModelConfig,
+    key: "contextWindow" | "modelMaxTokens" | "maxOutputTokens",
+    label: string,
+    min: number,
+    max: number
+  ): void {
+    const field = container.createDiv({ cls: "codex-provider-context-field" });
+    const id = `${this.accessibilityId}-${model.id.replace(/[^A-Za-z0-9_-]/gu, "-")}-${key}`;
+    field.createEl("label", { text: label, attr: { for: id } });
+    const input = field.createEl("input", {
+      cls: "codex-provider-modal-input",
+      attr: {
+        id,
+        type: "number",
+        min: String(min),
+        max: String(max),
+        step: "1",
+        value: String(model[key]),
+        "data-modal-focus-key": `model:${model.id}:${key}`
+      }
+    }) as HTMLInputElement;
+    input.oninput = () => {
+      const value = Number(input.value);
+      if (!Number.isSafeInteger(value)) return;
+      model[key] = value;
+      model.metadataSource = "manual";
+      this.invalidatePreflight();
+    };
+  }
+
+  private modelCapabilityText(model: ApiProviderModelConfig): string {
+    const source = model.metadataSource === "unknown"
+      ? this.label("能力未知", "Capabilities unknown")
+      : model.metadataSource === "manual"
+        ? this.label("手动覆盖", "Manual override")
+        : model.metadataSource === "catalog"
+          ? this.label("Pi 目录能力", "Pi catalog capabilities")
+          : this.label("已知能力", "Known capabilities");
+    const input = apiProviderModelSupportsImage(model)
+      ? this.label("文字 + 图片", "text + image")
+      : this.label("仅文字", "text only");
+    return [
+      source,
+      input,
+      this.label(
+        `工具 ${model.toolCalling ? "是" : "否"}`,
+        `tools ${model.toolCalling ? "yes" : "no"}`
+      ),
+      this.label(
+        `推理 ${model.reasoning ? "是" : "否"}`,
+        `reasoning ${model.reasoning ? "yes" : "no"}`
+      ),
+      `context ${model.contextWindow.toLocaleString()}`,
+      `model max ${model.modelMaxTokens.toLocaleString()}`,
+      `output ${model.maxOutputTokens.toLocaleString()}`
+    ].join(" · ");
   }
 
   private renderPreflightStatus(statusRow: HTMLElement): void {
@@ -926,193 +1181,7 @@ export class ProviderModelModal extends Modal {
     this.renderPreflightStatus(statusRow);
   }
 
-  private renderModelPicker(
-    container: HTMLElement,
-    automaticModel: string
-  ): void {
-    const picker = container.createDiv({ cls: "codex-provider-combobox codex-model-combobox" });
-    const listboxId = `${this.accessibilityId}-model-listbox`;
-    const selectedModelLabel = this.draft.modelSelection === "auto"
-      ? this.label("Auto", "Auto")
-      : this.draft.model;
-    const trigger = picker.createEl("button", {
-      cls: "codex-provider-combobox-trigger",
-      attr: {
-        type: "button",
-        title: selectedModelLabel,
-        "data-modal-focus-key": "model",
-        "aria-label": this.label(
-          `当前模型：${selectedModelLabel}`,
-          `Current model: ${selectedModelLabel}`
-        ),
-        "aria-haspopup": "listbox",
-        "aria-expanded": "false",
-        "aria-controls": listboxId
-      }
-    });
-    trigger.id = this.modelTriggerId;
-    trigger.createSpan({
-      cls: "codex-model-combobox-value",
-      text: selectedModelLabel
-    });
-    const chevron = trigger.createSpan({ cls: "codex-provider-combobox-chevron" });
-    setIcon(chevron, "chevron-down");
-    const menu = picker.createDiv({
-      cls: "codex-provider-combobox-menu"
-    });
-    const searchWrap = menu.createDiv({ cls: "codex-provider-combobox-search" });
-    const searchIcon = searchWrap.createSpan();
-    setIcon(searchIcon, "search");
-    const search = searchWrap.createEl("input", {
-      attr: {
-        type: "search",
-        placeholder: this.label("搜索或输入模型 ID", "Search or enter a model ID"),
-        autocomplete: "off",
-        "aria-label": this.label("搜索或输入模型 ID", "Search or enter a model ID")
-      }
-    }) as HTMLInputElement;
-    const list = menu.createDiv({
-      cls: "codex-provider-combobox-options",
-      attr: {
-        role: "listbox",
-        "aria-label": this.label("选择模型", "Choose a model")
-      }
-    });
-    list.id = listboxId;
-
-    const renderOptions = () => {
-      list.empty();
-      const query = search.value.trim();
-      const normalizedQuery = query.toLowerCase();
-      const choices = this.modelChoices(automaticModel);
-      const autoMatches = !normalizedQuery || "auto".includes(normalizedQuery);
-      if (autoMatches) {
-        const isSelected = this.draft.modelSelection === "auto";
-        const auto = list.createEl("button", {
-          cls: `codex-provider-combobox-option ${isSelected ? "is-selected" : ""}`,
-          attr: {
-            type: "button",
-            role: "option",
-            title: `Auto · ${automaticModel}`,
-            "aria-selected": String(isSelected),
-            tabindex: "-1"
-          }
-        });
-        auto.createSpan({ cls: "codex-model-option-name", text: "Auto" });
-        auto.createSpan({
-          cls: "codex-model-option-hint",
-          text: automaticModel
-        });
-        renderComboboxCheck(auto, isSelected);
-        auto.onclick = (event) => {
-          event.stopPropagation();
-          const first = getApiProviderPreset(this.providerId).models[0];
-          if (first) applyApiProviderModelPreset(this.draft, first.id);
-          this.draft.modelSelection = "auto";
-          this.invalidatePreflight();
-          this.render();
-          this.restoreComboboxTriggerFocus(this.modelTriggerId);
-        };
-      }
-      for (const modelId of choices) {
-        if (normalizedQuery && !modelId.toLowerCase().includes(normalizedQuery)) continue;
-        const isSelected = this.draft.modelSelection === "model" && this.draft.model === modelId;
-        const option = list.createEl("button", {
-          cls: `codex-provider-combobox-option ${isSelected ? "is-selected" : ""}`,
-          attr: {
-            type: "button",
-            role: "option",
-            title: modelId,
-            "aria-selected": String(isSelected),
-            tabindex: "-1"
-          }
-        });
-        option.createSpan({ cls: "codex-model-option-name", text: modelId });
-        renderComboboxCheck(option, isSelected);
-        option.onclick = (event) => {
-          event.stopPropagation();
-          this.selectModel(modelId);
-        };
-      }
-      if (
-        query
-        && isValidApiProviderModelId(query)
-        && !choices.includes(query)
-      ) {
-        const custom = list.createEl("button", {
-          cls: "codex-provider-combobox-option codex-model-custom-option",
-          attr: {
-            type: "button",
-            role: "option",
-            title: query,
-            "aria-selected": "false",
-            tabindex: "-1"
-          }
-        });
-        const icon = custom.createSpan({ cls: "codex-provider-option-icon" });
-        setIcon(icon, "plus");
-        custom.createSpan({
-          text: this.label(`使用 ${query}`, `Use ${query}`)
-        });
-        custom.onclick = (event) => {
-          event.stopPropagation();
-          this.selectModel(query);
-        };
-      }
-      if (!list.childElementCount) {
-        list.createDiv({
-          cls: "codex-provider-combobox-empty",
-          text: this.label("没有匹配的模型", "No matching models")
-        });
-      }
-    };
-    renderOptions();
-    const openPicker = (focusTarget: ComboboxFocusTarget) => {
-      this.closeOpenPickers();
-      picker.addClass("is-open");
-      trigger.setAttr("aria-expanded", "true");
-      this.positionCombobox(picker, trigger);
-      search.value = "";
-      renderOptions();
-      focusOpenCombobox(search, list, focusTarget);
-    };
-    const closePicker = (restoreFocus: boolean) => {
-      if (restoreFocus) this.suppressModalCloseForCurrentEvent();
-      picker.removeClass("is-open");
-      trigger.setAttr("aria-expanded", "false");
-      if (restoreFocus) trigger.focus();
-    };
-    trigger.onclick = (event) => {
-      event.stopPropagation();
-      if (picker.hasClass("is-open")) {
-        closePicker(false);
-        return;
-      }
-      openPicker("search");
-    };
-    search.onclick = (event) => event.stopPropagation();
-    search.oninput = renderOptions;
-    bindComboboxKeyboard({
-      picker,
-      trigger,
-      search,
-      options: list,
-      openPicker,
-      closePicker
-    });
-  }
-
-  private selectModel(modelId: string): void {
-    this.draft.model = modelId;
-    this.draft.modelSelection = "model";
-    this.draft.models = unique([modelId, ...this.draft.models]);
-    applyApiProviderModelPreset(this.draft, modelId);
-    this.invalidatePreflight();
-    this.render();
-    this.restoreComboboxTriggerFocus(this.modelTriggerId);
-  }
-
-  private modelChoices(automaticModel: string): string[] {
+  private modelChoices(): string[] {
     const presetModels = getApiProviderPreset(this.providerId).models.map(
       (model) => model.id
     );
@@ -1124,9 +1193,7 @@ export class ProviderModelModal extends Modal {
       : presetModels;
     return unique([
       ...source,
-      ...this.draft.models,
-      this.draft.model,
-      automaticModel
+      ...this.draft.models.map((model) => model.id)
     ].filter(Boolean));
   }
 
@@ -1172,8 +1239,8 @@ export class ProviderModelModal extends Modal {
     }
     if (state.status === "unsupported") {
       return this.label(
-        "该 Provider 未开放模型列表，当前显示内置候选。",
-        "This provider does not expose a model list; built-in choices are shown."
+        "该 Provider 未开放模型列表，请使用下方手动 Model ID 回退。",
+        "This provider does not expose a model list. Use the manual Model ID fallback below."
       );
     }
     if (state.status === "api_key_error") {
@@ -1188,13 +1255,13 @@ export class ProviderModelModal extends Modal {
       && !this.draft.apiKey.trim()
     ) {
       return this.label(
-        "输入 API Key 后自动获取；当前显示内置候选。",
-        "Enter an API key to load models automatically; built-in choices are shown."
+        "输入 API Key 后，点击“获取模型”；输入本身不会发起请求。",
+        "Enter an API key, then click Get models. Typing the key does not send a request."
       );
     }
     return this.label(
-      "将自动获取可用模型；当前显示内置候选。",
-      "Available models will load automatically; built-in choices are shown."
+      "点击“获取模型”主动请求一次模型列表；也可手动添加准确的 Model ID。",
+      "Click Get models to request the model list once, or add an exact Model ID manually."
     );
   }
 
@@ -1226,36 +1293,7 @@ export class ProviderModelModal extends Modal {
     this.renderFieldError(endpoint, "endpoint");
 
     this.renderApiKeyField(container);
-
-    const modelId = this.controlId("model");
-    const model = this.createField(
-      container,
-      this.label("模型名称", "Model ID"),
-      modelId
-    );
-    const modelInput = model.createEl("input", {
-      cls: "codex-provider-modal-input",
-      attr: {
-        id: modelId,
-        type: "text",
-        value: this.draft.model,
-        placeholder: this.label(
-          "输入模型参数值，例如 gpt-4o 或 openai/gpt-4o",
-          "Enter a model ID, for example gpt-4o or openai/gpt-4o"
-        ),
-        autocomplete: "off",
-        "data-modal-focus-key": "model"
-      }
-    }) as HTMLInputElement;
-    this.applyFieldAccessibility(modelInput, "model");
-    modelInput.oninput = () => {
-      this.draft.model = modelInput.value.trim();
-      this.draft.modelSelection = "model";
-      this.draft.models = this.draft.model ? [this.draft.model] : [];
-      this.invalidatePreflight();
-      this.clearFieldError("model", modelInput);
-    };
-    this.renderFieldError(model, "model");
+    this.renderModelSelectionField(container);
 
     const advanced = container.createDiv({ cls: "codex-provider-custom-advanced" });
     advanced.createDiv({
@@ -1264,15 +1302,6 @@ export class ProviderModelModal extends Modal {
     });
     const toggles = advanced.createDiv({ cls: "codex-provider-custom-toggles" });
     let protocolField: HTMLElement | null = null;
-    this.renderToggle(toggles, this.label("工具调用", "Tool calling"), "tool-calling", this.draft.toolCalling, (value) => {
-      this.draft.toolCalling = value;
-    });
-    this.renderToggle(toggles, this.label("图片输入", "Image input"), "image-input", this.draft.imageInput, (value) => {
-      this.draft.imageInput = value;
-    });
-    this.renderToggle(toggles, this.label("思考模式", "Reasoning mode"), "reasoning-mode", this.draft.reasoning, (value) => {
-      this.draft.reasoning = value;
-    });
     this.renderToggle(toggles, this.label("自定义协议", "Custom protocol"), "custom-protocol", this.customProtocolEnabled, (value) => {
       this.focusIntent = "toggle:custom-protocol";
       this.customProtocolEnabled = value;
@@ -1323,26 +1352,6 @@ export class ProviderModelModal extends Modal {
       this.restoreFocusIntent();
     };
     this.renderFieldError(protocolField, "protocol");
-
-    const contexts = advanced.createDiv({ cls: "codex-provider-context-grid" });
-    this.renderContextField(
-      contexts,
-      this.label("输入", "Input"),
-      this.draft.contextWindow,
-      [32_000, 64_000, 128_000, 256_000],
-      1_024,
-      2_000_000,
-      (value) => { this.draft.contextWindow = value; }
-    );
-    this.renderContextField(
-      contexts,
-      this.label("输出", "Output"),
-      this.draft.maxOutputTokens,
-      [8_000, 16_000, 32_000, 64_000],
-      1,
-      1_000_000,
-      (value) => { this.draft.maxOutputTokens = value; }
-    );
   }
 
   private renderToggle(
@@ -1371,70 +1380,6 @@ export class ProviderModelModal extends Modal {
   private updateProtocolPill(): void {
     this.titleEl.querySelector<HTMLElement>(".codex-provider-protocol-pill")
       ?.setText(protocolPill(this.draft.apiProtocol, this.zh));
-  }
-
-  private renderContextField(
-    container: HTMLElement,
-    label: string,
-    value: number,
-    suggestions: readonly number[],
-    min: number,
-    max: number,
-    onChange: (value: number) => void
-  ): void {
-    const fieldKey: ProviderFormField = label === this.label("输入", "Input")
-      ? "contextWindow"
-      : "maxOutputTokens";
-    const inputId = this.controlId(fieldKey);
-    const field = container.createDiv({ cls: "codex-provider-context-field" });
-    field.createEl("label", {
-      cls: "codex-provider-modal-label",
-      text: label,
-      attr: { for: inputId, "data-provider-field-label": "true" }
-    });
-    const input = field.createEl("input", {
-      cls: "codex-provider-modal-input",
-      attr: {
-        id: inputId,
-        type: "number",
-        min: String(min),
-        max: String(max),
-        step: "1",
-        value: String(value),
-        placeholder: this.label("使用提供商默认值", "Use provider default"),
-        "data-modal-focus-key": fieldKey
-      }
-    }) as HTMLInputElement;
-    this.applyFieldAccessibility(input, fieldKey);
-    input.oninput = () => {
-      const next = Number(input.value);
-      if (Number.isSafeInteger(next)) {
-        onChange(next);
-        this.invalidatePreflight();
-        this.clearFieldError(fieldKey, input);
-      }
-    };
-    const shortcuts = field.createDiv({ cls: "codex-provider-context-shortcuts" });
-    for (const suggestion of suggestions) {
-      const button = shortcuts.createEl("button", {
-        text: `${Math.round(suggestion / 1_000)}K`,
-        attr: {
-          type: "button",
-          "data-modal-focus-key": `${fieldKey}-${suggestion}`,
-          "aria-label": this.label(
-            `将${label}设为 ${suggestion.toLocaleString()} tokens`,
-            `Set ${label} to ${suggestion.toLocaleString()} tokens`
-          )
-        }
-      });
-      button.onclick = () => {
-        input.value = String(suggestion);
-        onChange(suggestion);
-        this.invalidatePreflight();
-        this.clearFieldError(fieldKey, input);
-      };
-    }
-    this.renderFieldError(field, fieldKey);
   }
 
   private createField(container: HTMLElement, label: string, controlId: string): HTMLElement {
@@ -1494,6 +1439,14 @@ export class ProviderModelModal extends Modal {
     if (requiredKey && !this.apiKeyInput.trim() && !this.draft.apiKey.trim()) {
       errors.apiKey = this.options.copy.providers.missingKey;
     }
+    const defaultModel = getDefaultApiProviderModel(this.draft);
+    if (
+      this.draft.models.length === 0
+      || !defaultModel
+      || this.draft.models.some((model) => !isValidApiProviderModelConfig(model))
+    ) {
+      errors.model = this.options.copy.providers.invalidModel;
+    }
     if (this.providerId === "custom") {
       const endpoint = this.draft.baseUrl.trim();
       if (!endpoint) {
@@ -1508,17 +1461,8 @@ export class ProviderModelModal extends Modal {
           errors.endpoint = this.label("请输入有效的 Endpoint URL。", "Enter a valid endpoint URL.");
         }
       }
-      if (!isValidApiProviderModelId(this.draft.model.trim())) {
-        errors.model = this.options.copy.providers.invalidModel;
-      }
       if (!["openai-completions", "openai-responses", "anthropic-messages"].includes(this.draft.apiProtocol)) {
         errors.protocol = this.label("请选择支持的 API 协议。", "Choose a supported API protocol.");
-      }
-      if (!Number.isSafeInteger(this.draft.contextWindow) || this.draft.contextWindow < 1_024 || this.draft.contextWindow > 2_000_000) {
-        errors.contextWindow = this.label("输入上下文需在 1,024 到 2,000,000 之间。", "Input context must be between 1,024 and 2,000,000.");
-      }
-      if (!Number.isSafeInteger(this.draft.maxOutputTokens) || this.draft.maxOutputTokens < 1 || this.draft.maxOutputTokens > 1_000_000) {
-        errors.maxOutputTokens = this.label("输出 token 需在 1 到 1,000,000 之间。", "Output tokens must be between 1 and 1,000,000.");
       }
     }
     return errors;
@@ -1682,11 +1626,6 @@ export class ProviderModelModal extends Modal {
     return null;
   }
 
-  private startInitialModelPreflight(): void {
-    if (!this.canDiscoverModels()) return;
-    void this.discoverModels();
-  }
-
   private invalidatePreflight(): void {
     this.invalidatingPreflightInPlace = true;
     try {
@@ -1705,16 +1644,22 @@ export class ProviderModelModal extends Modal {
   }
 
   private canDiscoverModels(): boolean {
-    return this.providerId !== "custom" && this.apiKeyReady();
+    return this.apiKeyReady() && Boolean(this.draft.baseUrl.trim());
   }
 
   private canTestConnection(): boolean {
     return this.apiKeyReady()
       && Boolean(this.draft.baseUrl.trim())
-      && isValidApiProviderModelId(this.draft.model.trim());
+      && Boolean(getDefaultApiProviderModel(this.draft));
   }
 
   private providerPreflightDraft(): PiProviderConfigurationDraft {
+    const model = getDefaultApiProviderModel(this.draft)
+      ?? createApiProviderModelConfig(
+        this.providerId,
+        "",
+        this.draft.runtimeProviderId
+      );
     return {
       providerSettingsId: this.draft.id,
       providerId: this.providerId,
@@ -1722,13 +1667,14 @@ export class ProviderModelModal extends Modal {
       apiProtocol: this.draft.apiProtocol,
       authMode: this.draft.authMode,
       baseUrl: this.draft.baseUrl,
-      modelId: this.draft.model,
+      modelId: model.id,
       apiKey: this.apiKeyInput,
-      toolCalling: this.draft.toolCalling,
-      imageInput: this.draft.imageInput,
-      reasoning: this.draft.reasoning,
-      contextWindow: this.draft.contextWindow,
-      maxOutputTokens: this.draft.maxOutputTokens
+      toolCalling: model.toolCalling,
+      imageInput: apiProviderModelSupportsImage(model),
+      reasoning: model.reasoning,
+      contextWindow: model.contextWindow,
+      modelMaxTokens: model.modelMaxTokens,
+      maxOutputTokens: model.maxOutputTokens
     };
   }
 

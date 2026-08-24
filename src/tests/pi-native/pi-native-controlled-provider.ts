@@ -20,6 +20,7 @@ import {
 export async function runPiNativeControlledProviderTests(): Promise<void> {
   assertCatalogModelMetadataFailsClosed();
   assertCurrentModelImageCapabilityIsCanonical();
+  assertConfiguredModelCapabilitiesAndCatalogImageTruthMerge();
   await assertExecutableAgentToolsProjectToProviderMetadata();
   await assertImageContentSurvivesControlledProviderProjection();
   await assertThrownOverflowRemainsVisibleToAgentSession();
@@ -56,6 +57,46 @@ function assertCurrentModelImageCapabilityIsCanonical(): void {
   });
   assert.equal(piModelSupportsImageInput(textOnly), false);
   assert.deepEqual(textOnly.input, ["text"]);
+}
+
+function assertConfiguredModelCapabilitiesAndCatalogImageTruthMerge(): void {
+  const provider = providerConfig();
+  const catalog = {
+    ...providerModel(),
+    name: "Catalog model",
+    reasoning: true,
+    input: ["text", "image"] as Array<"text" | "image">,
+    contextWindow: 128_000,
+    maxTokens: 32_000
+  };
+  const configured = createPiNativeModelFromConfiguration({
+    catalogModel: catalog,
+    provider,
+    configured: {
+      apiProtocol: "openai-completions",
+      contextWindow: 96_000,
+      maxOutputTokens: 12_000,
+      reasoning: false,
+      imageInput: false
+    }
+  });
+  assert.equal(configured.reasoning, false);
+  assert.equal(configured.contextWindow, 96_000);
+  assert.equal(configured.maxTokens, 12_000);
+  assert.deepEqual(configured.input, ["text", "image"]);
+
+  const configuredImage = createPiNativeModelFromConfiguration({
+    catalogModel: { ...catalog, input: ["text"] },
+    provider,
+    configured: {
+      apiProtocol: "openai-completions",
+      contextWindow: 96_000,
+      maxOutputTokens: 12_000,
+      reasoning: false,
+      imageInput: true
+    }
+  });
+  assert.deepEqual(configuredImage.input, ["text", "image"]);
 }
 
 function assertCatalogModelMetadataFailsClosed(): void {

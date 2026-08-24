@@ -905,7 +905,7 @@ export function compactReasoningLabel(value: ReasoningEffort): string {
 }
 
 export function shortModelLabel(value: string): string {
-  if (!value.trim()) return "自动";
+  if (!value.trim()) return "未选择";
   return value
     .replace(/^gpt-/i, "")
     .replace(/-/g, " ")
@@ -916,7 +916,7 @@ export function shortModelLabel(value: string): string {
 
 export function compactBrandedModelLabel(value: string): string {
   const trimmed = value.trim();
-  if (!trimmed) return "自动";
+  if (!trimmed) return "未选择";
 
   const separated = trimmed.match(/^(?:deepseek|kimi|qwen|gpt)[\s_:/-]+(.+)$/i);
   if (separated?.[1]) return separated[1];
@@ -987,7 +987,7 @@ function addModelButton(
   model: string,
   providerBrand: ProviderBrandId
 ): HTMLButtonElement {
-  const fullModelName = model.trim() || "自动";
+  const fullModelName = model.trim() || "未选择";
   const modelButton = container.createEl("button", {
     cls: "codex-composer-model-button codex-model-summary-button",
     attr: {
@@ -1076,7 +1076,7 @@ function queuedTurnPreview(item: QueuedTurnItem): string {
 function queuedTurnMeta(item: QueuedTurnItem): string {
   const parts = [
     "对话",
-    item.turnOptions.model ? shortModelLabel(item.turnOptions.model) : "自动",
+    item.turnOptions.model ? shortModelLabel(item.turnOptions.model) : "未选择",
     compactReasoningLabel(item.turnOptions.reasoning)
   ];
   if (item.skill) parts.push(`Skill ${item.skill.name}`);

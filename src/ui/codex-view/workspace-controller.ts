@@ -1,7 +1,11 @@
 import { Notice, type App } from "obsidian";
 import type CodexForObsidianPlugin from "../../main";
 import type { TurnOptions } from "../turn-options";
-import { getActiveApiProvider, getApiProviderModels, type StoredSession } from "../../settings/settings";
+import {
+  apiProviderHasUsableCredential,
+  getApiProviderModel,
+  type StoredSession
+} from "../../settings/settings";
 import { buildActiveEchoInkResourceCatalog, hasEnabledMcpResources, workspaceResourcesFromEchoInkResources } from "../../resources/registry";
 import type { EchoInkResource } from "../../resources/types";
 import type { PermissionMode, ReasoningEffort, ServiceTierChoice, UiMode } from "../../types/app-server";
@@ -14,6 +18,7 @@ export interface CodexWorkspaceHost {
   readonly app: App;
   readonly plugin: CodexForObsidianPlugin;
   running: boolean;
+  selectedProviderSettingsId: string;
   selectedModel: string;
   selectedReasoning: ReasoningEffort;
   selectedServiceTier: ServiceTierChoice;
@@ -111,6 +116,7 @@ export function currentTurnOptions(host: CodexWorkspaceHost, session?: StoredSes
   const workspaceResources = workspaceResourcesFromEchoInkResources(catalog);
   return {
     ...(cwd ? { cwd } : {}),
+    providerSettingsId: host.selectedProviderSettingsId,
     model: host.effectiveModel(),
     reasoning: host.selectedReasoning,
     serviceTier: host.selectedServiceTier,
@@ -125,16 +131,17 @@ export function currentEchoInkResourceCatalog(host: CodexWorkspaceHost): EchoInk
   return buildActiveEchoInkResourceCatalog({ settings: host.plugin.settings.resources });
 }
 
-export function activeProviderModels(host: CodexWorkspaceHost): string[] {
-  if (host.plugin.settings.providerMode !== "custom-api") return [];
-  const provider = getActiveApiProvider(host.plugin.settings);
-  return provider ? getApiProviderModels(provider) : [];
-}
-
 export function effectiveModel(host: CodexWorkspaceHost): string {
-  const providerModels = activeProviderModels(host);
-  if (providerModels.length) {
-    return providerModels.includes(host.selectedModel) ? host.selectedModel : providerModels[0];
-  }
-  return host.selectedModel || host.plugin.settings.defaultModel || "";
+  const provider = host.plugin.settings.apiProviders.find(
+    (candidate) => candidate.id === host.selectedProviderSettingsId
+  );
+  if (
+    !provider
+    || !apiProviderHasUsableCredential(
+      provider,
+      host.plugin.settings.openAICodexCredential
+    )
+    || !getApiProviderModel(provider, host.selectedModel)
+  ) return "";
+  return host.selectedModel;
 }

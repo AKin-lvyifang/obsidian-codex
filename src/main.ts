@@ -11,15 +11,17 @@ import type { EchoInkResource } from "./resources/types";
 import { enabledSkillResources } from "./resources/registry";
 import type { ReviewManager } from "./review/manager";
 import {
+  apiProviderModelSupportsImage,
   apiProviderHasUsableCredential,
   getActiveApiProvider,
+  getActiveApiProviderModel,
   type ChatMessage,
   type CodexForObsidianSettings,
   type KnowledgeBaseSettings,
   type ResourceManagementTab,
   type StoredSession
 } from "./settings/settings";
-import type { CodexView } from "./ui/codex-view";
+import { CodexView, VIEW_TYPE_CODEX } from "./ui/codex-view";
 import { registerEchoInkPluginFeatures, registerEchoInkStartupTasks } from "./plugin/bootstrap";
 import {
   EchoInkSettingsStore,
@@ -66,6 +68,7 @@ import type {
   RecoverPiNativeConversationInput
 } from "./harness/pi-native/pi-native-conversation-runtime";
 import {
+  createPiProductionModelDefinition,
   createPiProductionRuntimeBundle,
   type PiProductionRuntimeBundle
 } from "./plugin/pi-production-runtime-composition";
@@ -389,7 +392,13 @@ export default class CodexForObsidianPlugin extends Plugin {
     this.onboardingWorkspaceCoachmark?.destroy(restoreFocus);
     this.onboardingWorkspaceCoachmark = null;
   }
-  applyComposerDefaultsToView(): void { this.getViewService().applyComposerDefaultsToView(); }
+  applyComposerDefaultsToView(): void {
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_CODEX)) {
+      if (leaf.view instanceof CodexView) {
+        leaf.view.applySavedComposerDefaults();
+      }
+    }
+  }
   getCodexView(): CodexView | null { return this.getViewService().getCodexView(); }
   refreshKnowledgeBaseSurfaces(): void { this.getViewService().refreshKnowledgeBaseSurfaces(); }
   async openWorkspaceResourceSettings(tab: ResourceManagementTab = "plugins"): Promise<void> { return this.getViewService().openWorkspaceResourceSettings(tab); }
@@ -816,44 +825,61 @@ export default class CodexForObsidianPlugin extends Plugin {
     applyCandidate: (settings: CodexForObsidianSettings) => void,
     runtimeMode: "replace" | "preserve" | "suspend" = "replace"
   ): Promise<void> {
-    await this.cancelAllPiConversationActivations();
-    await this.apiProviderActivation.run({
-      isBusy: () => this.productActivity.hasActivity
-        || this.piRunConversations.size > 0,
-      beginSwitch: () => this.productActivity.beginSwitch(),
-      endSwitch: () => this.productActivity.endSwitch(),
-      snapshotMemory: () => snapshotApiProviderSettings(this.settings),
-      readPersisted: async () =>
-        await this.getSettingsStore().readPersistedApiProviderSettingsSnapshot(),
-      applyCandidate: () => applyCandidate(this.settings),
-      persistCandidate: async () => {
-        await this.saveSettings(true);
-      },
-      createCandidateRuntime: async () => {
-        if (runtimeMode === "preserve") return this.piRuntimeBundle;
-        if (runtimeMode === "suspend") return null;
-        return await createPiProductionRuntimeBundle(
-          this,
-          await this.ensurePiLocalData()
-        );
-      },
-      currentRuntime: () => this.piRuntimeBundle,
-      finalizeCandidate: async () => undefined,
-      abortCandidate: async () => undefined,
-      activateRuntime: (runtime) => {
-        const changed = runtime !== this.piRuntimeBundle;
-        this.piRuntimeBundle = runtime;
-        this.piRuntimeFlight = null;
-        if (changed) {
-          this.piActivatedConversationId = null;
-          this.piRunConversations.clear();
-        }
-      },
-      shutdownRuntime: async (runtime) => await runtime.runtime.shutdown(),
-      restoreMemory: (snapshot) => restoreApiProviderSettings(this.settings, snapshot),
-      restorePersisted: async (snapshot) =>
-        await this.getSettingsStore().restorePersistedApiProviderSettingsSnapshot(snapshot)
-    });
+    if (this.piRunConversations.size > 0) {
+      throw new Error("EchoInk 正在回答，当前模型暂时不能切换。");
+    }
+    this.productActivity.beginSwitch();
+    try {
+      const candidateSettings = structuredClone(this.settings);
+      applyCandidate(candidateSettings);
+      if (runtimeMode === "replace") {
+        createPiProductionModelDefinition(candidateSettings);
+      }
+      const candidateSnapshot = snapshotApiProviderSettings(candidateSettings);
+      await this.cancelAllPiConversationActivations();
+      await this.apiProviderActivation.run({
+        isBusy: () => false,
+        beginSwitch: () => undefined,
+        endSwitch: () => undefined,
+        snapshotMemory: () => snapshotApiProviderSettings(this.settings),
+        readPersisted: async () =>
+          await this.getSettingsStore().readPersistedApiProviderSettingsSnapshot(),
+        applyCandidate: () => restoreApiProviderSettings(
+          this.settings,
+          candidateSnapshot
+        ),
+        persistCandidate: async () => {
+          await this.saveSettings(true);
+        },
+        createCandidateRuntime: async () => {
+          if (runtimeMode === "preserve") return this.piRuntimeBundle;
+          if (runtimeMode === "suspend") return null;
+          return await createPiProductionRuntimeBundle(
+            this,
+            await this.ensurePiLocalData()
+          );
+        },
+        currentRuntime: () => this.piRuntimeBundle,
+        finalizeCandidate: async () => undefined,
+        abortCandidate: async () => undefined,
+        activateRuntime: (runtime) => {
+          const changed = runtime !== this.piRuntimeBundle;
+          this.piRuntimeBundle = runtime;
+          this.piRuntimeFlight = null;
+          if (changed) {
+            this.piActivatedConversationId = null;
+            this.piRunConversations.clear();
+          }
+        },
+        shutdownRuntime: async (runtime) => await runtime.runtime.shutdown(),
+        restoreMemory: (snapshot) => restoreApiProviderSettings(this.settings, snapshot),
+        restorePersisted: async (snapshot) =>
+          await this.getSettingsStore().restorePersistedApiProviderSettingsSnapshot(snapshot)
+      });
+      this.applyComposerDefaultsToView();
+    } finally {
+      this.productActivity.endSwitch();
+    }
   }
 
   private async withProductActivity<T>(action: () => Promise<T>): Promise<T> {
@@ -1083,6 +1109,31 @@ export default class CodexForObsidianPlugin extends Plugin {
     }
     return this.piProviderConfigurationService;
   }
+  private activePiProviderConfigurationDraft(): PiProviderConfigurationDraft {
+    const active = getActiveApiProviderModel(this.settings);
+    if (!active) throw new Error("请先在 API Provider 中选择可用模型。");
+    const { provider, model } = active;
+    return {
+      providerSettingsId: provider.id,
+      providerId: normalizeApiProviderId(
+        provider.providerId,
+        provider.baseUrl,
+        provider.name
+      ),
+      runtimeProviderId: provider.runtimeProviderId,
+      apiProtocol: provider.apiProtocol,
+      authMode: provider.authMode,
+      baseUrl: provider.baseUrl,
+      modelId: model.id,
+      apiKey: "",
+      toolCalling: model.toolCalling,
+      imageInput: apiProviderModelSupportsImage(model),
+      reasoning: model.reasoning,
+      contextWindow: model.contextWindow,
+      modelMaxTokens: model.modelMaxTokens,
+      maxOutputTokens: model.maxOutputTokens
+    };
+  }
   private getOpenAICodexOAuthService(): OpenAICodexOAuthService {
     if (!this.openAICodexOAuthService) {
       this.openAICodexOAuthService = new OpenAICodexOAuthService(this);
@@ -1093,28 +1144,8 @@ export default class CodexForObsidianPlugin extends Plugin {
     if (!this.editorTranslation) {
       this.editorTranslation = new EditorTranslationService({
         generateEnglishTranslation: async (input) => {
-          const provider = getActiveApiProvider(this.settings);
-          if (!provider) throw new Error("请先在 API Provider 中选择可用模型。");
           return await this.getPiProviderConfigurationService().generateText({
-            draft: {
-              providerSettingsId: provider.id,
-              providerId: normalizeApiProviderId(
-                provider.providerId,
-                provider.baseUrl,
-                provider.name
-              ),
-              runtimeProviderId: provider.runtimeProviderId,
-              apiProtocol: provider.apiProtocol,
-              authMode: provider.authMode,
-              baseUrl: provider.baseUrl,
-              modelId: provider.model,
-              apiKey: "",
-              toolCalling: false,
-              imageInput: false,
-              reasoning: provider.reasoning,
-              contextWindow: provider.contextWindow,
-              maxOutputTokens: provider.maxOutputTokens
-            },
+            draft: this.activePiProviderConfigurationDraft(),
             systemPrompt: input.systemPrompt,
             userPrompt: input.userPrompt,
             timeoutMs: input.timeoutMs,
@@ -1173,29 +1204,10 @@ export default class CodexForObsidianPlugin extends Plugin {
 
   /** One-shot dream LLM port; null when no Provider is configured. */
   private createDreamLlmPort(): DreamLlmPort | null {
-    const provider = getActiveApiProvider(this.settings);
-    if (!provider) return null;
+    if (!getActiveApiProviderModel(this.settings)) return null;
     return {
       call: async (input) => await this.getPiProviderConfigurationService().generateText({
-        draft: {
-          providerSettingsId: provider.id,
-          providerId: normalizeApiProviderId(
-            provider.providerId,
-            provider.baseUrl,
-            provider.name
-          ),
-          runtimeProviderId: provider.runtimeProviderId,
-          apiProtocol: provider.apiProtocol,
-          authMode: provider.authMode,
-          baseUrl: provider.baseUrl,
-          modelId: provider.model,
-          apiKey: "",
-          toolCalling: false,
-          imageInput: false,
-          reasoning: provider.reasoning,
-          contextWindow: provider.contextWindow,
-          maxOutputTokens: provider.maxOutputTokens
-        },
+        draft: this.activePiProviderConfigurationDraft(),
         systemPrompt: input.systemPrompt,
         userPrompt: input.userPrompt,
         timeoutMs: 120_000,
@@ -1208,28 +1220,8 @@ export default class CodexForObsidianPlugin extends Plugin {
     if (!this.personalMemoryCorrection) {
       this.personalMemoryCorrection = new PersonalMemoryCorrectionService({
         generateCorrection: async (input) => {
-          const provider = getActiveApiProvider(this.settings);
-          if (!provider) throw new Error("请先在 API Provider 中选择可用模型。");
           return await this.getPiProviderConfigurationService().generateText({
-            draft: {
-              providerSettingsId: provider.id,
-              providerId: normalizeApiProviderId(
-                provider.providerId,
-                provider.baseUrl,
-                provider.name
-              ),
-              runtimeProviderId: provider.runtimeProviderId,
-              apiProtocol: provider.apiProtocol,
-              authMode: provider.authMode,
-              baseUrl: provider.baseUrl,
-              modelId: provider.model,
-              apiKey: "",
-              toolCalling: false,
-              imageInput: false,
-              reasoning: provider.reasoning,
-              contextWindow: provider.contextWindow,
-              maxOutputTokens: provider.maxOutputTokens
-            },
+            draft: this.activePiProviderConfigurationDraft(),
             systemPrompt: input.systemPrompt,
             userPrompt: input.userPrompt,
             timeoutMs: input.timeoutMs,

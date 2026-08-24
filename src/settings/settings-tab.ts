@@ -48,10 +48,12 @@ import { filterWorkspaceResourceRows } from "../core/workspace-resource-filter";
 import {
   DEFAULT_SETTINGS,
   activateApiProvider,
+  activateApiProviderModel,
   apiProviderHasUsableCredential,
-  applyApiProviderModelPreset,
   createApiProviderConfig,
   getActiveApiProvider,
+  getApiProviderModel,
+  getDefaultApiProviderModel,
   normalizeReviewOutputDir,
   normalizeSettingsLanguage,
   validateApiProvider,
@@ -63,7 +65,6 @@ import {
 } from "./settings";
 import {
   apiProviderApiKeyRequired,
-  getApiProviderModelPreset,
   getApiProviderPreset,
   normalizeApiProviderBaseUrl,
   normalizeApiProviderId
@@ -1440,11 +1441,13 @@ export class CodexSettingTab extends PluginSettingTab {
       surface: "group"
     });
     const runGroup = createSettingsGroup(runSection);
-    const availableProviders = this.plugin.settings.apiProviders.filter(
+    const availableTargets = this.plugin.settings.apiProviders.flatMap(
       (provider) => apiProviderHasUsableCredential(
         provider,
         this.plugin.settings.openAICodexCredential
       )
+        ? provider.models.map((model) => ({ provider, model }))
+        : []
     );
     const modelSetting = applySettingsRow(new Setting(runGroup)
       .setName(zh ? "EchoInk 当前模型" : "Current EchoInk model")
@@ -1453,7 +1456,7 @@ export class CodexSettingTab extends PluginSettingTab {
         : "Chat, /ask, /maintain, and selection translation share this model.")
       .addDropdown((dropdown) => {
         dropdown.selectEl.setAttr("aria-label", zh ? "EchoInk 当前模型" : "Current EchoInk model");
-        if (availableProviders.length === 0) {
+        if (availableTargets.length === 0) {
           dropdown.addOption("", this.plugin.settings.apiProviders.length === 0
             ? (zh ? "尚无已保存模型" : "No saved models")
             : (zh ? "无可用模型" : "No available models"));
@@ -1463,39 +1466,43 @@ export class CodexSettingTab extends PluginSettingTab {
             provider,
             this.plugin.settings.openAICodexCredential
           );
-          const modelLabel = getApiProviderModelPreset(
-            normalizeApiProviderId(provider.providerId, provider.baseUrl, provider.name),
-            provider.model
-          )?.displayName ?? provider.model;
-          dropdown.addOption(
-            provider.id,
-            `${provider.name} · ${modelLabel}${credentialReady ? "" : (
-              provider.authMode === "oauth"
-                ? (zh ? "（需要登录）" : " (sign-in required)")
-                : (zh ? "（需重新保存 API Key）" : " (API key required)")
-            )}`
-          );
-          const option = Array.from(dropdown.selectEl.options).find(
-            (item) => item.value === provider.id
-          );
-          if (option && !credentialReady) option.disabled = true;
+          for (const model of provider.models) {
+            const value = providerModelSelectionValue(provider.id, model.id);
+            dropdown.addOption(
+              value,
+              `${provider.name} · ${model.displayName}${credentialReady ? "" : (
+                provider.authMode === "oauth"
+                  ? (zh ? "（需要登录）" : " (sign-in required)")
+                  : (zh ? "（需重新保存 API Key）" : " (API key required)")
+              )}`
+            );
+            const option = Array.from(dropdown.selectEl.options).find(
+              (item) => item.value === value
+            );
+            if (option && !credentialReady) option.disabled = true;
+          }
         }
         dropdown
-          .setValue(availableProviders.length === 0
+          .setValue(availableTargets.length === 0
             ? ""
-            : this.plugin.settings.activeApiProviderId)
-          .onChange(async (providerId) => {
+            : providerModelSelectionValue(
+              this.plugin.settings.activeApiProviderId,
+              this.plugin.settings.defaultModel
+            ))
+          .onChange(async (value) => {
+            const selection = parseProviderModelSelectionValue(value);
+            if (!selection) return;
             const target = this.plugin.settings.apiProviders.find(
-              (provider) => provider.id === providerId
+              (provider) => provider.id === selection.providerSettingsId
             );
             if (!target || !apiProviderHasUsableCredential(
               target,
               this.plugin.settings.openAICodexCredential
-            )) return;
+            ) || !getApiProviderModel(target, selection.modelId)) return;
             try {
               await this.plugin.activateApiProviderSettings((settings) => {
                 const candidate = settings.apiProviders.find(
-                  (provider) => provider.id === providerId
+                  (provider) => provider.id === selection.providerSettingsId
                 );
                 if (!candidate || !apiProviderHasUsableCredential(
                   candidate,
@@ -1503,17 +1510,17 @@ export class CodexSettingTab extends PluginSettingTab {
                 )) {
                   throw new Error("Provider authentication unavailable");
                 }
-                activateApiProvider(settings, candidate);
+                activateApiProviderModel(settings, candidate, selection.modelId);
               });
               new Notice(zh
-                ? `已切换到 ${target.name} · ${target.model}`
-                : `Now using ${target.name} · ${target.model}`);
+                ? `已切换到 ${target.name} · ${selection.modelId}`
+                : `Now using ${target.name} · ${selection.modelId}`);
             } catch (error) {
               new Notice(error instanceof Error ? error.message : copy.providers.saveFailed);
             }
             this.scheduleDisplay();
           });
-        dropdown.selectEl.disabled = availableProviders.length === 0;
+        dropdown.selectEl.disabled = availableTargets.length === 0;
       })
       .addButton((button) => button
         .setButtonText(zh ? "管理模型" : "Manage models")
@@ -2546,8 +2553,12 @@ export class CodexSettingTab extends PluginSettingTab {
         saved.baseUrl,
         saved.name
       )).id;
-      const modelDisplayName = getApiProviderModelPreset(providerId, saved.model)?.displayName
-        ?? saved.model;
+      const defaultModel = getDefaultApiProviderModel(saved);
+      const modelDisplayName = defaultModel
+        ? `${defaultModel.displayName}${saved.models.length > 1
+          ? ` + ${saved.models.length - 1}`
+          : ""}`
+        : label("未设置模型", "No model set");
       const row = savedList.createDiv({
         cls: `codex-provider-saved-row is-provider-${providerId}`
       });
@@ -2591,12 +2602,6 @@ export class CodexSettingTab extends PluginSettingTab {
       }
 
       const rowMeta = row.createDiv({ cls: "codex-provider-saved-meta" });
-      if (saved.modelSelection === "auto") {
-        rowMeta.createSpan({
-          cls: "codex-provider-mode-badge",
-          text: "Auto"
-        });
-      }
       const apiKeyRequired = apiProviderApiKeyRequired(providerId);
       const credentialReady = apiProviderHasUsableCredential(
         saved,
@@ -2746,12 +2751,6 @@ export class CodexSettingTab extends PluginSettingTab {
       draft.baseUrl = preset.baseUrl;
       draft.apiProtocol = preset.apiProtocol;
       draft.authMode = preset.authMode;
-      if (draft.modelSelection === "auto") {
-        draft.model = preset.model;
-      }
-      const modelPreset = getApiProviderModelPreset(providerId, draft.model);
-      if (modelPreset) applyApiProviderModelPreset(draft, modelPreset.id);
-      if (draftInput.modelSelection === "auto") draft.modelSelection = "auto";
     }
     try {
       draft.baseUrl = normalizeApiProviderBaseUrl(
@@ -2762,12 +2761,25 @@ export class CodexSettingTab extends PluginSettingTab {
       return { saved: false, message: this.copy.providers.saveFailed };
     }
     draft.name = draft.name.trim();
-    draft.model = draft.model.trim();
     draft.runtimeProviderId = draft.runtimeProviderId.trim();
-    draft.models = Array.from(new Set([
-      draft.model,
-      ...draft.models
-    ].map((model) => model.trim()).filter(Boolean)));
+    const seenModelIds = new Set<string>();
+    draft.models = draft.models.flatMap((model) => {
+      const id = model.id.trim();
+      if (!id || seenModelIds.has(id)) return [];
+      seenModelIds.add(id);
+      return [{
+        ...model,
+        id,
+        displayName: model.displayName.trim() || id,
+        input: model.input.includes("image")
+          ? ["text", "image"] as const
+          : ["text"] as const
+      }];
+    }).map((model) => ({
+      ...model,
+      input: [...model.input]
+    }));
+    draft.defaultModelId = draft.defaultModelId.trim();
     draft.apiKey = draft.authMode === "oauth"
       ? ""
       : apiKey || draftInput.apiKey.trim();
@@ -2874,8 +2886,8 @@ export class CodexSettingTab extends PluginSettingTab {
       }, wasActive ? (fallback ? "replace" : "suspend") : "preserve");
       new Notice(fallback && wasActive
         ? (this.plugin.settings.settingsLanguage === "en"
-          ? `Removed. Now using ${fallback.name} · ${fallback.model}.`
-          : `已删除，现已切换到 ${fallback.name} · ${fallback.model}。`)
+          ? `Removed. Now using ${fallback.name} · ${fallback.defaultModelId}.`
+          : `已删除，现已切换到 ${fallback.name} · ${fallback.defaultModelId}。`)
         : (this.plugin.settings.settingsLanguage === "en"
           ? "Saved model removed."
           : "已删除已保存模型。"));
@@ -3942,7 +3954,38 @@ export class CodexSettingTab extends PluginSettingTab {
   }
 }
 
+function providerModelSelectionValue(
+  providerSettingsId: string,
+  modelId: string
+): string {
+  return JSON.stringify([providerSettingsId, modelId]);
+}
+
+function parseProviderModelSelectionValue(value: string): Readonly<{
+  providerSettingsId: string;
+  modelId: string;
+}> | null {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (
+      !Array.isArray(parsed)
+      || parsed.length !== 2
+      || typeof parsed[0] !== "string"
+      || !parsed[0]
+      || typeof parsed[1] !== "string"
+      || !parsed[1]
+    ) return null;
+    return {
+      providerSettingsId: parsed[0],
+      modelId: parsed[1]
+    };
+  } catch {
+    return null;
+  }
+}
+
 function providerConfigurationFingerprint(provider: ApiProviderConfig): string {
+  const model = getDefaultApiProviderModel(provider);
   return JSON.stringify({
     providerId: normalizeApiProviderId(
       provider.providerId,
@@ -3952,12 +3995,7 @@ function providerConfigurationFingerprint(provider: ApiProviderConfig): string {
     runtimeProviderId: provider.runtimeProviderId,
     apiProtocol: provider.apiProtocol,
     baseUrl: provider.baseUrl,
-    model: provider.model,
-    toolCalling: provider.toolCalling,
-    imageInput: provider.imageInput,
-    reasoning: provider.reasoning,
-    contextWindow: provider.contextWindow,
-    maxOutputTokens: provider.maxOutputTokens,
+    model,
     apiKeyConfigured: Boolean(provider.apiKey.trim())
   });
 }

@@ -69,13 +69,19 @@ export class ProviderPreflightSession {
     this.publish({
       status: "idle",
       operation: "model_list",
-      models: [],
+      models: this.current.models,
       connectionFailure: null
     });
   }
 
   reset(): void {
-    this.invalidate();
+    this.generation += 1;
+    this.publish({
+      status: "idle",
+      operation: "model_list",
+      models: [],
+      connectionFailure: null
+    });
   }
 
   cancel(): void {

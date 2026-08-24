@@ -7,14 +7,22 @@ import type {
   StreamOptions
 } from "@earendil-works/pi-ai";
 import {
+  MOONSHOTAI_CN_MODELS
+} from "@earendil-works/pi-ai/providers/moonshotai-cn.models";
+import {
   activateApiProvider,
+  activateApiProviderModel,
   applyApiProviderModelPreset,
   createApiProviderConfig,
+  createApiProviderModelConfig,
   DEFAULT_SETTINGS,
   normalizeSettingsData,
   resolveEchoInkWelcomeCopy,
-  removeApiProvider
+  removeApiProvider,
+  type ApiProviderConfig,
+  type ApiProviderModelConfig
 } from "../settings/settings";
+import CodexForObsidianPlugin from "../main";
 import { API_PROVIDER_PRESETS, apiProviderRequestUrl } from "../settings/provider-presets";
 import { providerTooltipBaseUrl } from "../settings/provider-tooltip";
 import type {
@@ -59,6 +67,11 @@ import {
 import {
   runApiProviderActivationServiceTests
 } from "./api-provider-activation-service";
+import {
+  ApiProviderActivationService,
+  ProductActivityGate
+} from "../plugin/api-provider-activation-service";
+import { CodexView } from "../ui/codex-view";
 import { runEditorTranslationServiceTests } from "./editor-translation-service";
 import { runEditorTranslationSelectionTests } from "./editor-translation-selection";
 import {
@@ -132,7 +145,7 @@ import {
 } from "../plugin/openai-codex-oauth-service";
 
 export async function runProviderSettingsBehaviorTests(): Promise<void> {
-  assertSettingsV50MigrationContract();
+  assertSettingsV51MigrationContract();
   assertOnboardingTruthContract();
   assertFiveStepOnboardingEntrypoints();
   assertCodexHeaderIdentityContract();
@@ -148,6 +161,8 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   await assertOpenAICodexCredentialStoreContract();
   await assertOpenAICodexLogoutSuspendsRuntime();
   await runApiProviderActivationServiceTests();
+  await assertProviderActivationMainTransactionContract();
+  assertAllOpenComposersSynchronizeAfterActivation();
   await runEditorTranslationServiceTests();
   runEditorTranslationSelectionTests();
   await assertProviderTextGenerationCompletionContract();
@@ -195,6 +210,123 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   await assertAvatarProcessorContract();
   await assertPersonalityCardUsesNewBehaviorDimensions();
   await assertHexagonCaptionSurvivesRepeatedAsyncRender();
+}
+
+function replaceProviderModels(
+  provider: ApiProviderConfig,
+  ...modelIds: string[]
+): void {
+  provider.models = modelIds.map((modelId) =>
+    createApiProviderModelConfig(provider.providerId, modelId)
+  );
+  provider.defaultModelId = provider.models[0]?.id ?? "";
+}
+
+function primaryProviderModel(provider: ApiProviderConfig): ApiProviderModelConfig {
+  const model = provider.models.find(
+    (candidate) => candidate.id === provider.defaultModelId
+  );
+  assert.ok(model);
+  return model;
+}
+
+async function assertProviderActivationMainTransactionContract(): Promise<void> {
+  const provider = createApiProviderConfig("deepseek", "transaction-provider");
+  provider.apiKey = "fixture-key";
+  const alternateId = API_PROVIDER_PRESETS.find(
+    (candidate) => candidate.id === "deepseek"
+  )?.models[1]?.id;
+  assert.ok(alternateId);
+  provider.models.push(createApiProviderModelConfig("deepseek", alternateId));
+  const settings = structuredClone(DEFAULT_SETTINGS);
+  settings.apiProviders = [provider];
+  activateApiProvider(settings, provider);
+  const events: string[] = [];
+  const plugin = Object.create(
+    CodexForObsidianPlugin.prototype
+  ) as CodexForObsidianPlugin & Record<string, any>;
+  plugin.settings = settings;
+  plugin.piRunConversations = new Map();
+  plugin.productActivity = new ProductActivityGate();
+  plugin.apiProviderActivation = new ApiProviderActivationService();
+  plugin.piRuntimeBundle = null;
+  plugin.piRuntimeFlight = null;
+  plugin.piActivatedConversationId = null;
+  plugin.cancelAllPiConversationActivations = async () => {
+    events.push("cancel-activations");
+  };
+  let persisted = snapshotApiProviderSettings(settings);
+  plugin.getSettingsStore = () => ({
+    readPersistedApiProviderSettingsSnapshot: async () => {
+      events.push("read-persisted");
+      return structuredClone(persisted);
+    },
+    restorePersistedApiProviderSettingsSnapshot: async (
+      snapshot: typeof persisted
+    ) => {
+      events.push("restore-persisted");
+      persisted = structuredClone(snapshot);
+    }
+  });
+  plugin.saveSettings = async () => {
+    events.push("persist-candidate");
+    persisted = snapshotApiProviderSettings(plugin.settings);
+  };
+  plugin.applyComposerDefaultsToView = () => {
+    events.push("sync-composers");
+  };
+
+  plugin.piRunConversations.set("conversation-busy", "run-busy");
+  await assert.rejects(
+    plugin.activateApiProviderSettings(() => undefined),
+    /正在回答/u
+  );
+  assert.deepEqual(events, [], "busy must be checked before activation cancellation");
+  plugin.piRunConversations.clear();
+
+  await assert.rejects(plugin.activateApiProviderSettings((candidate) => {
+    const model = candidate.apiProviders[0]?.models[0];
+    assert.ok(model);
+    model.contextWindow = 1_024;
+    model.modelMaxTokens = 2_048;
+    model.maxOutputTokens = 2_048;
+  }), /Context|metadata/u);
+  assert.deepEqual(events, [], "invalid candidate must fail before cancellation or persistence");
+  assert.equal(plugin.settings.defaultModel, provider.defaultModelId);
+
+  await plugin.activateApiProviderSettings((candidate) => {
+    const target = candidate.apiProviders[0];
+    assert.ok(target);
+    activateApiProviderModel(candidate, target, alternateId);
+  }, "preserve");
+  assert.deepEqual(events, [
+    "cancel-activations",
+    "read-persisted",
+    "persist-candidate",
+    "sync-composers"
+  ]);
+  assert.equal(plugin.settings.defaultModel, alternateId);
+  assert.equal(persisted.defaultModel, alternateId);
+}
+
+function assertAllOpenComposersSynchronizeAfterActivation(): void {
+  const synchronized: string[] = [];
+  const first = Object.create(CodexView.prototype) as CodexView;
+  const second = Object.create(CodexView.prototype) as CodexView;
+  first.applySavedComposerDefaults = () => { synchronized.push("first"); };
+  second.applySavedComposerDefaults = () => { synchronized.push("second"); };
+  CodexForObsidianPlugin.prototype.applyComposerDefaultsToView.call({
+    app: {
+      workspace: {
+        getLeavesOfType: () => [
+          { view: first },
+          { view: { applySavedComposerDefaults: () => synchronized.push("other") } },
+          { view: second }
+        ]
+      }
+    }
+  });
+  assert.deepEqual(synchronized, ["first", "second"]);
 }
 
 async function assertAnimatedSettingsTabIcons(): Promise<void> {
@@ -609,10 +741,11 @@ async function assertProviderTextGenerationCompletionContract(): Promise<void> {
     modelId: "deepseek-chat",
     apiKey: "fixture-key",
     toolCalling: false,
-    imageInput: false,
-    reasoning: false,
-    contextWindow: 64_000,
-    maxOutputTokens: 8_192
+    imageInput: true,
+    reasoning: true,
+    contextWindow: 96_000,
+    modelMaxTokens: 12_000,
+    maxOutputTokens: 4_000
   };
   const host = {
     app: new App(),
@@ -621,10 +754,14 @@ async function assertProviderTextGenerationCompletionContract(): Promise<void> {
   };
   let nextResult: (signal: AbortSignal) => Promise<AssistantMessage> = async () =>
     providerTextMessage("stop", "\n  - **Hello**\n\n");
+  let capturedRequest: any = null;
   const dispatcher = {
-    stream: (request: { options: { signal?: AbortSignal } }) => ({
-      result: async () => await nextResult(request.options.signal ?? new AbortController().signal)
-    })
+    stream: (request: { options: { signal?: AbortSignal } }) => {
+      capturedRequest = request;
+      return {
+        result: async () => await nextResult(request.options.signal ?? new AbortController().signal)
+      };
+    }
   } as unknown as Pick<PiProviderProtocolDispatcher, "stream">;
   const service = new PiProviderConfigurationService(host as never, {
     textGenerationDispatcher: dispatcher
@@ -633,7 +770,8 @@ async function assertProviderTextGenerationCompletionContract(): Promise<void> {
     draft,
     systemPrompt: "Translate.",
     userPrompt: "翻译。",
-    timeoutMs: 1_000
+    timeoutMs: 1_000,
+    maxTokens: 10_000
   };
   let writebackAttempts = 0;
   const generateAndWriteBack = async (): Promise<void> => {
@@ -645,6 +783,11 @@ async function assertProviderTextGenerationCompletionContract(): Promise<void> {
     await service.generateText(input),
     "\n  - **Hello**\n\n"
   );
+  assert.deepEqual(capturedRequest?.model.input, ["text", "image"]);
+  assert.equal(capturedRequest?.model.reasoning, true);
+  assert.equal(capturedRequest?.model.contextWindow, 96_000);
+  assert.equal(capturedRequest?.model.maxTokens, 12_000);
+  assert.equal(capturedRequest?.options.maxTokens, 4_000);
 
   nextResult = async () => providerTextMessage("stop", " \n\t ");
   await assert.rejects(
@@ -831,9 +974,7 @@ async function assertProviderApiKeyEditLifecycle(): Promise<void> {
   installProviderModalDomFixture();
   const existing = createApiProviderConfig("custom", "custom-api-key-edit");
   existing.baseUrl = "https://custom.example/v1";
-  existing.model = "custom-model";
-  existing.models = [existing.model];
-  existing.modelSelection = "model";
+  replaceProviderModels(existing, "custom-model");
   existing.apiKey = "saved-api-key";
 
   let blankDraft: typeof existing | null = null;
@@ -915,7 +1056,7 @@ async function assertPersistedProviderRollbackPreservesQueuedSettingsSave(): Pro
   };
   const store = new EchoInkSettingsStore(plugin as never);
   const providerSnapshot = await store.readPersistedApiProviderSettingsSnapshot();
-  const candidate = createApiProviderConfig("openai", "persisted-candidate");
+  const candidate = createApiProviderConfig("deepseek", "persisted-candidate");
   candidate.apiKey = "persisted-candidate-api-key";
   persisted.apiProviders = [candidate];
   activateApiProvider(persisted, candidate);
@@ -1709,16 +1850,23 @@ function assertSettingsAccessibleNamesAndOverflow(): void {
   settings.settingsTab = "knowledgeBase";
   tab.display();
   assertSettingControlAccessibleName(tab.containerEl, "EchoInk 当前模型", "select");
+  const modelOptions = Array.from(
+    tab.containerEl.querySelectorAll<HTMLOptionElement>("option")
+  );
+  const optionForProvider = (providerId: string) => modelOptions.find((option) => {
+    try {
+      const value: unknown = JSON.parse(option.value);
+      return Array.isArray(value) && value[0] === providerId;
+    } catch {
+      return false;
+    }
+  });
   assert.equal(
-    tab.containerEl.querySelector<HTMLOptionElement>(
-      `option[value="${missingCredential.id}"]`
-    )?.disabled,
+    optionForProvider(missingCredential.id)?.disabled,
     true
   );
   assert.equal(
-    tab.containerEl.querySelector<HTMLOptionElement>(
-      `option[value="${credentialFree.id}"]`
-    )?.disabled,
+    optionForProvider(credentialFree.id)?.disabled,
     false
   );
   mutable.settingsDetail = "knowledge-memory";
@@ -1764,7 +1912,7 @@ function assertProviderScopedRollbackPreservesConcurrentSettings(): void {
   settings.apiProviders = [old];
   activateApiProvider(settings, old);
   const snapshot = snapshotApiProviderSettings(settings);
-  const candidate = createApiProviderConfig("openai", "rollback-candidate");
+  const candidate = createApiProviderConfig("deepseek", "rollback-candidate");
   settings.apiProviders = [candidate];
   activateApiProvider(settings, candidate);
   settings.settingsLanguage = "en";
@@ -1814,21 +1962,49 @@ async function assertProviderModalModelAccessibleNameIncludesValue(): Promise<vo
     language: "en",
     copy: settingsCopy("en"),
     preflight: {
-      listModels: async () => ({ status: "available", models: provider.models }),
+      listModels: async () => ({
+        status: "available",
+        models: provider.models.map((model) => model.id)
+      }),
       testConnection: async () => ({ status: "available" })
     },
     save: async () => ({ saved: true })
   });
   modal.open();
-  const trigger = providerModalElementByFocusKey(modal, "model");
+  const trigger = providerModalElementByFocusKey(modal, "model-discover");
   assert.ok(trigger);
-  assert.equal(trigger.getAttribute("aria-labelledby"), null);
-  assert.match(trigger.getAttribute("aria-label") ?? "", /Current model/u);
-  assert.match(trigger.getAttribute("aria-label") ?? "", /Auto/u);
+  assert.equal(trigger.textContent, "Get models");
+  assert.doesNotMatch(modal.contentEl.textContent, /\bAuto\b/u);
+  const selected = primaryProviderModel(provider);
+  assert.ok(providerModalElementByFocusKey(
+    modal,
+    `model-enabled:${selected.id}`
+  ));
+  assert.ok(providerModalElementByFocusKey(
+    modal,
+    `model-default:${selected.id}`
+  ));
+  providerModalElementByFocusKey(modal, "manual-model-add")?.click();
+  assert.match(
+    modal.contentEl.textContent,
+    new RegExp(settingsCopy("en").providers.invalidModel, "u")
+  );
+  const manual = providerModalElementByFocusKey(modal, "manual-model");
+  assert.ok(manual);
+  manual.value = "manual-model-id";
+  manual.oninput?.(new Event("input"));
+  providerModalElementByFocusKey(modal, "manual-model-add")?.click();
+  assert.equal(
+    providerModalElementByFocusKey(
+      modal,
+      "model-enabled:manual-model-id"
+    )?.checked,
+    true
+  );
   modal.close();
 }
 
-function assertSettingsV50MigrationContract(): void {
+function assertSettingsV51MigrationContract(): void {
   const failures: Error[] = [];
   const check = (label: string, assertion: () => void): void => {
     try {
@@ -1839,7 +2015,7 @@ function assertSettingsV50MigrationContract(): void {
   };
 
   check("fresh install does not select a Provider without a usable API Key", () => {
-    assert.equal(DEFAULT_SETTINGS.settingsVersion, 50);
+    assert.equal(DEFAULT_SETTINGS.settingsVersion, 51);
     assert.equal(DEFAULT_SETTINGS.activeApiProviderId, "");
     assert.equal(DEFAULT_SETTINGS.memory.useLongTermMemory, true);
     assert.equal(
@@ -1854,6 +2030,128 @@ function assertSettingsV50MigrationContract(): void {
       normalizeSettingsData({ memory: { enabled: true, useLongTermMemory: false } }).settings.memory.useLongTermMemory,
       false
     );
+  });
+
+  check("v50 flat and auto Provider settings migrate to one explicit enabled default model", () => {
+    const normalized = normalizeSettingsData({
+      ...structuredClone(DEFAULT_SETTINGS),
+      settingsVersion: 50,
+      activeApiProviderId: "legacy-custom",
+      defaultModel: "legacy-model",
+      apiProviders: [{
+        id: "legacy-custom",
+        providerId: "custom",
+        runtimeProviderId: "legacy-runtime",
+        apiProtocol: "openai-completions",
+        authMode: "api-key",
+        name: "Legacy custom",
+        baseUrl: "https://legacy.example/v1",
+        model: "legacy-model",
+        models: ["legacy-model", "unselected-discovery-result"],
+        modelSelection: "auto",
+        toolCalling: true,
+        imageInput: true,
+        reasoning: true,
+        contextWindow: 96_000,
+        maxOutputTokens: 12_000,
+        apiKey: "fixture-key"
+      }]
+    }).settings;
+    const provider = normalized.apiProviders[0];
+    assert.ok(provider);
+    assert.equal(provider.defaultModelId, "legacy-model");
+    assert.equal(normalized.defaultModel, "legacy-model");
+    assert.deepEqual(provider.models.map((model) => model.id), ["legacy-model"]);
+    assert.deepEqual(provider.models[0], {
+      id: "legacy-model",
+      displayName: "legacy-model",
+      input: ["text", "image"],
+      toolCalling: true,
+      reasoning: true,
+      contextWindow: 96_000,
+      modelMaxTokens: 12_000,
+      maxOutputTokens: 12_000,
+      metadataSource: "manual"
+    });
+    for (const retired of [
+      "model",
+      "modelSelection",
+      "toolCalling",
+      "imageInput",
+      "reasoning",
+      "contextWindow",
+      "maxOutputTokens"
+    ]) {
+      assert.equal(Object.hasOwn(provider, retired), false, retired);
+    }
+  });
+
+  check("v51 preserves an active non-default enabled Composer model", () => {
+    const provider = createApiProviderConfig("custom", "current-multi-model");
+    provider.name = "Current multi-model";
+    provider.baseUrl = "https://current.example/v1";
+    provider.apiKey = "fixture-key";
+    replaceProviderModels(provider, "model-default", "model-selected");
+    const normalized = normalizeSettingsData({
+      ...structuredClone(DEFAULT_SETTINGS),
+      settingsVersion: 51,
+      activeApiProviderId: provider.id,
+      defaultModel: "model-selected",
+      apiProviders: [provider]
+    }).settings;
+    assert.equal(normalized.activeApiProviderId, provider.id);
+    assert.equal(normalized.apiProviders[0]?.defaultModelId, "model-default");
+    assert.equal(normalized.defaultModel, "model-selected");
+  });
+
+  check("unknown model metadata starts text-only without inherited capabilities", () => {
+    const unknown = createApiProviderModelConfig("custom", "undocumented-model");
+    assert.deepEqual(unknown.input, ["text"]);
+    assert.equal(unknown.toolCalling, false);
+    assert.equal(unknown.reasoning, false);
+    assert.equal(unknown.metadataSource, "unknown");
+  });
+
+  check("discovered IDs use exact runtime Provider metadata from the Pi catalog", () => {
+    const catalog = MOONSHOTAI_CN_MODELS["kimi-k2.7-code"];
+    assert.ok(catalog);
+    assert.equal(Object.hasOwn(catalog, "toolCalling"), false);
+    const discovered = createApiProviderModelConfig(
+      "kimi",
+      catalog.id,
+      "moonshotai-cn"
+    );
+    assert.deepEqual(discovered, {
+      id: catalog.id,
+      displayName: catalog.name,
+      input: catalog.input.includes("image")
+        ? ["text", "image"]
+        : ["text"],
+      toolCalling: true,
+      reasoning: catalog.reasoning,
+      contextWindow: catalog.contextWindow,
+      modelMaxTokens: catalog.maxTokens,
+      maxOutputTokens: 65_536,
+      metadataSource: "catalog"
+    });
+    const provider = createApiProviderConfig("kimi", "catalog-provider");
+    provider.models = [discovered];
+    provider.defaultModelId = discovered.id;
+    const reopened = normalizeSettingsData({
+      ...structuredClone(DEFAULT_SETTINGS),
+      settingsVersion: 51,
+      apiProviders: [provider]
+    }).settings.apiProviders[0]?.models[0];
+    assert.deepEqual(reopened, discovered);
+    const sameIdWrongProvider = createApiProviderModelConfig(
+      "custom",
+      catalog.id,
+      "deepseek"
+    );
+    assert.equal(sameIdWrongProvider.metadataSource, "unknown");
+    assert.deepEqual(sameIdWrongProvider.input, ["text"]);
+    assert.equal(sameIdWrongProvider.toolCalling, false);
+    assert.equal(sameIdWrongProvider.reasoning, false);
   });
 
   check("v48 drops retired Provider references and requires API Key re-entry", () => {
@@ -3318,7 +3616,7 @@ async function assertKnowledgeInitPausedMappingsHideTechnicalDetails(): Promise<
   // 快照比对用 providerId + model（id 即 provider-ready）。
   const readyProvider = createApiProviderConfig("deepseek", "provider-ready");
   readyProvider.apiKey = "knowledge-init-test-key";
-  readyProvider.model = "model-ready";
+  replaceProviderModels(readyProvider, "model-ready");
   settings.apiProviders = [readyProvider];
   activateApiProvider(settings, readyProvider);
   const tab = await renderKnowledgeInitTab(plugin);
@@ -3769,7 +4067,7 @@ async function assertKnowledgeInitRecoveryAndActionErrorRendering(): Promise<voi
   const masked = createKnowledgeInitPluginFixture(maskedState);
   const readyProvider = createApiProviderConfig("deepseek", "provider-ready");
   readyProvider.apiKey = "knowledge-init-test-key";
-  readyProvider.model = "model-ready";
+  replaceProviderModels(readyProvider, "model-ready");
   masked.settings.apiProviders = [readyProvider];
   activateApiProvider(masked.settings, readyProvider);
   masked.settings.knowledgeBase.initialization.status = "initialized";
@@ -3914,7 +4212,7 @@ async function assertKnowledgeInitRecoveryAndActionErrorRendering(): Promise<voi
   const staleDigest = createKnowledgeInitPluginFixture(staleDigestState);
   const staleProvider = createApiProviderConfig("deepseek", "provider-ready");
   staleProvider.apiKey = "knowledge-init-test-key";
-  staleProvider.model = "model-ready";
+  replaceProviderModels(staleProvider, "model-ready");
   staleDigest.settings.apiProviders = [staleProvider];
   activateApiProvider(staleDigest.settings, staleProvider);
   const staleTab = await renderKnowledgeInitTab(staleDigest.plugin);
@@ -4366,7 +4664,17 @@ function assertSavedModelLifecycle(): void {
 
   activateApiProvider(settings, primary);
   assert.equal(settings.activeApiProviderId, primary.id);
-  assert.equal(applyApiProviderModelPreset(primary, primary.models[1] ?? primary.model), true);
+  const primaryModelId = primary.defaultModelId;
+  const alternate = API_PROVIDER_PRESETS.find(
+    (preset) => preset.id === "deepseek"
+  )?.models[1]?.id;
+  assert.ok(alternate);
+  assert.equal(applyApiProviderModelPreset(primary, alternate), true);
+  assert.deepEqual(
+    primary.models.map((model) => model.id),
+    [primaryModelId, alternate]
+  );
+  assert.equal(primary.defaultModelId, alternate);
   assert.equal(removeApiProvider(settings, primary.id), true);
   assert.equal(settings.activeApiProviderId, fallback.id);
   assert.equal(removeApiProvider(settings, fallback.id), true);
@@ -4376,6 +4684,7 @@ function assertSavedModelLifecycle(): void {
 async function assertSavedBindingPreflightLifecycle(): Promise<void> {
   const provider = createApiProviderConfig("deepseek", "saved-provider");
   provider.apiKey = "saved-provider-api-key";
+  const model = primaryProviderModel(provider);
   const draft: PiProviderConfigurationDraft = {
     providerSettingsId: provider.id,
     providerId: "deepseek",
@@ -4383,13 +4692,14 @@ async function assertSavedBindingPreflightLifecycle(): Promise<void> {
     apiProtocol: provider.apiProtocol,
     authMode: provider.authMode,
     baseUrl: provider.baseUrl,
-    modelId: provider.model,
+    modelId: model.id,
     apiKey: "",
-    toolCalling: provider.toolCalling,
-    imageInput: provider.imageInput,
-    reasoning: provider.reasoning,
-    contextWindow: provider.contextWindow,
-    maxOutputTokens: provider.maxOutputTokens
+    toolCalling: model.toolCalling,
+    imageInput: model.input.includes("image"),
+    reasoning: model.reasoning,
+    contextWindow: model.contextWindow,
+    modelMaxTokens: model.modelMaxTokens,
+    maxOutputTokens: model.maxOutputTokens
   };
   assert.equal(providerPreflightApiKeyReady({
     providerId: "deepseek",
@@ -4397,9 +4707,9 @@ async function assertSavedBindingPreflightLifecycle(): Promise<void> {
     storedApiKey: provider.apiKey
   }), true);
 
-  let resolveAutomatic!: (result: PiProviderModelListResult) => void;
-  const automaticResult = new Promise<PiProviderModelListResult>((resolve) => {
-    resolveAutomatic = resolve;
+  let resolveRequested!: (result: PiProviderModelListResult) => void;
+  const requestedResult = new Promise<PiProviderModelListResult>((resolve) => {
+    resolveRequested = resolve;
   });
   const calls: string[] = [];
   let modelListAttempt = 0;
@@ -4410,11 +4720,11 @@ async function assertSavedBindingPreflightLifecycle(): Promise<void> {
       modelListAttempt += 1;
       assert.equal(input.providerSettingsId, provider.id);
       assert.equal(input.apiKey, "");
-      if (modelListAttempt === 1) return await automaticResult;
+      if (modelListAttempt === 1) return await requestedResult;
       return {
         status: modelListAttempt === 2
           ? "temporary_failure" as const
-          : "credential_error" as const,
+          : "api_key_error" as const,
         models: []
       };
     },
@@ -4434,21 +4744,21 @@ async function assertSavedBindingPreflightLifecycle(): Promise<void> {
     (state) => states.push(`${state.operation}:${state.status}`)
   );
 
-  const automatic = preflight.discoverModels(draft);
+  const requested = preflight.discoverModels(draft);
   assert.equal(preflight.state.status, "loading");
   assert.equal(modelListAttempt, 1);
-  resolveAutomatic({
+  resolveRequested({
     status: "available",
-    models: [provider.model]
+    models: [model.id]
   });
-  await automatic;
+  await requested;
   assert.equal(preflight.state.status, "available");
-  assert.deepEqual(preflight.state.models, [provider.model]);
+  assert.deepEqual(preflight.state.models, [model.id]);
 
   await preflight.discoverModels(draft);
   assert.equal(preflight.state.status, "temporary_failure");
   await preflight.discoverModels(draft);
-  assert.equal(preflight.state.status, "credential_error");
+  assert.equal(preflight.state.status, "api_key_error");
   await preflight.testConnection(draft);
   assert.equal(preflight.state.status, "unsupported");
   assert.equal(preflight.state.connectionFailure, "protocol");
@@ -4467,7 +4777,7 @@ async function assertSavedBindingPreflightLifecycle(): Promise<void> {
     "model_list:loading",
     "model_list:temporary_failure",
     "model_list:loading",
-    "model_list:credential_error",
+    "model_list:api_key_error",
     "connection:loading",
     "connection:unsupported",
     "connection:loading",
@@ -4661,6 +4971,7 @@ async function assertOpenAICodexModalLifecycle(): Promise<void> {
     "codex-oauth-modal"
   );
   const openedUrls: string[] = [];
+  let modelListCalls = 0;
   const modal = new ProviderModelModal({
     app: new App(),
     draft: provider,
@@ -4668,10 +4979,13 @@ async function assertOpenAICodexModalLifecycle(): Promise<void> {
     language: "en",
     copy: settingsCopy("en"),
     preflight: {
-      listModels: async () => ({
-        status: "available",
-        models: provider.models
-      }),
+      listModels: async () => {
+        modelListCalls += 1;
+        return {
+          status: "available",
+          models: provider.models.map((model) => model.id)
+        };
+      },
       testConnection: async () => ({
         status: "failed",
         failure: "auth"
@@ -4707,6 +5021,7 @@ async function assertOpenAICodexModalLifecycle(): Promise<void> {
   });
   modal.open();
   await flushProviderModalTasks();
+  assert.equal(modelListCalls, 0);
   assert.match(modal.contentEl.textContent, /Beta/u);
   assert.match(modal.contentEl.textContent, /OpenAI browser authorization/u);
   assert.doesNotMatch(modal.contentEl.textContent, /API Key/u);
@@ -4714,7 +5029,7 @@ async function assertOpenAICodexModalLifecycle(): Promise<void> {
     modal.titleEl.querySelector(".codex-provider-protocol-pill"),
     null
   );
-  assert.match(modal.contentEl.textContent, /gpt-5\.6-sol/u);
+  assert.match(modal.contentEl.textContent, /GPT-5\.6 Sol/u);
 
   const login = Array.from(modal.contentEl.querySelectorAll("button"))
     .find((button) => button.textContent === "Sign in with OpenAI");
@@ -4734,6 +5049,7 @@ async function assertOpenAICodexModalLifecycle(): Promise<void> {
   assert.equal(finish.disabled, false);
   finish.click();
   await flushProviderModalTasks();
+  assert.equal(modelListCalls, 0, "OAuth completion must not request models");
   assert.match(modal.contentEl.textContent, /OpenAI Codex is connected/u);
   assert.ok(Array.from(modal.contentEl.querySelectorAll("button"))
     .some((button) => button.textContent === "Log out"));
@@ -4755,7 +5071,7 @@ async function assertProviderModelModalPreflightLifecycle(): Promise<void> {
   const copy = settingsCopy("en");
   const provider = createApiProviderConfig("deepseek", "saved-modal-provider");
   provider.apiKey = "saved-modal-provider-api-key";
-  const automatic = deferred<PiProviderModelListResult>();
+  const discovery = deferred<PiProviderModelListResult>();
   const connections = [
     deferred<PiProviderConnectionTestResult>(),
     deferred<PiProviderConnectionTestResult>()
@@ -4768,7 +5084,7 @@ async function assertProviderModelModalPreflightLifecycle(): Promise<void> {
   const service = {
     listModels: async (draft: PiProviderConfigurationDraft) => {
       calls.push({ operation: "listModels", draft: structuredClone(draft) });
-      return await automatic.promise;
+      return await discovery.promise;
     },
     testConnection: async (draft: PiProviderConfigurationDraft) => {
       calls.push({ operation: "testConnection", draft: structuredClone(draft) });
@@ -4788,14 +5104,36 @@ async function assertProviderModelModalPreflightLifecycle(): Promise<void> {
   });
 
   modal.open();
+  assert.equal(calls.length, 0, "opening the modal must not request models");
+  assertProviderModalStatus(modal, "idle");
+  const apiKey = providerModalElementByFocusKey(modal, "apiKey");
+  assert.ok(apiKey);
+  apiKey.value = "replacement-api-key";
+  apiKey.oninput?.(new Event("input"));
+  assert.equal(calls.length, 0, "editing an API key must not request models");
+  const discover = providerModalElementByFocusKey(modal, "model-discover");
+  assert.ok(discover);
+  discover.click();
   assert.equal(calls.length, 1);
   assert.equal(calls[0]?.operation, "listModels");
   assert.equal(calls[0]?.draft.providerSettingsId, provider.id);
-  assert.equal(calls[0]?.draft.apiKey, "");
+  assert.equal(calls[0]?.draft.apiKey, "replacement-api-key");
   assertProviderModalStatus(modal, "loading", copy.providers.modelListLoading);
 
-  automatic.resolve({ status: "available", models: provider.models });
+  const nextModel = API_PROVIDER_PRESETS.find(
+    (preset) => preset.id === "deepseek"
+  )?.models[1]?.id;
+  assert.ok(nextModel);
+  discovery.resolve({
+    status: "available",
+    models: [primaryProviderModel(provider).id, nextModel]
+  });
   await flushProviderModalTasks();
+  assert.deepEqual(
+    provider.models.map((model) => model.id),
+    [primaryProviderModel(provider).id],
+    "refresh results must not silently change enabled models"
+  );
   const firstTest = providerModalElementByFocusKey(
     modal,
     "provider-test-connection"
@@ -4803,17 +5141,24 @@ async function assertProviderModelModalPreflightLifecycle(): Promise<void> {
   assert.ok(firstTest);
   firstTest.click();
   assert.equal(calls[1]?.operation, "testConnection");
-  assert.equal(calls[1]?.draft.modelId, provider.model);
-  assert.equal(calls[1]?.draft.apiKey, "");
+  assert.equal(calls[1]?.draft.modelId, primaryProviderModel(provider).id);
+  assert.equal(calls[1]?.draft.apiKey, "replacement-api-key");
   assertProviderModalStatus(modal, "loading", copy.providers.testingConnection);
 
-  const nextModel = provider.models.find((model) => model !== provider.model);
-  assert.ok(nextModel);
-  const nextModelOption = Array.from(
-    modal.contentEl.querySelectorAll<HTMLButtonElement>("button")
-  ).find((button) => button.title === nextModel);
-  assert.ok(nextModelOption);
-  nextModelOption.click();
+  const nextEnabled = providerModalElementByFocusKey(
+    modal,
+    `model-enabled:${nextModel}`
+  );
+  assert.ok(nextEnabled);
+  nextEnabled.checked = true;
+  nextEnabled.onchange?.(new Event("change"));
+  const nextDefault = providerModalElementByFocusKey(
+    modal,
+    `model-default:${nextModel}`
+  );
+  assert.ok(nextDefault);
+  nextDefault.checked = true;
+  nextDefault.onchange?.(new Event("change"));
   assertProviderModalStatus(modal, "idle");
 
   connections[0]?.resolve({ status: "available" });
@@ -4832,7 +5177,7 @@ async function assertProviderModelModalPreflightLifecycle(): Promise<void> {
   secondTest.click();
   assert.equal(calls[2]?.operation, "testConnection");
   assert.equal(calls[2]?.draft.modelId, nextModel);
-  assert.equal(calls[2]?.draft.apiKey, "");
+  assert.equal(calls[2]?.draft.apiKey, "replacement-api-key");
 
   const customProvider = modal.contentEl.querySelector<HTMLButtonElement>(
     '[data-provider-id="custom"]'
@@ -4883,12 +5228,17 @@ async function assertProviderModelModalCloseCancelsPendingPreflight(): Promise<v
   const closedRequestModel = "closed-request-model";
 
   modal.open();
+  assert.equal(attempt, 0);
+  providerModalElementByFocusKey(modal, "model-discover")?.click();
   assert.equal(attempt, 1);
   modal.close();
   first.resolve({ status: "available", models: [closedRequestModel] });
   await flushProviderModalTasks();
 
   modal.open();
+  assert.equal(attempt, 1);
+  assertProviderModalStatus(modal, "idle");
+  providerModalElementByFocusKey(modal, "model-discover")?.click();
   assert.equal(attempt, 2);
   assertProviderModalStatus(modal, "loading", copy.providers.modelListLoading);
   assert.equal(
@@ -4896,7 +5246,10 @@ async function assertProviderModelModalCloseCancelsPendingPreflight(): Promise<v
       .some((button) => button.title === closedRequestModel),
     false
   );
-  reopened.resolve({ status: "available", models: [provider.model] });
+  reopened.resolve({
+    status: "available",
+    models: [primaryProviderModel(provider).id]
+  });
   await flushProviderModalTasks();
   modal.close();
 }
