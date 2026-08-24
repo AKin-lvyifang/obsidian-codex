@@ -10,8 +10,8 @@ import {
 } from "../knowledge-base/dashboard";
 import type { StoredAttachment } from "../settings/settings";
 import {
-  apiProviderHasUsableApiKey,
-  getActiveApiProvider,
+  apiProviderHasUsableCredential,
+  getActiveApiProviderModel,
   newId,
   validateApiProvider
 } from "../settings/settings";
@@ -283,13 +283,19 @@ function createKnowledgeInitializationHost(
       await plugin.app.fileManager.renameFile(source, normalizePath(targetPath));
     },
     currentProvider() {
-      const provider = getActiveApiProvider(plugin.settings);
+      const active = getActiveApiProviderModel(plugin.settings);
       if (
-        !provider
-        || !apiProviderHasUsableApiKey(provider)
-        || validateApiProvider(provider).length > 0
+        !active
+        || !apiProviderHasUsableCredential(
+          active.provider,
+          plugin.settings.openAICodexCredential
+        )
+        || validateApiProvider(active.provider).length > 0
       ) return null;
-      return Object.freeze({ providerId: provider.id, model: provider.model });
+      return Object.freeze({
+        providerId: active.provider.id,
+        model: active.model.id
+      });
     },
     processedRawPaths() {
       return new Set(Object.keys(plugin.settings.knowledgeBase.processedSources));

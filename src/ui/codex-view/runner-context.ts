@@ -53,6 +53,8 @@ export interface CodexViewTurnContext extends CodexViewRunnerBaseContext, Messag
   readonly inputEl: HTMLTextAreaElement;
   readonly attachments: StoredAttachment[];
   readonly selectedSkill: EchoInkResource | null;
+  selectedProviderSettingsId: string;
+  selectedModel: string;
   ensureSession(): StoredSession;
   composerStateForSession(session: StoredSession): ComposerPrimaryActionState;
   enqueueComposerDraft(): Promise<void>;

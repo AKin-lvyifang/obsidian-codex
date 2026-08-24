@@ -268,16 +268,29 @@ export interface ApiProviderConfig {
   authMode: ApiProviderAuthMode;
   name: string;
   baseUrl: string;
-  model: string;
-  models: string[];
-  modelSelection: "auto" | "model";
-  toolCalling: boolean;
-  imageInput: boolean;
-  reasoning: boolean;
-  contextWindow: number;
-  maxOutputTokens: number;
+  /** Enabled models. Model identity is scoped to this Provider settings id. */
+  models: ApiProviderModelConfig[];
+  /** Explicit default; always references one entry in models when configured. */
+  defaultModelId: string;
   apiKey: string;
   queryParams?: Record<string, string>;
+}
+
+export type ApiProviderModelInput = "text" | "image";
+export type ApiProviderModelMetadataSource = "preset" | "unknown" | "manual";
+
+export interface ApiProviderModelConfig {
+  id: string;
+  displayName: string;
+  input: ApiProviderModelInput[];
+  toolCalling: boolean;
+  reasoning: boolean;
+  contextWindow: number;
+  /** Provider-published model output ceiling. */
+  modelMaxTokens: number;
+  /** EchoInk's actual per-request output ceiling. */
+  maxOutputTokens: number;
+  metadataSource: ApiProviderModelMetadataSource;
 }
 
 export interface WorkspaceResourceToggles {
@@ -338,7 +351,7 @@ export const DEFAULT_REVIEW_OUTPUT_DIR = "outputs";
 
 export const DEFAULT_SETTINGS: CodexForObsidianSettings = {
   productGeneration: "pi-agent-product-v1",
-  settingsVersion: 50,
+  settingsVersion: 51,
   settingsLanguage: "zh-CN",
   settingsTab: "providers",
   proxyEnabled: false,
@@ -639,21 +652,16 @@ export function applyApiProviderPreset(
   providerId: ApiProviderId
 ): void {
   const preset = getApiProviderPreset(providerId);
-  const modelPreset = preset.models[0];
   provider.providerId = preset.id;
   provider.runtimeProviderId = preset.runtimeProviderId;
   provider.apiProtocol = preset.apiProtocol;
   provider.authMode = preset.authMode;
   provider.name = preset.name;
   provider.baseUrl = preset.baseUrl;
-  provider.model = preset.model;
-  provider.models = preset.models.map((model) => model.id);
-  provider.modelSelection = "auto";
-  provider.toolCalling = modelPreset?.toolCalling ?? true;
-  provider.imageInput = modelPreset?.imageInput ?? false;
-  provider.reasoning = modelPreset?.reasoning ?? false;
-  provider.contextWindow = modelPreset?.contextWindow ?? 64_000;
-  provider.maxOutputTokens = modelPreset?.maxOutputTokens ?? 8_192;
+  provider.models = preset.model
+    ? [createApiProviderModelConfig(preset.id, preset.model)]
+    : [];
+  provider.defaultModelId = provider.models[0]?.id ?? "";
   delete provider.queryParams;
   clearApiProviderApiKey(settings, provider);
   settings.providerMode = "custom-api";
@@ -665,7 +673,9 @@ export function createApiProviderConfig(
   id = newId("provider")
 ): ApiProviderConfig {
   const preset = getApiProviderPreset(providerId);
-  const modelPreset = preset.models[0];
+  const models = preset.model
+    ? [createApiProviderModelConfig(preset.id, preset.model)]
+    : [];
   return {
     id,
     providerId: preset.id,
@@ -674,15 +684,41 @@ export function createApiProviderConfig(
     authMode: preset.authMode,
     name: preset.name,
     baseUrl: preset.baseUrl,
-    model: preset.model,
-    models: preset.models.map((model) => model.id),
-    modelSelection: "auto",
-    toolCalling: modelPreset?.toolCalling ?? true,
-    imageInput: modelPreset?.imageInput ?? false,
-    reasoning: modelPreset?.reasoning ?? false,
-    contextWindow: modelPreset?.contextWindow ?? 64_000,
-    maxOutputTokens: modelPreset?.maxOutputTokens ?? 8_192,
+    models,
+    defaultModelId: models[0]?.id ?? "",
     apiKey: ""
+  };
+}
+
+export function createApiProviderModelConfig(
+  providerId: ApiProviderId,
+  modelId: string
+): ApiProviderModelConfig {
+  const id = modelId.trim();
+  const preset = getApiProviderModelPreset(providerId, id);
+  if (preset) {
+    return {
+      id: preset.id,
+      displayName: preset.displayName ?? preset.id,
+      input: preset.imageInput ? ["text", "image"] : ["text"],
+      toolCalling: preset.toolCalling,
+      reasoning: preset.reasoning,
+      contextWindow: preset.contextWindow,
+      modelMaxTokens: preset.modelMaxTokens,
+      maxOutputTokens: preset.maxOutputTokens,
+      metadataSource: "preset"
+    };
+  }
+  return {
+    id,
+    displayName: id,
+    input: ["text"],
+    toolCalling: false,
+    reasoning: false,
+    contextWindow: 64_000,
+    modelMaxTokens: 8_192,
+    maxOutputTokens: 8_192,
+    metadataSource: "unknown"
   };
 }
 
@@ -697,14 +733,55 @@ export function applyApiProviderModelPreset(
   );
   const modelPreset = getApiProviderModelPreset(providerId, modelId);
   if (!modelPreset) return false;
-  provider.model = modelPreset.id;
-  provider.modelSelection = "model";
-  provider.toolCalling = modelPreset.toolCalling;
-  provider.imageInput = modelPreset.imageInput;
-  provider.reasoning = modelPreset.reasoning;
-  provider.contextWindow = modelPreset.contextWindow;
-  provider.maxOutputTokens = modelPreset.maxOutputTokens;
+  const model = createApiProviderModelConfig(providerId, modelPreset.id);
+  const index = provider.models.findIndex((entry) => entry.id === model.id);
+  if (index >= 0) provider.models[index] = model;
+  else provider.models.push(model);
+  provider.defaultModelId = model.id;
   return true;
+}
+
+export function getApiProviderModel(
+  provider: Pick<ApiProviderConfig, "models">,
+  modelId: string
+): ApiProviderModelConfig | null {
+  return provider.models.find((model) => model.id === modelId) ?? null;
+}
+
+export function getDefaultApiProviderModel(
+  provider: Pick<ApiProviderConfig, "models" | "defaultModelId">
+): ApiProviderModelConfig | null {
+  return getApiProviderModel(provider, provider.defaultModelId);
+}
+
+export function getActiveApiProviderModel(
+  settings: Pick<
+    CodexForObsidianSettings,
+    "activeApiProviderId" | "apiProviders" | "defaultModel"
+  >
+): Readonly<{
+  provider: ApiProviderConfig;
+  model: ApiProviderModelConfig;
+}> | null {
+  const provider = getActiveApiProvider(settings);
+  if (!provider) return null;
+  const model = getApiProviderModel(provider, settings.defaultModel);
+  return model ? { provider, model } : null;
+}
+
+export function setApiProviderDefaultModel(
+  provider: Pick<ApiProviderConfig, "models" | "defaultModelId">,
+  modelId: string
+): boolean {
+  if (!getApiProviderModel(provider, modelId)) return false;
+  provider.defaultModelId = modelId;
+  return true;
+}
+
+export function apiProviderModelSupportsImage(
+  model: Pick<ApiProviderModelConfig, "input">
+): boolean {
+  return model.input.includes("image");
 }
 
 export function activateApiProvider(
@@ -716,9 +793,25 @@ export function activateApiProvider(
   >,
   provider: ApiProviderConfig
 ): void {
+  activateApiProviderModel(settings, provider, provider.defaultModelId);
+}
+
+export function activateApiProviderModel(
+  settings: Pick<
+    CodexForObsidianSettings,
+    | "providerMode"
+    | "activeApiProviderId"
+    | "defaultModel"
+  >,
+  provider: ApiProviderConfig,
+  modelId: string
+): void {
+  if (!getApiProviderModel(provider, modelId)) {
+    throw new Error("provider_model_unavailable");
+  }
   settings.providerMode = "custom-api";
   settings.activeApiProviderId = provider.id;
-  settings.defaultModel = provider.model;
+  settings.defaultModel = modelId;
 }
 
 export function clearApiProviderApiKey(
@@ -733,14 +826,20 @@ export function clearApiProviderApiKey(
   settings.activeApiProviderId = provider.id;
 }
 
-export function getApiProviderModels(provider: Pick<ApiProviderConfig, "model"> & Partial<Pick<ApiProviderConfig, "models">>): string[] {
-  return normalizeModelList([...(provider.models ?? []), provider.model]);
+export function getApiProviderModels(
+  provider: Pick<ApiProviderConfig, "models">
+): string[] {
+  return provider.models.map((model) => model.id);
 }
 
-export function providerModelLabel(provider: Pick<ApiProviderConfig, "model"> & Partial<Pick<ApiProviderConfig, "models">>, language: SettingsLanguage = "zh-CN"): string {
+export function providerModelLabel(
+  provider: Pick<ApiProviderConfig, "models" | "defaultModelId">,
+  language: SettingsLanguage = "zh-CN"
+): string {
   const models = getApiProviderModels(provider);
   if (!models.length) return language === "en" ? "No model set" : "未设置模型";
-  return models.length === 1 ? models[0] : language === "en" ? `${models[0]} + ${models.length - 1} more` : `${models[0]} 等 ${models.length} 个`;
+  const primary = provider.defaultModelId || models[0];
+  return models.length === 1 ? primary : language === "en" ? `${primary} + ${models.length - 1} more` : `${primary} 等 ${models.length} 个`;
 }
 
 export function sanitizeCredentialSettingsForDataSave(
@@ -840,15 +939,14 @@ function proxyUrlContainsCredential(value: unknown): boolean {
 export function validateApiProvider(provider: Pick<ApiProviderConfig,
   | "name"
   | "baseUrl"
-  | "model"
+  | "models"
+  | "defaultModelId"
   | "apiKey"
   | "apiProtocol"
   | "authMode"
   | "runtimeProviderId"
-  | "contextWindow"
-  | "maxOutputTokens"
 > & Partial<Pick<ApiProviderConfig,
-  "models" | "providerId"
+  "providerId"
 >>, language: SettingsLanguage = "zh-CN"): string[] {
   const errors: string[] = [];
   const providerId = normalizeApiProviderId(
@@ -880,19 +978,34 @@ export function validateApiProvider(provider: Pick<ApiProviderConfig,
       ? "Ollama must use an exact local loopback address"
       : "Ollama 只允许使用精确的本机 loopback 地址");
   }
-  if (!isValidApiProviderModelId(provider.model)) {
+  if (provider.models.length === 0) {
     errors.push(language === "en"
-      ? "Model ID is invalid"
-      : "Model ID 无效");
+      ? "Select at least one model"
+      : "至少选择一个模型");
+  }
+  const seenModelIds = new Set<string>();
+  for (const model of provider.models) {
+    if (
+      !isValidApiProviderModelConfig(model)
+      || seenModelIds.has(model.id)
+    ) {
+      errors.push(language === "en"
+        ? "Model metadata is invalid"
+        : "模型元数据无效");
+      break;
+    }
+    seenModelIds.add(model.id);
+  }
+  if (
+    !isValidApiProviderModelId(provider.defaultModelId)
+    || !seenModelIds.has(provider.defaultModelId)
+  ) {
+    errors.push(language === "en"
+      ? "Choose a valid default model"
+      : "请选择有效的默认模型");
   }
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u.test(provider.runtimeProviderId)) {
     errors.push(language === "en" ? "Runtime Provider ID is invalid" : "Runtime Provider ID 无效");
-  }
-  if (!Number.isSafeInteger(provider.contextWindow) || provider.contextWindow < 1_024 || provider.contextWindow > 2_000_000) {
-    errors.push(language === "en" ? "Input context is invalid" : "输入 Context 无效");
-  }
-  if (!Number.isSafeInteger(provider.maxOutputTokens) || provider.maxOutputTokens < 1 || provider.maxOutputTokens > Math.min(provider.contextWindow, 1_000_000)) {
-    errors.push(language === "en" ? "Output context is invalid" : "输出 Context 无效");
   }
   if (
     apiProviderApiKeyRequired(providerId)
@@ -903,11 +1016,44 @@ export function validateApiProvider(provider: Pick<ApiProviderConfig,
   return errors;
 }
 
-export function isValidApiProviderModelId(value: unknown): boolean {
+export function isValidApiProviderModelId(value: unknown): value is string {
   return typeof value === "string"
     && value.length > 0
     && value.length <= 256
     && !/[\s\p{Cc}]/u.test(value);
+}
+
+export function isValidApiProviderModelConfig(
+  value: unknown
+): value is ApiProviderModelConfig {
+  const model = settingsRecord(value);
+  if (!model || !isValidApiProviderModelId(model.id)) return false;
+  if (
+    typeof model.displayName !== "string"
+    || !model.displayName.trim()
+    || !Array.isArray(model.input)
+    || !model.input.includes("text")
+    || model.input.some((entry) => entry !== "text" && entry !== "image")
+    || typeof model.toolCalling !== "boolean"
+    || typeof model.reasoning !== "boolean"
+    || !["preset", "unknown", "manual"].includes(String(model.metadataSource))
+  ) return false;
+  const contextWindow = model.contextWindow;
+  const modelMaxTokens = model.modelMaxTokens;
+  const maxOutputTokens = model.maxOutputTokens;
+  return Number.isSafeInteger(contextWindow)
+    && Number(contextWindow) >= 1_024
+    && Number(contextWindow) <= 2_000_000
+    && Number.isSafeInteger(modelMaxTokens)
+    && Number(modelMaxTokens) >= 1
+    && Number(modelMaxTokens) <= 1_000_000
+    && Number.isSafeInteger(maxOutputTokens)
+    && Number(maxOutputTokens) >= 1
+    && Number(maxOutputTokens) <= Math.min(
+      Number(contextWindow),
+      Number(modelMaxTokens),
+      1_000_000
+    );
 }
 
 export function removeApiProvider(settings: Pick<CodexForObsidianSettings, "providerMode" | "activeApiProviderId" | "apiProviders">, providerId: string): boolean {
@@ -1672,6 +1818,7 @@ function normalizeApiProviderSelection(settings: Pick<
   | "providerMode"
   | "activeApiProviderId"
   | "apiProviders"
+  | "defaultModel"
   | "openAICodexCredential"
 >): void {
   const active = getActiveApiProvider(settings);
@@ -1682,7 +1829,11 @@ function normalizeApiProviderSelection(settings: Pick<
       active,
       settings.openAICodexCredential
     )
-  ) return;
+  ) {
+    settings.defaultModel = getApiProviderModel(active, settings.defaultModel)?.id
+      ?? active.defaultModelId;
+    return;
+  }
   const first = settings.apiProviders.find((provider) =>
     apiProviderHasUsableCredential(
       provider,
@@ -1690,6 +1841,7 @@ function normalizeApiProviderSelection(settings: Pick<
     )
   );
   settings.activeApiProviderId = first?.id ?? "";
+  settings.defaultModel = first?.defaultModelId ?? "";
 }
 
 function normalizeApiProviders(value: unknown): ApiProviderConfig[] {
@@ -1703,13 +1855,6 @@ function normalizeApiProviders(value: unknown): ApiProviderConfig[] {
     const id = uniqueProviderId(sanitizeProviderId(record.id, index), usedIds, index);
     usedIds.add(id);
     const queryParams = normalizeQueryParams(record.queryParams);
-    const storedModels: unknown[] = Array.isArray(record.models)
-      ? record.models
-      : [];
-    const models = normalizeModelList([
-      ...storedModels,
-      record.model
-    ]);
     const name = typeof record.name === "string" ? record.name.trim() : "";
     const baseUrl = typeof record.baseUrl === "string" ? record.baseUrl.trim() : "";
     const providerId = normalizeApiProviderId(
@@ -1718,11 +1863,7 @@ function normalizeApiProviders(value: unknown): ApiProviderConfig[] {
       name
     );
     const preset = getApiProviderPreset(providerId);
-    const selectedModel = models[0] ?? preset.model;
-    const modelPreset = getApiProviderModelPreset(
-      providerId,
-      selectedModel
-    );
+    const modelSelection = normalizeApiProviderModels(record, providerId);
     return {
       id,
       providerId,
@@ -1745,34 +1886,8 @@ function normalizeApiProviders(value: unknown): ApiProviderConfig[] {
       authMode: apiProviderAuthMode(providerId),
       name: name || preset.name,
       baseUrl: baseUrl || preset.baseUrl,
-      model: selectedModel,
-      models: normalizeModelList([
-        ...models,
-        ...preset.models.map((model) => model.id)
-      ]),
-      modelSelection: record.modelSelection === "auto"
-        ? "auto"
-        : "model",
-      toolCalling: typeof record.toolCalling === "boolean"
-        ? record.toolCalling
-        : modelPreset?.toolCalling ?? true,
-      imageInput: typeof record.imageInput === "boolean"
-        ? record.imageInput
-        : modelPreset?.imageInput ?? false,
-      reasoning: typeof record.reasoning === "boolean"
-        ? record.reasoning
-        : modelPreset?.reasoning ?? false,
-      contextWindow: normalizePositiveInteger(
-        record.contextWindow,
-        modelPreset?.contextWindow ?? 64_000,
-        1_024,
-        2_000_000
-      ),
-      maxOutputTokens: normalizeApiProviderMaxOutputTokens({
-        storedValue: record.maxOutputTokens,
-        providerId,
-        modelPreset
-      }),
+      models: modelSelection.models,
+      defaultModelId: modelSelection.defaultModelId,
       apiKey: apiProviderAuthMode(providerId) === "oauth"
         ? ""
         : typeof record.apiKey === "string"
@@ -1783,29 +1898,167 @@ function normalizeApiProviders(value: unknown): ApiProviderConfig[] {
   });
 }
 
-function normalizeApiProviderMaxOutputTokens(input: Readonly<{
-  storedValue: unknown;
-  providerId: ApiProviderId;
-  modelPreset: ReturnType<typeof getApiProviderModelPreset>;
-}>): number {
-  const normalized = normalizePositiveInteger(
-    input.storedValue,
-    input.modelPreset?.maxOutputTokens ?? 8_192,
+function normalizeApiProviderModels(
+  provider: Record<string, unknown>,
+  providerId: ApiProviderId
+): Readonly<{
+  models: ApiProviderModelConfig[];
+  defaultModelId: string;
+}> {
+  const rawModels = Array.isArray(provider.models) ? provider.models : [];
+  const explicitRecords = rawModels
+    .map(settingsRecord)
+    .filter((record): record is Record<string, unknown> => Boolean(
+      record && isValidApiProviderModelId(record.id)
+    ));
+  const legacyModelId = isValidApiProviderModelId(provider.model)
+    ? String(provider.model).trim()
+    : rawModels.find(isValidApiProviderModelId)?.toString().trim()
+      ?? getApiProviderPreset(providerId).model;
+  const source = explicitRecords.length
+    ? explicitRecords.map((record) => normalizeStoredApiProviderModel(
+      record,
+      providerId
+    ))
+    : legacyModelId
+      ? [normalizeLegacyApiProviderModel(provider, providerId, legacyModelId)]
+      : [];
+  const models: ApiProviderModelConfig[] = [];
+  const seen = new Set<string>();
+  for (const model of source) {
+    if (!isValidApiProviderModelId(model.id) || seen.has(model.id)) continue;
+    seen.add(model.id);
+    models.push(model);
+  }
+  const requestedDefault = isValidApiProviderModelId(provider.defaultModelId)
+    ? String(provider.defaultModelId).trim()
+    : isValidApiProviderModelId(provider.model)
+      ? String(provider.model).trim()
+      : "";
+  if (requestedDefault && !seen.has(requestedDefault)) {
+    const model = createApiProviderModelConfig(providerId, requestedDefault);
+    seen.add(model.id);
+    models.unshift(model);
+  }
+  return {
+    models,
+    defaultModelId: seen.has(requestedDefault)
+      ? requestedDefault
+      : models[0]?.id ?? ""
+  };
+}
+
+function normalizeStoredApiProviderModel(
+  record: Record<string, unknown>,
+  providerId: ApiProviderId
+): ApiProviderModelConfig {
+  const id = String(record.id).trim();
+  if (record.metadataSource === "manual") {
+    return normalizeManualApiProviderModel(record, providerId, id);
+  }
+  const preset = getApiProviderModelPreset(providerId, id);
+  if (preset) return createApiProviderModelConfig(providerId, id);
+  const unknown = createApiProviderModelConfig(providerId, id);
+  unknown.displayName = normalizeText(record.displayName, id);
+  return unknown;
+}
+
+function normalizeLegacyApiProviderModel(
+  provider: Record<string, unknown>,
+  providerId: ApiProviderId,
+  modelId: string
+): ApiProviderModelConfig {
+  if (getApiProviderModelPreset(providerId, modelId)) {
+    return createApiProviderModelConfig(providerId, modelId);
+  }
+  const hasLegacyMetadata = [
+    "toolCalling",
+    "imageInput",
+    "reasoning",
+    "contextWindow",
+    "modelMaxTokens",
+    "maxOutputTokens"
+  ].some((key) => Object.hasOwn(provider, key));
+  return hasLegacyMetadata
+    ? normalizeManualApiProviderModel(provider, providerId, modelId)
+    : createApiProviderModelConfig(providerId, modelId);
+}
+
+function normalizeManualApiProviderModel(
+  record: Record<string, unknown>,
+  providerId: ApiProviderId,
+  modelId: string
+): ApiProviderModelConfig {
+  const preset = getApiProviderModelPreset(providerId, modelId);
+  const input = normalizeApiProviderModelInput(
+    record.input,
+    record.imageInput === true
+  );
+  const contextWindow = normalizePositiveInteger(
+    record.contextWindow,
+    preset?.contextWindow ?? 64_000,
+    1_024,
+    2_000_000
+  );
+  const modelMaxTokens = normalizePositiveInteger(
+    record.modelMaxTokens,
+    normalizePositiveInteger(
+      record.maxOutputTokens,
+      preset?.modelMaxTokens ?? 8_192,
+      1,
+      1_000_000
+    ),
     1,
     1_000_000
   );
-  // v44's exact 256K Kimi preset value is migrated to 64K. Lower user limits
-  // remain valid, while no Kimi request may exceed the product ceiling.
-  return apiProviderMaxOutputReserve(
-    input.providerId,
-    input.modelPreset?.id ?? "",
-    normalized
+  const maxOutputTokens = apiProviderMaxOutputReserve(
+    providerId,
+    modelId,
+    normalizePositiveInteger(
+      record.maxOutputTokens,
+      preset?.maxOutputTokens ?? Math.min(modelMaxTokens, 8_192),
+      1,
+      Math.min(contextWindow, modelMaxTokens, 1_000_000)
+    )
   );
+  return {
+    id: modelId,
+    displayName: normalizeText(
+      record.displayName,
+      preset?.displayName ?? modelId
+    ),
+    input,
+    toolCalling: typeof record.toolCalling === "boolean"
+      ? record.toolCalling
+      : preset?.toolCalling ?? false,
+    reasoning: typeof record.reasoning === "boolean"
+      ? record.reasoning
+      : preset?.reasoning ?? false,
+    contextWindow,
+    modelMaxTokens,
+    maxOutputTokens: Math.min(
+      maxOutputTokens,
+      contextWindow,
+      modelMaxTokens
+    ),
+    metadataSource: "manual"
+  };
+}
+
+function normalizeApiProviderModelInput(
+  value: unknown,
+  legacyImageInput: boolean
+): ApiProviderModelInput[] {
+  const entries = Array.isArray(value) ? value : [];
+  const image = legacyImageInput || entries.includes("image");
+  return image ? ["text", "image"] : ["text"];
 }
 
 function createDefaultApiProvider(): ApiProviderConfig {
   const preset = getApiProviderPreset("deepseek");
-  const modelPreset = preset.models[0];
+  const models = preset.model
+    ? [createApiProviderModelConfig(preset.id, preset.model)]
+    : [];
   return {
     id: "provider-default",
     providerId: preset.id,
@@ -1814,14 +2067,8 @@ function createDefaultApiProvider(): ApiProviderConfig {
     authMode: preset.authMode,
     name: preset.name,
     baseUrl: preset.baseUrl,
-    model: preset.model,
-    models: preset.models.map((model) => model.id),
-    modelSelection: "auto",
-    toolCalling: modelPreset.toolCalling,
-    imageInput: modelPreset.imageInput,
-    reasoning: modelPreset.reasoning,
-    contextWindow: modelPreset.contextWindow,
-    maxOutputTokens: modelPreset.maxOutputTokens,
+    models,
+    defaultModelId: models[0]?.id ?? "",
     apiKey: ""
   };
 }
@@ -1868,18 +2115,6 @@ function normalizeCredentialRef(value: unknown): string {
   return /^cred-[a-f0-9]{32}$/u.test(credentialRef)
     ? credentialRef
     : "";
-}
-
-function normalizeModelList(value: unknown[]): string[] {
-  const seen = new Set<string>();
-  const models: string[] = [];
-  for (const item of value) {
-    const model = typeof item === "string" ? item.trim() : "";
-    if (!model || seen.has(model)) continue;
-    seen.add(model);
-    models.push(model);
-  }
-  return models;
 }
 
 function sanitizeProviderId(value: unknown, index: number): string {

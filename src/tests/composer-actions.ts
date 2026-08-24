@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { renderComposerToolbar, type ComposerToolbarCallbacks, type ComposerToolbarState } from "../ui/codex-view/composer";
+import {
+  composerModelMenuState,
+  composerProviderModelOptions,
+  selectComposerModel
+} from "../ui/codex-view/composer-controller";
+import {
+  createApiProviderConfig,
+  createApiProviderModelConfig,
+  DEFAULT_SETTINGS
+} from "../settings/settings";
 
 export async function runComposerActionTests(): Promise<void> {
   const originalDocument = globalThis.document;
@@ -56,9 +66,101 @@ export async function runComposerActionTests(): Promise<void> {
     assert.match(css, /@keyframes echoink-animate-mic/u);
     assert.match(css, /prefers-reduced-motion:\s*reduce/u);
     console.log("PASS conversation-ui: Animate Icons Send/Mic preserve composer action semantics");
+    await assertExactComposerProviderModelSelection();
   } finally {
     (globalThis as unknown as { document?: Document }).document = originalDocument;
   }
+}
+
+async function assertExactComposerProviderModelSelection(): Promise<void> {
+  const settings = structuredClone(DEFAULT_SETTINGS);
+  const first = createApiProviderConfig("custom", "provider-first");
+  first.name = "First Provider";
+  first.baseUrl = "https://first.example/v1";
+  first.apiKey = "fixture-first-key";
+  first.models = [createApiProviderModelConfig("custom", "shared-model")];
+  first.defaultModelId = "shared-model";
+  const second = createApiProviderConfig("custom", "provider-second");
+  second.name = "Second Provider";
+  second.baseUrl = "https://second.example/v1";
+  second.apiKey = "fixture-second-key";
+  second.models = [createApiProviderModelConfig("custom", "shared-model")];
+  second.defaultModelId = "shared-model";
+  const missingCredential = createApiProviderConfig("custom", "provider-missing");
+  missingCredential.name = "Missing Credential";
+  missingCredential.baseUrl = "https://missing.example/v1";
+  missingCredential.models = [createApiProviderModelConfig("custom", "hidden-model")];
+  missingCredential.defaultModelId = "hidden-model";
+  settings.apiProviders = [first, second, missingCredential];
+  settings.activeApiProviderId = first.id;
+  settings.defaultModel = "shared-model";
+
+  let activationMode: "success" | "failure" | "busy" = "failure";
+  let renderCount = 0;
+  const host: any = {
+    plugin: {
+      settings,
+      activateApiProviderSettings: async (applyCandidate: (candidate: typeof settings) => void) => {
+        if (activationMode === "busy") {
+          throw new Error("EchoInk 正在处理其他请求，请稍后再试。");
+        }
+        if (activationMode === "failure") throw new Error("runtime-create-failed");
+        applyCandidate(settings);
+      },
+      saveSettings: async () => undefined
+    },
+    running: false,
+    selectedProviderSettingsId: first.id,
+    selectedModel: "shared-model",
+    selectedReasoning: settings.defaultReasoning,
+    selectedServiceTier: settings.defaultServiceTier,
+    selectedPermission: settings.defaultPermission,
+    selectedMode: settings.defaultMode,
+    effectiveModel: () => host.selectedModel,
+    renderToolbar: () => { renderCount += 1; }
+  };
+
+  const options = composerProviderModelOptions(host);
+  assert.deepEqual(
+    options.map((option) => [option.providerSettingsId, option.modelId]),
+    [[first.id, "shared-model"], [second.id, "shared-model"]],
+    "same model IDs must retain their Provider settings identity"
+  );
+  assert.deepEqual(
+    composerModelMenuState(host).providerModels.map((option) => option.providerName),
+    ["First Provider", "Second Provider"]
+  );
+
+  assert.equal(await selectComposerModel(host, {
+    providerSettingsId: second.id,
+    modelId: "shared-model"
+  }), false);
+  assert.equal(host.selectedProviderSettingsId, first.id);
+  assert.equal(settings.activeApiProviderId, first.id);
+  assert.equal(renderCount, 0);
+
+  activationMode = "busy";
+  host.running = true;
+  assert.equal(await selectComposerModel(host, {
+    providerSettingsId: second.id,
+    modelId: "shared-model"
+  }), false);
+  assert.equal(host.selectedProviderSettingsId, first.id);
+  assert.equal(settings.activeApiProviderId, first.id);
+  assert.equal(renderCount, 0);
+
+  activationMode = "success";
+  host.running = false;
+  assert.equal(await selectComposerModel(host, {
+    providerSettingsId: second.id,
+    modelId: "shared-model"
+  }), true);
+  assert.equal(host.selectedProviderSettingsId, second.id);
+  assert.equal(host.selectedModel, "shared-model");
+  assert.equal(settings.activeApiProviderId, second.id);
+  assert.equal(settings.defaultModel, "shared-model");
+  assert.equal(renderCount, 1);
+  console.log("PASS conversation-ui: Composer preserves exact Provider/model identity and transactional rollback");
 }
 
 function renderAction(overrides: Partial<ComposerToolbarState> = {}) {

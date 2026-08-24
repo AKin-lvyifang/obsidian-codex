@@ -131,7 +131,8 @@ import type {
   PiProviderRuntimeConfigPort
 } from "../harness/pi/production-pi-model-resolver";
 import {
-  getActiveApiProvider,
+  apiProviderModelSupportsImage,
+  getActiveApiProviderModel,
   selectActiveConversationSession,
   type ApiProviderConfig,
   type CodexForObsidianSettings,
@@ -140,8 +141,6 @@ import {
 } from "../settings/settings";
 import {
   apiProviderApiKeyRequired,
-  apiProviderMaxOutputReserve,
-  apiProviderModelMaxTokens,
   isLoopbackApiProviderUrl,
   normalizeApiProviderBaseUrl,
   normalizeApiProviderId,
@@ -1929,13 +1928,14 @@ function resolveProvider(
   modelMaxTokens: number;
   maxOutputTokens: number;
 } {
-  const provider = getActiveApiProvider(settings);
-  if (!provider || settings.providerMode !== "custom-api") {
+  const active = getActiveApiProviderModel(settings);
+  if (!active || settings.providerMode !== "custom-api") {
     throw new PiProductionConfigurationError(
       "provider_not_configured",
       "请先在 EchoInk 设置中配置 Provider、API URL 和 API Key。"
     );
   }
+  const { provider, model } = active;
   const productProviderId = normalizeApiProviderId(
     provider.providerId,
     provider.baseUrl,
@@ -1996,7 +1996,7 @@ function resolveProvider(
       "当前 Provider runtime identity 无效。"
     );
   }
-  const modelRef = provider.model.trim();
+  const modelRef = model.id.trim();
   if (!modelRef) {
     throw new PiProductionConfigurationError(
       "provider_unsupported",
@@ -2004,13 +2004,17 @@ function resolveProvider(
     );
   }
   if (
-    !Number.isSafeInteger(provider.contextWindow)
-    || provider.contextWindow < 1_024
-    || provider.contextWindow > 2_000_000
-    || !Number.isSafeInteger(provider.maxOutputTokens)
-    || provider.maxOutputTokens < 1
-    || provider.maxOutputTokens > Math.min(
-      provider.contextWindow,
+    !Number.isSafeInteger(model.contextWindow)
+    || model.contextWindow < 1_024
+    || model.contextWindow > 2_000_000
+    || !Number.isSafeInteger(model.modelMaxTokens)
+    || model.modelMaxTokens < 1
+    || model.modelMaxTokens > 1_000_000
+    || !Number.isSafeInteger(model.maxOutputTokens)
+    || model.maxOutputTokens < 1
+    || model.maxOutputTokens > Math.min(
+      model.contextWindow,
+      model.modelMaxTokens,
       1_000_000
     )
   ) {
@@ -2027,20 +2031,12 @@ function resolveProvider(
     baseUrl,
     modelRef,
     apiKey,
-    toolCalling: provider.toolCalling,
-    imageInput: provider.imageInput,
-    reasoning: provider.reasoning,
-    contextWindow: provider.contextWindow,
-    modelMaxTokens: apiProviderModelMaxTokens(
-      productProviderId,
-      modelRef,
-      provider.maxOutputTokens
-    ),
-    maxOutputTokens: apiProviderMaxOutputReserve(
-      productProviderId,
-      modelRef,
-      provider.maxOutputTokens
-    )
+    toolCalling: model.toolCalling,
+    imageInput: apiProviderModelSupportsImage(model),
+    reasoning: model.reasoning,
+    contextWindow: model.contextWindow,
+    modelMaxTokens: model.modelMaxTokens,
+    maxOutputTokens: model.maxOutputTokens
   };
 }
 

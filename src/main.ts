@@ -11,8 +11,10 @@ import type { EchoInkResource } from "./resources/types";
 import { enabledSkillResources } from "./resources/registry";
 import type { ReviewManager } from "./review/manager";
 import {
+  apiProviderModelSupportsImage,
   apiProviderHasUsableCredential,
   getActiveApiProvider,
+  getActiveApiProviderModel,
   type ChatMessage,
   type CodexForObsidianSettings,
   type KnowledgeBaseSettings,
@@ -1065,6 +1067,31 @@ export default class CodexForObsidianPlugin extends Plugin {
     }
     return this.piProviderConfigurationService;
   }
+  private activePiProviderConfigurationDraft(): PiProviderConfigurationDraft {
+    const active = getActiveApiProviderModel(this.settings);
+    if (!active) throw new Error("请先在 API Provider 中选择可用模型。");
+    const { provider, model } = active;
+    return {
+      providerSettingsId: provider.id,
+      providerId: normalizeApiProviderId(
+        provider.providerId,
+        provider.baseUrl,
+        provider.name
+      ),
+      runtimeProviderId: provider.runtimeProviderId,
+      apiProtocol: provider.apiProtocol,
+      authMode: provider.authMode,
+      baseUrl: provider.baseUrl,
+      modelId: model.id,
+      apiKey: "",
+      toolCalling: model.toolCalling,
+      imageInput: apiProviderModelSupportsImage(model),
+      reasoning: model.reasoning,
+      contextWindow: model.contextWindow,
+      modelMaxTokens: model.modelMaxTokens,
+      maxOutputTokens: model.maxOutputTokens
+    };
+  }
   private getOpenAICodexOAuthService(): OpenAICodexOAuthService {
     if (!this.openAICodexOAuthService) {
       this.openAICodexOAuthService = new OpenAICodexOAuthService(this);
@@ -1075,28 +1102,8 @@ export default class CodexForObsidianPlugin extends Plugin {
     if (!this.editorTranslation) {
       this.editorTranslation = new EditorTranslationService({
         generateEnglishTranslation: async (input) => {
-          const provider = getActiveApiProvider(this.settings);
-          if (!provider) throw new Error("请先在 API Provider 中选择可用模型。");
           return await this.getPiProviderConfigurationService().generateText({
-            draft: {
-              providerSettingsId: provider.id,
-              providerId: normalizeApiProviderId(
-                provider.providerId,
-                provider.baseUrl,
-                provider.name
-              ),
-              runtimeProviderId: provider.runtimeProviderId,
-              apiProtocol: provider.apiProtocol,
-              authMode: provider.authMode,
-              baseUrl: provider.baseUrl,
-              modelId: provider.model,
-              apiKey: "",
-              toolCalling: false,
-              imageInput: false,
-              reasoning: provider.reasoning,
-              contextWindow: provider.contextWindow,
-              maxOutputTokens: provider.maxOutputTokens
-            },
+            draft: this.activePiProviderConfigurationDraft(),
             systemPrompt: input.systemPrompt,
             userPrompt: input.userPrompt,
             timeoutMs: input.timeoutMs,
@@ -1155,29 +1162,10 @@ export default class CodexForObsidianPlugin extends Plugin {
 
   /** One-shot dream LLM port; null when no Provider is configured. */
   private createDreamLlmPort(): DreamLlmPort | null {
-    const provider = getActiveApiProvider(this.settings);
-    if (!provider) return null;
+    if (!getActiveApiProviderModel(this.settings)) return null;
     return {
       call: async (input) => await this.getPiProviderConfigurationService().generateText({
-        draft: {
-          providerSettingsId: provider.id,
-          providerId: normalizeApiProviderId(
-            provider.providerId,
-            provider.baseUrl,
-            provider.name
-          ),
-          runtimeProviderId: provider.runtimeProviderId,
-          apiProtocol: provider.apiProtocol,
-          authMode: provider.authMode,
-          baseUrl: provider.baseUrl,
-          modelId: provider.model,
-          apiKey: "",
-          toolCalling: false,
-          imageInput: false,
-          reasoning: provider.reasoning,
-          contextWindow: provider.contextWindow,
-          maxOutputTokens: provider.maxOutputTokens
-        },
+        draft: this.activePiProviderConfigurationDraft(),
         systemPrompt: input.systemPrompt,
         userPrompt: input.userPrompt,
         timeoutMs: 120_000,
@@ -1190,28 +1178,8 @@ export default class CodexForObsidianPlugin extends Plugin {
     if (!this.personalMemoryCorrection) {
       this.personalMemoryCorrection = new PersonalMemoryCorrectionService({
         generateCorrection: async (input) => {
-          const provider = getActiveApiProvider(this.settings);
-          if (!provider) throw new Error("请先在 API Provider 中选择可用模型。");
           return await this.getPiProviderConfigurationService().generateText({
-            draft: {
-              providerSettingsId: provider.id,
-              providerId: normalizeApiProviderId(
-                provider.providerId,
-                provider.baseUrl,
-                provider.name
-              ),
-              runtimeProviderId: provider.runtimeProviderId,
-              apiProtocol: provider.apiProtocol,
-              authMode: provider.authMode,
-              baseUrl: provider.baseUrl,
-              modelId: provider.model,
-              apiKey: "",
-              toolCalling: false,
-              imageInput: false,
-              reasoning: provider.reasoning,
-              contextWindow: provider.contextWindow,
-              maxOutputTokens: provider.maxOutputTokens
-            },
+            draft: this.activePiProviderConfigurationDraft(),
             systemPrompt: input.systemPrompt,
             userPrompt: input.userPrompt,
             timeoutMs: input.timeoutMs,

@@ -22,8 +22,8 @@ import {
   type KnowledgeInitializationRecovery
 } from "./knowledge-initialization-recovery";
 import {
-  apiProviderHasUsableApiKey,
-  getActiveApiProvider,
+  apiProviderHasUsableCredential,
+  getActiveApiProviderModel,
   validateApiProvider
 } from "./settings";
 import { createSettingsSection, createSettingsState } from "./settings-v2";
@@ -1379,10 +1379,13 @@ export class KnowledgeInitializationSection {
 
   /** 当前设置派生的可用 Provider 快照；不可用时为 null。 */
   private currentProviderSnapshot(): KnowledgeInitializationProviderSnapshot | null {
-    const provider = getActiveApiProvider(this.plugin.settings);
-    if (!provider || !apiProviderHasUsableApiKey(provider)) return null;
-    if (validateApiProvider(provider).length > 0) return null;
-    return { providerId: provider.id, model: provider.model };
+    const active = getActiveApiProviderModel(this.plugin.settings);
+    if (!active || !apiProviderHasUsableCredential(
+      active.provider,
+      this.plugin.settings.openAICodexCredential
+    )) return null;
+    if (validateApiProvider(active.provider).length > 0) return null;
+    return { providerId: active.provider.id, model: active.model.id };
   }
 
   private currentProviderReady(): boolean {

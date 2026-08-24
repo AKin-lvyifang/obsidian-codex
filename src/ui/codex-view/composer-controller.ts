@@ -3,7 +3,10 @@ import type CodexForObsidianPlugin from "../../main";
 import { enabledSkillResources } from "../../resources/registry";
 import type { EchoInkResource } from "../../resources/types";
 import {
+  activateApiProviderModel,
+  apiProviderHasUsableCredential,
   getActiveApiProvider,
+  getApiProviderModel,
   type StoredAttachment,
   type StoredSession
 } from "../../settings/settings";
@@ -29,7 +32,8 @@ import {
   openModelMenu as showModelMenu,
   openSkillMenu as showSkillMenu,
   renderKnowledgeCommandMatches as renderKnowledgeCommandMatchesView,
-  renderSkillMatches as renderSkillMatchesView
+  renderSkillMatches as renderSkillMatchesView,
+  type ComposerProviderModelOption
 } from "./menus";
 import { normalizeWorkspacePath, workspaceDirectoryExists, workspaceDisplayName } from "./workspace-utils";
 import {
@@ -69,6 +73,7 @@ export interface CodexComposerHost {
   draggedQueueItemId: string;
   selectedSkill: EchoInkResource | null;
   attachments: StoredAttachment[];
+  selectedProviderSettingsId: string;
   selectedModel: string;
   selectedReasoning: ReasoningEffort;
   selectedServiceTier: ServiceTierChoice;
@@ -81,7 +86,6 @@ export interface CodexComposerHost {
   activeRunSessionId: string;
   ensureSession(): StoredSession;
   currentEchoInkResourceCatalog(): EchoInkResource[];
-  activeProviderModels(): string[];
   effectiveModel(): string;
   renderToolbar(): void;
   renderMessages(options?: {
@@ -463,7 +467,7 @@ export async function submitKnowledgeBaseCommand(host: CodexComposerHost, comman
 
 export function openModelMenu(host: CodexComposerHost, event: MouseEvent): void {
   showModelMenu(event, composerModelMenuState(host), {
-    onSelectModel: (model) => selectComposerModel(host, model),
+    onSelectModel: (selection) => void selectComposerModel(host, selection),
     onSelectReasoning: (reasoning) => selectComposerReasoning(host, reasoning),
     onSelectServiceTier: (tier) => selectComposerServiceTier(host, tier),
     onSelectMode: (mode) => selectComposerMode(host, mode)
@@ -472,21 +476,80 @@ export function openModelMenu(host: CodexComposerHost, event: MouseEvent): void 
 
 export function composerModelMenuState(host: CodexComposerHost) {
   return {
-    providerModels: host.activeProviderModels(),
-    availableModels: [],
+    providerModels: composerProviderModelOptions(host),
+    selectedProviderSettingsId: host.selectedProviderSettingsId,
     selectedModel: host.selectedModel,
-    defaultModel: host.plugin.settings.defaultModel,
-    effectiveModel: host.effectiveModel(),
     selectedReasoning: host.selectedReasoning,
     selectedServiceTier: host.selectedServiceTier,
     selectedMode: host.selectedMode
   };
 }
 
-export function selectComposerModel(host: CodexComposerHost, model: string): void {
-  host.selectedModel = model;
-  persistComposerDefaults(host);
+export function composerProviderModelOptions(
+  host: Pick<CodexComposerHost, "plugin">
+): ComposerProviderModelOption[] {
+  const settings = host.plugin.settings;
+  return settings.apiProviders.flatMap((provider) =>
+    apiProviderHasUsableCredential(provider, settings.openAICodexCredential)
+      ? provider.models.map((model) => ({
+          providerSettingsId: provider.id,
+          providerName: provider.name,
+          modelId: model.id,
+          modelName: model.displayName || model.id
+        }))
+      : []
+  );
+}
+
+export async function selectComposerModel(
+  host: CodexComposerHost,
+  selection: Readonly<{
+    providerSettingsId: string;
+    modelId: string;
+  }>
+): Promise<boolean> {
+  const target = host.plugin.settings.apiProviders.find(
+    (provider) => provider.id === selection.providerSettingsId
+  );
+  const targetModel = target && getApiProviderModel(target, selection.modelId);
+  if (
+    !target
+    || !targetModel
+    || !apiProviderHasUsableCredential(
+      target,
+      host.plugin.settings.openAICodexCredential
+    )
+  ) {
+    new Notice("所选 Provider 或模型已不可用，请先检查 Provider 设置");
+    return false;
+  }
+  try {
+    await host.plugin.activateApiProviderSettings((settings) => {
+      const candidate = settings.apiProviders.find(
+        (provider) => provider.id === selection.providerSettingsId
+      );
+      if (
+        !candidate
+        || !apiProviderHasUsableCredential(
+          candidate,
+          settings.openAICodexCredential
+        )
+      ) {
+        throw new Error("Provider authentication unavailable");
+      }
+      activateApiProviderModel(settings, candidate, selection.modelId);
+    });
+  } catch (error) {
+    new Notice(
+      `切换 Provider/模型失败：${error instanceof Error ? error.message : String(error)}`
+    );
+    return false;
+  }
+  host.selectedProviderSettingsId = selection.providerSettingsId;
+  host.selectedModel = selection.modelId;
   host.renderToolbar();
+  new Notice(`已切换到 ${target.name} · ${targetModel.displayName || targetModel.id}`);
+  return true;
 }
 
 export function selectComposerReasoning(host: CodexComposerHost, reasoning: ReasoningEffort): void {
@@ -512,7 +575,7 @@ export function currentComposerSummary(host: CodexComposerHost): string {
 }
 
 export function currentComposerSummaryTitle(host: CodexComposerHost): string {
-  return `模型：${host.effectiveModel() || "自动"}\n打开模型和运行参数`;
+  return `模型：${host.effectiveModel() || "未选择"}\n打开模型和运行参数`;
 }
 
 export function currentComposerProviderBrand(host: CodexComposerHost): ProviderBrandId {

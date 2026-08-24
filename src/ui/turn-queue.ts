@@ -45,8 +45,13 @@ export class RuntimeTurnQueue {
   }
 
   dequeueNext(sessionId: string): QueuedTurnItem | null {
+    return this.consumeNext(sessionId);
+  }
+
+  consumeNext(sessionId: string, expectedItemId?: string): QueuedTurnItem | null {
     const queue = this.sessions.get(sessionId);
     if (!queue || queue.paused || queue.recoveryRequired) return null;
+    if (expectedItemId && queue.items[0]?.id !== expectedItemId) return null;
     const item = queue.items.shift();
     this.cleanupEmptySession(sessionId);
     return item ? cloneQueuedTurnItem(item) : null;

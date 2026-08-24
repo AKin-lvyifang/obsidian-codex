@@ -1,8 +1,7 @@
 import { Menu, Notice, setIcon } from "obsidian";
-import { DEFAULT_SETTINGS, ensureModelChoices } from "../../settings/settings";
 import { filterSkillResources } from "../../resources/registry";
 import type { EchoInkResource } from "../../resources/types";
-import type { CodexModel, ReasoningEffort, ServiceTierChoice, UiMode } from "../../types/app-server";
+import type { ReasoningEffort, ServiceTierChoice, UiMode } from "../../types/app-server";
 import { knowledgeCommandOptions, type KnowledgeBaseCommandOption } from "../../knowledge-base/commands";
 import { selectKnowledgeCommandItem, setKnowledgeCommandMenuOpen } from "../knowledge-command-menu";
 import { labelFor } from "./composer";
@@ -49,18 +48,26 @@ export interface WorkspaceMenuCallbacks {
 }
 
 export interface ModelMenuState {
-  providerModels: string[];
-  availableModels: CodexModel[];
+  providerModels: ComposerProviderModelOption[];
+  selectedProviderSettingsId: string;
   selectedModel: string;
-  defaultModel: string;
-  effectiveModel: string;
   selectedReasoning: ReasoningEffort;
   selectedServiceTier: ServiceTierChoice;
   selectedMode: UiMode;
 }
 
+export interface ComposerProviderModelOption {
+  providerSettingsId: string;
+  providerName: string;
+  modelId: string;
+  modelName: string;
+}
+
 export interface ModelMenuCallbacks {
-  onSelectModel: (model: string) => void;
+  onSelectModel: (selection: Readonly<{
+    providerSettingsId: string;
+    modelId: string;
+  }>) => void;
   onSelectReasoning: (reasoning: ReasoningEffort) => void;
   onSelectServiceTier: (tier: ServiceTierChoice) => void;
   onSelectMode: (mode: UiMode) => void;
@@ -77,6 +84,9 @@ interface ComposerParameterOption {
   value: string;
   label: string;
   selected: boolean;
+  group?: string;
+  groupId?: string;
+  providerSettingsId?: string;
 }
 
 interface ComposerParameterSection {
@@ -85,7 +95,7 @@ interface ComposerParameterSection {
   label: string;
   currentValue: string;
   options: ComposerParameterOption[];
-  onSelect: (value: string) => void;
+  onSelect: (option: ComposerParameterOption) => void;
 }
 
 interface ActiveComposerParameterMenu {
@@ -285,34 +295,37 @@ export function renderKnowledgeCommandMatches(
   selectKnowledgeCommandItem(input, container, index > 0 ? 0 : -1);
 }
 
-function modelChoicesForState(state: ModelMenuState): CodexModel[] {
-  return state.providerModels.length
-    ? ensureModelChoices([], ...state.providerModels)
-    : ensureModelChoices(state.availableModels, state.selectedModel, state.defaultModel, DEFAULT_SETTINGS.defaultModel);
-}
-
 function parameterSections(
   state: ModelMenuState,
   callbacks: ModelMenuCallbacks,
   includeRuntimeOptions: boolean
 ): ComposerParameterSection[] {
-  const models = modelChoicesForState(state);
-  const selectedModel = models.find((model) => model.model === state.selectedModel || model.model === state.effectiveModel);
+  const selectedModel = state.providerModels.find((model) =>
+    model.providerSettingsId === state.selectedProviderSettingsId
+    && model.modelId === state.selectedModel
+  );
   const sections: ComposerParameterSection[] = [
     {
       id: "model",
       icon: "box",
       label: "模型",
-      currentValue: state.selectedModel ? selectedModel?.displayName || selectedModel?.model || state.selectedModel : "自动",
-      options: [
-        { value: "", label: "自动", selected: !state.selectedModel },
-        ...models.map((model) => ({
-          value: model.model,
-          label: model.displayName || model.model,
-          selected: Boolean(state.selectedModel) && (state.selectedModel === model.model || state.effectiveModel === model.model)
-        }))
-      ],
-      onSelect: callbacks.onSelectModel
+      currentValue: selectedModel?.modelName || state.selectedModel || "未选择",
+      options: state.providerModels.map((model) => ({
+        value: model.modelId,
+        label: model.modelName,
+        selected: model.providerSettingsId === state.selectedProviderSettingsId
+          && model.modelId === state.selectedModel,
+        group: model.providerName,
+        groupId: model.providerSettingsId,
+        providerSettingsId: model.providerSettingsId
+      })),
+      onSelect: (option) => {
+        if (!option.providerSettingsId) return;
+        callbacks.onSelectModel({
+          providerSettingsId: option.providerSettingsId,
+          modelId: option.value
+        });
+      }
     },
     {
       id: "reasoning",
@@ -324,7 +337,7 @@ function parameterSections(
         label: labelFor(effort),
         selected: state.selectedReasoning === effort
       })),
-      onSelect: (value) => callbacks.onSelectReasoning(value as ReasoningEffort)
+      onSelect: (option) => callbacks.onSelectReasoning(option.value as ReasoningEffort)
     }
   ];
   if (!includeRuntimeOptions) return sections;
@@ -341,7 +354,7 @@ function parameterSections(
         label: labelFor(tier),
         selected: state.selectedServiceTier === tier
       })),
-      onSelect: (value) => runtimeCallbacks.onSelectServiceTier(value as ServiceTierChoice)
+      onSelect: (option) => runtimeCallbacks.onSelectServiceTier(option.value as ServiceTierChoice)
     },
     {
       id: "mode",
@@ -353,7 +366,7 @@ function parameterSections(
         label: labelFor(mode),
         selected: state.selectedMode === mode
       })),
-      onSelect: (value) => runtimeCallbacks.onSelectMode(value as UiMode)
+      onSelect: (option) => runtimeCallbacks.onSelectMode(option.value as UiMode)
     }
   );
   return sections;
@@ -512,7 +525,16 @@ function openParameterSubmenu(
   panel.setAttribute("aria-label", section.label);
   panel.setCssStyles({ visibility: "hidden" });
   panel.createDiv({ cls: "codex-parameter-submenu-title", text: section.label });
+  let previousGroupId = "";
   for (const option of section.options) {
+    if (option.group && option.groupId !== previousGroupId) {
+      panel.createDiv({
+        cls: "codex-parameter-option-group",
+        text: option.group,
+        attr: { role: "presentation" }
+      });
+      previousGroupId = option.groupId ?? option.group;
+    }
     const button = panel.createEl("button", {
       cls: `codex-parameter-menu-item codex-parameter-option${option.selected ? " is-selected" : ""}`,
       attr: {
@@ -528,7 +550,7 @@ function openParameterSubmenu(
       clickEvent.preventDefault();
       clickEvent.stopPropagation();
       closeComposerParameterMenu();
-      section.onSelect(option.value);
+      section.onSelect(option);
     };
   }
   panel.onkeydown = (keyEvent) => {

@@ -13,7 +13,13 @@ import {
   type PiChatUiViewModel
 } from "../../harness/pi-native/pi-chat-ui-projector";
 import type { ChatMessage, StoredSession } from "../../settings/settings";
-import { newId } from "../../settings/settings";
+import {
+  activateApiProviderModel,
+  apiProviderHasUsableCredential,
+  getApiProviderModel,
+  newId,
+  validateApiProvider
+} from "../../settings/settings";
 import { composerPrimaryActionForState } from "../composer-state";
 import { canStartQueuedTurn, type QueuedTurnItem } from "../turn-queue";
 import { enabledSkillResources } from "../../resources/registry";
@@ -246,7 +252,7 @@ export async function startNextQueuedTurn(view: CodexViewTurnContext, sessionId:
     viewRunning: view.running,
     knowledgeTaskRunning: false
   })) return;
-  const item = view.turnQueue.dequeueNext(sessionId);
+  const item = view.turnQueue.peekNext(sessionId);
   if (!item) {
     view.renderQueue();
     view.renderToolbar();
@@ -256,13 +262,33 @@ export async function startNextQueuedTurn(view: CodexViewTurnContext, sessionId:
   view.renderQueue();
   view.renderToolbar();
   let outcome: QueuedTurnOutcome = "failed";
+  let consumed: QueuedTurnItem | null = null;
+  let headChangedDuringActivation = false;
   try {
-    outcome = await view.startQueuedTurnItemSafely(item, "queue");
+    if (!await prepareTurnProviderModel(view, item, true)) {
+      view.turnQueue.pauseSessionQueue(sessionId);
+      return;
+    }
+    consumed = view.turnQueue.consumeNext(sessionId, item.id);
+    if (!consumed) {
+      headChangedDuringActivation = true;
+    } else {
+      outcome = await startPreparedQueuedTurnItemSafely(view, consumed, "queue");
+    }
   } finally {
     view.queueStartInProgress = false;
+    view.renderQueue();
+    view.renderToolbar();
   }
-  if (outcome !== "running") {
-    await view.afterTurnSettled(item.sessionId, outcome === "completed");
+  if (headChangedDuringActivation) {
+    if (
+      view.turnQueue.hasQueuedItems(sessionId)
+      && !view.turnQueue.isSessionQueuePaused(sessionId)
+    ) await view.startNextQueuedTurn(sessionId);
+    return;
+  }
+  if (consumed && outcome !== "running") {
+    await view.afterTurnSettled(consumed.sessionId, outcome === "completed");
   }
 }
 
@@ -292,6 +318,15 @@ export async function createQueuedTurnFromComposer(view: CodexViewTurnContext, o
 }
 
 export async function startQueuedTurnItem(view: CodexViewTurnContext, item: QueuedTurnItem, source: QueuedTurnSource): Promise<QueuedTurnOutcome> {
+  if (!await prepareTurnProviderModel(view, item, false)) return "failed";
+  return await startPreparedQueuedTurnItem(view, item, source);
+}
+
+async function startPreparedQueuedTurnItem(
+  view: CodexViewTurnContext,
+  item: QueuedTurnItem,
+  source: QueuedTurnSource
+): Promise<QueuedTurnOutcome> {
   const session = view.sessionById(item.sessionId);
   if (!session) {
     new Notice("队列所属会话已不存在");
@@ -308,6 +343,80 @@ export async function startQueuedTurnItemSafely(view: CodexViewTurnContext, item
     new Notice(`任务收口失败：${message}`);
     return "failed";
   }
+}
+
+async function startPreparedQueuedTurnItemSafely(
+  view: CodexViewTurnContext,
+  item: QueuedTurnItem,
+  source: QueuedTurnSource
+): Promise<QueuedTurnOutcome> {
+  try {
+    return await startPreparedQueuedTurnItem(view, item, source);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    new Notice(`任务收口失败：${message}`);
+    return "failed";
+  }
+}
+
+async function prepareTurnProviderModel(
+  view: CodexViewTurnContext,
+  item: Pick<QueuedTurnItem, "turnOptions">,
+  retainQueueHead: boolean
+): Promise<boolean> {
+  const selection = item.turnOptions;
+  const settings = view.plugin.settings;
+  const target = settings.apiProviders.find(
+    (provider) => provider.id === selection.providerSettingsId
+  );
+  const targetModel = target && getApiProviderModel(target, selection.model);
+  if (
+    !target
+    || !targetModel
+    || !apiProviderHasUsableCredential(target, settings.openAICodexCredential)
+    || validateApiProvider(target).length > 0
+  ) {
+    new Notice(retainQueueHead
+      ? "队列所选 Provider 或模型已不可用；队首已保留并暂停，请检查 Provider 设置后继续。"
+      : "所选 Provider 或模型已不可用，请检查 Provider 设置后重试。");
+    return false;
+  }
+  if (
+    settings.providerMode === "custom-api"
+    && settings.activeApiProviderId === selection.providerSettingsId
+    && settings.defaultModel === selection.model
+  ) {
+    view.selectedProviderSettingsId = selection.providerSettingsId;
+    view.selectedModel = selection.model;
+    return true;
+  }
+  try {
+    await view.plugin.activateApiProviderSettings((candidateSettings) => {
+      const candidate = candidateSettings.apiProviders.find(
+        (provider) => provider.id === selection.providerSettingsId
+      );
+      if (
+        !candidate
+        || !apiProviderHasUsableCredential(
+          candidate,
+          candidateSettings.openAICodexCredential
+        )
+      ) {
+        throw new Error("Provider authentication unavailable");
+      }
+      activateApiProviderModel(candidateSettings, candidate, selection.model);
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    new Notice(retainQueueHead
+      ? `切换队列 Provider/模型失败；队首已保留并暂停：${detail}`
+      : `切换 Provider/模型失败：${detail}`);
+    return false;
+  }
+  view.selectedProviderSettingsId = selection.providerSettingsId;
+  view.selectedModel = selection.model;
+  view.renderToolbar();
+  return true;
 }
 
 export async function startChatTurn(view: CodexViewTurnContext, session: StoredSession, item: QueuedTurnItem, source: QueuedTurnSource): Promise<QueuedTurnOutcome> {
