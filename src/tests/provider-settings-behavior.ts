@@ -1564,9 +1564,94 @@ function assertSettingsAccessibleNamesAndOverflow(): void {
   tab.display();
   assert.match(tab.containerEl.textContent, /当前事实/u);
   assert.match(tab.containerEl.textContent, /用户可见的事实正文/u);
+  const correctionCard = tab.containerEl.querySelector<ProviderModalTestElement>(
+    ".echoink-memory-correction-row"
+  );
+  assert.ok(correctionCard, "the current Memory renders as one correction card");
+  const cardHeader = correctionCard.querySelector<ProviderModalTestElement>(
+    ".echoink-memory-card-header"
+  );
+  const cardFields = correctionCard.querySelector<ProviderModalTestElement>(
+    ".echoink-memory-card-fields"
+  );
+  assert.ok(cardHeader && cardFields);
+  assert.equal(correctionCard.children[0], cardHeader,
+    "the title and Correct action stay in the first card layer");
+  assert.equal(correctionCard.children[1], cardFields,
+    "the readable Memory fields follow the header");
+  assert.equal(
+    cardHeader.querySelector(".echoink-memory-card-title")?.textContent,
+    "当前事实"
+  );
+  assert.deepEqual(
+    cardFields.querySelectorAll(".echoink-memory-card-label")
+      .map((element) => element.textContent),
+    ["记忆内容", "召回时机"]
+  );
+  assert.deepEqual(
+    cardFields.querySelectorAll(".echoink-memory-card-body")
+      .map((element) => element.textContent),
+    ["用户可见的事实正文", "需要核对事实时"]
+  );
+  assert.deepEqual(
+    cardFields.children.map((element) => element.className),
+    [
+      "echoink-memory-card-field echoink-memory-card-content",
+      "echoink-memory-card-field echoink-memory-card-recall"
+    ]
+  );
+  const correctionActions = correctionCard.querySelectorAll<ProviderModalTestElement>("button");
+  assert.deepEqual(correctionActions.map((button) => button.textContent), ["修正"]);
+  assert.equal(correctionActions[0]?.closest(".echoink-memory-card-header"), cardHeader);
+  assert.equal(correctionCard.querySelectorAll("input, textarea, select").length, 0);
+  assert.equal(
+    correctionCard.querySelectorAll("*")
+      .some((element) => element.className.includes("echoink-secondary-")),
+    false
+  );
+  assert.doesNotMatch(
+    correctionCard.textContent,
+    /联想线索|AI 推断|Association clues|secondary/iu
+  );
   assert.doesNotMatch(
     tab.containerEl.textContent,
     /mem_ui_private_id|private-source|records\/facts|revision/u
+  );
+
+  settings.settingsLanguage = "en";
+  tab.display();
+  const englishCard = tab.containerEl.querySelector<ProviderModalTestElement>(
+    ".echoink-memory-correction-row"
+  );
+  assert.ok(englishCard);
+  assert.deepEqual(
+    englishCard.querySelectorAll(".echoink-memory-card-label")
+      .map((element) => element.textContent),
+    ["Memory content", "Recall when"]
+  );
+  assert.deepEqual(
+    englishCard.querySelectorAll("button").map((button) => button.textContent),
+    ["Correct"]
+  );
+  assert.doesNotMatch(englishCard.textContent, /Association clues|AI inferred/iu);
+  settings.settingsLanguage = "zh-CN";
+
+  const correctionCss = readFileSync("styles.css", "utf8");
+  const bodyRule = correctionCss.match(/\.echoink-memory-card-body\s*\{([^}]*)\}/u)?.[1] ?? "";
+  assert.match(bodyRule, /max-inline-size:\s*68ch;/u);
+  assert.match(bodyRule, /line-height:\s*1\.6;/u);
+  assert.match(bodyRule, /overflow-wrap:\s*anywhere;/u);
+  assert.match(bodyRule, /text-wrap:\s*pretty;/u);
+  assert.doesNotMatch(bodyRule, /(?:^|;)\s*(?:width|height)\s*:/u);
+  assert.match(
+    correctionCss,
+    /@container \(max-width:\s*360px\)\s*\{[\s\S]*?\.echoink-memory-card-header\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\);/u
+  );
+  assert.doesNotMatch(correctionCss, /\.echoink-secondary-/u);
+  const settingsTabSource = readFileSync("src/settings/settings-tab.ts", "utf8");
+  assert.doesNotMatch(
+    settingsTabSource,
+    /echoink-secondary-facts|listSecondaryForParent|renderSecondaryFactRow|openSecondaryFactEditor/u
   );
 
   settings.settingsTab = "general";

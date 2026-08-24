@@ -2,11 +2,6 @@ import { Notice, PluginSettingTab, Setting, setIcon } from "obsidian";
 import type CodexForObsidianPlugin from "../main";
 import type { PiConversationCatalogEntry } from "../harness/pi-native/contracts";
 import {
-  SECONDARY_CONTENT_MAX_CHARS,
-  SECONDARY_MAX_MATCH_TERMS,
-  SECONDARY_REASON_MAX_CHARS,
-  SECONDARY_RECALL_WHEN_MAX_CHARS,
-  SECONDARY_TITLE_MAX_CHARS,
   type PersonalMemoryKind,
   type PersonalMemoryRecord
 } from "../harness/memory/personal-memory-contracts";
@@ -2083,14 +2078,11 @@ export class CodexSettingTab extends PluginSettingTab {
     }
     for (const [recordIndex, record] of records.entries()) {
       const row = list.createDiv({ cls: "echoink-settings-compact-row echoink-memory-correction-row" });
-      const copy = row.createDiv({ cls: "echoink-settings-compact-copy" });
-      copy.createDiv({ cls: "echoink-settings-compact-title", text: record.title });
-      copy.createDiv({ cls: "echoink-settings-compact-description", text: record.content });
-      copy.createDiv({
-        cls: "echoink-settings-feature-meta",
-        text: `${zh ? "何时可能想起" : "When it may be recalled"}：${record.recallWhen}`
+      const header = row.createDiv({ cls: "echoink-memory-card-header" });
+      header.createDiv({ cls: "echoink-memory-card-title", text: record.title });
+      const actions = header.createDiv({
+        cls: "echoink-settings-compact-actions echoink-memory-card-actions"
       });
-      const actions = row.createDiv({ cls: "echoink-settings-compact-actions" });
       const correct = actions.createEl("button", {
         text: zh ? "修正" : "Correct",
         attr: {
@@ -2102,223 +2094,25 @@ export class CodexSettingTab extends PluginSettingTab {
       correct.disabled = this.memoryActionRunning;
       correct.onclick = () => void this.correctPersonalMemoryRecord(record);
 
-      // --- Association clues: collapsed by default ---
-      const secWrap = row.createDiv({ cls: "echoink-secondary-facts" });
-      const secToggle = secWrap.createEl("button", {
-        cls: "echoink-secondary-facts-toggle",
-        attr: { type: "button" }
+      const fields = row.createDiv({ cls: "echoink-memory-card-fields" });
+      const content = fields.createDiv({
+        cls: "echoink-memory-card-field echoink-memory-card-content"
       });
-      secToggle.setText(zh ? "联想线索·AI 推断（…）" : "Association clues · AI inferred (…)");
-      secWrap.createDiv({
-        cls: "echoink-settings-feature-meta",
-        text: zh
-          ? "联想线索只帮助系统在相关话题中召回一级 Memory，不代表用户确认。"
-          : "Association clues only help recall a primary Memory; they are not user-confirmed."
+      content.createDiv({
+        cls: "echoink-memory-card-label",
+        text: zh ? "记忆内容" : "Memory content"
       });
-      const secPanel = secWrap.createDiv({ cls: "echoink-secondary-facts-panel" });
-      secPanel.addClass("is-hidden");
-      let secOpen = false;
-      let secLoaded = false;
-      const refreshSecondaryPanel = async (): Promise<void> => {
-        try {
-          const system = await this.plugin.getCognitiveSystem();
-          const facts = [...(await system.listSecondaryForParent(record.id))]
-            .filter((fact) => fact.status === "current");
-          secToggle.setText(zh
-            ? `联想线索·AI 推断（${facts.length}）`
-            : `Association clues · AI inferred (${facts.length})`);
-          if (!secOpen) return;
-          secPanel.empty();
-          if (!facts.length) {
-            secPanel.createDiv({
-              cls: "echoink-secondary-empty",
-              text: zh ? "做梦还没有为这条记忆生成联想线索。" : "Dreaming has not generated association clues for this memory yet."
-            });
-            return;
-          }
-          for (const fact of facts) {
-            this.renderSecondaryFactRow(secPanel, fact, zh, () => void refreshSecondaryPanel());
-          }
-        } catch (error) {
-          console.error("EchoInk secondary facts load failed", error);
-          secToggle.setText(zh ? "联想线索读取失败" : "Failed to load association clues");
-        }
-      };
-      secToggle.onclick = () => {
-        secOpen = !secOpen;
-        secPanel.toggleClass("is-hidden", !secOpen);
-        if (secOpen && !secLoaded) secLoaded = true;
-        void refreshSecondaryPanel();
-      };
-      void refreshSecondaryPanel();
-    }
-  }
+      content.createDiv({ cls: "echoink-memory-card-body", text: record.content });
 
-  private renderSecondaryFactRow(
-    panel: HTMLElement,
-    fact: Readonly<import("../harness/memory/personal-memory-contracts").SecondaryMemoryRecord>,
-    zh: boolean,
-    onMutated: () => void
-  ): void {
-    const factRow = panel.createDiv({ cls: "echoink-secondary-fact-row" });
-    const head = factRow.createDiv({ cls: "echoink-secondary-fact-head" });
-    head.createSpan({
-      cls: "echoink-secondary-fact-badge",
-      text: fact.basis === "user_edited_inference"
-        ? (zh ? "联想线索·用户修正" : "Association clue · User edited")
-        : (zh ? "联想线索·AI 推断" : "Association clue · AI inferred")
-    });
-    const relationLabels: Record<string, string> = {
-      category: zh ? "分类" : "category",
-      instance: zh ? "具体实例" : "instance",
-      attribute: zh ? "属性" : "attribute",
-      context: zh ? "情境" : "context",
-      associated: zh ? "关联" : "associated"
-    };
-    head.createSpan({
-      cls: "echoink-secondary-fact-badge",
-      text: relationLabels[fact.relation] ?? fact.relation
-    });
-    head.createSpan({
-      cls: "echoink-secondary-fact-badge",
-      text: fact.confidence >= 0.75
-        ? (zh ? "参考强度：高" : "Reference strength: high")
-        : fact.confidence >= 0.6
-          ? (zh ? "参考强度：中" : "Reference strength: medium")
-          : (zh ? "参考强度：低" : "Reference strength: low")
-    });
-    head.createSpan({ cls: "echoink-secondary-fact-title", text: fact.title });
-    factRow.createDiv({ cls: "echoink-secondary-fact-content", text: fact.content });
-    factRow.createDiv({
-      cls: "echoink-settings-feature-meta",
-      text: `${zh ? "联想词" : "Match terms"}：${fact.matchTerms.join("、") || "—"}`
-    });
-    if (fact.reason) {
-      factRow.createDiv({
-        cls: "echoink-settings-feature-meta",
-        text: `${zh ? "依据" : "Reason"}：${fact.reason}`
+      const recall = fields.createDiv({
+        cls: "echoink-memory-card-field echoink-memory-card-recall"
       });
+      recall.createDiv({
+        cls: "echoink-memory-card-label",
+        text: zh ? "召回时机" : "Recall when"
+      });
+      recall.createDiv({ cls: "echoink-memory-card-body", text: record.recallWhen });
     }
-    const factActions = factRow.createDiv({ cls: "echoink-secondary-fact-actions" });
-    const editBtn = factActions.createEl("button", {
-      text: zh ? "编辑" : "Edit",
-      attr: { type: "button" }
-    });
-    const deleteBtn = factActions.createEl("button", {
-      text: zh ? "删除" : "Delete",
-      attr: { type: "button" }
-    });
-    editBtn.onclick = () => this.openSecondaryFactEditor(factRow, fact, zh, onMutated);
-    deleteBtn.onclick = () => {
-      void confirmModal(
-        this.app,
-        zh ? "删除联想线索" : "Delete association clue",
-        zh
-          ? `确定删除「${fact.title}」这条联想线索吗？一级 Memory 不受影响。`
-          : `Delete the association clue "${fact.title}"? The primary Memory is not affected.`,
-        zh ? "删除" : "Delete",
-        zh ? "取消" : "Cancel"
-      ).then((confirmed) => {
-        if (!confirmed) return;
-        void (async () => {
-          try {
-            const system = await this.plugin.getCognitiveSystem();
-            await system.deleteSecondaryFact(fact.parentId, fact.id, fact.revision);
-            new Notice(zh ? "联想线索已删除" : "Association clue deleted");
-            onMutated();
-          } catch (error) {
-            console.error("EchoInk secondary fact delete failed", error);
-            new Notice(zh ? "删除失败，请重试" : "Delete failed; please retry");
-          }
-        })();
-      });
-    };
-  }
-
-  private openSecondaryFactEditor(
-    factRow: HTMLElement,
-    fact: Readonly<import("../harness/memory/personal-memory-contracts").SecondaryMemoryRecord>,
-    zh: boolean,
-    onMutated: () => void
-  ): void {
-    factRow.empty();
-    const titleInput = factRow.createEl("input", {
-      cls: "echoink-secondary-edit-input",
-      attr: {
-        type: "text",
-        maxlength: String(SECONDARY_TITLE_MAX_CHARS),
-        placeholder: zh ? "标题" : "Title"
-      }
-    });
-    titleInput.value = fact.title;
-    const contentArea = factRow.createEl("textarea", {
-      cls: "echoink-secondary-edit-textarea",
-      attr: {
-        rows: "3",
-        maxlength: String(SECONDARY_CONTENT_MAX_CHARS),
-        placeholder: zh ? "内容" : "Content"
-      }
-    });
-    contentArea.value = fact.content;
-    const recallInput = factRow.createEl("input", {
-      cls: "echoink-secondary-edit-input",
-      attr: {
-        type: "text",
-        maxlength: String(SECONDARY_RECALL_WHEN_MAX_CHARS),
-        placeholder: zh ? "何时可能想起" : "When it may be recalled"
-      }
-    });
-    recallInput.value = fact.recallWhen;
-    const termsInput = factRow.createEl("input", {
-      cls: "echoink-secondary-edit-input",
-      attr: {
-        type: "text",
-        placeholder: zh
-          ? `匹配词（用逗号分隔，最多 ${SECONDARY_MAX_MATCH_TERMS} 个）`
-          : `Match terms (comma separated, max ${SECONDARY_MAX_MATCH_TERMS})`
-      }
-    });
-    termsInput.value = fact.matchTerms.join(", ");
-    const reasonInput = factRow.createEl("input", {
-      cls: "echoink-secondary-edit-input",
-      attr: {
-        type: "text",
-        maxlength: String(SECONDARY_REASON_MAX_CHARS),
-        placeholder: zh ? "推理依据（可选）" : "Reason (optional)"
-      }
-    });
-    reasonInput.value = fact.reason;
-    const editorActions = factRow.createDiv({ cls: "echoink-secondary-fact-actions" });
-    const saveBtn = editorActions.createEl("button", {
-      text: zh ? "保存" : "Save",
-      attr: { type: "button" }
-    });
-    const cancelBtn = editorActions.createEl("button", {
-      text: zh ? "取消" : "Cancel",
-      attr: { type: "button" }
-    });
-    cancelBtn.onclick = () => onMutated();
-    saveBtn.onclick = () => {
-      saveBtn.setAttr("disabled", "true");
-      void (async () => {
-        try {
-          const system = await this.plugin.getCognitiveSystem();
-          await system.updateSecondaryFact(fact.parentId, fact.id, {
-            title: titleInput.value,
-            content: contentArea.value,
-            recallWhen: recallInput.value,
-            matchTerms: termsInput.value.split(/[,，]/u).map((term) => term.trim()).filter(Boolean),
-            reason: reasonInput.value.trim()
-          }, fact.revision);
-          new Notice(zh ? "联想线索已更新" : "Association clue updated");
-          onMutated();
-        } catch (error) {
-          console.error("EchoInk secondary fact edit failed", error);
-          new Notice(zh ? "保存失败：请检查字段长度和匹配词" : "Save failed: check field lengths and match terms");
-          saveBtn.removeAttribute("disabled");
-        }
-      })();
-    };
   }
 
   private currentPersonalMemoryRecords(
