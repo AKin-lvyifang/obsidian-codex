@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { renderComposerToolbar, type ComposerToolbarCallbacks, type ComposerToolbarState } from "../ui/codex-view/composer";
+import {
+  composerAttachmentImageSrc,
+  renderComposerAttachments,
+  renderComposerToolbar,
+  type ComposerToolbarCallbacks,
+  type ComposerToolbarState
+} from "../ui/codex-view/composer";
 
 export async function runComposerActionTests(): Promise<void> {
   const originalDocument = globalThis.document;
@@ -47,15 +53,61 @@ export async function runComposerActionTests(): Promise<void> {
     assert.equal(disabled.primary.disabled, true);
     assert.equal(disabled.primary.getAttribute("aria-label"), "提示词增强中");
 
+    const attachmentContainer = new ComposerTestElement("div");
+    const removedAttachments: string[] = [];
+    renderComposerAttachments(
+      attachmentContainer as unknown as HTMLElement,
+      {
+        selectedSkill: null,
+        attachments: [
+          { type: "image", name: "cover #1.png", path: "/tmp/Echo Ink/cover #1.png" },
+          { type: "file", name: "requirements.md", path: "/tmp/Echo Ink/requirements.md" }
+        ]
+      },
+      {
+        onRemoveSkill: () => undefined,
+        onRemoveAttachment: (path) => removedAttachments.push(path)
+      }
+    );
+    const thumbnail = attachmentContainer.querySelector(".codex-attachment-thumbnail")!;
+    const image = thumbnail.querySelector("img")!;
+    assert.equal(image.src, "file:///tmp/Echo%20Ink/cover%20%231.png");
+    assert.equal(thumbnail.getAttribute("title"), "/tmp/Echo Ink/cover #1.png");
+    image.onerror?.();
+    assert.equal(thumbnail.hasClass("is-broken"), true, "unsupported image switches to its fallback");
+    assert.ok(thumbnail.querySelector(".codex-attachment-thumbnail-fallback"));
+    const imageRemove = thumbnail.querySelector(".codex-attachment-thumbnail-remove")!;
+    assert.equal(imageRemove.getAttribute("aria-label"), "移除图片：cover #1.png");
+    imageRemove.click();
+
+    const fileChip = attachmentContainer.querySelector(".codex-attachment-file-chip")!;
+    assert.equal(fileChip.getAttribute("title"), "/tmp/Echo Ink/requirements.md");
+    assert.equal(fileChip.querySelector(".codex-attachment-name")?.textContent, "requirements.md");
+    assert.ok(fileChip.querySelector(".codex-attachment-file-icon"));
+    const fileRemove = fileChip.querySelector(".codex-attachment-file-remove")!;
+    assert.equal(fileRemove.getAttribute("aria-label"), "移除文件：requirements.md");
+    fileRemove.click();
+    assert.deepEqual(removedAttachments, [
+      "/tmp/Echo Ink/cover #1.png",
+      "/tmp/Echo Ink/requirements.md"
+    ]);
+    assert.equal(composerAttachmentImageSrc("file:///tmp/already.png"), "file:///tmp/already.png");
+
     const composerSource = readFileSync("src/ui/codex-view/composer.ts", "utf8");
     const iconSource = readFileSync("src/ui/animate-icon.ts", "utf8");
     const css = readFileSync("styles.css", "utf8");
+    const turnRunnerSource = readFileSync("src/ui/codex-view/turn-runner.ts", "utf8");
     assert.doesNotMatch(composerSource, /send-horizontal/u);
     assert.match(iconSource, /M19 10v2a7 7 0 0 1-14 0v-2/u);
     assert.match(css, /@keyframes echoink-animate-send/u);
     assert.match(css, /@keyframes echoink-animate-mic/u);
     assert.match(css, /prefers-reduced-motion:\s*reduce/u);
-    console.log("PASS conversation-ui: Animate Icons Send/Mic preserve composer action semantics");
+    assert.match(css, /\.codex-attachment-thumbnail \{[\s\S]*?width:\s*72px;[\s\S]*?height:\s*72px;/u);
+    assert.match(css, /\.codex-attachment-thumbnail-image \{[\s\S]*?object-fit:\s*cover;/u);
+    assert.match(css, /\.codex-attachment-thumbnail-remove \{[\s\S]*?width:\s*26px;[\s\S]*?height:\s*26px;/u);
+    assert.match(css, /@media \(max-width:\s*560px\)[\s\S]*?\.codex-attachment-thumbnail \{[\s\S]*?width:\s*64px;[\s\S]*?height:\s*64px;/u);
+    assert.match(turnRunnerSource, /Pi Chat 的附件入口尚未完成切换，本轮没有发送/u);
+    console.log("PASS conversation-ui: composer actions and compact attachment presentation preserve send semantics");
   } finally {
     (globalThis as unknown as { document?: Document }).document = originalDocument;
   }
@@ -130,6 +182,10 @@ class ComposerTestElement {
   };
   className = "";
   disabled = false;
+  onerror: (() => void) | null = null;
+  onload: (() => void) | null = null;
+  src = "";
+  textContent = "";
   value = "";
   onclick: ((event?: unknown) => void) | null = null;
   onchange: (() => void) | null = null;
@@ -145,6 +201,7 @@ class ComposerTestElement {
   createEl(tagName: string, options: Record<string, any> = {}): ComposerTestElement {
     const element = new ComposerTestElement(tagName);
     if (options.cls) element.className = String(options.cls);
+    if (options.text !== undefined) element.textContent = String(options.text);
     for (const [name, value] of Object.entries(options.attr ?? {})) element.setAttribute(name, String(value));
     this.append(element);
     return element;

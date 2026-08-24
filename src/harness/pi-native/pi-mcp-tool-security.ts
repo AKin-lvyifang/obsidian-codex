@@ -37,10 +37,17 @@ type McpToolBlockReason =
   | "authorization_failed";
 
 export interface PiMcpApprovalConfirmationInput {
+  readonly requestId: string;
+  readonly conversationId: string;
+  readonly piSessionId: string;
+  readonly productRunId: string;
+  readonly toolCallId: string;
   readonly resourceName: string;
   readonly toolName: string;
   readonly destructive: boolean;
   readonly arguments: JsonValue;
+  readonly target: JsonValue;
+  readonly preview: JsonValue;
   readonly signal: AbortSignal | undefined;
 }
 
@@ -294,10 +301,17 @@ implements PiVaultAdditionalToolSecurityPort, PiMcpExecutionSecurityPort {
     let accepted = false;
     try {
       accepted = await confirmation.confirm({
+        requestId: ticket.ticketId,
+        conversationId: ticket.conversationId,
+        piSessionId: ticket.piSessionId,
+        productRunId: ticket.productRunId,
+        toolCallId: ticket.toolCallId,
         resourceName: input.descriptor.resourceName,
         toolName: input.descriptor.toolName,
         destructive: input.descriptor.destructive,
         arguments: normalizedArguments,
+        target: ticket.resolvedTarget,
+        preview: ticket.preview,
         signal: input.signal
       });
     } catch {

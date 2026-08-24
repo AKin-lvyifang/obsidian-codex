@@ -1282,6 +1282,8 @@ function applyToolProductStates(
     const key = toolProductIdentityKey(identity.value, message.runId);
     const approval = approvals.get(key);
     const receipt = receipts.get(key);
+    if (approval) message.approval = approvalSnapshot(approval);
+    else delete message.approval;
     const toolId = projectedToolId(message);
     const knownRead = PHASE_TWO_READ_TOOL_IDS.has(toolId);
     const knownWrite = PHASE_TWO_WRITE_TOOL_IDS.has(toolId);
@@ -1327,6 +1329,20 @@ function applyToolProductStates(
       delete message.completedAt;
     }
   }
+}
+
+function approvalSnapshot(
+  approval: Readonly<PiChatUiToolApprovalView>
+): NonNullable<ChatMessage["approval"]> {
+  const updatedAt = finiteProductRecordTime(approval.updatedAt);
+  const target = visibleText(approval.target);
+  const preview = visibleText(approval.preview);
+  return Object.freeze({
+    status: approval.status,
+    ...(target ? { target } : {}),
+    ...(preview ? { preview } : {}),
+    ...(updatedAt > 0 ? { updatedAt } : {})
+  });
 }
 
 interface ToolProductRecordIdentity {
@@ -1792,6 +1808,13 @@ export function piEntryIdFromProjectedMessageId(
   return identity?.kind === "entry" ? identity.value : undefined;
 }
 
+export function piToolCallIdFromProjectedMessageId(
+  messageId: string
+): string | undefined {
+  const identity = projectionIdentity(messageId);
+  return identity?.kind === "tool" ? identity.value : undefined;
+}
+
 function reScopeMessageId(id: string, scope: string): string {
   const identity = projectionIdentity(id);
   if (identity?.kind === "entry") return entryMessageId(scope, identity.value);
@@ -1873,7 +1896,7 @@ function removeMessage(messages: ChatMessage[], id: string): void {
 
 function dedupeMessages(messages: readonly ChatMessage[]): ChatMessage[] {
   const result: ChatMessage[] = [];
-  for (const message of messages) upsertMessage(result, { ...message });
+  for (const message of messages) upsertMessage(result, cloneProjectedMessage(message));
   return result;
 }
 
@@ -1892,6 +1915,7 @@ function cloneView(current: Readonly<PiChatUiViewModel>): PiChatUiViewModel {
 function cloneProjectedMessage(message: Readonly<ChatMessage>): ChatMessage {
   return {
     ...message,
+    ...(message.approval ? { approval: { ...message.approval } } : {}),
     ...(message.personalMemorySources
       ? {
           personalMemorySources: message.personalMemorySources.map(

@@ -64,6 +64,11 @@ export interface PiVaultToolRunIdentity {
 }
 
 export interface PiVaultApprovalConfirmationInput {
+  readonly requestId: string;
+  readonly conversationId: string;
+  readonly piSessionId: string;
+  readonly productRunId: string;
+  readonly toolCallId: string;
   readonly toolId: PiVaultToolId;
   readonly target: JsonValue;
   readonly preview: JsonValue;
@@ -182,6 +187,11 @@ export function createPiVaultProductionAuthorizationPort(
       let accepted = false;
       try {
         accepted = await options.confirmation.confirm({
+          requestId: ticket.ticketId,
+          conversationId: ticket.conversationId,
+          piSessionId: ticket.piSessionId,
+          productRunId: ticket.productRunId,
+          toolCallId: ticket.toolCallId,
           toolId: input.toolId,
           target: target.resolvedTarget,
           preview: target.preview,

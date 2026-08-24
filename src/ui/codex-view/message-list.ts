@@ -36,22 +36,46 @@ import {
 import { renderProviderBrandIcon, type ProviderBrandId } from "../../settings/provider-brand-icons";
 import { API_PROVIDER_PRESETS } from "../../settings/provider-presets";
 import {
+  createAIElementsDocumentSources,
+  createSmoothAIApprovalCard,
   createSmoothAIArtifact,
   createSmoothAIMessageBody,
   createSmoothAIReasoning,
+  markSmoothAIApproval,
   markSmoothAIArtifact,
+  markSmoothAIDiff,
   markSmoothAIReasoning,
+  markSmoothAIResponse,
   markSmoothAITaskList,
   markSmoothAIToolCall,
+  renderSmoothAILoader,
+  renderSmoothAISuggestions,
   renderSmoothAIToolStatus,
   renderSmoothBlurOutUp,
-  smoothAIStatus
+  smoothAIStatus,
+  type SmoothAIApprovalState
 } from "./smooth-chat-ui";
 
 type MessageRenderRow =
   | { id: string; kind: "message"; message: ChatMessage; showAgentHeader: boolean; showAgentFooter: boolean; processExpanded: boolean }
   | { id: string; kind: "actionItem"; message: ChatMessage; showAgentHeader: boolean }
   | { id: string; kind: "turnProcess"; turn: CompletedAgentTurn; showAgentHeader: boolean };
+
+interface LocalVaultDocumentSource {
+  citations: KnowledgeBaseCitation[];
+  key: string;
+  kind: "vault";
+  path: string;
+  references: KnowledgeReference[];
+}
+
+interface LocalMemoryDocumentSource {
+  key: string;
+  kind: "memory";
+  source: PersonalMemorySourceReference;
+}
+
+type LocalDocumentSource = LocalVaultDocumentSource | LocalMemoryDocumentSource;
 
 export interface MessageListRenderOptions {
   forceBottom?: boolean;
@@ -63,6 +87,12 @@ export interface MessageListRenderOptions {
 export interface AgentIdentityView {
   readonly displayName: string;
   readonly avatarUrl: string | null;
+}
+
+export interface MessageApprovalDecisionBinding {
+  readonly target: string;
+  readonly preview: string;
+  decide(decision: "approve" | "reject"): boolean;
 }
 
 export interface MessageListRenderInput {
@@ -86,6 +116,10 @@ export interface MessageListRenderInput {
     action: "execute" | "continue" | "pause" | "cancel"
   ) => Promise<void>;
   onModifyTaskPlan?: (planId: string, title: string) => void;
+  resolveApprovalDecision?: (
+    message: Readonly<ChatMessage>
+  ) => MessageApprovalDecisionBinding | null;
+  onSuggestionSelect?: (text: string) => void;
   onScheduleMeasure: (forceBottom?: boolean) => void;
   onScheduleRunProgress: () => void;
   shouldFollowBottom?: () => boolean;
@@ -134,6 +168,11 @@ const AGENT_LIVE_COPY_INTERVAL_MS = 1800;
 const PROCESS_CONTENT_UNAVAILABLE_TEXT = "后端未提供可展示内容";
 const COLD_START_STATUS_TEXT = "正在整理上下文";
 const COLD_START_COPY_TEXTS = ["先把问题看明白", "等模型接上话", "把上下文放到手边"];
+const EMPTY_CONVERSATION_SUGGESTIONS = [
+  { id: "organize-knowledge-base", label: "整理知识库" },
+  { id: "summarize-current-note", label: "总结当前笔记" },
+  { id: "search-knowledge-base", label: "从知识库找答案" }
+] as const;
 
 export interface KnowledgeBaseRunProgressState {
   totalCells: number;
@@ -279,6 +318,12 @@ export class CodexMessageListRenderer {
         welcome.createDiv({ cls: "codex-resource-note codex-welcome-subtitle" }),
         env.welcomeCopy.subtitle
       );
+      const suggestions = renderSmoothAISuggestions(
+        welcome,
+        EMPTY_CONVERSATION_SUGGESTIONS,
+        (suggestion) => env.onSuggestionSelect?.(suggestion.label)
+      );
+      suggestions.addClass("codex-welcome-suggestions");
       return;
     }
 
@@ -512,7 +557,8 @@ export class CodexMessageListRenderer {
       if (!content) continue;
       wrapper.toggleClass("codex-message-streaming", update.message.status === "running");
       wrapper.toggleClass("codex-message-empty-running", update.message.status === "running" && !displayTextForMessage(update.message).trim());
-      renderRichText(env.app, env.component, content, displayTextForMessage(update.message));
+      if (isAgentAnswerMessage(update.message)) this.renderAgentAnswerContent(content, update.message);
+      else renderRichText(env.app, env.component, content, displayTextForMessage(update.message));
       updated = true;
       shouldPinBottom = shouldPinBottom || update.shouldPinBottom;
     }
@@ -657,6 +703,10 @@ export class CodexMessageListRenderer {
     }
     const content = bodyHost.createDiv({ cls: "codex-message-content" });
     content.dataset.messageContent = "true";
+    if (emptyRunningAnswer) {
+      this.renderAgentAnswerContent(content, message);
+      return;
+    }
     if (message.itemType === "thinking") {
       this.renderThinkingMessage(content, message);
       return;
@@ -681,17 +731,17 @@ export class CodexMessageListRenderer {
     }
     if (isProcessItemType(message.itemType)) {
       this.renderProcessMessage(content, message, false, options.processExpanded === true);
-      this.renderKnowledgeUsageCards(wrapper, message.id, knowledgeUsageMessageData(message));
+      this.renderKnowledgeUsageCards(wrapper, message.id, knowledgeUsageMessageData(message), message.citations);
       return;
     }
     const displayText = displayTextForMessage(message);
     if (!this.renderKnowledgeBaseResultContent(content, message, displayText)) {
-      renderRichText(env.app, env.component, content, displayText);
+      if (isAgentAnswerMessage(message)) this.renderAgentAnswerContent(content, message);
+      else renderRichText(env.app, env.component, content, displayText);
     }
     if (message.rawRef) this.renderRawMessageExpander(content, message);
     if (message.itemType === "knowledgeBase" && message.details) this.renderKnowledgeBaseContextNote(wrapper, message.details);
-    if (message.citations) this.renderKnowledgeBaseCitations(wrapper, message.id, message.citations);
-    this.renderKnowledgeUsageCards(wrapper, message.id, knowledgeUsageMessageData(message));
+    this.renderKnowledgeUsageCards(wrapper, message.id, knowledgeUsageMessageData(message), message.citations);
     if (message.role === "user") this.renderMessageCopyAction(wrapper, message, true);
     const footerActions = options.showAgentFooter
       ? this.renderAgentFooter(wrapper, message)
@@ -703,6 +753,18 @@ export class CodexMessageListRenderer {
         Boolean(footerActions)
       );
     }
+  }
+
+  private renderAgentAnswerContent(container: HTMLElement, message: ChatMessage): void {
+    const env = this.requireEnv();
+    const text = displayTextForMessage(message);
+    if (message.status === "running" && !text.trim()) {
+      container.empty();
+      renderSmoothAILoader(container, "正在生成回复");
+      return;
+    }
+    renderRichText(env.app, env.component, container, text);
+    markSmoothAIResponse(container, message.status === "running");
   }
 
   private renderTaskPlanCard(
@@ -1183,124 +1245,103 @@ export class CodexMessageListRenderer {
   private renderKnowledgeUsageCards(
     container: HTMLElement,
     messageId: string,
-    usage: KnowledgeUsageMessageData
+    usage: KnowledgeUsageMessageData,
+    citations?: KnowledgeBaseCitationSummary
   ): void {
-    if (
-      !usage.askSourceAttribution
-      && !usage.references.length
-      && !usage.producedPaths.length
-    ) return;
-    const stateKey = `knowledge-usage:${messageId}`;
-    const details = container.createEl("details", {
-      cls: "codex-kb-citations codex-knowledge-references"
-    });
-    details.open = this.openKnowledgeBaseCitations.get(stateKey) ?? false;
-    details.ontoggle = () => {
-      this.openKnowledgeBaseCitations.set(stateKey, details.open);
-      this.requireEnv().onScheduleMeasure();
-    };
-    const summary = details.createEl("summary", { cls: "codex-kb-citations-summary" });
-    summary.createSpan({
-      cls: "codex-kb-citations-title",
-      text: usage.askSourceAttribution ? "本轮来源" : "本次引用"
-    });
-    const counts = summary.createSpan({ cls: "codex-kb-citation-buckets" });
-    if (usage.askSourceAttribution) {
-      counts.createSpan({
-        cls: "codex-kb-source-count",
-        text: `${usage.references.length} 个 Vault 参考`
-      });
-      counts.createSpan({
-        cls: "codex-kb-source-count",
-        text: personalMemorySourceCountLabel(usage.personalMemorySources.length)
-      });
-      const body = details.createDiv({ cls: "codex-kb-citations-body" });
-      const vaultGroup = this.renderKnowledgeUsageGroup(body, "Vault 参考");
-      if (usage.references.length) {
-        for (const reference of usage.references) {
-          this.renderKnowledgeReferenceItem(vaultGroup, reference);
-        }
-      } else {
-        vaultGroup.createDiv({
-          cls: "codex-kb-no-evidence",
-          text: "本轮未注入 Vault 参考。"
-        });
+    const documents = localDocumentSources(citations, usage);
+    if (documents.length) {
+      const stateKey = `knowledge-documents:${messageId}`;
+      const sources = createAIElementsDocumentSources(
+        container,
+        documents.length,
+        this.openKnowledgeBaseCitations.get(stateKey) ?? false
+      );
+      sources.root.ontoggle = () => {
+        this.openKnowledgeBaseCitations.set(stateKey, sources.root.open);
+        sources.summary.setAttribute("aria-expanded", String(sources.root.open));
+        this.requireEnv().onScheduleMeasure();
+      };
+      for (const document of documents) {
+        this.renderLocalDocumentSource(sources.body, document, citations?.status);
       }
-      const memoryGroup = this.renderKnowledgeUsageGroup(body, "Personal Memory");
-      if (usage.personalMemorySources.length) {
-        for (const source of usage.personalMemorySources) {
-          this.renderPersonalMemorySourceItem(memoryGroup, source);
-        }
-      } else {
-        memoryGroup.createDiv({
-          cls: "codex-kb-no-evidence",
-          text: personalMemorySourceEmptyStateLabel()
-        });
-      }
-      return;
-    }
-    if (usage.references.length) {
-      counts.createSpan({
-        cls: "codex-kb-source-count",
-        text: `${usage.references.length} 个本地来源`
+    } else if (citations || usage.askSourceAttribution) {
+      container.createDiv({
+        cls: "codex-kb-no-evidence codex-ai-elements-sources-empty",
+        text: citations
+          ? "没有命中文件，也没有引用片段；不会显示伪来源。"
+          : personalMemorySourceEmptyStateLabel()
       });
     }
     if (usage.producedPaths.length) {
-      counts.createSpan({
-        cls: "codex-kb-source-count",
-        text: `${usage.producedPaths.length} 个产物`
-      });
-    }
-    const body = details.createDiv({ cls: "codex-kb-citations-body" });
-    for (const reference of usage.references) {
-      this.renderKnowledgeReferenceItem(body, reference);
-    }
-    for (const producedPath of usage.producedPaths) {
-      this.renderKnowledgeProducedPath(body, producedPath);
+      const artifact = createSmoothAIArtifact(container, "本轮产物");
+      artifact.root.addClass("codex-knowledge-produced-artifact");
+      for (const producedPath of usage.producedPaths) {
+        this.renderKnowledgeProducedPath(artifact.body, producedPath);
+      }
     }
   }
 
-  private renderKnowledgeUsageGroup(container: HTMLElement, title: string): HTMLElement {
-    const group = container.createDiv({ cls: "codex-kb-citation-group" });
-    const header = group.createDiv({ cls: "codex-kb-citation-header" });
-    header.createSpan({ cls: "codex-kb-citation-title", text: title });
-    return group;
-  }
-
-  private renderPersonalMemorySourceItem(
+  private renderLocalDocumentSource(
     container: HTMLElement,
-    source: PersonalMemorySourceReference
+    document: LocalDocumentSource,
+    evidenceStatus?: KnowledgeBaseCitationSummary["status"]
   ): void {
     const item = container.createDiv({
-      cls: "codex-kb-citation-item codex-personal-memory-source-item"
+      cls: `codex-ai-elements-source is-${document.kind}`,
+      attr: { "data-source-key": document.key }
     });
-    const header = item.createDiv({ cls: "codex-kb-citation-header" });
-    header.createSpan({ cls: "codex-kb-citation-title", text: source.title });
-  }
+    const header = item.createDiv({ cls: "codex-ai-elements-source-header" });
+    const icon = header.createSpan({
+      cls: "codex-ai-elements-source-icon",
+      attr: { "aria-hidden": "true" }
+    });
+    setIcon(icon, "book-open");
+    if (document.kind === "memory") {
+      header.createSpan({
+        cls: "codex-ai-elements-source-title codex-message-note-link is-disabled",
+        text: document.source.title,
+        attr: { title: "Personal Memory 没有 Vault 路径，无法打开" }
+      });
+      return;
+    }
 
-  private renderKnowledgeReferenceItem(
-    container: HTMLElement,
-    reference: KnowledgeReference
-  ): void {
-    const item = container.createDiv({ cls: "codex-kb-citation-item codex-knowledge-reference-item" });
-    const header = item.createDiv({ cls: "codex-kb-citation-header" });
-    const title = header.createEl("button", {
-      cls: "codex-kb-citation-title",
-      text: reference.title || noteNameForPath(reference.vaultRelativePath),
-      attr: {
-        type: "button",
-        title: `打开 ${reference.vaultRelativePath} 第 ${reference.lineStart}-${reference.lineEnd} 行`
+    const env = this.requireEnv();
+    const file = env.app.vault.getAbstractFileByPath(document.path);
+    const noteName = noteNameForPath(document.path);
+    if (file instanceof TFile) {
+      const title = header.createEl("button", {
+        cls: "codex-ai-elements-source-title codex-message-note-link",
+        text: noteName,
+        attr: {
+          type: "button",
+          "aria-label": `打开笔记 ${noteName}`,
+          "data-path": document.path,
+          title: `在 Obsidian 中打开 ${document.path}`
+        }
+      });
+      title.onclick = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        void this.openLocalDocumentSource(document);
+      };
+    } else {
+      header.createSpan({
+        cls: "codex-ai-elements-source-title codex-message-note-link is-disabled",
+        text: noteName,
+        attr: { title: `当前 Vault 中找不到 ${document.path}，无法打开` }
+      });
+    }
+
+    const metadata = localDocumentMetadata(document, evidenceStatus);
+    if (metadata.length) {
+      const meta = item.createDiv({ cls: "codex-ai-elements-source-meta" });
+      for (const label of metadata) meta.createSpan({ text: label });
+    }
+    for (const excerpt of localDocumentExcerpts(document)) {
+      const quote = item.createDiv({ cls: "codex-kb-citation-quote" });
+      for (const line of excerpt.split(/\r\n|\n|\r/u)) {
+        quote.createDiv({ cls: "codex-kb-citation-line", text: line });
       }
-    });
-    const openReference = (event: MouseEvent) => {
-      event.preventDefault();
-      event.stopPropagation();
-      void this.openKnowledgeReference(reference);
-    };
-    title.onclick = openReference;
-    const quote = item.createDiv({ cls: "codex-kb-citation-quote" });
-    for (const line of reference.excerpt.split(/\r\n|\n|\r/u)) {
-      quote.createDiv({ cls: "codex-kb-citation-line", text: line });
     }
   }
 
@@ -1308,15 +1349,35 @@ export class CodexMessageListRenderer {
     const item = container.createDiv({ cls: "codex-kb-citation-item codex-knowledge-produced-path" });
     const header = item.createDiv({ cls: "codex-kb-citation-header" });
     const title = header.createEl("button", {
-      cls: "codex-kb-citation-title",
+      cls: "codex-kb-citation-title codex-message-note-link",
       text: noteNameForPath(producedPath),
-      attr: { type: "button", title: `打开 ${producedPath}` }
+      attr: {
+        type: "button",
+        "aria-label": `打开笔记 ${noteNameForPath(producedPath)}`,
+        "data-path": producedPath,
+        title: `打开 ${producedPath}`
+      }
     });
     title.onclick = (event) => {
       event.preventDefault();
       event.stopPropagation();
       void this.openKnowledgeBasePath(producedPath);
     };
+  }
+
+  private async openLocalDocumentSource(document: LocalVaultDocumentSource): Promise<void> {
+    const reference = document.references[0];
+    if (reference) {
+      await this.openKnowledgeReference(reference);
+      return;
+    }
+    const env = this.requireEnv();
+    const file = env.app.vault.getAbstractFileByPath(document.path);
+    if (!(file instanceof TFile)) {
+      new Notice(`没有在当前 Obsidian 仓库找到：${document.path}`);
+      return;
+    }
+    await env.app.workspace.getLeaf("tab").openFile(file, { active: true });
   }
 
   private async openKnowledgeReference(reference: KnowledgeReference): Promise<void> {
@@ -1355,56 +1416,6 @@ export class CodexMessageListRenderer {
     const icon = note.createSpan({ cls: "codex-kb-context-note-icon" });
     setIcon(icon, "message-square-share");
     note.createSpan({ cls: "codex-kb-context-note-text", text: normalized });
-  }
-
-  private renderKnowledgeBaseCitations(container: HTMLElement, messageId: string, citations: KnowledgeBaseCitationSummary): void {
-    const stateKey = `kb-citations:${messageId}`;
-    const details = container.createEl("details", { cls: `codex-kb-citations codex-kb-citations-${citations.status}` });
-    details.open = this.openKnowledgeBaseCitations.get(stateKey) ?? false;
-    details.ontoggle = () => {
-      this.openKnowledgeBaseCitations.set(stateKey, details.open);
-      this.requireEnv().onScheduleMeasure();
-    };
-    const summary = details.createEl("summary", { cls: "codex-kb-citations-summary" });
-    summary.createSpan({ cls: "codex-kb-citations-title", text: "本次来源" });
-    const buckets = summary.createSpan({ cls: "codex-kb-citation-buckets" });
-    for (const bucket of ["wiki", "journal", "outputs"] as KnowledgeBaseCitationBucket[]) {
-      buckets.createSpan({ cls: `codex-kb-source-count codex-kb-source-${bucket}`, text: `${kbBucketLabel(bucket)} ${citations.counts[bucket] ?? 0}` });
-    }
-    summary.createSpan({ cls: `codex-kb-evidence-status codex-kb-evidence-${citations.status}`, text: kbEvidenceStatusLabel(citations.status) });
-
-    const body = details.createDiv({ cls: "codex-kb-citations-body" });
-    if (!citations.citations.length) {
-      body.createDiv({ cls: "codex-kb-no-evidence", text: "没有命中文件，也没有引用片段；不会显示伪来源。" });
-      return;
-    }
-    for (const citation of citations.citations) this.renderKnowledgeBaseCitationItem(body, citation);
-  }
-
-  private renderKnowledgeBaseCitationItem(container: HTMLElement, citation: KnowledgeBaseCitation): void {
-    const item = container.createDiv({ cls: `codex-kb-citation-item codex-kb-citation-${citation.bucket}` });
-    const header = item.createDiv({ cls: "codex-kb-citation-header" });
-    const title = header.createEl("button", {
-      cls: "codex-kb-citation-title",
-      text: citation.title || noteNameForPath(citation.path),
-      attr: {
-        type: "button",
-        title: `打开 ${citation.path}`
-      }
-    });
-    title.onclick = (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      void this.openKnowledgeBaseCitation(citation);
-    };
-    const quote = item.createDiv({ cls: "codex-kb-citation-quote" });
-    for (const line of citation.excerptLines.length ? citation.excerptLines : ["无可用引用片段"]) {
-      quote.createDiv({ cls: "codex-kb-citation-line", text: line });
-    }
-  }
-
-  private async openKnowledgeBaseCitation(citation: KnowledgeBaseCitation): Promise<void> {
-    await this.openKnowledgeBasePath(citation.path);
   }
 
   private renderActionStreamItem(container: HTMLElement, message: ChatMessage, showAgentHeader: boolean): void {
@@ -1481,17 +1492,22 @@ export class CodexMessageListRenderer {
     }
     const row = container.createDiv({ cls: `codex-action-item codex-action-item-${item.kind}` });
     markSmoothAIToolCall(row, item.status);
+    const approvalState = approvalStateForMessage(item.source);
+    if (approvalState) markSmoothAIApproval(row, approvalState);
     row.toggleClass("is-standalone", options.standalone);
     row.toggleClass("is-failed", isAttentionActionStatus(item.status));
     row.toggleClass("is-running", isActiveActionStatus(item.status));
     const head = row.createDiv({ cls: "codex-action-item-head" });
     this.renderActionItemHead(head, item);
+    this.renderApprovalCard(row, item.source);
   }
 
   private renderExpandableActionItem(container: HTMLElement, item: ActionItemViewModel, options: { standalone: boolean }): void {
     const detailId = stableDomId(`codex-action-detail-${item.id}`);
     const details = container.createEl("details", { cls: `codex-action-item codex-action-item-${item.kind} codex-action-item-expandable` });
     markSmoothAIToolCall(details, item.status);
+    const approvalState = approvalStateForMessage(item.source);
+    if (approvalState) markSmoothAIApproval(details, approvalState);
     details.toggleClass("is-standalone", options.standalone);
     details.toggleClass("is-failed", isAttentionActionStatus(item.status));
     details.toggleClass("is-running", isActiveActionStatus(item.status));
@@ -1526,6 +1542,7 @@ export class CodexMessageListRenderer {
     this.renderActionItemHead(summary, item);
     caret = summary.createSpan({ cls: "codex-action-item-caret" });
     setIcon(caret, details.open ? "chevron-up" : "chevron-down");
+    this.renderApprovalCard(container, item.source);
     if (details.open) renderBody();
   }
 
@@ -1566,6 +1583,48 @@ export class CodexMessageListRenderer {
     const stats = container.createSpan({ cls: "codex-action-diff-stats" });
     if (typeof item.diff.added === "number") stats.createSpan({ cls: "codex-diff-stat codex-diff-stat-add", text: `+${item.diff.added}` });
     if (typeof item.diff.removed === "number") stats.createSpan({ cls: "codex-diff-stat codex-diff-stat-remove", text: `-${item.diff.removed}` });
+  }
+
+  private renderApprovalCard(container: HTMLElement, message: ChatMessage): void {
+    const env = this.requireEnv();
+    const binding = env.resolveApprovalDecision?.(message) ?? null;
+    const state = approvalStateForMessage(message)
+      ?? (binding ? "waiting_approval" : null);
+    if (!state) return;
+    const elements = createSmoothAIApprovalCard(container, {
+      state,
+      target: message.approval?.target || binding?.target,
+      preview: message.approval?.preview || binding?.preview,
+      controlled: state === "waiting_approval" && Boolean(binding)
+    });
+    if (!binding || !elements.approveButton || !elements.rejectButton) return;
+    const buttons = [elements.approveButton, elements.rejectButton];
+    let deciding = false;
+    const decide = (decision: "approve" | "reject") => (event: MouseEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (deciding) return;
+      deciding = true;
+      elements.root.setAttribute("aria-busy", "true");
+      for (const button of buttons) button.disabled = true;
+      let accepted = false;
+      try {
+        accepted = binding.decide(decision);
+      } catch {
+        accepted = false;
+      }
+      if (accepted) {
+        env.onScheduleMeasure();
+        return;
+      }
+      deciding = false;
+      elements.root.setAttribute("aria-busy", "false");
+      for (const button of buttons) button.disabled = false;
+      new Notice("该审批已失效，请等待状态刷新。");
+      this.rerenderPreservingScroll();
+    };
+    elements.approveButton.onclick = decide("approve");
+    elements.rejectButton.onclick = decide("reject");
   }
 
   private rerenderPreservingScroll(): void {
@@ -1611,8 +1670,7 @@ export class CodexMessageListRenderer {
     markSmoothAIReasoning(shell, message.status);
     if (message.status === "running") {
       const row = shell.createDiv({ cls: "codex-thinking-live" });
-      row.createSpan({ cls: "codex-thinking-dot" });
-      row.createSpan({ text: message.text || COLD_START_STATUS_TEXT });
+      renderSmoothAILoader(row, message.text || COLD_START_STATUS_TEXT);
       row.createSpan({ cls: "codex-agent-live-copy", text: ` · ${rotatingChoice(COLD_START_COPY_TEXTS, message.createdAt)}` });
       env.onScheduleRunProgress();
       return;
@@ -1623,6 +1681,8 @@ export class CodexMessageListRenderer {
   private renderProcessMessage(container: HTMLElement, message: ChatMessage, nested = false, forceOpen = false): void {
     const details = container.createEl("details", { cls: `codex-structured codex-process codex-process-${message.itemType ?? "item"}` });
     markSmoothAIToolCall(details, message.status);
+    const approvalState = approvalStateForMessage(message);
+    if (approvalState) markSmoothAIApproval(details, approvalState);
     details.toggleClass("is-running", isActiveProcessStatus(message.status));
     details.toggleClass("is-completed", message.status === "completed");
     details.toggleClass("is-error", isAttentionProcessStatus(message.status));
@@ -1659,6 +1719,7 @@ export class CodexMessageListRenderer {
       if (message.itemType === "fileChange" && message.files?.length) this.renderProcessFileChips(main.createDiv({ cls: "codex-process-files" }), message.files);
     }
     if (message.status) summary.createSpan({ cls: "codex-structured-status", text: labelForStatus(message.status) });
+    this.renderApprovalCard(container, message);
     if (details.open) renderBody();
   }
 
@@ -1666,7 +1727,8 @@ export class CodexMessageListRenderer {
     const hasExplicitChannels = hasExplicitProcessChannels(message);
     const env = this.requireEnv();
     if (!hasExplicitChannels && message.processContentAvailability === "unavailable") {
-      body.createDiv({ cls: "codex-process-raw-loading", text: PROCESS_CONTENT_UNAVAILABLE_TEXT });
+      if (isActiveProcessStatus(message.status)) this.renderProcessLoader(body, "正在等待工具输出");
+      else body.createDiv({ cls: "codex-process-raw-loading", text: PROCESS_CONTENT_UNAVAILABLE_TEXT });
       return;
     }
     const fallback = message.status === "running" ? "正在接收过程内容..." : "暂无内容";
@@ -1702,8 +1764,9 @@ export class CodexMessageListRenderer {
   }
 
   private renderProcessChannels(body: HTMLElement, message: ChatMessage): void {
-    this.renderProcessChannel(body, "输入", message.processInputAvailability, message.processInput, false);
-    this.renderProcessChannel(body, "输出", message.processOutputAvailability, message.processOutput, true);
+    const active = isActiveProcessStatus(message.status);
+    this.renderProcessChannel(body, "输入", message.processInputAvailability, message.processInput, false, false);
+    this.renderProcessChannel(body, "输出", message.processOutputAvailability, message.processOutput, true, active);
   }
 
   private renderProcessChannel(
@@ -1711,7 +1774,8 @@ export class CodexMessageListRenderer {
     label: string,
     availability: ChatMessage["processInputAvailability"],
     text: string | undefined,
-    artifact: boolean
+    artifact: boolean,
+    activeWait: boolean
   ): void {
     if (!availability) return;
     const artifactElements = artifact ? createSmoothAIArtifact(body, label) : null;
@@ -1719,7 +1783,8 @@ export class CodexMessageListRenderer {
     artifactElements?.root.addClass("codex-process-channel");
     if (!artifact) channel.createDiv({ cls: "codex-process-raw-title", text: label });
     if (availability === "unavailable") {
-      channel.createDiv({ cls: "codex-process-raw-loading", text: PROCESS_CONTENT_UNAVAILABLE_TEXT });
+      if (activeWait) this.renderProcessLoader(channel, "正在等待工具输出");
+      else channel.createDiv({ cls: "codex-process-raw-loading", text: PROCESS_CONTENT_UNAVAILABLE_TEXT });
       return;
     }
     if (availability === "empty") {
@@ -1741,15 +1806,16 @@ export class CodexMessageListRenderer {
       const artifact = createSmoothAIArtifact(body, "文件改动");
       const artifactBody = artifact.body;
       const files = parseFileChangeDiff(text || fallback, message.diffSummary);
-      if (!files.length) {
+      if (!hasRenderableDiff(files)) {
         this.renderPlainTextBlock(artifactBody, text || fallback);
         return;
       }
+      markSmoothAIDiff(artifact.root);
       if (message.diffSummary) this.renderDiffOverview(artifactBody, message.diffSummary);
       this.renderDiffFiles(artifactBody, files, message.files ?? []);
     };
     if (message.rawRef) {
-      body.createDiv({ cls: "codex-process-raw-loading", text: "正在加载文件改动..." });
+      this.renderProcessLoader(body, "正在加载文件改动");
       void this.loadRawText(message)
         .then((text) => {
           renderDiff(text);
@@ -1774,7 +1840,7 @@ export class CodexMessageListRenderer {
       shell.createEl("pre", { cls: "codex-shell-output", text: shellTranscript(text || fallback) });
     };
     if (message.rawRef) {
-      body.createDiv({ cls: "codex-process-raw-loading", text: "正在加载命令输出..." });
+      this.renderProcessLoader(body, "正在加载命令输出");
       void this.loadRawText(message)
         .then((text) => {
           renderShell(text);
@@ -1850,7 +1916,7 @@ export class CodexMessageListRenderer {
       row.createSpan({ cls: "codex-diff-line-no codex-diff-line-old", text: line.oldLine === null ? "" : String(line.oldLine) });
       row.createSpan({ cls: "codex-diff-line-no codex-diff-line-new", text: line.newLine === null ? "" : String(line.newLine) });
       row.createSpan({ cls: "codex-diff-marker", text: line.marker });
-      row.createSpan({ cls: "codex-diff-content", text: line.text || " " });
+      row.createSpan({ cls: "codex-diff-content", text: line.text });
     }
   }
 
@@ -1900,16 +1966,18 @@ export class CodexMessageListRenderer {
   }
 
   private renderDeferredRawText(container: HTMLElement, message: ChatMessage, fallback: string): void {
-    const status = container.createDiv({ cls: "codex-process-raw-loading", text: "正在加载全文..." });
+    const status = this.renderProcessLoader(container, "正在加载全文");
     const pre = container.createEl("pre", { cls: "codex-process-fulltext" });
     pre.setText(displayTextForMessage(message) || fallback);
     void this.loadRawText(message)
       .then((text) => {
+        status.empty();
         status.setText(this.rawMetaLabel(message, text));
         pre.setText(text || fallback);
         this.requireEnv().onScheduleMeasure();
       })
       .catch((error) => {
+        status.empty();
         status.setText(`全文加载失败：${error instanceof Error ? error.message : String(error)}`);
         this.requireEnv().onScheduleMeasure();
       });
@@ -1923,8 +1991,7 @@ export class CodexMessageListRenderer {
       if (!details.open || loaded) return;
       loaded = true;
       const body = details.createDiv({ cls: "codex-raw-message-body" });
-      body.createDiv({ cls: "codex-process-raw-loading", text: "正在加载全文..." });
-      const pre = body.createEl("pre", { cls: "codex-process-fulltext" });
+      this.renderProcessLoader(body, "正在加载全文");
       this.requireEnv().onScheduleMeasure();
       void this.loadRawText(message)
         .then((text) => {
@@ -1933,10 +2000,17 @@ export class CodexMessageListRenderer {
           this.requireEnv().onScheduleMeasure();
         })
         .catch((error) => {
-          pre.setText(`全文加载失败：${error instanceof Error ? error.message : String(error)}`);
+          body.empty();
+          body.createDiv({ cls: "codex-process-raw-loading", text: `全文加载失败：${error instanceof Error ? error.message : String(error)}` });
           this.requireEnv().onScheduleMeasure();
         });
     };
+  }
+
+  private renderProcessLoader(container: HTMLElement, label: string): HTMLElement {
+    const host = container.createDiv({ cls: "codex-process-raw-loading" });
+    renderSmoothAILoader(host, label);
+    return host;
   }
 
   private renderPlainTextBlock(container: HTMLElement, text: string): void {
@@ -2206,6 +2280,7 @@ function actionItemDetailLabel(item: ActionItemViewModel): string {
 }
 
 export function actionVerb(item: ActionItemViewModel): string {
+  if (item.source.status === "expired") return statusActionVerb(item.kind, "确认已过期");
   if (item.status === "unconfirmed") return statusActionVerb(item.kind, "状态未回传");
   if (item.status === "interrupted") return statusActionVerb(item.kind, "已中断");
   if (item.status === "canceled") return statusActionVerb(item.kind, "已取消");
@@ -2353,6 +2428,7 @@ function labelForStatus(status: string): string {
     uncertain: "结果不确定",
     canceled: "已取消",
     cancelled: "已取消",
+    expired: "确认已过期",
     blocked: "等待确认",
     interrupted: "中断",
     unconfirmed: "状态未回传",
@@ -2377,7 +2453,21 @@ function isActiveProcessStatus(status: string | undefined): boolean {
   return status === "running"
     || status === "waiting_approval"
     || status === "approved"
-    || status === "verifying";
+    || status === "verifying"
+    || status === "blocked"
+    || status === "recovery-pending";
+}
+
+function approvalStateForMessage(
+  message: Readonly<ChatMessage>
+): SmoothAIApprovalState | null {
+  const status = message.approval?.status;
+  if (status === "pending") return "waiting_approval";
+  if (status === "approved") return "approved";
+  if (status === "denied") return "denied";
+  if (status === "cancelled") return "cancelled";
+  if (status === "expired") return "expired";
+  return null;
 }
 
 function isAttentionProcessStatus(status: string | undefined): boolean {
@@ -2396,6 +2486,83 @@ function labelForDiffKind(kind: string): string {
     unknown: "改动"
   };
   return labels[kind] ?? "改动";
+}
+
+function localDocumentSources(
+  citations: KnowledgeBaseCitationSummary | undefined,
+  usage: KnowledgeUsageMessageData
+): LocalDocumentSource[] {
+  const documents: LocalDocumentSource[] = [];
+  const vaultDocuments = new Map<string, LocalVaultDocumentSource>();
+  const memoryKeys = new Set<string>();
+  const getVaultDocument = (rawPath: string): LocalVaultDocumentSource | null => {
+    const path = rawPath.trim();
+    if (!path) return null;
+    const normalizedPath = normalizePath(path);
+    const key = `vault:${normalizedPath}`;
+    const existing = vaultDocuments.get(key);
+    if (existing) return existing;
+    const document: LocalVaultDocumentSource = {
+      citations: [],
+      key,
+      kind: "vault",
+      path: normalizedPath,
+      references: []
+    };
+    vaultDocuments.set(key, document);
+    documents.push(document);
+    return document;
+  };
+
+  for (const citation of citations?.citations ?? []) {
+    getVaultDocument(citation.path)?.citations.push(citation);
+  }
+  for (const reference of usage.references) {
+    getVaultDocument(reference.vaultRelativePath)?.references.push(reference);
+  }
+  for (const source of usage.personalMemorySources) {
+    const id = source.id.trim();
+    if (!id) continue;
+    const key = `memory:${id}`;
+    if (memoryKeys.has(key)) continue;
+    memoryKeys.add(key);
+    documents.push({ key, kind: "memory", source });
+  }
+  return documents;
+}
+
+function localDocumentMetadata(
+  document: LocalVaultDocumentSource,
+  evidenceStatus?: KnowledgeBaseCitationSummary["status"]
+): string[] {
+  const labels = new Set<string>();
+  for (const citation of document.citations) labels.add(kbBucketLabel(citation.bucket));
+  if (document.citations.length && evidenceStatus) labels.add(kbEvidenceStatusLabel(evidenceStatus));
+  for (const reference of document.references) {
+    labels.add(`第 ${reference.lineStart}-${reference.lineEnd} 行`);
+  }
+  return Array.from(labels);
+}
+
+function localDocumentExcerpts(document: LocalVaultDocumentSource): string[] {
+  const excerpts = new Set<string>();
+  for (const citation of document.citations) {
+    const excerpt = citation.excerptLines.join("\n");
+    if (excerpt) excerpts.add(excerpt);
+  }
+  for (const reference of document.references) {
+    if (reference.excerpt) excerpts.add(reference.excerpt);
+  }
+  return Array.from(excerpts);
+}
+
+function hasRenderableDiff(files: ParsedDiffFile[]): boolean {
+  return files.some((file) => file.lines.some((line) =>
+    line.type === "hunk"
+    || line.type === "add"
+    || line.type === "remove"
+    || line.type === "context"
+  ));
 }
 
 function kbBucketLabel(bucket: KnowledgeBaseCitationBucket): string {

@@ -4,7 +4,8 @@
 
 EchoInk includes native TypeScript DOM and CSS adaptations of the official
 SmoothUI `Blur Out Up`, `AI Message`, `AI Reasoning`, `AI Tool Call`,
-`AI Artifact`, and `AI Task List` component patterns.
+`AI Artifact`, `AI Task List`, `AI Diff`, `AI Approval`, `AI Sources`,
+`AI Loader`, `AI Response`, and `AI Suggestions` component patterns.
 
 Adapted official component sources:
 
@@ -14,6 +15,12 @@ Adapted official component sources:
 - [AI Tool Call](https://github.com/educlopez/smoothui/blob/main/packages/smoothui/components/ai-tool-call/index.tsx)
 - [AI Artifact](https://github.com/educlopez/smoothui/blob/main/packages/smoothui/components/ai-artifact/index.tsx)
 - [AI Task List](https://github.com/educlopez/smoothui/blob/main/packages/smoothui/components/ai-task-list/index.tsx)
+- [AI Diff](https://github.com/educlopez/smoothui/blob/main/packages/smoothui/components/ai-diff/index.tsx)
+- [AI Approval](https://github.com/educlopez/smoothui/blob/main/packages/smoothui/components/ai-approval/index.tsx)
+- [AI Sources](https://github.com/educlopez/smoothui/blob/main/packages/smoothui/components/ai-sources/index.tsx)
+- [AI Loader](https://github.com/educlopez/smoothui/blob/main/packages/smoothui/components/ai-loader/index.tsx)
+- [AI Response](https://github.com/educlopez/smoothui/blob/main/packages/smoothui/components/ai-response/index.tsx)
+- [AI Suggestions](https://github.com/educlopez/smoothui/blob/main/packages/smoothui/components/ai-suggestions/index.tsx)
 
 MIT License
 
@@ -36,3 +43,29 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## Vercel AI Elements
+
+EchoInk includes a modified native Obsidian TypeScript DOM and CSS adaptation
+of the Vercel AI Elements `Sources` component for local document provenance.
+The adaptation replaces React, Radix Collapsible, Tailwind CSS, and Lucide with
+the existing Obsidian DOM and icon APIs, and it intentionally omits the
+upstream external-link behavior.
+
+Adapted upstream source at commit `6a9d5b1822ffb10bba4bd97175f01edd7d8651cd`:
+
+- [Sources](https://github.com/vercel/ai-elements/blob/6a9d5b1822ffb10bba4bd97175f01edd7d8651cd/packages/elements/src/sources.tsx)
+
+Copyright 2023 Vercel, Inc.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.

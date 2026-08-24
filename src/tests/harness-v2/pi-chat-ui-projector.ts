@@ -989,6 +989,16 @@ function assertPhaseTwoLiveToolProductStatesStayOnOneCard(): void {
     approvals: [approval],
     receipts: [receipt]
   });
+  assert.deepEqual(onlyTool(view).approval, {
+    status: "approved",
+    preview: "创建 Inbox/Live.md",
+    updatedAt: 6
+  });
+  assert.equal(
+    "operationIdentity" in (onlyTool(view).approval ?? {}),
+    false,
+    "ChatMessage approval projection must not expose authorization identity"
+  );
   assert.equal(
     onlyTool(view).status,
     "verifying",
@@ -1155,6 +1165,11 @@ function assertPhaseTwoDurableToolProductStatesReopenWithoutLegacyEvents(): void
   assert.equal(tools.length, 2);
   assert.equal(toolByCall(first, "read-p2").status, "completed");
   assert.equal(toolByCall(first, "write-p2").status, "completed");
+  assert.deepEqual(toolByCall(first, "write-p2").approval, {
+    status: "approved",
+    preview: "创建 Created.md",
+    updatedAt: 7
+  });
   assert.match(toolByCall(first, "write-p2").details ?? "", /读回验证/u);
   assert.deepEqual(reopened.messages, first.messages);
   assert.deepEqual(reopened.provisionalMessageIds, []);
@@ -1251,7 +1266,22 @@ function assertPhaseTwoWriteTerminalStatesRemainDistinct(): void {
     now: 3
   });
   assert.equal(onlyTool(denied).status, "denied");
+  assert.equal(onlyTool(denied).approval?.status, "denied");
   assert.deepEqual(denied.pendingToolCallIds, []);
+
+  const expired = projector.projectSessionBranch({
+    piSessionId: "session-terminal-p2",
+    activeLeafId: "tool-result-terminal-p2",
+    entries,
+    runState: "completed",
+    productRunId: "run-terminal-p2",
+    approvals: [{ ...approval, status: "expired" }],
+    now: 4
+  });
+  assert.equal(onlyTool(expired).status, "denied",
+    "aggregate Tool status keeps its existing denied compatibility mapping");
+  assert.equal(onlyTool(expired).approval?.status, "expired",
+    "the display-only Approval snapshot must preserve expired distinctly");
 }
 
 function assertSessionRunAndBranchScopesDoNotCross(): void {

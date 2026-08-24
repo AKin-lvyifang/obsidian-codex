@@ -10,6 +10,7 @@ import { settleStaleRunningMessages } from "../../core/message-state";
 import { SessionMessageStore, type SessionMessageInput } from "./session-message-store";
 import { CodexMessageListRenderer } from "./message-list";
 import { MessageScrollFollowController, type MessageRenderScheduleOptions } from "./message-scroll-follow";
+import { piToolCallIdFromProjectedMessageId } from "../../harness/pi-native/pi-chat-ui-projector";
 
 export interface CodexMessageHost {
   readonly app: App;
@@ -24,6 +25,7 @@ export interface CodexMessageHost {
   knowledgeBaseRunProgressTimer: number | null;
   messagesEl: HTMLElement;
   virtualListEl: HTMLElement;
+  inputEl: HTMLTextAreaElement;
   messageListRenderer: CodexMessageListRenderer;
   messageScrollFollow: MessageScrollFollowController;
   messagesBottomFollowPaused: boolean;
@@ -93,6 +95,28 @@ export function renderMessages(host: CodexMessageHost, options: { forceBottom?: 
     tokenUsage: session.tokenUsage,
     vaultPath: host.plugin.getVaultPath(),
     readRawMessageText: (rawRef) => host.plugin.readRawMessageText(rawRef),
+    resolveApprovalDecision: (message) => {
+      const piSessionId = session.piSessionId?.trim();
+      const productRunId = message.runId?.trim();
+      const toolCallId = piToolCallIdFromProjectedMessageId(message.id);
+      if (
+        session.bodyAuthority !== "pi_session_only"
+        || !piSessionId
+        || !productRunId
+        || !toolCallId
+      ) return null;
+      return host.plugin.piAgentApprovalBinding({
+        conversationId: session.id,
+        piSessionId,
+        productRunId,
+        toolCallId
+      });
+    },
+    onSuggestionSelect: (text) => {
+      host.inputEl.value = text;
+      host.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+      host.inputEl.focus();
+    },
     ...(session.bodyAuthority === "pi_session_only"
       ? {
         onDerivePiConversation: (entryId: string) =>

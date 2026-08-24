@@ -246,6 +246,8 @@ export interface PiNativeConversationRuntimeOptions {
     piSessionId: string;
     entries: readonly SessionEntry[];
   }): Promise<readonly PiChatUiMessageDecoration[]>;
+  /** Disposes runtime-owned live resources before active sessions are released. */
+  disposeRuntimeResources?(): void;
   knowledge?: PiKnowledgeRuntimePort;
   projector?: PiChatUiProjector;
   idFactory?: () => string;
@@ -1743,6 +1745,7 @@ export class PiNativeConversationRuntime {
     if (this.shuttingDown) return;
     this.shuttingDown = true;
     try {
+      this.options.disposeRuntimeResources?.();
       for (const conversationId of [...this.active.keys()]) {
         await this.releaseConversation(conversationId);
       }
@@ -2818,7 +2821,10 @@ export class PiNativeConversationRuntime {
     return {
       catalog: active.catalog,
       activeLeafId: active.projection.activeLeafId,
-      messages: active.projection.messages.map((message) => ({ ...message })),
+      messages: active.projection.messages.map((message) => ({
+        ...message,
+        ...(message.approval ? { approval: { ...message.approval } } : {})
+      })),
       diagnostics: await this.catalog.diagnostics(
         active.catalog.conversationId
       ),

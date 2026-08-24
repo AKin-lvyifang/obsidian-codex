@@ -92,6 +92,21 @@ export interface EchoInkChatRunTerminalRecovery {
   payloadSource: EchoInkChatTerminalPayloadSource;
 }
 
+export type ChatMessageApprovalStatus =
+  | "pending"
+  | "approved"
+  | "denied"
+  | "expired"
+  | "cancelled";
+
+/** Display-only projection of the durable Approval Ticket lifecycle. */
+export interface ChatMessageApprovalSnapshot {
+  readonly status: ChatMessageApprovalStatus;
+  readonly target?: string;
+  readonly preview?: string;
+  readonly updatedAt?: number;
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "system" | "tool";
@@ -122,6 +137,7 @@ export interface ChatMessage {
   processOutput?: string;
   processInputAvailability?: "provided" | "empty" | "unavailable";
   processOutputAvailability?: "provided" | "empty" | "unavailable";
+  approval?: Readonly<ChatMessageApprovalSnapshot>;
   diffSummary?: DiffSummary;
   citations?: KnowledgeBaseCitationSummary;
   /** True only when a settled `/ask` source snapshot was projected. */
@@ -1277,6 +1293,8 @@ function normalizeChatMessages(value: unknown): ChatMessage[] {
       else delete message.runTerminalRecovered;
       message.runUsage = normalizeHarnessRunUsage(item.runUsage);
       if (!message.runUsage) delete message.runUsage;
+      message.approval = normalizeChatMessageApproval(item.approval);
+      if (!message.approval) delete message.approval;
       try {
         message.taskPlan = normalizeEchoInkTaskPlanSnapshot(item.taskPlan);
       } catch {
@@ -1287,6 +1305,30 @@ function normalizeChatMessages(value: unknown): ChatMessage[] {
       return message;
     })
     .filter((message): message is ChatMessage => Boolean(message));
+}
+
+function normalizeChatMessageApproval(
+  value: unknown
+): ChatMessage["approval"] {
+  const approval = settingsRecord(value);
+  if (!approval) return undefined;
+  const status = approval.status;
+  if (
+    status !== "pending"
+    && status !== "approved"
+    && status !== "denied"
+    && status !== "expired"
+    && status !== "cancelled"
+  ) return undefined;
+  const target = normalizeOptionalText(approval.target);
+  const preview = normalizeOptionalText(approval.preview);
+  const updatedAt = normalizeOptionalPositiveNumber(approval.updatedAt);
+  return Object.freeze({
+    status,
+    ...(target ? { target } : {}),
+    ...(preview ? { preview } : {}),
+    ...(updatedAt === undefined ? {} : { updatedAt })
+  });
 }
 
 function assignOptionalText<T extends object, K extends keyof T>(target: T, key: K, value: unknown): void {

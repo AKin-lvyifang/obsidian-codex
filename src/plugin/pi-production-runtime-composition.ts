@@ -86,7 +86,10 @@ import {
   isEchoInkTaskPlanTerminal,
   type EchoInkTaskPlanSnapshot
 } from "../types/task-plan";
-import { FileApprovalTicketStore } from "../harness/pi-native/tool-authorization";
+import {
+  canonicalJsonStringify,
+  FileApprovalTicketStore
+} from "../harness/pi-native/tool-authorization";
 import { VaultDomainService } from "../harness/pi-native/vault-domain-service";
 import { EchoInkVaultToolEgressPolicy } from "../harness/pi-native/vault-tool-result-safety";
 import {
@@ -172,6 +175,7 @@ import {
   createObsidianPiMcpApprovalConfirmation,
   recoverPiMcpDomainReceipts
 } from "./pi-mcp-tool-production";
+import { PiAgentApprovalBroker } from "./pi-agent-approval-broker";
 import { stablePathToken } from "../harness/pi-native/file-store-utils";
 import {
   buildEchoInkSystemConstitutionPrompt,
@@ -226,6 +230,7 @@ export interface PiProductionPluginHost {
 
 export interface PiProductionRuntimeBundle {
   readonly runtime: PiNativeConversationRuntime;
+  readonly approvalBroker: PiAgentApprovalBroker;
   readonly catalog: FileConversationCatalog;
   readonly approvals: FileApprovalTicketStore;
   readonly receipts: FileDomainReceiptStore;
@@ -340,6 +345,7 @@ export async function createPiProductionRuntimeBundle(
   const settingsBeforeCutover = snapshotPiConversationShellSettings(
     plugin.settings
   );
+  const approvalBroker = new PiAgentApprovalBroker();
   let runtime: PiNativeConversationRuntime | null = null;
   try {
     const initializedRuntime = new PiNativeConversationRuntime({
@@ -368,7 +374,8 @@ export async function createPiProductionRuntimeBundle(
             writeExecution,
             knowledgeMaintenance,
             knowledgeAgentIndex,
-            personalMemory
+            personalMemory,
+            approvalBroker
           });
         } catch (error) {
           if (error instanceof PiNativeModelMetadataError) {
@@ -409,7 +416,8 @@ export async function createPiProductionRuntimeBundle(
           receipts,
           conversationId: state.conversationId,
           productRunId: state.productRunId
-        })
+        }),
+      disposeRuntimeResources: () => approvalBroker.dispose()
     });
     runtime = initializedRuntime;
     await initializedRuntime.initialize();
@@ -421,6 +429,7 @@ export async function createPiProductionRuntimeBundle(
 
     return Object.freeze({
       runtime: initializedRuntime,
+      approvalBroker,
       catalog,
       approvals,
       receipts,
@@ -434,7 +443,8 @@ export async function createPiProductionRuntimeBundle(
       plugin.settings,
       settingsBeforeCutover
     );
-    await runtime?.shutdown().catch(() => undefined);
+    if (runtime) await runtime.shutdown().catch(() => undefined);
+    else approvalBroker.dispose();
     throw error;
   }
 }
@@ -1221,6 +1231,7 @@ async function createProductionAgentSession(input: {
   knowledgeMaintenance: PiKnowledgeMaintenanceToolPort;
   knowledgeAgentIndex: KnowledgeAgentIndex;
   personalMemory: PersonalMemoryRepository;
+  approvalBroker: PiAgentApprovalBroker;
 }): Promise<PiNativeAgentSessionFactoryResult> {
   const preparedProvider = await preparePiProductionProvider(input);
   const { configured, binding, controlledConfig, provider } = preparedProvider;
@@ -1277,13 +1288,35 @@ async function createProductionAgentSession(input: {
   if (Boolean(input.input.skillPath) !== Boolean(input.input.skillName)) {
     throw new Error("Pi-native Skill path and name must be selected together");
   }
+  const vaultModalConfirmation = createObsidianPiVaultApprovalConfirmation(
+    input.plugin.app
+  );
+  const mcpModalConfirmation = createObsidianPiMcpApprovalConfirmation(
+    input.plugin.app
+  );
   const authorization = createPiVaultProductionAuthorizationPort({
     approvals: input.approvals,
     adapter: input.vaultAdapter,
     currentRunIdentity: () => input.input.currentToolExecutionContext(),
     userId: localPiVaultUserId(input.deviceScope.deviceIdDigest),
     deviceId: input.deviceScope.deviceIdDigest,
-    confirmation: createObsidianPiVaultApprovalConfirmation(input.plugin.app)
+    confirmation: {
+      async confirm(request) {
+        if (input.input.currentTaskPlanTurnContext()?.mode !== "agent") {
+          return await vaultModalConfirmation.confirm(request);
+        }
+        return await input.approvalBroker.waitForDecision({
+          requestId: request.requestId,
+          conversationId: request.conversationId,
+          piSessionId: request.piSessionId,
+          productRunId: request.productRunId,
+          toolCallId: request.toolCallId,
+          target: canonicalJsonStringify(request.target),
+          preview: canonicalJsonStringify(request.preview),
+          signal: request.signal
+        });
+      }
+    }
   });
   const maintenanceSecurity = createPiKnowledgeMaintenanceToolSecurity({
     currentRunIdentity: () => input.input.currentToolExecutionContext(),
@@ -1302,7 +1335,23 @@ async function createProductionAgentSession(input: {
       await isPiMcpToolCurrentlyAllowed(input.plugin, descriptor),
     approvals: input.approvals,
     receipts: input.receipts,
-    confirmation: createObsidianPiMcpApprovalConfirmation(input.plugin.app),
+    confirmation: {
+      async confirm(request) {
+        if (input.input.currentTaskPlanTurnContext()?.mode !== "agent") {
+          return await mcpModalConfirmation.confirm(request);
+        }
+        return await input.approvalBroker.waitForDecision({
+          requestId: request.requestId,
+          conversationId: request.conversationId,
+          piSessionId: request.piSessionId,
+          productRunId: request.productRunId,
+          toolCallId: request.toolCallId,
+          target: canonicalJsonStringify(request.target),
+          preview: canonicalJsonStringify(request.preview),
+          signal: request.signal
+        });
+      }
+    },
     userId: localPiVaultUserId(input.deviceScope.deviceIdDigest),
     deviceId: input.deviceScope.deviceIdDigest,
     egress: new EchoInkVaultToolEgressPolicy()
