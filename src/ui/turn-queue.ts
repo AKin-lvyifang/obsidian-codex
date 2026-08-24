@@ -16,6 +16,8 @@ export interface QueuedTurnItem {
   createdAt: number;
   /** Catalog draft selected by the user; consumed only after Pi durably accepts it. */
   piDraftId?: string;
+  /** In-memory only; the item is removed immediately after this becomes true. */
+  piUserEntryAccepted?: true;
 }
 
 export interface QueueStartState {
@@ -55,6 +57,17 @@ export class RuntimeTurnQueue {
     const item = queue.items.shift();
     this.cleanupEmptySession(sessionId);
     return item ? cloneQueuedTurnItem(item) : null;
+  }
+
+  acceptPiUserEntry(sessionId: string, itemId: string): boolean {
+    const queue = this.sessions.get(sessionId);
+    if (!queue) return false;
+    const index = queue.items.findIndex((item) => item.id === itemId);
+    if (index < 0) return false;
+    queue.items[index]!.piUserEntryAccepted = true;
+    queue.items.splice(index, 1);
+    this.cleanupEmptySession(sessionId);
+    return true;
   }
 
   peekNext(sessionId: string): QueuedTurnItem | null {

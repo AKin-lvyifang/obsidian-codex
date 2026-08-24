@@ -101,12 +101,34 @@ export function createPiNativeModelFromConfiguration(input: {
     imageInput: boolean;
   };
 }): Model<Api> {
-  if (input.catalogModel) {
-    return createPiNativeModelFromCatalog({
-      catalogModel: input.catalogModel,
-      provider: input.provider
-    });
-  }
+  const configuredModel = createConfiguredPiNativeModel(input);
+  if (!input.catalogModel) return configuredModel;
+  const catalogModel = createPiNativeModelFromCatalog({
+    catalogModel: input.catalogModel,
+    provider: input.provider
+  });
+  return deepFreeze({
+    ...structuredClone(catalogModel),
+    reasoning: input.configured.reasoning,
+    input: input.configured.imageInput
+      || catalogModel.input.includes("image")
+      ? ["text", "image"]
+      : ["text"],
+    contextWindow: input.configured.contextWindow,
+    maxTokens: input.configured.maxOutputTokens
+  });
+}
+
+function createConfiguredPiNativeModel(input: {
+  provider: PiProviderRuntimeConfig;
+  configured: {
+    apiProtocol: ApiProviderProtocol;
+    contextWindow: number;
+    maxOutputTokens: number;
+    reasoning: boolean;
+    imageInput: boolean;
+  };
+}): Model<Api> {
   const configured = input.configured;
   if (
     input.provider.apiProtocol !== configured.apiProtocol

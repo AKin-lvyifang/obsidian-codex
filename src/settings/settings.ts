@@ -33,6 +33,7 @@ import {
   type EchoInkTaskPlanSnapshot
 } from "../types/task-plan";
 import type { EchoInkConversationSessionShell } from "./current-conversation";
+import { resolveEchoInkPiCatalogModel } from "./pi-model-catalog";
 
 export interface StoredAttachment {
   type: "file" | "image";
@@ -277,7 +278,11 @@ export interface ApiProviderConfig {
 }
 
 export type ApiProviderModelInput = "text" | "image";
-export type ApiProviderModelMetadataSource = "preset" | "unknown" | "manual";
+export type ApiProviderModelMetadataSource =
+  | "preset"
+  | "catalog"
+  | "unknown"
+  | "manual";
 
 export interface ApiProviderModelConfig {
   id: string;
@@ -692,7 +697,8 @@ export function createApiProviderConfig(
 
 export function createApiProviderModelConfig(
   providerId: ApiProviderId,
-  modelId: string
+  modelId: string,
+  runtimeProviderId = getApiProviderPreset(providerId).runtimeProviderId
 ): ApiProviderModelConfig {
   const id = modelId.trim();
   const preset = getApiProviderModelPreset(providerId, id);
@@ -707,6 +713,32 @@ export function createApiProviderModelConfig(
       modelMaxTokens: preset.modelMaxTokens,
       maxOutputTokens: preset.maxOutputTokens,
       metadataSource: "preset"
+    };
+  }
+  const catalogModel = resolveEchoInkPiCatalogModel(runtimeProviderId, id);
+  if (catalogModel) {
+    return {
+      id: catalogModel.id,
+      displayName: catalogModel.name.trim() || catalogModel.id,
+      input: catalogModel.input.includes("image")
+        ? ["text", "image"]
+        : ["text"],
+      // Pi's public chat-model wrappers contain only tool-capable models. Pi
+      // Model has no separate toolCalling field; input is not used to infer it.
+      toolCalling: true,
+      reasoning: catalogModel.reasoning,
+      contextWindow: catalogModel.contextWindow,
+      modelMaxTokens: catalogModel.maxTokens,
+      maxOutputTokens: Math.min(
+        catalogModel.contextWindow,
+        catalogModel.maxTokens,
+        apiProviderMaxOutputReserve(
+          providerId,
+          catalogModel.id,
+          catalogModel.maxTokens
+        )
+      ),
+      metadataSource: "catalog"
     };
   }
   return {
@@ -1036,7 +1068,7 @@ export function isValidApiProviderModelConfig(
     || model.input.some((entry) => entry !== "text" && entry !== "image")
     || typeof model.toolCalling !== "boolean"
     || typeof model.reasoning !== "boolean"
-    || !["preset", "unknown", "manual"].includes(String(model.metadataSource))
+    || !["preset", "catalog", "unknown", "manual"].includes(String(model.metadataSource))
   ) return false;
   const contextWindow = model.contextWindow;
   const modelMaxTokens = model.modelMaxTokens;
@@ -1863,20 +1895,25 @@ function normalizeApiProviders(value: unknown): ApiProviderConfig[] {
       name
     );
     const preset = getApiProviderPreset(providerId);
-    const modelSelection = normalizeApiProviderModels(record, providerId);
+    const runtimeProviderId = normalizeRuntimeProviderId(
+      record.runtimeProviderId,
+      providerId === "custom"
+        ? preset.runtimeProviderId
+        : providerId === "openai"
+          || providerId === "anthropic"
+          || providerId === "qwen"
+          ? providerId
+          : preset.runtimeProviderId
+    );
+    const modelSelection = normalizeApiProviderModels(
+      record,
+      providerId,
+      runtimeProviderId
+    );
     return {
       id,
       providerId,
-      runtimeProviderId: normalizeRuntimeProviderId(
-        record.runtimeProviderId,
-        providerId === "custom"
-          ? preset.runtimeProviderId
-          : providerId === "openai"
-            || providerId === "anthropic"
-            || providerId === "qwen"
-            ? providerId
-            : preset.runtimeProviderId
-      ),
+      runtimeProviderId,
       apiProtocol: providerId === "custom"
         || providerId === "openai"
         || providerId === "anthropic"
@@ -1900,7 +1937,8 @@ function normalizeApiProviders(value: unknown): ApiProviderConfig[] {
 
 function normalizeApiProviderModels(
   provider: Record<string, unknown>,
-  providerId: ApiProviderId
+  providerId: ApiProviderId,
+  runtimeProviderId: string
 ): Readonly<{
   models: ApiProviderModelConfig[];
   defaultModelId: string;
@@ -1918,10 +1956,16 @@ function normalizeApiProviderModels(
   const source = explicitRecords.length
     ? explicitRecords.map((record) => normalizeStoredApiProviderModel(
       record,
-      providerId
+      providerId,
+      runtimeProviderId
     ))
     : legacyModelId
-      ? [normalizeLegacyApiProviderModel(provider, providerId, legacyModelId)]
+      ? [normalizeLegacyApiProviderModel(
+        provider,
+        providerId,
+        runtimeProviderId,
+        legacyModelId
+      )]
       : [];
   const models: ApiProviderModelConfig[] = [];
   const seen = new Set<string>();
@@ -1936,7 +1980,11 @@ function normalizeApiProviderModels(
       ? String(provider.model).trim()
       : "";
   if (requestedDefault && !seen.has(requestedDefault)) {
-    const model = createApiProviderModelConfig(providerId, requestedDefault);
+    const model = createApiProviderModelConfig(
+      providerId,
+      requestedDefault,
+      runtimeProviderId
+    );
     seen.add(model.id);
     models.unshift(model);
   }
@@ -1950,15 +1998,20 @@ function normalizeApiProviderModels(
 
 function normalizeStoredApiProviderModel(
   record: Record<string, unknown>,
-  providerId: ApiProviderId
+  providerId: ApiProviderId,
+  runtimeProviderId: string
 ): ApiProviderModelConfig {
   const id = String(record.id).trim();
   if (record.metadataSource === "manual") {
     return normalizeManualApiProviderModel(record, providerId, id);
   }
-  const preset = getApiProviderModelPreset(providerId, id);
-  if (preset) return createApiProviderModelConfig(providerId, id);
-  const unknown = createApiProviderModelConfig(providerId, id);
+  const normalized = createApiProviderModelConfig(
+    providerId,
+    id,
+    runtimeProviderId
+  );
+  if (normalized.metadataSource !== "unknown") return normalized;
+  const unknown = normalized;
   unknown.displayName = normalizeText(record.displayName, id);
   return unknown;
 }
@@ -1966,10 +2019,16 @@ function normalizeStoredApiProviderModel(
 function normalizeLegacyApiProviderModel(
   provider: Record<string, unknown>,
   providerId: ApiProviderId,
+  runtimeProviderId: string,
   modelId: string
 ): ApiProviderModelConfig {
-  if (getApiProviderModelPreset(providerId, modelId)) {
-    return createApiProviderModelConfig(providerId, modelId);
+  const known = createApiProviderModelConfig(
+    providerId,
+    modelId,
+    runtimeProviderId
+  );
+  if (known.metadataSource !== "unknown") {
+    return known;
   }
   const hasLegacyMetadata = [
     "toolCalling",
@@ -1981,7 +2040,7 @@ function normalizeLegacyApiProviderModel(
   ].some((key) => Object.hasOwn(provider, key));
   return hasLegacyMetadata
     ? normalizeManualApiProviderModel(provider, providerId, modelId)
-    : createApiProviderModelConfig(providerId, modelId);
+    : known;
 }
 
 function normalizeManualApiProviderModel(

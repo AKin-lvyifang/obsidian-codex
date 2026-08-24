@@ -100,6 +100,7 @@ async function queuedTurnsKeepExactProviderModelAndRetainUnavailableHead(): Prom
   queue.enqueue(queued("turn-b", second.id, "model-b"));
   const activations: string[] = [];
   const sends: string[] = [];
+  let failBeforePiAcceptance = false;
   const view: any = {
     plugin: {
       settings,
@@ -119,10 +120,14 @@ async function queuedTurnsKeepExactProviderModelAndRetainUnavailableHead(): Prom
     renderToolbar: () => undefined,
     sessionById: (sessionId: string) => sessionId === session.id ? session : null,
     startChatTurn: async (_session: StoredSession, item: QueuedTurnItem) => {
+      if (failBeforePiAcceptance) return "failed" as const;
       sends.push(`${item.turnOptions.providerSettingsId}:${item.turnOptions.model}`);
+      queue.acceptPiUserEntry(item.sessionId, item.id);
       return "completed" as const;
     },
-    afterTurnSettled: async () => undefined
+    afterTurnSettled: async (sessionId: string, succeeded: boolean) => {
+      queue.settleSessionQueue(sessionId, succeeded);
+    }
   };
 
   await startNextQueuedTurn(view, session.id);
@@ -153,6 +158,27 @@ async function queuedTurnsKeepExactProviderModelAndRetainUnavailableHead(): Prom
     `${first.id}:model-a`,
     `${second.id}:model-b`,
     `${first.id}:model-a`
+  ]);
+  assert.equal(queue.hasQueuedItems(session.id), false);
+
+  queue.enqueue(queued("turn-pre-accept-failure", second.id, "model-b"));
+  failBeforePiAcceptance = true;
+  await startNextQueuedTurn(view, session.id);
+  assert.equal(queue.isSessionQueuePaused(session.id), true);
+  assert.deepEqual(
+    queue.itemsForSession(session.id).map((item) => item.id),
+    ["turn-pre-accept-failure"]
+  );
+  assert.equal(sends.length, 3, "a pre-accept failure must retain one unsent Prompt");
+
+  failBeforePiAcceptance = false;
+  queue.resumeSessionQueue(session.id);
+  await startNextQueuedTurn(view, session.id);
+  assert.deepEqual(sends, [
+    `${first.id}:model-a`,
+    `${second.id}:model-b`,
+    `${first.id}:model-a`,
+    `${second.id}:model-b`
   ]);
   assert.equal(queue.hasQueuedItems(session.id), false);
   console.log("PASS conversation-ui: Queue switches exact combinations and retains an unavailable head");

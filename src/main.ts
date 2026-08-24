@@ -21,7 +21,7 @@ import {
   type ResourceManagementTab,
   type StoredSession
 } from "./settings/settings";
-import type { CodexView } from "./ui/codex-view";
+import { CodexView, VIEW_TYPE_CODEX } from "./ui/codex-view";
 import { registerEchoInkPluginFeatures, registerEchoInkStartupTasks } from "./plugin/bootstrap";
 import {
   EchoInkSettingsStore,
@@ -68,6 +68,7 @@ import type {
   RecoverPiNativeConversationInput
 } from "./harness/pi-native/pi-native-conversation-runtime";
 import {
+  createPiProductionModelDefinition,
   createPiProductionRuntimeBundle,
   type PiProductionRuntimeBundle
 } from "./plugin/pi-production-runtime-composition";
@@ -385,7 +386,13 @@ export default class CodexForObsidianPlugin extends Plugin {
     this.onboardingWorkspaceCoachmark?.destroy(restoreFocus);
     this.onboardingWorkspaceCoachmark = null;
   }
-  applyComposerDefaultsToView(): void { this.getViewService().applyComposerDefaultsToView(); }
+  applyComposerDefaultsToView(): void {
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_CODEX)) {
+      if (leaf.view instanceof CodexView) {
+        leaf.view.applySavedComposerDefaults();
+      }
+    }
+  }
   getCodexView(): CodexView | null { return this.getViewService().getCodexView(); }
   refreshKnowledgeBaseSurfaces(): void { this.getViewService().refreshKnowledgeBaseSurfaces(); }
   async openWorkspaceResourceSettings(tab: ResourceManagementTab = "plugins"): Promise<void> { return this.getViewService().openWorkspaceResourceSettings(tab); }
@@ -800,44 +807,61 @@ export default class CodexForObsidianPlugin extends Plugin {
     applyCandidate: (settings: CodexForObsidianSettings) => void,
     runtimeMode: "replace" | "preserve" | "suspend" = "replace"
   ): Promise<void> {
-    await this.cancelAllPiConversationActivations();
-    await this.apiProviderActivation.run({
-      isBusy: () => this.productActivity.hasActivity
-        || this.piRunConversations.size > 0,
-      beginSwitch: () => this.productActivity.beginSwitch(),
-      endSwitch: () => this.productActivity.endSwitch(),
-      snapshotMemory: () => snapshotApiProviderSettings(this.settings),
-      readPersisted: async () =>
-        await this.getSettingsStore().readPersistedApiProviderSettingsSnapshot(),
-      applyCandidate: () => applyCandidate(this.settings),
-      persistCandidate: async () => {
-        await this.saveSettings(true);
-      },
-      createCandidateRuntime: async () => {
-        if (runtimeMode === "preserve") return this.piRuntimeBundle;
-        if (runtimeMode === "suspend") return null;
-        return await createPiProductionRuntimeBundle(
-          this,
-          await this.ensurePiLocalData()
-        );
-      },
-      currentRuntime: () => this.piRuntimeBundle,
-      finalizeCandidate: async () => undefined,
-      abortCandidate: async () => undefined,
-      activateRuntime: (runtime) => {
-        const changed = runtime !== this.piRuntimeBundle;
-        this.piRuntimeBundle = runtime;
-        this.piRuntimeFlight = null;
-        if (changed) {
-          this.piActivatedConversationId = null;
-          this.piRunConversations.clear();
-        }
-      },
-      shutdownRuntime: async (runtime) => await runtime.runtime.shutdown(),
-      restoreMemory: (snapshot) => restoreApiProviderSettings(this.settings, snapshot),
-      restorePersisted: async (snapshot) =>
-        await this.getSettingsStore().restorePersistedApiProviderSettingsSnapshot(snapshot)
-    });
+    if (this.piRunConversations.size > 0) {
+      throw new Error("EchoInk 正在回答，当前模型暂时不能切换。");
+    }
+    this.productActivity.beginSwitch();
+    try {
+      const candidateSettings = structuredClone(this.settings);
+      applyCandidate(candidateSettings);
+      if (runtimeMode === "replace") {
+        createPiProductionModelDefinition(candidateSettings);
+      }
+      const candidateSnapshot = snapshotApiProviderSettings(candidateSettings);
+      await this.cancelAllPiConversationActivations();
+      await this.apiProviderActivation.run({
+        isBusy: () => false,
+        beginSwitch: () => undefined,
+        endSwitch: () => undefined,
+        snapshotMemory: () => snapshotApiProviderSettings(this.settings),
+        readPersisted: async () =>
+          await this.getSettingsStore().readPersistedApiProviderSettingsSnapshot(),
+        applyCandidate: () => restoreApiProviderSettings(
+          this.settings,
+          candidateSnapshot
+        ),
+        persistCandidate: async () => {
+          await this.saveSettings(true);
+        },
+        createCandidateRuntime: async () => {
+          if (runtimeMode === "preserve") return this.piRuntimeBundle;
+          if (runtimeMode === "suspend") return null;
+          return await createPiProductionRuntimeBundle(
+            this,
+            await this.ensurePiLocalData()
+          );
+        },
+        currentRuntime: () => this.piRuntimeBundle,
+        finalizeCandidate: async () => undefined,
+        abortCandidate: async () => undefined,
+        activateRuntime: (runtime) => {
+          const changed = runtime !== this.piRuntimeBundle;
+          this.piRuntimeBundle = runtime;
+          this.piRuntimeFlight = null;
+          if (changed) {
+            this.piActivatedConversationId = null;
+            this.piRunConversations.clear();
+          }
+        },
+        shutdownRuntime: async (runtime) => await runtime.runtime.shutdown(),
+        restoreMemory: (snapshot) => restoreApiProviderSettings(this.settings, snapshot),
+        restorePersisted: async (snapshot) =>
+          await this.getSettingsStore().restorePersistedApiProviderSettingsSnapshot(snapshot)
+      });
+      this.applyComposerDefaultsToView();
+    } finally {
+      this.productActivity.endSwitch();
+    }
   }
 
   private async withProductActivity<T>(action: () => Promise<T>): Promise<T> {

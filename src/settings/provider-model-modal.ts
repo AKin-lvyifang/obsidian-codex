@@ -873,7 +873,8 @@ export class ProviderModelModal extends Modal {
     const enabled = getApiProviderModel(this.draft, modelId);
     const model = enabled ?? createApiProviderModelConfig(
       this.providerId,
-      modelId
+      modelId,
+      this.draft.runtimeProviderId
     );
     const row = container.createDiv({
       cls: `codex-provider-model-choice ${enabled ? "is-enabled" : ""}`
@@ -927,7 +928,8 @@ export class ProviderModelModal extends Modal {
     if (enabled && index < 0) {
       this.draft.models.push(createApiProviderModelConfig(
         this.providerId,
-        modelId
+        modelId,
+        this.draft.runtimeProviderId
       ));
       if (!this.draft.defaultModelId) this.draft.defaultModelId = modelId;
     } else if (!enabled && index >= 0) {
@@ -1090,7 +1092,9 @@ export class ProviderModelModal extends Modal {
       ? this.label("能力未知", "Capabilities unknown")
       : model.metadataSource === "manual"
         ? this.label("手动覆盖", "Manual override")
-        : this.label("已知能力", "Known capabilities");
+        : model.metadataSource === "catalog"
+          ? this.label("Pi 目录能力", "Pi catalog capabilities")
+          : this.label("已知能力", "Known capabilities");
     const input = apiProviderModelSupportsImage(model)
       ? this.label("文字 + 图片", "text + image")
       : this.label("仅文字", "text only");
@@ -1640,7 +1644,11 @@ export class ProviderModelModal extends Modal {
 
   private providerPreflightDraft(): PiProviderConfigurationDraft {
     const model = getDefaultApiProviderModel(this.draft)
-      ?? createApiProviderModelConfig(this.providerId, "");
+      ?? createApiProviderModelConfig(
+        this.providerId,
+        "",
+        this.draft.runtimeProviderId
+      );
     return {
       providerSettingsId: this.draft.id,
       providerId: this.providerId,

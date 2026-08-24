@@ -7,7 +7,11 @@ import type {
   StreamOptions
 } from "@earendil-works/pi-ai";
 import {
+  MOONSHOTAI_CN_MODELS
+} from "@earendil-works/pi-ai/providers/moonshotai-cn.models";
+import {
   activateApiProvider,
+  activateApiProviderModel,
   applyApiProviderModelPreset,
   createApiProviderConfig,
   createApiProviderModelConfig,
@@ -18,6 +22,7 @@ import {
   type ApiProviderConfig,
   type ApiProviderModelConfig
 } from "../settings/settings";
+import CodexForObsidianPlugin from "../main";
 import { API_PROVIDER_PRESETS, apiProviderRequestUrl } from "../settings/provider-presets";
 import { providerTooltipBaseUrl } from "../settings/provider-tooltip";
 import type {
@@ -62,6 +67,11 @@ import {
 import {
   runApiProviderActivationServiceTests
 } from "./api-provider-activation-service";
+import {
+  ApiProviderActivationService,
+  ProductActivityGate
+} from "../plugin/api-provider-activation-service";
+import { CodexView } from "../ui/codex-view";
 import { runEditorTranslationServiceTests } from "./editor-translation-service";
 import { runEditorTranslationSelectionTests } from "./editor-translation-selection";
 import {
@@ -151,6 +161,8 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   await assertOpenAICodexCredentialStoreContract();
   await assertOpenAICodexLogoutSuspendsRuntime();
   await runApiProviderActivationServiceTests();
+  await assertProviderActivationMainTransactionContract();
+  assertAllOpenComposersSynchronizeAfterActivation();
   await runEditorTranslationServiceTests();
   runEditorTranslationSelectionTests();
   await assertProviderTextGenerationCompletionContract();
@@ -215,6 +227,105 @@ function primaryProviderModel(provider: ApiProviderConfig): ApiProviderModelConf
   );
   assert.ok(model);
   return model;
+}
+
+async function assertProviderActivationMainTransactionContract(): Promise<void> {
+  const provider = createApiProviderConfig("deepseek", "transaction-provider");
+  provider.apiKey = "fixture-key";
+  const alternateId = API_PROVIDER_PRESETS.find(
+    (candidate) => candidate.id === "deepseek"
+  )?.models[1]?.id;
+  assert.ok(alternateId);
+  provider.models.push(createApiProviderModelConfig("deepseek", alternateId));
+  const settings = structuredClone(DEFAULT_SETTINGS);
+  settings.apiProviders = [provider];
+  activateApiProvider(settings, provider);
+  const events: string[] = [];
+  const plugin = Object.create(
+    CodexForObsidianPlugin.prototype
+  ) as CodexForObsidianPlugin & Record<string, any>;
+  plugin.settings = settings;
+  plugin.piRunConversations = new Map();
+  plugin.productActivity = new ProductActivityGate();
+  plugin.apiProviderActivation = new ApiProviderActivationService();
+  plugin.piRuntimeBundle = null;
+  plugin.piRuntimeFlight = null;
+  plugin.piActivatedConversationId = null;
+  plugin.cancelAllPiConversationActivations = async () => {
+    events.push("cancel-activations");
+  };
+  let persisted = snapshotApiProviderSettings(settings);
+  plugin.getSettingsStore = () => ({
+    readPersistedApiProviderSettingsSnapshot: async () => {
+      events.push("read-persisted");
+      return structuredClone(persisted);
+    },
+    restorePersistedApiProviderSettingsSnapshot: async (
+      snapshot: typeof persisted
+    ) => {
+      events.push("restore-persisted");
+      persisted = structuredClone(snapshot);
+    }
+  });
+  plugin.saveSettings = async () => {
+    events.push("persist-candidate");
+    persisted = snapshotApiProviderSettings(plugin.settings);
+  };
+  plugin.applyComposerDefaultsToView = () => {
+    events.push("sync-composers");
+  };
+
+  plugin.piRunConversations.set("conversation-busy", "run-busy");
+  await assert.rejects(
+    plugin.activateApiProviderSettings(() => undefined),
+    /正在回答/u
+  );
+  assert.deepEqual(events, [], "busy must be checked before activation cancellation");
+  plugin.piRunConversations.clear();
+
+  await assert.rejects(plugin.activateApiProviderSettings((candidate) => {
+    const model = candidate.apiProviders[0]?.models[0];
+    assert.ok(model);
+    model.contextWindow = 1_024;
+    model.modelMaxTokens = 2_048;
+    model.maxOutputTokens = 2_048;
+  }), /Context|metadata/u);
+  assert.deepEqual(events, [], "invalid candidate must fail before cancellation or persistence");
+  assert.equal(plugin.settings.defaultModel, provider.defaultModelId);
+
+  await plugin.activateApiProviderSettings((candidate) => {
+    const target = candidate.apiProviders[0];
+    assert.ok(target);
+    activateApiProviderModel(candidate, target, alternateId);
+  }, "preserve");
+  assert.deepEqual(events, [
+    "cancel-activations",
+    "read-persisted",
+    "persist-candidate",
+    "sync-composers"
+  ]);
+  assert.equal(plugin.settings.defaultModel, alternateId);
+  assert.equal(persisted.defaultModel, alternateId);
+}
+
+function assertAllOpenComposersSynchronizeAfterActivation(): void {
+  const synchronized: string[] = [];
+  const first = Object.create(CodexView.prototype) as CodexView;
+  const second = Object.create(CodexView.prototype) as CodexView;
+  first.applySavedComposerDefaults = () => { synchronized.push("first"); };
+  second.applySavedComposerDefaults = () => { synchronized.push("second"); };
+  CodexForObsidianPlugin.prototype.applyComposerDefaultsToView.call({
+    app: {
+      workspace: {
+        getLeavesOfType: () => [
+          { view: first },
+          { view: { applySavedComposerDefaults: () => synchronized.push("other") } },
+          { view: second }
+        ]
+      }
+    }
+  });
+  assert.deepEqual(synchronized, ["first", "second"]);
 }
 
 async function assertAnimatedSettingsTabIcons(): Promise<void> {
@@ -1880,6 +1991,48 @@ function assertSettingsV51MigrationContract(): void {
     assert.equal(unknown.toolCalling, false);
     assert.equal(unknown.reasoning, false);
     assert.equal(unknown.metadataSource, "unknown");
+  });
+
+  check("discovered IDs use exact runtime Provider metadata from the Pi catalog", () => {
+    const catalog = MOONSHOTAI_CN_MODELS["kimi-k2.7-code"];
+    assert.ok(catalog);
+    assert.equal(Object.hasOwn(catalog, "toolCalling"), false);
+    const discovered = createApiProviderModelConfig(
+      "kimi",
+      catalog.id,
+      "moonshotai-cn"
+    );
+    assert.deepEqual(discovered, {
+      id: catalog.id,
+      displayName: catalog.name,
+      input: catalog.input.includes("image")
+        ? ["text", "image"]
+        : ["text"],
+      toolCalling: true,
+      reasoning: catalog.reasoning,
+      contextWindow: catalog.contextWindow,
+      modelMaxTokens: catalog.maxTokens,
+      maxOutputTokens: 65_536,
+      metadataSource: "catalog"
+    });
+    const provider = createApiProviderConfig("kimi", "catalog-provider");
+    provider.models = [discovered];
+    provider.defaultModelId = discovered.id;
+    const reopened = normalizeSettingsData({
+      ...structuredClone(DEFAULT_SETTINGS),
+      settingsVersion: 51,
+      apiProviders: [provider]
+    }).settings.apiProviders[0]?.models[0];
+    assert.deepEqual(reopened, discovered);
+    const sameIdWrongProvider = createApiProviderModelConfig(
+      "custom",
+      catalog.id,
+      "deepseek"
+    );
+    assert.equal(sameIdWrongProvider.metadataSource, "unknown");
+    assert.deepEqual(sameIdWrongProvider.input, ["text"]);
+    assert.equal(sameIdWrongProvider.toolCalling, false);
+    assert.equal(sameIdWrongProvider.reasoning, false);
   });
 
   check("v48 drops retired Provider references and requires API Key re-entry", () => {

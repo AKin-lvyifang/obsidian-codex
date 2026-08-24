@@ -262,18 +262,17 @@ export async function startNextQueuedTurn(view: CodexViewTurnContext, sessionId:
   view.renderQueue();
   view.renderToolbar();
   let outcome: QueuedTurnOutcome = "failed";
-  let consumed: QueuedTurnItem | null = null;
   let headChangedDuringActivation = false;
   try {
     if (!await prepareTurnProviderModel(view, item, true)) {
       view.turnQueue.pauseSessionQueue(sessionId);
       return;
     }
-    consumed = view.turnQueue.consumeNext(sessionId, item.id);
-    if (!consumed) {
+    const current = view.turnQueue.peekNext(sessionId);
+    if (!current || current.id !== item.id) {
       headChangedDuringActivation = true;
     } else {
-      outcome = await startPreparedQueuedTurnItemSafely(view, consumed, "queue");
+      outcome = await startPreparedQueuedTurnItemSafely(view, item, "queue");
     }
   } finally {
     view.queueStartInProgress = false;
@@ -287,8 +286,16 @@ export async function startNextQueuedTurn(view: CodexViewTurnContext, sessionId:
     ) await view.startNextQueuedTurn(sessionId);
     return;
   }
-  if (consumed && outcome !== "running") {
-    await view.afterTurnSettled(consumed.sessionId, outcome === "completed");
+  if (outcome !== "running") {
+    const retainedBeforePiAcceptance = view.turnQueue
+      .itemsForSession(item.sessionId)
+      .some((candidate) => candidate.id === item.id);
+    await view.afterTurnSettled(item.sessionId, outcome === "completed");
+    if (retainedBeforePiAcceptance && outcome !== "completed") {
+      new Notice(
+        "队列任务在 Pi 接收前失败；队首仅保留一份且队列已暂停，请处理错误后手动继续。"
+      );
+    }
   }
 }
 
@@ -498,6 +505,10 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
       ...(item.piDraftId ? { draftId: item.piDraftId } : {}),
       ...(maintenanceScope ? { maintenanceScope } : {})
     });
+    if (source === "queue") {
+      view.turnQueue.acceptPiUserEntry(session.id, item.id);
+      view.renderQueue();
+    }
     view.activeRunId = handle.productRunId;
     view.activeRunKind = "chat";
     view.activeRunSessionId = session.id;

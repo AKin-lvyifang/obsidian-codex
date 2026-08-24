@@ -11,7 +11,9 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
   InMemoryCredentialStore,
-  InMemoryModelsStore
+  InMemoryModelsStore,
+  type Api,
+  type Model
 } from "@earendil-works/pi-ai";
 import type { App } from "obsidian";
 import {
@@ -140,6 +142,9 @@ import {
   type StoredSession
 } from "../settings/settings";
 import {
+  resolveEchoInkPiCatalogModel
+} from "../settings/pi-model-catalog";
+import {
   apiProviderApiKeyRequired,
   isLoopbackApiProviderUrl,
   normalizeApiProviderBaseUrl,
@@ -258,6 +263,52 @@ export function hasPiProductionProviderConfiguration(
   } catch {
     return false;
   }
+}
+
+/** Builds the same configured Pi model shape used by AgentSession before a
+ * Provider transaction is allowed to persist or replace the active Runtime. */
+export function createPiProductionModelDefinition(
+  settings: CodexForObsidianSettings
+): Model<Api> {
+  const configured = resolveProvider(settings);
+  return createPiProductionModelDefinitionFromResolved(configured);
+}
+
+function createPiProductionModelDefinitionFromResolved(
+  configured: ReturnType<typeof resolveProvider>
+): Model<Api> {
+  const model = createPiNativeModelFromConfiguration({
+    catalogModel: resolveEchoInkPiCatalogModel(
+      configured.providerId,
+      configured.modelRef
+    ) ?? undefined,
+    provider: providerRuntimeConfig(configured),
+    configured: {
+      apiProtocol: configured.apiProtocol,
+      contextWindow: configured.contextWindow,
+      maxOutputTokens: configured.modelMaxTokens,
+      reasoning: configured.reasoning,
+      imageInput: configured.imageInput
+    }
+  });
+  try {
+    calculatePiEffectiveInputBudget({
+      contextWindow: model.contextWindow,
+      maxOutputReserve: Math.min(
+        configured.maxOutputTokens,
+        model.maxTokens
+      )
+    });
+  } catch (error) {
+    if (error instanceof PiContextBudgetError) {
+      throw new PiNativeModelMetadataError(
+        "model_metadata_incompatible",
+        error.message
+      );
+    }
+    throw error;
+  }
+  return model;
 }
 
 export async function createPiProductionRuntimeBundle(
@@ -1243,20 +1294,7 @@ async function createProductionAgentSession(input: {
     modelsStore: new InMemoryModelsStore(),
     allowModelNetwork: false
   });
-  const model = createPiNativeModelFromConfiguration({
-    catalogModel: modelRuntime.getModel(
-      provider.providerId,
-      provider.modelRef
-    ),
-    provider,
-    configured: {
-      apiProtocol: configured.apiProtocol,
-      contextWindow: configured.contextWindow,
-      maxOutputTokens: configured.modelMaxTokens,
-      reasoning: configured.reasoning,
-      imageInput: configured.imageInput
-    }
-  });
+  const model = createPiProductionModelDefinitionFromResolved(configured);
   let contextBudget: PiEffectiveInputBudget;
   try {
     contextBudget = calculatePiEffectiveInputBudget({
@@ -1523,7 +1561,7 @@ async function createProductionAgentSession(input: {
     enableSkillCommands: true,
     enableInstallTelemetry: false,
     enableAnalytics: false,
-    images: { blockImages: !configured.imageInput }
+    images: { blockImages: !model.input.includes("image") }
   }, { projectTrusted: false });
   const agentDir = path.join(
     input.catalog.vaultRootPath,
