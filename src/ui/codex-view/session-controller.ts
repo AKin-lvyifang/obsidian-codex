@@ -11,6 +11,9 @@ import { openSessionMenu as showSessionMenu } from "./menus";
 import { renderCodexTabs } from "./tabs";
 import type { EchoInkResource } from "../../resources/types";
 import {
+  copyPiImageAttachmentsForProjection,
+  piComposerImageAttachmentsForEntry,
+  projectPiImageAttachments,
   refreshPiConversationSupport,
   rememberPiConversationProjection
 } from "./pi-conversation-support";
@@ -320,11 +323,19 @@ async function derivePiConversationInTransitionLane(
     derived = createPiConversationShell(host, derivation.projection.catalog);
     host.plugin.settings.sessions.push(derived);
   }
+  const resendImages = derivation.anchorRole === "user"
+    ? piComposerImageAttachmentsForEntry(session, entryId)
+    : [];
+  copyPiImageAttachmentsForProjection(
+    session,
+    derived,
+    derivation.projection.messages
+  );
   applyPiConversationProjectionToShell(host, derived, derivation.projection);
   host.plugin.settings.activeSessionId = derived.id;
   host.inputEl.value = derivation.editorText;
   host.closeComposerMenus();
-  host.attachments = [];
+  host.attachments = resendImages;
   host.selectedSkill = null;
   host.inputEl.focus();
   host.inputEl.setSelectionRange(
@@ -723,7 +734,10 @@ function applyPiConversationProjectionToShell(
 ): void {
   rememberPiConversationProjection(host.plugin, projection);
   applyPiCatalogEntryToShell(shell, projection.catalog);
-  shell.messages = structuredClone(projection.messages);
+  shell.messages = projectPiImageAttachments(
+    shell,
+    structuredClone(projection.messages)
+  );
   if (projection.contextLedger) {
     shell.contextLedger = structuredClone(projection.contextLedger);
   } else {

@@ -7,7 +7,7 @@ import type {
   SessionManager
 } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
 import {
   routeKnowledgeConversationCommand,
   type KnowledgeConversationCommand
@@ -46,6 +46,7 @@ import type {
   PiChatRuntimeEvent,
   PiChatRuntimeEventListener,
   PiChatSubmitRequest,
+  PiChatPreparedImage,
   PiConversationCatalogEntry,
   PiConversationDerivationResult,
   PiConversationCatalogStatus,
@@ -65,6 +66,7 @@ import type {
   PiTaskPlanTransitionRequest,
   PiTaskPlanTransitionResult
 } from "./contracts";
+import { PI_IMAGE_INPUT_UNSUPPORTED_MESSAGE } from "./contracts";
 import type { PersonalMemorySourceReference } from "../../settings/settings";
 import { latestPiContextLedger } from "./pi-context-budget";
 import {
@@ -316,6 +318,8 @@ export type PiNativeConversationRuntimeErrorCode =
   | "skill_binding_invalid"
   | "session_recovery_invalid"
   | "agent_session_invalid"
+  | "image_input_unsupported"
+  | "product_run_start_failed_after_user_entry"
   | "agent_settled_missing"
   | "projection_unsettled"
   | "provider_execution_unbound";
@@ -324,11 +328,19 @@ export class PiNativeConversationRuntimeError extends Error {
   constructor(
     readonly code: PiNativeConversationRuntimeErrorCode,
     message: string,
-    options?: ErrorOptions
+    options?: ErrorOptions & {
+      readonly piUserEntryAccepted?: boolean;
+      readonly piUserEntryId?: string;
+    }
   ) {
     super(message, options);
     this.name = "PiNativeConversationRuntimeError";
+    this.piUserEntryAccepted = options?.piUserEntryAccepted === true;
+    this.piUserEntryId = options?.piUserEntryId;
   }
+
+  readonly piUserEntryAccepted: boolean;
+  readonly piUserEntryId?: string;
 }
 
 interface ActiveConversation {
@@ -972,6 +984,7 @@ export class PiNativeConversationRuntime {
     this.assertReady();
     this.assertConversationNotRecovering(request.conversationId);
     assertValidSkillBinding(request);
+    const promptImages = normalizePiChatPreparedImages(request.images);
     const mode = normalizePiChatMode(request.mode);
     let catalog = await this.catalog.get(request.conversationId);
     if (!catalog) {
@@ -1022,6 +1035,18 @@ export class PiNativeConversationRuntime {
       throw new PiNativeConversationRuntimeError(
         "conversation_busy",
         `Conversation ${request.conversationId} 已有运行中的 ProductRun`
+      );
+    }
+    if (knowledgeCommand.kind === "maintain" && promptImages.length) {
+      throw new PiNativeConversationRuntimeError(
+        "agent_session_invalid",
+        "/maintain 不接受图片输入。"
+      );
+    }
+    if (promptImages.length && !agentSessionSupportsImageInput(active.session)) {
+      throw new PiNativeConversationRuntimeError(
+        "image_input_unsupported",
+        PI_IMAGE_INPUT_UNSUPPORTED_MESSAGE
       );
     }
 
@@ -1140,7 +1165,8 @@ export class PiNativeConversationRuntime {
     let promptPromise: Promise<void>;
     try {
       promptPromise = active.session.prompt(promptText, {
-        source: "interactive"
+        source: "interactive",
+        ...(promptImages.length ? { images: promptImages } : {})
       });
     } catch (promptStartError) {
       const cleanupErrors = await this.cleanupFailedProductRunStart(
@@ -1166,9 +1192,6 @@ export class PiNativeConversationRuntime {
         sessionManager: active.sessionManager,
         expectedEntryIds: [userEntry.id]
       });
-      if (selectedDraft) {
-        await this.catalog.removeDraft(selectedDraft.draftId);
-      }
     } catch (error) {
       const cleanupErrors = await this.cleanupFailedProductRunStart(
         active,
@@ -1179,6 +1202,24 @@ export class PiNativeConversationRuntime {
         error,
         cleanupErrors,
         "Pi first Entry durability failed and runtime cleanup was incomplete"
+      );
+    }
+
+    try {
+      if (selectedDraft) {
+        await this.catalog.removeDraft(selectedDraft.draftId);
+      }
+    } catch (error) {
+      const cleanupErrors = await this.cleanupFailedProductRunStart(
+        active,
+        execution,
+        promptPromise
+      );
+      throw productRunStartFailureAfterUserEntry(
+        error,
+        cleanupErrors,
+        "Pi user Entry 已接受，但草稿消费失败。",
+        userEntry.id
       );
     }
 
@@ -1212,17 +1253,13 @@ export class PiNativeConversationRuntime {
         execution,
         promptPromise
       );
-      if (cleanupErrors.length > 0) {
-        throw productRunStartFailure(
-          storageError,
-          cleanupErrors,
-          "ProductRun persistence failed and Pi runtime cleanup was incomplete"
-        );
-      }
-      throw productRunStartFailure(
+      throw productRunStartFailureAfterUserEntry(
         storageError,
         cleanupErrors,
-        "ProductRun persistence failed"
+        cleanupErrors.length > 0
+          ? "Pi user Entry 已接受，但 ProductRun 持久化与清理未完整完成。"
+          : "Pi user Entry 已接受，但 ProductRun 持久化失败。",
+        userEntry.id
       );
     }
     const result = this.completeProductRun(
@@ -4071,6 +4108,96 @@ function productRunStartFailure(
     [primaryError, ...cleanupErrors],
     message
   );
+}
+
+function productRunStartFailureAfterUserEntry(
+  primaryError: unknown,
+  cleanupErrors: readonly unknown[],
+  message: string,
+  userEntryId: string
+): PiNativeConversationRuntimeError {
+  return new PiNativeConversationRuntimeError(
+    "product_run_start_failed_after_user_entry",
+    message,
+    {
+      cause: productRunStartFailure(primaryError, cleanupErrors, message),
+      piUserEntryAccepted: true,
+      piUserEntryId: userEntryId
+    }
+  );
+}
+
+export function agentSessionSupportsImageInput(
+  session: Pick<AgentSession, "model">
+): boolean {
+  const model = session.model as Readonly<{
+    imageInput?: unknown;
+    input?: unknown;
+  }> | undefined;
+  return Boolean(
+    model
+    && (
+      model.imageInput === true
+      || (Array.isArray(model.input) && model.input.includes("image"))
+    )
+  );
+}
+
+function normalizePiChatPreparedImages(
+  values: readonly Readonly<PiChatPreparedImage>[] | undefined
+): ImageContent[] {
+  if (!values?.length) return [];
+  return values.map((value, index) => {
+    const content = value?.content;
+    const attachment = value?.attachment;
+    const invalid =
+      !content
+      || content.kind !== "inline_image"
+      || content.preflight !== "approved"
+      || !isPiInlineImageMimeType(content.mimeType)
+      || !validInlineImageBase64(content.data)
+      || !attachment
+      || attachment.type !== "image"
+      || !attachment.name?.trim()
+      || !attachment.path?.trim()
+      || !isPiLocalImageMimeType(attachment.mimeType)
+      || "data" in attachment
+      || "base64" in attachment;
+    if (invalid) {
+      throw new PiNativeConversationRuntimeError(
+        "agent_session_invalid",
+        `Pi 图片输入 ${index + 1} 未通过提交契约。`
+      );
+    }
+    return {
+      type: "image",
+      data: content.data,
+      mimeType: content.mimeType
+    };
+  });
+}
+
+function isPiInlineImageMimeType(value: unknown): value is ImageContent["mimeType"] {
+  return value === "image/png"
+    || value === "image/jpeg"
+    || value === "image/gif"
+    || value === "image/webp";
+}
+
+function isPiLocalImageMimeType(value: unknown): value is string {
+  return isPiInlineImageMimeType(value)
+    || value === "image/bmp"
+    || value === "image/heic"
+    || value === "image/heif"
+    || value === "image/svg+xml";
+}
+
+function validInlineImageBase64(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length % 4 === 0
+    && /^[A-Za-z0-9+/]+={0,2}$/.test(value)
+    && Buffer.from(value, "base64").byteLength > 0;
 }
 
 function combinedOperationError(

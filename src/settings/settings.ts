@@ -38,7 +38,21 @@ export interface StoredAttachment {
   type: "file" | "image";
   name: string;
   path: string;
+  /** Local display metadata only; image payloads remain exclusively in Pi Session. */
+  mimeType?: string;
+  /** Derived at projection time and never persisted as transcript truth. */
+  availability?: "available" | "unavailable";
 }
+
+export interface StoredPiImageAttachmentMetadata {
+  readonly name: string;
+  readonly path: string;
+  readonly mimeType: string;
+}
+
+export type StoredPiImageAttachmentsByEntry = Readonly<
+  Record<string, readonly Readonly<StoredPiImageAttachmentMetadata>[]>
+>;
 
 /** Minimal display metadata for a primary Personal Memory injected this turn. */
 export interface PersonalMemorySourceReference {
@@ -143,7 +157,10 @@ export type StoredSession = EchoInkConversationSessionShell<
   ChatMessage,
   Readonly<PiContextLedger>,
   TokenUsage
->;
+> & {
+  /** Local-only metadata keyed by the durable Pi user Entry identity. */
+  piImageAttachments?: StoredPiImageAttachmentsByEntry;
+};
 
 export type SettingsTab = "general" | "providers" | "resources" | "knowledgeBase" | "review";
 export type ProviderMode = "custom-api";
@@ -1222,16 +1239,23 @@ function normalizeStoredSessions(value: unknown): StoredSession[] {
         && (!piSessionId || parsedContextLedger.piSessionId === piSessionId)
         ? parsedContextLedger
         : undefined;
+      const bodyAuthority = normalizeStoredSessionBodyAuthority(
+        session.bodyAuthority
+      );
+      const piImageAttachments = bodyAuthority === "pi_session_only"
+        ? sanitizeStoredPiImageAttachments(session.piImageAttachments)
+        : undefined;
       return {
         id,
         title: normalizeText(session.title, "新会话"),
         piSessionId,
         defaultMemoryMode: normalizeStoredSessionMemoryMode(session.defaultMemoryMode),
-        bodyAuthority: normalizeStoredSessionBodyAuthority(session.bodyAuthority),
+        bodyAuthority,
         cwd: normalizeOptionalText(session.cwd),
         messages,
         tokenUsage: session.tokenUsage as TokenUsage,
         contextLedger,
+        ...(piImageAttachments ? { piImageAttachments } : {}),
         createdAt: normalizeNonNegativeNumber(session.createdAt),
         updatedAt: normalizeNonNegativeNumber(session.updatedAt)
       };
@@ -1249,6 +1273,54 @@ function normalizeStoredSessionBodyAuthority(
   value: unknown
 ): StoredSession["bodyAuthority"] {
   return value === "pi_session_only" ? value : undefined;
+}
+
+export function sanitizeStoredPiImageAttachments(
+  value: unknown
+): StoredPiImageAttachmentsByEntry | undefined {
+  const record = settingsRecord(value);
+  if (!record) return undefined;
+  const entries: Array<[
+    string,
+    readonly Readonly<StoredPiImageAttachmentMetadata>[]
+  ]> = [];
+  for (const [rawEntryId, rawAttachments] of Object.entries(record)) {
+    const entryId = rawEntryId.trim();
+    if (!entryId || !Array.isArray(rawAttachments)) continue;
+    const attachments = rawAttachments
+      .map((raw): StoredPiImageAttachmentMetadata | null => {
+        const item = settingsRecord(raw);
+        if (!item) return null;
+        const name = normalizeOptionalText(item.name);
+        const path = normalizeOptionalText(item.path);
+        const mimeType = normalizeStoredPiImageMimeType(item.mimeType);
+        if (!name || !path || !mimeType) return null;
+        return Object.freeze({ name, path, mimeType });
+      })
+      .filter((item): item is StoredPiImageAttachmentMetadata => Boolean(item));
+    if (attachments.length) {
+      entries.push([entryId, Object.freeze(attachments)]);
+    }
+  }
+  return entries.length
+    ? Object.freeze(Object.fromEntries(entries))
+    : undefined;
+}
+
+function normalizeStoredPiImageMimeType(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const mimeType = value.trim().toLowerCase();
+  if (mimeType === "image/jpg") return "image/jpeg";
+  return mimeType === "image/png"
+    || mimeType === "image/jpeg"
+    || mimeType === "image/gif"
+    || mimeType === "image/webp"
+    || mimeType === "image/bmp"
+    || mimeType === "image/heic"
+    || mimeType === "image/heif"
+    || mimeType === "image/svg+xml"
+    ? mimeType
+    : undefined;
 }
 
 function normalizeChatMessages(value: unknown): ChatMessage[] {

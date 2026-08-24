@@ -16,7 +16,11 @@ import {
   type AgentSession,
   type AgentSessionEvent
 } from "@earendil-works/pi-coding-agent";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type {
+  AssistantMessage,
+  ImageContent,
+  UserMessage
+} from "@earendil-works/pi-ai";
 import { FileConversationCatalog } from "../../harness/pi-native/file-conversation-catalog";
 import { FileProductRunStore } from "../../harness/pi-native/file-product-run-store";
 import { PiNativeFileStoreError } from "../../harness/pi-native/file-store-utils";
@@ -30,9 +34,13 @@ import {
   type PiNativeTaskPlanTurnContext
 } from "../../harness/pi-native/pi-native-conversation-runtime";
 import type {
+  PiChatPreparedImage,
   PiChatRuntimeEvent,
   PiKnowledgeRuntimePort,
   PiKnowledgeReference
+} from "../../harness/pi-native/contracts";
+import {
+  PI_IMAGE_INPUT_UNSUPPORTED_MESSAGE
 } from "../../harness/pi-native/contracts";
 import {
   PiSessionDurabilityError,
@@ -81,6 +89,7 @@ export async function runPiNativeConversationRuntimeTests(): Promise<void> {
   await assertAgentSessionWarningsUseConversationSupport();
   await assertSkillPromptAndBindingValidation();
   await assertDurableDraftRequiresExplicitSuccessfulResubmission();
+  await assertImagePromptsRequireCapabilityAndPreserveOrder();
   await assertVerifiedPrefixRecoveryIsExplicitAndFailClosed();
   await assertExperienceSourceRefsArePointerOnlyAndDeleteAware();
   await assertMemoryTurnIsAvailableBeforeUserEntryPersistence();
@@ -2031,6 +2040,113 @@ Promise<void> {
   });
 }
 
+async function assertImagePromptsRequireCapabilityAndPreserveOrder():
+Promise<void> {
+  const orderedImages = [
+    preparedImage("first.png", "/fixture/first.png", "image/png", "AQID"),
+    preparedImage("second.jpg", "/fixture/second.jpg", "image/jpeg", "BAUG")
+  ] as const;
+
+  await withFixture(
+    ["run-image-text", "run-image-only"],
+    async (fixture) => {
+      const conversationId = "image-capable-conversation";
+      await fixture.runtime.createConversation({
+        conversationId,
+        title: "Image capable",
+        cwd: fixture.root,
+        createdAt: 2
+      });
+      await fixture.runtime.activateConversation(conversationId);
+      const session = fixture.latestSession();
+      session.model.input = ["text", "image"];
+
+      const textAndImages = await fixture.runtime.submit({
+        conversationId,
+        text: "按顺序看这两张图",
+        images: orderedImages,
+        submittedAt: 3
+      });
+      assert.deepEqual(session.promptTexts, ["按顺序看这两张图"]);
+      assert.deepEqual(session.promptImages[0], [
+        { type: "image", data: "AQID", mimeType: "image/png" },
+        { type: "image", data: "BAUG", mimeType: "image/jpeg" }
+      ]);
+      const firstUserMessage = session.sessionManager.getEntries().find(
+        (entry) => entry.id === textAndImages.userEntryId
+      );
+      assert.equal(firstUserMessage?.type, "message");
+      if (firstUserMessage?.type === "message") {
+        assert.deepEqual(firstUserMessage.message.content, [
+          { type: "text", text: "按顺序看这两张图" },
+          { type: "image", data: "AQID", mimeType: "image/png" },
+          { type: "image", data: "BAUG", mimeType: "image/jpeg" }
+        ]);
+      }
+      session.finishSuccessful("看到了两张图");
+      assert.equal((await textAndImages.result).terminalState, "completed");
+      assert.equal(
+        fixture.runtime.releaseProductRun(textAndImages.productRunId),
+        true
+      );
+
+      const pureImage = await fixture.runtime.submit({
+        conversationId,
+        text: "",
+        images: [orderedImages[1]],
+        submittedAt: 4
+      });
+      assert.equal(session.promptTexts[1], "");
+      assert.deepEqual(session.promptImages[1], [
+        { type: "image", data: "BAUG", mimeType: "image/jpeg" }
+      ]);
+      const pureImageUserMessage = session.sessionManager.getEntries().find(
+        (entry) => entry.id === pureImage.userEntryId
+      );
+      assert.equal(pureImageUserMessage?.type, "message");
+      if (pureImageUserMessage?.type === "message") {
+        assert.deepEqual(pureImageUserMessage.message.content, [
+          { type: "text", text: "" },
+          { type: "image", data: "BAUG", mimeType: "image/jpeg" }
+        ]);
+      }
+      session.finishSuccessful("纯图片也已接收");
+      assert.equal((await pureImage.result).terminalState, "completed");
+      assert.equal(fixture.runtime.releaseProductRun(pureImage.productRunId), true);
+    }
+  );
+
+  await withFixture(["run-image-must-not-start"], async (fixture) => {
+    const conversationId = "image-incapable-conversation";
+    await fixture.runtime.createConversation({
+      conversationId,
+      title: "Image incapable",
+      cwd: fixture.root,
+      createdAt: 5
+    });
+    await fixture.runtime.activateConversation(conversationId);
+    const session = fixture.latestSession();
+
+    await assert.rejects(
+      fixture.runtime.submit({
+        conversationId,
+        text: "不能发送",
+        images: [orderedImages[0]],
+        submittedAt: 6
+      }),
+      (error: unknown) => error instanceof PiNativeConversationRuntimeError
+        && error.code === "image_input_unsupported"
+        && error.message === PI_IMAGE_INPUT_UNSUPPORTED_MESSAGE
+        && error.piUserEntryAccepted === false
+        && error.piUserEntryId === undefined
+    );
+    assert.deepEqual(session.promptTexts, []);
+    assert.deepEqual(session.promptImages, []);
+    assert.deepEqual(await fixture.productRuns.list(conversationId), []);
+    assert.deepEqual(session.lifecycleCalls, []);
+  });
+}
+
 async function assertVerifiedPrefixRecoveryIsExplicitAndFailClosed():
 Promise<void> {
   await withFixture(["run-recovery"], async (fixture) => {
@@ -2350,15 +2466,26 @@ async function assertProductRunPersistenceFailure(
         };
       }
 
+      let acceptedFailure: PiNativeConversationRuntimeError | null = null;
       await assert.rejects(
         fixture.runtime.submit({
           conversationId: `${stage}-failure-conversation`,
           text: "first attempt",
           submittedAt: 10
         }),
-        (error: unknown) => error === storageError
+        (error: unknown) => {
+          if (!(error instanceof PiNativeConversationRuntimeError)) return false;
+          acceptedFailure = error;
+          return error.code === "product_run_start_failed_after_user_entry"
+            && error.piUserEntryAccepted === true
+            && Boolean(error.piUserEntryId)
+            && error.cause === storageError;
+        }
       );
       const session = fixture.latestSession();
+      assert.ok(session.sessionManager.getEntries().some(
+        (entry) => entry.id === acceptedFailure?.piUserEntryId
+      ));
       assert.deepEqual(session.lifecycleCalls, [
         "clearQueue",
         "abort",
@@ -2753,6 +2880,8 @@ async function withFixture(
 
 class ControlledAgentSession {
   readonly promptTexts: string[] = [];
+  readonly promptImages: ImageContent[][] = [];
+  readonly model = { input: ["text"] as string[] };
   readonly taskPlanTurns: Array<Readonly<PiNativeTaskPlanTurnContext> | null> = [];
   readonly lifecycleCalls: string[] = [];
   readonly activeToolSelections: string[][] = [];
@@ -2818,10 +2947,16 @@ class ControlledAgentSession {
     this.emitSettledOnAbort = false;
   }
 
-  prompt(text: string, options: { source?: string }): Promise<void> {
+  prompt(
+    text: string,
+    options: { source?: string; images?: ImageContent[] }
+  ): Promise<void> {
     assert.equal(options.source, "interactive");
     assert.equal(this.isStreaming, false);
     this.promptTexts.push(text);
+    this.promptImages.push(
+      (options.images ?? []).map((image) => ({ ...image }))
+    );
     this.taskPlanTurns.push(this.currentTaskPlanTurn());
     this.memoryTurnsBeforeUserEntryAppend.push(this.currentMemoryTurn());
     this.knowledgeTurnsBeforeUserEntryAppend.push(
@@ -2833,11 +2968,16 @@ class ControlledAgentSession {
       throw error;
     }
     this.promptSequence += 1;
-    const userMessage = {
+    const userMessage: UserMessage = {
       role: "user",
-      content: text,
+      content: options.images?.length
+        ? [
+            { type: "text", text },
+            ...options.images.map((image) => ({ ...image }))
+          ]
+        : text,
       timestamp: 200_000 + this.promptSequence
-    } as const;
+    };
     this.sessionManager.appendMessage(userMessage);
     if (this.runtimeMessageTimestampDrift) {
       const runtimeUserMessage = {
@@ -3112,4 +3252,26 @@ function assistantMessage(text: string, timestamp: number): AssistantMessage {
     timestamp
   };
   return message;
+}
+
+function preparedImage(
+  name: string,
+  localPath: string,
+  mimeType: "image/png" | "image/jpeg",
+  data: string
+): Readonly<PiChatPreparedImage> {
+  return Object.freeze({
+    content: Object.freeze({
+      kind: "inline_image" as const,
+      preflight: "approved" as const,
+      data,
+      mimeType
+    }),
+    attachment: Object.freeze({
+      type: "image" as const,
+      name,
+      path: localPath,
+      mimeType
+    })
+  });
 }

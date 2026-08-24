@@ -1,5 +1,10 @@
 import * as assert from "node:assert/strict";
-import type { Api, Context, Model } from "@earendil-works/pi-ai";
+import type {
+  Api,
+  Context,
+  ImageContent,
+  Model
+} from "@earendil-works/pi-ai";
 import {
   createPiNativeControlledProvider,
   createPiNativeModelFromCatalog,
@@ -13,6 +18,7 @@ import {
 export async function runPiNativeControlledProviderTests(): Promise<void> {
   assertCatalogModelMetadataFailsClosed();
   await assertExecutableAgentToolsProjectToProviderMetadata();
+  await assertImageContentSurvivesControlledProviderProjection();
   await assertThrownOverflowRemainsVisibleToAgentSession();
   await assertUnknownProviderFailuresRemainSanitized();
 }
@@ -129,6 +135,64 @@ Promise<void> {
   }]);
   assert.equal("execute" in captured.tools![0]!, false);
   assert.equal(runtimeTool.execute, execute);
+}
+
+async function assertImageContentSurvivesControlledProviderProjection():
+Promise<void> {
+  const model = providerModel();
+  const config = providerConfig();
+  const image: ImageContent = {
+    type: "image",
+    data: "AQIDBA==",
+    mimeType: "image/png"
+  };
+  const context: Context = {
+    systemPrompt: "Inspect the ordered image content.",
+    messages: [{
+      role: "user",
+      content: [
+        { type: "text", text: "请看图片" },
+        image
+      ],
+      timestamp: 1
+    }],
+    tools: []
+  };
+  let captured: Context | undefined;
+  const provider = createPiNativeControlledProvider({
+    config: {
+      read: async () => structuredClone(config)
+    },
+    controlledStream: {
+      authorityId: "phase1-provider-authority",
+      storeSetId: "phase1-provider-store",
+      stream: (input) => {
+        captured = input.context;
+        throw new Error("fixture_transport_stop");
+      }
+    },
+    model,
+    currentExecutionContext: () => ({
+      runId: "phase1-provider-image-run",
+      conversationId: "phase1-provider-image-conversation",
+      turnId: "phase1-provider-image-turn",
+      correlationId: "phase1-provider-image-correlation"
+    })
+  });
+
+  const result = await provider.stream(model, context, {}).result();
+
+  assert.equal(result.errorMessage, "controlled_transport_failed");
+  assert.ok(captured, "the controlled Provider dispatcher must receive Context");
+  assert.notEqual(captured, context);
+  assert.notEqual(captured.messages[0], context.messages[0]);
+  assert.deepEqual(captured.messages[0], context.messages[0]);
+  const capturedContent = captured.messages[0]?.content;
+  assert.ok(Array.isArray(capturedContent));
+  assert.deepEqual(capturedContent, [
+    { type: "text", text: "请看图片" },
+    { type: "image", data: "AQIDBA==", mimeType: "image/png" }
+  ]);
 }
 
 async function runThrowingProvider(message: string) {

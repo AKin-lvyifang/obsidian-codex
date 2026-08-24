@@ -1,4 +1,7 @@
 import * as assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import type {
   PiChatSubmitRequest,
   PiChatRuntimeEvent,
@@ -6,8 +9,15 @@ import type {
   PiConversationProjection,
   PiProductRunRecord
 } from "../../harness/pi-native/contracts";
-import type { StoredSession } from "../../settings/settings";
-import { piChatMemoryModeForGlobalSetting, startChatTurn } from "../../ui/codex-view/turn-runner";
+import { PI_IMAGE_INPUT_UNSUPPORTED_MESSAGE } from "../../harness/pi-native/contracts";
+import type { ChatMessage, StoredSession } from "../../settings/settings";
+import {
+  enqueueComposerDraft,
+  piChatMemoryModeForGlobalSetting,
+  startChatTurn,
+  startNextQueuedTurn
+} from "../../ui/codex-view/turn-runner";
+import { classifyLocalAttachmentType } from "../../ui/codex-view/attachments";
 import { enabledSkillsForComposerMenu, removeTrailingSlashQuery } from "../../ui/codex-view/composer-controller";
 import { compactBrandedModelLabel } from "../../ui/codex-view/composer";
 import { buildActiveEchoInkResourceCatalog } from "../../resources/registry";
@@ -18,20 +28,447 @@ import {
   personalMemorySourceEmptyStateLabel,
   piConversationDeriveActionLabel
 } from "../../ui/codex-view/message-list";
-import { activateSession } from "../../ui/codex-view/session-controller";
-import type { QueuedTurnItem } from "../../ui/turn-queue";
+import {
+  activateSession,
+  derivePiConversationFromMessage
+} from "../../ui/codex-view/session-controller";
+import {
+  RuntimeTurnQueue,
+  type QueuedTurnItem
+} from "../../ui/turn-queue";
+import {
+  copyPiImageAttachmentsForProjection,
+  piComposerImageAttachmentsForEntry,
+  projectPiImageAttachments
+} from "../../ui/codex-view/pi-conversation-support";
+import { piProjectedEntryMessageId } from "../../harness/pi-native/pi-chat-ui-projector";
+
+const PNG_1X1 = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+  "base64"
+);
 
 export async function runPiNativeTurnRunnerTests(): Promise<void> {
+  localAttachmentClassificationUsesMimeOrExtension();
   asyncSkillMenuOnlyReturnsEnabledSkills();
   composerModelLabelsOnlyRemoveKnownBrandPrefixes();
   globalMemoryModeOverridesEverySubmit();
+  imageMetadataProjectsAndCopiesByPiEntryIdentity();
   tableRowsKeepVaultNoteAliasesInsideOneCell();
   emptyPersonalMemorySourceDisplayDoesNotClaimInjection();
   await messageActionContractsStayTruthful();
+  await userImageDerivationRestoresTheResendComposer();
+  await activeRunImagesUseTheNormalQueue();
+  await queuedImageFailuresAreRetainedOnlyBeforePiAcceptance();
+  await inFlightComposerImageTransferCannotDuplicate();
+  await imageCapabilityFailurePreservesComposerAndAcceptedFailureRecordsMetadata();
   await agentSettlementOnlyFinalizesPiChatTurn();
   await pendingSubmitKeepsRunningConversationResidentAcrossSessionSwitch();
   await disabledOrStaleSkillCannotStartTurn();
   await maintainScopeIsResolvedBeforeProviderSubmit();
+}
+
+function localAttachmentClassificationUsesMimeOrExtension(): void {
+  assert.equal(
+    classifyLocalAttachmentType("/fixture/camera-upload", "image/heif"),
+    "image"
+  );
+  assert.equal(
+    classifyLocalAttachmentType("/fixture/camera.HEIF", "application/octet-stream"),
+    "image"
+  );
+  assert.equal(
+    classifyLocalAttachmentType("/fixture/photo.png", "text/plain"),
+    "image",
+    "a known image extension remains sufficient when the host MIME is stale"
+  );
+  assert.equal(
+    classifyLocalAttachmentType("/fixture/note.md", "text/markdown"),
+    "file"
+  );
+  assert.equal(
+    classifyLocalAttachmentType("/fixture/archive.bin", "application/octet-stream"),
+    "file"
+  );
+}
+
+function imageMetadataProjectsAndCopiesByPiEntryIdentity(): void {
+  const entryId = "user-image-metadata";
+  const source: StoredSession = {
+    id: "conversation-image-metadata",
+    title: "Image metadata",
+    kind: "chat",
+    piSessionId: "pi-image-metadata",
+    bodyAuthority: "pi_session_only",
+    cwd: "/vault",
+    messages: [],
+    piImageAttachments: {
+      [entryId]: [
+        {
+          name: "原图一.png",
+          path: "/missing/ordered-one.png",
+          mimeType: "image/png"
+        },
+        {
+          name: "原图二.jpg",
+          path: "/missing/ordered-two.jpg",
+          mimeType: "image/jpeg"
+        }
+      ]
+    },
+    createdAt: 1,
+    updatedAt: 1
+  };
+  const fallbackMessage: ChatMessage = {
+    id: `pi:pi-image-metadata:leaf:leaf:entry:${entryId}`,
+    role: "user",
+    itemType: "user",
+    text: "",
+    images: [{
+      type: "image",
+      name: "图片 1",
+      path: "",
+      mimeType: "image/png",
+      availability: "unavailable"
+    }, {
+      type: "image",
+      name: "图片 2",
+      path: "",
+      mimeType: "image/jpeg",
+      availability: "unavailable"
+    }],
+    createdAt: 2
+  };
+
+  const projected = projectPiImageAttachments(source, [fallbackMessage]);
+  assert.equal(projected.length, 1, "missing local files must not drop the user message");
+  assert.deepEqual(projected[0]?.images, [{
+    type: "image",
+    name: "原图一.png",
+    path: "/missing/ordered-one.png",
+    mimeType: "image/png",
+    availability: "unavailable"
+  }, {
+    type: "image",
+    name: "原图二.jpg",
+    path: "/missing/ordered-two.jpg",
+    mimeType: "image/jpeg",
+    availability: "unavailable"
+  }]);
+
+  const derived: StoredSession = {
+    id: "conversation-image-derived",
+    title: "Derived",
+    kind: "chat",
+    piSessionId: "pi-image-derived",
+    bodyAuthority: "pi_session_only",
+    cwd: "/vault",
+    messages: [],
+    createdAt: 3,
+    updatedAt: 3
+  };
+  copyPiImageAttachmentsForProjection(source, derived, projected);
+  assert.deepEqual(derived.piImageAttachments, source.piImageAttachments);
+  assert.deepEqual(piComposerImageAttachmentsForEntry(source, entryId), [
+    {
+      type: "image",
+      name: "原图一.png",
+      path: "/missing/ordered-one.png",
+      mimeType: "image/png"
+    },
+    {
+      type: "image",
+      name: "原图二.jpg",
+      path: "/missing/ordered-two.jpg",
+      mimeType: "image/jpeg"
+    }
+  ]);
+}
+
+async function activeRunImagesUseTheNormalQueue(): Promise<void> {
+  const session = piSessionShell("conversation-active-image-queue");
+  const queue = new RuntimeTurnQueue();
+  const item = queuedImageTurn(session.id, "/fixture/queued-image.png");
+  let followUpCalls = 0;
+  let composerClearCalls = 0;
+  const view: any = {
+    plugin: {
+      followUpPiConversation: async () => { followUpCalls += 1; }
+    },
+    running: true,
+    activeRunKind: "chat",
+    activeRunSessionId: session.id,
+    turnQueue: queue,
+    createQueuedTurnFromComposer: async () => item,
+    sessionById: () => session,
+    clearComposerDraft: () => { composerClearCalls += 1; },
+    renderQueue: () => undefined,
+    renderToolbar: () => undefined
+  };
+
+  await enqueueComposerDraft(view);
+
+  assert.equal(followUpCalls, 0, "image turns must not use text-only follow-up");
+  assert.equal(queue.itemsForSession(session.id).length, 1);
+  assert.deepEqual(queue.itemsForSession(session.id)[0]?.attachments, item.attachments);
+  assert.equal(queue.itemsForSession(session.id)[0]?.piUserEntryAccepted, undefined);
+  assert.equal(
+    queue.itemsForSession(session.id)[0]?.clearComposerAfterPiAcceptance,
+    true
+  );
+  assert.equal(
+    composerClearCalls,
+    0,
+    "Pi must durably accept the queued image turn before Composer clears"
+  );
+
+  await enqueueComposerDraft(view);
+  assert.equal(
+    queue.itemsForSession(session.id).length,
+    1,
+    "an unchanged Composer snapshot must not be duplicated while waiting"
+  );
+  assert.equal(followUpCalls, 0);
+}
+
+async function queuedImageFailuresAreRetainedOnlyBeforePiAcceptance():
+Promise<void> {
+  const runScenario = async (accepted: boolean) => {
+    const sessionId = accepted
+      ? "conversation-accepted-image-failure"
+      : "conversation-pre-accept-image-failure";
+    const queue = new RuntimeTurnQueue();
+    queue.enqueue(queuedImageTurn(sessionId, `/fixture/${sessionId}.png`));
+    const view: any = {
+      turnQueue: queue,
+      queueStartInProgress: false,
+      running: false,
+      renderQueue: () => undefined,
+      renderToolbar: () => undefined,
+      startQueuedTurnItemSafely: async (turn: QueuedTurnItem) => {
+        if (accepted) turn.piUserEntryAccepted = true;
+        return "failed" as const;
+      },
+      afterTurnSettled: async (id: string, succeeded: boolean) => {
+        queue.settleSessionQueue(id, succeeded);
+      }
+    };
+    await startNextQueuedTurn(view, sessionId);
+    return { queue, sessionId };
+  };
+
+  const beforeAcceptance = await runScenario(false);
+  assert.equal(beforeAcceptance.queue.itemsForSession(beforeAcceptance.sessionId).length, 1);
+  assert.equal(
+    beforeAcceptance.queue.isSessionQueuePaused(beforeAcceptance.sessionId),
+    true,
+    "a pre-acceptance failure must return the exact turn to the front and pause"
+  );
+
+  const afterAcceptance = await runScenario(true);
+  assert.deepEqual(afterAcceptance.queue.itemsForSession(afterAcceptance.sessionId), []);
+  assert.equal(
+    afterAcceptance.queue.isSessionQueuePaused(afterAcceptance.sessionId),
+    false,
+    "a durable Pi user Entry must never be duplicated back into the queue"
+  );
+}
+
+async function inFlightComposerImageTransferCannotDuplicate(): Promise<void> {
+  const session = piSessionShell("conversation-in-flight-image-transfer");
+  const queue = new RuntimeTurnQueue();
+  const queued = queuedImageTurn(session.id, "/fixture/in-flight.png");
+  queued.clearComposerAfterPiAcceptance = true;
+  queue.enqueue(queued);
+  const startGate = deferred<"failed">();
+  let running = false;
+  const view: any = {
+    plugin: {
+      followUpPiConversation: async () => {
+        throw new Error("image transfers must not use follow-up");
+      }
+    },
+    turnQueue: queue,
+    queueStartInProgress: false,
+    get running() { return running; },
+    set running(value: boolean) { running = value; },
+    activeRunKind: "",
+    activeRunSessionId: "",
+    renderQueue: () => undefined,
+    renderToolbar: () => undefined,
+    startQueuedTurnItemSafely: async () => {
+      running = true;
+      view.activeRunKind = "chat";
+      view.activeRunSessionId = session.id;
+      return await startGate.promise;
+    },
+    afterTurnSettled: async (id: string, succeeded: boolean) => {
+      queue.settleSessionQueue(id, succeeded);
+    },
+    createQueuedTurnFromComposer: async () =>
+      queuedImageTurn(session.id, "/fixture/in-flight.png"),
+    sessionById: () => session,
+    clearComposerDraft: () => undefined
+  };
+
+  const flight = startNextQueuedTurn(view, session.id);
+  await waitFor(() => view.queueStartInProgress === true && running);
+  await enqueueComposerDraft(view);
+  assert.deepEqual(
+    queue.itemsForSession(session.id),
+    [],
+    "the in-flight transferred snapshot must not be queued a second time"
+  );
+
+  running = false;
+  startGate.resolve("failed");
+  await flight;
+  assert.equal(queue.itemsForSession(session.id).length, 1);
+  assert.equal(queue.isSessionQueuePaused(session.id), true);
+}
+
+async function imageCapabilityFailurePreservesComposerAndAcceptedFailureRecordsMetadata():
+Promise<void> {
+  const root = await mkdtemp(path.join(tmpdir(), "echoink-turn-runner-image-"));
+  try {
+    const imagePath = path.join(root, "composer.png");
+    await writeFile(imagePath, PNG_1X1);
+    const unsupportedSession = piSessionShell("conversation-image-unsupported");
+    const unsupportedItem = queuedImageTurn(unsupportedSession.id, imagePath);
+    let unsupportedClearCalls = 0;
+    let unsupportedSubmit: PiChatSubmitRequest | null = null;
+    const unsupportedView = imageFailureView({
+      session: unsupportedSession,
+      onSubmit: async (request) => {
+        unsupportedSubmit = request;
+        throw new Error(PI_IMAGE_INPUT_UNSUPPORTED_MESSAGE);
+      },
+      onClearComposer: () => { unsupportedClearCalls += 1; }
+    });
+
+    assert.equal(
+      await startChatTurn(
+        unsupportedView,
+        unsupportedSession,
+        unsupportedItem,
+        "composer"
+      ),
+      "failed"
+    );
+    assert.equal(unsupportedSubmit?.text, unsupportedItem.text);
+    assert.equal(unsupportedSubmit?.images?.length, 1);
+    assert.equal(unsupportedClearCalls, 0);
+    assert.equal(unsupportedItem.piUserEntryAccepted, undefined);
+    assert.equal(unsupportedSession.piImageAttachments, undefined);
+
+    const acceptedSession = piSessionShell("conversation-image-accepted-failure");
+    const acceptedItem = queuedImageTurn(acceptedSession.id, imagePath);
+    acceptedItem.clearComposerAfterPiAcceptance = true;
+    let acceptedClearCalls = 0;
+    let persistenceCalls = 0;
+    const acceptedError = Object.assign(
+      new Error("Pi user Entry 已接受，但 ProductRun 持久化失败。"),
+      {
+        piUserEntryAccepted: true as const,
+        piUserEntryId: "entry-image-accepted"
+      }
+    );
+    const acceptedView = imageFailureView({
+      session: acceptedSession,
+      composerItem: acceptedItem,
+      onSubmit: async () => { throw acceptedError; },
+      onClearComposer: () => { acceptedClearCalls += 1; },
+      onPersist: async () => { persistenceCalls += 1; }
+    });
+
+    assert.equal(
+      await startChatTurn(
+        acceptedView,
+        acceptedSession,
+        acceptedItem,
+        "queue"
+      ),
+      "failed"
+    );
+    assert.equal(acceptedItem.piUserEntryAccepted, true);
+    assert.equal(acceptedClearCalls, 1);
+    assert.equal(persistenceCalls, 1);
+    assert.deepEqual(
+      acceptedSession.piImageAttachments?.["entry-image-accepted"],
+      [{
+        name: "composer.png",
+        path: imagePath,
+        mimeType: "image/png"
+      }]
+    );
+    assert.doesNotMatch(
+      JSON.stringify(acceptedSession.piImageAttachments),
+      /iVBORw0KGgo/u
+    );
+
+    const switchedSession = piSessionShell("conversation-image-switch-target");
+    const switchedItem = queuedImageTurn(acceptedSession.id, imagePath);
+    switchedItem.clearComposerAfterPiAcceptance = true;
+    let switchedClearCalls = 0;
+    const switchedView = imageFailureView({
+      session: acceptedSession,
+      composerItem: switchedItem,
+      onSubmit: async () => { throw acceptedError; },
+      onClearComposer: () => { switchedClearCalls += 1; }
+    });
+    switchedView.plugin.settings.sessions.push(switchedSession);
+    switchedView.plugin.settings.activeSessionId = switchedSession.id;
+
+    assert.equal(
+      await startChatTurn(
+        switchedView,
+        acceptedSession,
+        switchedItem,
+        "queue"
+      ),
+      "failed"
+    );
+    assert.equal(
+      switchedClearCalls,
+      0,
+      "an accepted turn from session A must not clear an identical draft in active session B"
+    );
+
+    const editedSession = piSessionShell("conversation-image-edited-draft");
+    const editedItem = queuedImageTurn(editedSession.id, imagePath);
+    let editedClearCalls = 0;
+    let editedView: any;
+    editedView = imageFailureView({
+      session: editedSession,
+      composerItem: editedItem,
+      onSubmit: async () => {
+        editedView.inputEl.value = "这是用户等待期间输入的新草稿";
+        throw acceptedError;
+      },
+      onClearComposer: () => { editedClearCalls += 1; }
+    });
+
+    assert.equal(
+      await startChatTurn(
+        editedView,
+        editedSession,
+        editedItem,
+        "composer"
+      ),
+      "failed"
+    );
+    assert.equal(
+      editedClearCalls,
+      0,
+      "direct Composer acceptance must not clear text edited while submit was pending"
+    );
+    assert.equal(
+      editedView.inputEl.value,
+      "这是用户等待期间输入的新草稿"
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 }
 
 function emptyPersonalMemorySourceDisplayDoesNotClaimInjection(): void {
@@ -180,6 +617,86 @@ async function messageActionContractsStayTruthful(): Promise<void> {
     async () => { throw new Error("clipboard unavailable"); }
   );
   assert.equal(failure.status, "failure");
+}
+
+async function userImageDerivationRestoresTheResendComposer(): Promise<void> {
+  const entryId = "user-image-derive";
+  const source = piSessionShell("conversation-image-derive-source");
+  source.piImageAttachments = {
+    [entryId]: [{
+      name: "derive.png",
+      path: "/missing/derive.png",
+      mimeType: "image/png"
+    }]
+  };
+  const targetId = "conversation-image-derive-target";
+  let saveCalls = 0;
+  const inputEl = {
+    value: "",
+    focus: () => undefined,
+    setSelectionRange: () => undefined
+  };
+  const plugin: any = {
+    settings: {
+      sessions: [source],
+      activeSessionId: source.id
+    },
+    getVaultPath: () => "/vault",
+    derivePiConversation: async () => ({
+      sourceConversationId: source.id,
+      anchorEntryId: entryId,
+      anchorRole: "user" as const,
+      editorText: "请重新看这张图",
+      activation: { status: "activated" as const },
+      projection: {
+        catalog: {
+          conversationId: targetId,
+          piSessionId: "pi-image-derive-target",
+          vaultId: "vault-turn-runner",
+          title: "Derived image conversation",
+          status: "active" as const,
+          defaultMemoryMode: "normal" as const,
+          createdAt: 3,
+          updatedAt: 3,
+          sessionFile: "/sessions/pi-image-derive-target.jsonl"
+        },
+        activeLeafId: null,
+        messages: [],
+        diagnostics: [],
+        drafts: []
+      }
+    }),
+    saveSettings: async () => { saveCalls += 1; }
+  };
+  const host: any = {
+    app: {},
+    plugin,
+    turnQueue: new RuntimeTurnQueue(),
+    tabBarEl: {},
+    running: false,
+    activeRunSessionId: "",
+    inputEl,
+    attachments: [],
+    selectedSkill: null,
+    closeComposerMenus: () => undefined,
+    resetVirtualWindow: () => undefined,
+    renderTabs: () => undefined,
+    renderMessages: () => undefined,
+    renderToolbar: () => undefined,
+    updateInputPlaceholder: () => undefined
+  };
+
+  await derivePiConversationFromMessage(host, source, entryId);
+
+  assert.equal(plugin.settings.activeSessionId, targetId);
+  assert.equal(inputEl.value, "请重新看这张图");
+  assert.deepEqual(host.attachments, [{
+    type: "image",
+    name: "derive.png",
+    path: "/missing/derive.png",
+    mimeType: "image/png"
+  }]);
+  assert.equal(saveCalls, 1);
 }
 
 function tableRowsKeepVaultNoteAliasesInsideOneCell(): void {
@@ -332,8 +849,16 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
   const item: QueuedTurnItem = {
     id: "queued-turn-runner",
     sessionId: session.id,
-    text: "hello",
-    attachments: [],
+    text: "",
+    attachments: [{
+      type: "image",
+      name: "memory-personality-v1.webp",
+      path: path.resolve(
+        process.cwd(),
+        "src/knowledge-base/assets/guide/memory-personality-v1.webp"
+      ),
+      mimeType: "image/webp"
+    }],
     skill: {
       id: "echoink-local:skill:review",
       kind: "skill",
@@ -363,7 +888,13 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
   let submittedRequest: PiChatSubmitRequest | null = null;
   const renderedAssistantStatuses: Array<string | undefined> = [];
   const plugin = {
+    settings: {
+      memory: { useLongTermMemory: true },
+      sessions: [session],
+      activeSessionId: session.id
+    },
     getVaultPath: () => "/vault",
+    persistPiNativeSettings: async () => undefined,
     buildRuntimeEchoInkResourceCatalog: async () => [item.skill!],
     submitPiChat: async (request: PiChatSubmitRequest) => {
       submittedRequest = request;
@@ -405,6 +936,9 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
     activeRunNativeExecutionRecordIds: [],
     turnStartedAt: 0,
     messagesBottomFollowPaused: false,
+    inputEl: { value: item.text },
+    attachments: item.attachments.map((attachment) => ({ ...attachment })),
+    selectedSkill: { ...item.skill! },
     clearComposerDraft: () => { composerCleared = true; },
     renderTabs: () => undefined,
     renderMessagesIfActive: () => {
@@ -429,6 +963,73 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
   assert.equal(submittedRequest?.skillPath, "skills/review/SKILL.md");
   assert.equal(submittedRequest?.skillName, "review");
   assert.equal(submittedRequest?.memoryMode, "normal");
+  assert.equal(submittedRequest?.images?.length, 1);
+  assert.equal(projectionReads, 0);
+  const liveUserMessage = session.messages.find((message) =>
+    message.role === "user"
+  );
+  assert.equal(liveUserMessage?.text, item.text);
+  assert.deepEqual(liveUserMessage?.images, [{
+    type: "image",
+    name: "memory-personality-v1.webp",
+    path: item.attachments[0]!.path,
+    mimeType: "image/webp",
+    availability: "available"
+  }]);
+  const submittedImagePayload = submittedRequest?.images?.[0]?.content.data;
+  assert.ok(submittedImagePayload);
+  assert.equal(
+    JSON.stringify(liveUserMessage).includes(submittedImagePayload),
+    false,
+    "the immediate live projection must keep metadata only, never a Base64 copy"
+  );
+
+  await emit(listener, runtimeEvent({
+    type: "message_start",
+    messageKey: "user-live",
+    role: "user"
+  }));
+  assert.equal(
+    session.messages.filter((message) => message.role === "user").length,
+    1,
+    "a real user message_start must reuse the optimistic accepted image bubble"
+  );
+  assert.deepEqual(
+    session.messages.find((message) => message.role === "user")?.images,
+    liveUserMessage?.images,
+    "user message_start must preserve the complete local thumbnail metadata"
+  );
+  await emit(listener, runtimeEvent({
+    type: "message_end",
+    messageKey: "user-live",
+    role: "user",
+    text: item.text,
+    status: "completed"
+  }));
+  assert.equal(
+    session.messages.filter((message) => message.role === "user").length,
+    1,
+    "a user message_end without entryId must not create a second bubble"
+  );
+  assert.deepEqual(
+    session.messages.find((message) => message.role === "user")?.images,
+    liveUserMessage?.images,
+    "user message_end without entryId must preserve path and availability"
+  );
+  await emit(listener, runtimeEvent({
+    type: "message_entry_resolved",
+    messageKey: "user-live",
+    entryId: "entry-user"
+  }));
+  assert.equal(
+    session.messages.filter((message) => message.role === "user").length,
+    1
+  );
+  assert.deepEqual(
+    session.messages.find((message) => message.role === "user")?.images,
+    liveUserMessage?.images,
+    "entry resolution must preserve ordered local image metadata"
+  );
 
   await emit(listener, runtimeEvent({
     type: "message_start",
@@ -693,6 +1294,96 @@ Promise<void> {
   assert.equal(view.activeRunSessionId, "");
 }
 
+function piSessionShell(id: string): StoredSession {
+  return {
+    id,
+    title: id,
+    kind: "chat",
+    piSessionId: `pi-${id}`,
+    bodyAuthority: "pi_session_only",
+    cwd: "/vault",
+    messages: [],
+    createdAt: 1,
+    updatedAt: 1
+  };
+}
+
+function queuedImageTurn(sessionId: string, imagePath: string): QueuedTurnItem {
+  return {
+    id: `queued-${sessionId}`,
+    sessionId,
+    text: "请看图片",
+    attachments: [{
+      type: "image",
+      name: path.basename(imagePath),
+      path: imagePath,
+      mimeType: "image/png"
+    }],
+    skill: null,
+    turnOptions: {
+      model: "",
+      reasoning: "high",
+      serviceTier: "fast",
+      permission: "read-only",
+      mode: "agent",
+      mcpEnabled: false
+    },
+    kind: "chat",
+    createdAt: 2
+  };
+}
+
+function imageFailureView(input: Readonly<{
+  session: StoredSession;
+  composerItem?: Readonly<QueuedTurnItem>;
+  onSubmit(request: PiChatSubmitRequest): Promise<never>;
+  onClearComposer(): void;
+  onPersist?(): Promise<void>;
+}>): any {
+  let running = false;
+  let activeRunId = "";
+  return {
+    plugin: {
+      settings: {
+        memory: { useLongTermMemory: true },
+        sessions: [input.session],
+        activeSessionId: input.session.id
+      },
+      getVaultPath: () => "/vault",
+      submitPiChat: input.onSubmit,
+      persistPiNativeSettings: input.onPersist ?? (async () => undefined),
+      readPiConversationProjection: async () => {
+        throw new Error("no ProductRun projection for rejected submit");
+      },
+      abortPiConversation: async () => undefined,
+      releasePiProductionRun: () => undefined
+    },
+    get running() { return running; },
+    set running(value: boolean) { running = value; },
+    get activeRunId() { return activeRunId; },
+    set activeRunId(value: string) { activeRunId = value; },
+    activeRunKind: "",
+    activeRunSessionId: "",
+    activeTurnId: "",
+    turnStartedAt: 0,
+    messagesBottomFollowPaused: false,
+    inputEl: { value: input.composerItem?.text ?? "" },
+    attachments: input.composerItem?.attachments.map((attachment) => ({
+      ...attachment
+    })) ?? [],
+    selectedSkill: input.composerItem?.skill ?? null,
+    clearComposerDraft: input.onClearComposer,
+    renderTabs: () => undefined,
+    renderMessages: () => undefined,
+    renderMessagesIfActive: () => undefined,
+    renderToolbar: () => undefined,
+    applyStatus: () => undefined,
+    armTurnWatchdog: () => undefined,
+    clearTurnWatchdog: () => undefined,
+    clearActiveRun: () => { activeRunId = ""; }
+  };
+}
+
 function runtimeEvent(
   patch: RuntimeEventPatch
 ): PiChatRuntimeEvent {
@@ -753,10 +1444,27 @@ function durableProjection(
     activeLeafId: "entry-assistant",
     messages: [
       {
-        id: "entry-user",
+        id: piProjectedEntryMessageId(
+          session.piSessionId!,
+          "entry-assistant",
+          "entry-user"
+        ),
         role: "user",
         itemType: "user",
-        text: "hello",
+        text: session.piImageAttachments?.["entry-user"]?.length ? "" : "hello",
+        ...(session.piImageAttachments?.["entry-user"]?.length
+          ? {
+              images: session.piImageAttachments["entry-user"].map(
+                (image, index) => ({
+                  type: "image" as const,
+                  name: `图片 ${index + 1}`,
+                  path: "",
+                  mimeType: image.mimeType,
+                  availability: "unavailable" as const
+                })
+              )
+            }
+          : {}),
         status: "completed",
         runId: "product-run-turn-runner",
         turnId: "product-run-turn-runner",
@@ -764,7 +1472,11 @@ function durableProjection(
         completedAt: 2
       },
       {
-        id: "entry-assistant",
+        id: piProjectedEntryMessageId(
+          session.piSessionId!,
+          "entry-assistant",
+          "entry-assistant"
+        ),
         role: "assistant",
         itemType: "assistant",
         text: assistantStatus === "completed" ? "done" : "streaming",

@@ -16,6 +16,10 @@ export interface QueuedTurnItem {
   createdAt: number;
   /** Catalog draft selected by the user; consumed only after Pi durably accepts it. */
   piDraftId?: string;
+  /** In-memory queue lease marker; never persisted as Conversation content. */
+  piUserEntryAccepted?: boolean;
+  /** Clear this exact Composer snapshot only after Pi durably accepts it. */
+  clearComposerAfterPiAcceptance?: boolean;
 }
 
 export interface QueueStartState {
@@ -41,6 +45,13 @@ export class RuntimeTurnQueue {
     const queue = this.ensureSessionQueue(item.sessionId);
     const snapshot = cloneQueuedTurnItem(item);
     queue.items.push(snapshot);
+    return cloneQueuedTurnItem(snapshot);
+  }
+
+  enqueueFront(item: QueuedTurnItem): QueuedTurnItem {
+    const queue = this.ensureSessionQueue(item.sessionId);
+    const snapshot = cloneQueuedTurnItem(item);
+    queue.items.unshift(snapshot);
     return cloneQueuedTurnItem(snapshot);
   }
 

@@ -39,7 +39,7 @@ export function attachActiveFile(host: CodexAttachmentHost): void {
     return;
   }
   host.attachments.push({
-    type: isImagePath(file.path) ? "image" : "file",
+    type: classifyLocalAttachmentType(file.path),
     name: file.name,
     path: absoluteVaultPath(host.plugin.getVaultPath(), file.path)
   });
@@ -57,9 +57,10 @@ export function pickFiles(host: CodexAttachmentHost, imagesOnly: boolean): void 
       const filePath = (file as File & { path?: string }).path;
       if (!filePath) continue;
       host.attachments.push({
-        type: isImagePath(filePath) ? "image" : "file",
+        type: classifyLocalAttachmentType(filePath, file.type),
         name: file.name,
-        path: filePath
+        path: filePath,
+        ...(file.type ? { mimeType: file.type } : {})
       });
     }
     host.renderAttachments();
@@ -98,12 +99,31 @@ export function handleDroppedFiles(host: CodexAttachmentHost, event: DragEvent):
     const filePath = (file as File & { path?: string }).path;
     if (!filePath) continue;
     host.attachments.push({
-      type: isImagePath(filePath) ? "image" : "file",
+      type: classifyLocalAttachmentType(filePath, file.type),
       name: file.name,
-      path: filePath
+      path: filePath,
+      ...(file.type ? { mimeType: file.type } : {})
     });
   }
   host.renderAttachments();
+}
+
+export function classifyLocalAttachmentType(
+  filePath: string,
+  mimeType?: string
+): StoredAttachment["type"] {
+  const normalizedMimeType = mimeType
+    ?.split(";", 1)[0]
+    ?.trim()
+    .toLowerCase();
+  const imageMimeType = Boolean(
+    normalizedMimeType
+    && normalizedMimeType.startsWith("image/")
+    && normalizedMimeType.length > "image/".length
+  );
+  return imageMimeType || isImagePath(filePath) || /\.heif$/iu.test(filePath)
+    ? "image"
+    : "file";
 }
 
 export async function handlePastedFiles(host: CodexAttachmentHost, event: ClipboardEvent): Promise<void> {
