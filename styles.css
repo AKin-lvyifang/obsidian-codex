@@ -16725,7 +16725,7 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
   justify-content: center;
   width: 14px;
   height: 14px;
-  margin-left: auto;
+  margin-inline-start: auto;
   flex: 0 0 14px;
   color: var(--text-faint);
 }
@@ -16749,9 +16749,8 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
 
 .codex-assistant-turn-spine::before {
   position: absolute;
-  top: 10px;
-  bottom: 10px;
-  left: 9px;
+  inset-block: 10px;
+  inset-inline-start: 9px;
   width: 1px;
   background: color-mix(in srgb, var(--background-modifier-border) 78%, transparent);
   content: "";
@@ -16856,6 +16855,161 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
   color: var(--text-faint);
   font-size: var(--echoink-conversation-font-status);
   font-variant-numeric: tabular-nums;
+}
+
+/* Tool actions stay on the same process spine instead of forming a second card stack. */
+.codex-assistant-turn-action-ledger {
+  position: relative;
+  display: grid;
+  gap: var(--echoink-conversation-space-1);
+  min-width: 0;
+  padding-block: 5px;
+}
+
+.codex-assistant-turn-action-ledger-summary {
+  min-width: 0;
+  min-height: 20px;
+  margin-inline-start: calc(19px + var(--echoink-conversation-space-3));
+  overflow-wrap: anywhere;
+  color: var(--echoink-conversation-status-muted);
+  font-size: var(--echoink-conversation-font-status);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  line-height: var(--echoink-conversation-line-status);
+  text-wrap: pretty;
+}
+
+.codex-assistant-turn-action-ledger.is-completed
+  .codex-assistant-turn-action-ledger-summary {
+  color: var(--text-faint);
+}
+
+.codex-assistant-turn .codex-assistant-turn-action-node {
+  position: relative;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.codex-assistant-turn-action-node.is-success {
+  opacity: 0.66;
+}
+
+.codex-assistant-turn-action-node.is-success[open] {
+  opacity: 1;
+}
+
+.codex-assistant-turn-action-node.is-success[open]
+  > .codex-action-item-head {
+  opacity: 0.66;
+}
+
+.codex-assistant-turn-action-node.is-error {
+  opacity: 1;
+}
+
+.codex-assistant-turn-action-ledger .codex-action-item-head {
+  align-items: flex-start;
+  gap: var(--echoink-conversation-space-3);
+  width: 100%;
+  max-width: none;
+  min-height: 24px;
+  padding: 3px 0 !important;
+}
+
+.codex-assistant-turn-action-ledger .codex-smooth-ai-tool-status {
+  z-index: 1;
+  width: 19px;
+  height: 19px;
+  flex: 0 0 19px;
+  background: var(--background-primary);
+}
+
+.codex-assistant-turn-action-ledger .codex-action-item-main {
+  display: flex;
+  align-items: baseline;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  gap: 0 var(--echoink-conversation-space-1);
+  min-width: 0;
+  max-width: none;
+  overflow-wrap: anywhere;
+  font-size: var(--echoink-conversation-font-body);
+  font-weight: 400;
+  line-height: var(--echoink-conversation-line-body);
+}
+
+.codex-assistant-turn-action-ledger .codex-action-item-prefix {
+  flex: 0 0 auto;
+  color: var(--text-normal);
+  font-size: inherit;
+  font-weight: 500;
+  line-height: inherit;
+}
+
+.codex-assistant-turn-action-ledger .codex-action-item-title,
+.codex-assistant-turn-action-ledger
+  .codex-process-file-link.codex-action-item-file,
+.codex-assistant-turn-action-ledger
+  .codex-process-file-text.codex-action-item-file {
+  min-width: 0;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  color: var(--text-normal);
+  font-size: inherit;
+  font-weight: 400;
+  line-height: inherit;
+  text-overflow: clip;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.codex-assistant-turn-action-ledger .codex-action-item-duration,
+.codex-assistant-turn-action-ledger .codex-action-item-extra,
+.codex-assistant-turn-action-ledger .codex-action-diff-stats {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font-size: var(--echoink-conversation-font-status);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  line-height: var(--echoink-conversation-line-status);
+  white-space: nowrap;
+}
+
+.codex-assistant-turn-action-ledger .codex-action-diff-stats {
+  align-self: baseline;
+}
+
+.codex-assistant-turn-action-ledger .codex-action-item-caret {
+  align-self: flex-start;
+  width: 19px;
+  height: 19px;
+  flex: 0 0 19px;
+}
+
+.codex-assistant-turn-action-node > .codex-action-item-head:focus-visible {
+  border-radius: var(--echoink-conversation-radius-sm);
+  outline: 2px solid var(--echoink-conversation-focus);
+  outline-offset: 2px;
+}
+
+/* The status ring is the action marker; only the current marker may move. */
+.codex-assistant-turn-action-node.is-running .codex-action-item-icon,
+.codex-assistant-turn-action-node
+  .codex-smooth-ai-tool-status.is-running::before {
+  animation: none;
+}
+
+.codex-assistant-turn-action-node
+  .codex-smooth-ai-tool-status.is-running::before {
+  border-right-color: currentColor;
 }
 
 .codex-assistant-turn-final {
@@ -16965,7 +17119,7 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
 /* Collapsed Tool, Diff, Artifact, and Sources remain lightweight. */
 .codex-assistant-turn .codex-action-item.codex-smooth-ai-tool-call,
 .codex-assistant-turn .codex-process.codex-smooth-ai-tool-call {
-  border-color: transparent;
+  border: 0;
   background: transparent;
   box-shadow: none;
 }
@@ -16973,9 +17127,9 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
 .codex-assistant-turn details.codex-action-item.codex-smooth-ai-tool-call:not([open]),
 .codex-assistant-turn details.codex-process.codex-smooth-ai-tool-call:not([open]),
 .codex-assistant-turn details.codex-ai-elements-sources:not([open]) {
-  padding-right: 0;
-  padding-left: 0;
-  border-color: transparent;
+  padding-inline: 0;
+  border: 0;
+  border-radius: 0;
   background: transparent;
 }
 
@@ -16985,6 +17139,53 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
   border: 1px solid var(--background-modifier-border);
   border-radius: var(--echoink-conversation-radius-md);
   background: color-mix(in srgb, var(--background-secondary) 46%, transparent);
+}
+
+.codex-assistant-turn details.codex-assistant-turn-action-node[open] {
+  padding: 0;
+}
+
+.codex-assistant-turn-action-node[open] .codex-action-item-details-body {
+  min-width: 0;
+  margin: 0;
+  padding-block: var(--echoink-conversation-space-1)
+    var(--echoink-conversation-space-3);
+  padding-inline: calc(19px + var(--echoink-conversation-space-3))
+    var(--echoink-conversation-space-3);
+  color: var(--text-normal);
+  font-size: var(--echoink-conversation-font-body);
+  font-weight: 400;
+  line-height: var(--echoink-conversation-line-body);
+}
+
+.codex-assistant-turn-action-node[open]
+  .codex-action-item-details-body .codex-process-body {
+  margin-inline-start: 0;
+}
+
+/* Expanded actions own the one boundary; nested Diff and Artifact shells stay flat. */
+.codex-assistant-turn-action-node[open] .codex-smooth-ai-artifact,
+.codex-assistant-turn-action-node[open] .codex-process-fulltext,
+.codex-assistant-turn-action-node[open] .codex-diff-files,
+.codex-assistant-turn-resource[open] .codex-smooth-ai-artifact,
+.codex-assistant-turn-resource[open] .codex-diff-files {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.codex-assistant-turn-action-node[open] .codex-smooth-ai-artifact-header {
+  min-height: 0;
+  padding: var(--echoink-conversation-space-1) 0;
+  border-bottom: 0;
+}
+
+.codex-assistant-turn-action-node[open] .codex-smooth-ai-artifact-body,
+.codex-assistant-turn-action-node[open] .codex-process-fulltext {
+  padding: var(--echoink-conversation-space-1) 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .codex-assistant-turn .codex-smooth-ai-artifact,
@@ -17020,6 +17221,12 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
   .codex-assistant-turn-node.is-current .codex-assistant-turn-node-marker {
     animation: codex-assistant-turn-current 1.35s ease-in-out infinite;
   }
+
+  .codex-assistant-turn-action-node.is-current
+    .codex-smooth-ai-tool-status.is-running::before {
+    border-right-color: transparent;
+    animation: codex-smooth-tool-ring 900ms linear infinite;
+  }
 }
 
 @container (max-width: 420px) {
@@ -17029,7 +17236,19 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
   }
 
   .codex-assistant-turn-summary-caret {
-    margin-left: 0;
+    margin-inline-start: 0;
+  }
+
+  .codex-assistant-turn-action-ledger-summary {
+    margin-inline-start: calc(19px + var(--echoink-conversation-space-2));
+  }
+
+  .codex-assistant-turn-action-ledger .codex-action-item-head {
+    gap: var(--echoink-conversation-space-2);
+  }
+
+  .codex-assistant-turn-action-node[open] .codex-action-item-details-body {
+    padding-inline-start: calc(19px + var(--echoink-conversation-space-2));
   }
 
   .codex-jump-to-latest-label {
@@ -17047,6 +17266,13 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
 @media (prefers-reduced-motion: reduce) {
   .codex-assistant-turn-node.is-current .codex-assistant-turn-node-marker {
     opacity: 1;
+    transform: none;
+    animation: none;
+  }
+
+  .codex-assistant-turn-action-node.is-current
+    .codex-smooth-ai-tool-status.is-running::before {
+    border-right-color: currentColor;
     transform: none;
     animation: none;
   }

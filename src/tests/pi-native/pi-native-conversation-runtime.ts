@@ -80,6 +80,7 @@ import {
   reasoningSummaryFromSessionEntry,
   type EchoInkReasoningSummarySnapshot
 } from "../../types/reasoning-summary";
+import { stableHashedIdentity } from "../../core/mapping";
 
 const API: PiSessionManagerApi = {
   codingAgentVersion: VERSION,
@@ -373,6 +374,11 @@ async function assertReasoningSummaryRuntimeLifecycle(): Promise<void> {
     assert.deepEqual(
       new Set(taskSummaries[1]?.activities.map((activity) => activity.kind)),
       new Set(["provider", "tool", "task"])
+    );
+    assert.equal(
+      taskSummaries[1]?.activities.find((activity) => activity.kind === "tool")?.id,
+      stableHashedIdentity("reasoning-tool", "reasoning-task-update"),
+      "runtime Tool activity and projected Tool message share one toolCallId identity"
     );
     assert.doesNotMatch(
       JSON.stringify(taskSummaries),

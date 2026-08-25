@@ -42,7 +42,7 @@ const ZH_CN = {
   } satisfies Record<SettingsTab, string>,
   general: {
     settingsLanguage: "设置语言",
-    settingsLanguageDesc: "只影响设置页显示；不会改写 Prompt、会话内容或用户自定义名称。",
+    settingsLanguageDesc: "控制 EchoInk 界面语言；不会改写 Prompt、会话内容或用户自定义名称。",
     auto: "自动",
     defaultReasoning: "默认思考强度",
     defaultSpeed: "默认速度",
@@ -300,7 +300,7 @@ const EN: SettingsCopy = {
   },
   general: {
     settingsLanguage: "Settings language",
-    settingsLanguageDesc: "Only changes this settings page. Prompts, chats, and custom names are unchanged.",
+    settingsLanguageDesc: "Controls the EchoInk interface language. Prompts, chats, and custom names are unchanged.",
     auto: "Auto",
     defaultReasoning: "Default reasoning",
     defaultSpeed: "Default speed",
@@ -535,4 +535,968 @@ export const SETTINGS_LANGUAGE_OPTIONS: SettingsLanguage[] = ["zh-CN", "en"];
 
 export function settingsCopy(language: SettingsLanguage): SettingsCopy {
   return SETTINGS_COPY[language] ?? SETTINGS_COPY["zh-CN"];
+}
+
+export type ConversationSectionKind = "process" | "reasoning" | "tools" | "answer";
+export type ConversationActionKind =
+  | "read"
+  | "search"
+  | "command"
+  | "edit"
+  | "tool"
+  | "agent"
+  | "plan"
+  | "verify"
+  | "system";
+export type ConversationActionStatus =
+  | "running"
+  | "waiting_approval"
+  | "approved"
+  | "verifying"
+  | "completed"
+  | "failed"
+  | "denied"
+  | "uncertain"
+  | "blocked"
+  | "canceled"
+  | "unconfirmed"
+  | "interrupted"
+  | "recovery-pending"
+  | "recovery-blocked";
+
+export interface ConversationCopy {
+  readonly sections: Readonly<Record<ConversationSectionKind, string>>;
+  readonly turn: Readonly<{
+    processed: (duration: string) => string;
+    waitingForUser: string;
+    processing: (current?: string) => string;
+    terminalPrefix: (status: string) => string;
+    stepCount: (count: number) => string;
+    toolCount: (count: number) => string;
+  }>;
+  readonly process: Readonly<{
+    reasoningTitle: string;
+    providerReasoningRunning: string;
+    providerReasoningEnded: string;
+    providerReasoningDuration: (duration: string) => string;
+    questionAnswered: string;
+    interactionOutcome: (outcome: string) => string;
+    sourcesTitle: string;
+    verifiableSources: (count: number) => string;
+    noDisplayableSources: string;
+    artifactsTitle: string;
+    fileCount: (count: number) => string;
+    artifactCount: (count: number) => string;
+    fallbackTitle: (kind: string) => string;
+    activityTitle: (kind: string, name?: string) => string;
+    activityCompleted: (count: number) => string;
+    activityStage: (stage: string) => string;
+    publicReasoningRunning: string;
+    publicReasoningCompleted: string;
+    publicReasoningDuration: (duration: string) => string;
+    receivingPublicReasoning: string;
+    taskAria: (title: string, completed: number, total: number) => string;
+    taskProgress: (completed: number, total: number) => string;
+    nodeStatus: (status: string) => string;
+  }>;
+  readonly action: Readonly<{
+    commandFallback: string;
+    completedTitle: (kind: ConversationActionKind, target: string) => string;
+    agentFailed: string;
+    agentFallback: string;
+    fallbackTitle: (kind: ConversationActionKind) => string;
+    summary: (count: number, status: ConversationActionStatus) => string;
+    active: (kind: ConversationActionKind, status: ConversationActionStatus, target: string) => string;
+    recoveryPending: string;
+    recoveryBlocked: string;
+    statusUnconfirmed: string;
+    processInterrupted: string;
+    processCancelled: string;
+    countLabel: (kind: ConversationActionKind, count: number) => string;
+    groupTitle: (
+      kind: ConversationActionKind,
+      status: ConversationActionStatus,
+      count: number,
+      fileCount: number,
+      hasFailure: boolean
+    ) => string;
+    detailLabel: (kind: ConversationActionKind, failed: boolean) => string;
+    verb: (
+      kind: ConversationActionKind,
+      status: ConversationActionStatus,
+      confirmationExpired: boolean
+    ) => string;
+    moreFiles: (count: number) => string;
+    itemTypeTitle: (itemType?: string) => string;
+    statusLabel: (status: string) => string;
+  }>;
+  readonly sources: Readonly<{
+    usedDocuments: (count: number) => string;
+    noEvidence: string;
+    personalMemoryCount: (count: number) => string;
+    noPersonalMemory: string;
+    noVaultPath: string;
+    openNote: (label: string) => string;
+    openInObsidian: (path: string) => string;
+    missingInVault: (path: string) => string;
+    lineRange: (start: number, end: number) => string;
+    bucketLabel: (bucket: string) => string;
+    evidenceStatus: (status: string) => string;
+  }>;
+  readonly details: Readonly<{
+    input: string;
+    output: string;
+    contentUnavailable: string;
+    waitingForToolOutput: string;
+    receivingContent: string;
+    noContent: string;
+    emptyContent: string;
+    fileChanges: string;
+    loadingFileChanges: string;
+    fileChangesLoadFailed: (error: string) => string;
+    loadingCommandOutput: string;
+    commandOutputLoadFailed: (error: string) => string;
+    changedFiles: (count: number) => string;
+    previousPath: (path: string) => string;
+    diffKind: (kind: string) => string;
+    noDiff: string;
+    editedPrefix: string;
+    cannotOpenPath: (path: string) => string;
+    open: (label: string) => string;
+    loadingFullText: string;
+    fullTextLoadFailed: (error: string) => string;
+    rawOutput: string;
+    lineCount: (count: number) => string;
+    fullTextPreserved: string;
+  }>;
+  readonly approval: Readonly<{
+    stateLabel: (state: string) => string;
+    target: string;
+    preview: string;
+    reject: string;
+    approve: string;
+  }>;
+  readonly task: Readonly<{
+    planLabel: (title: string) => string;
+    statusLabel: (status: string) => string;
+    historyStatus: (status: string, completed: number, total: number) => string;
+  }>;
+  readonly message: Readonly<{
+    preparingReply: string;
+    generatingReply: string;
+    organizingContext: string;
+    thinkingLiveCopies: readonly string[];
+    thinking: string;
+    thinkingProcess: string;
+    thinkingComplete: string;
+    deriveConversation: string;
+    copyMessage: string;
+    copyAnswer: string;
+    messageCopied: string;
+    answerCopied: string;
+    copyMessageFailed: string;
+    copyAnswerFailed: string;
+    copied: string;
+    copyFailed: string;
+    suggestionsAria: string;
+    suggestions: readonly Readonly<{ id: string; label: string }>[];
+  }>;
+}
+
+const ZH_ACTION_COUNT_LABELS: Record<ConversationActionKind, string> = {
+  read: "读取",
+  search: "搜索",
+  command: "命令",
+  edit: "编辑",
+  tool: "调用",
+  agent: "智能体",
+  plan: "计划",
+  verify: "验证",
+  system: "系统"
+};
+
+const EN_ACTION_COUNT_LABELS: Record<ConversationActionKind, string> = {
+  read: "Reads",
+  search: "Searches",
+  command: "Commands",
+  edit: "Edits",
+  tool: "Calls",
+  agent: "Agents",
+  plan: "Plans",
+  verify: "Checks",
+  system: "System"
+};
+
+const ZH_ACTION_BASE_LABELS: Record<ConversationActionKind, string> = {
+  read: "读取",
+  search: "搜索",
+  command: "运行",
+  edit: "编辑",
+  tool: "工具调用",
+  agent: "智能体动作",
+  plan: "计划更新",
+  verify: "验证",
+  system: "系统动作"
+};
+
+const EN_ACTION_BASE_LABELS: Record<ConversationActionKind, string> = {
+  read: "Read",
+  search: "Search",
+  command: "Command",
+  edit: "Edit",
+  tool: "Tool call",
+  agent: "Agent action",
+  plan: "Plan update",
+  verify: "Verification",
+  system: "System action"
+};
+
+const ZH_CONVERSATION_COPY: ConversationCopy = {
+  sections: {
+    process: "处理过程",
+    reasoning: "模型推理",
+    tools: "执行动作",
+    answer: "最终回答"
+  },
+  turn: {
+    processed: (duration) => `已处理 ${duration}`,
+    waitingForUser: "等待用户回应",
+    processing: (current) => current ? `正在处理 · ${current}` : "正在处理",
+    terminalPrefix: (status) => status === "completed"
+      ? "处理完成"
+      : status === "failed"
+        ? "处理失败"
+        : status === "cancelled"
+          ? "已取消"
+          : "已中断",
+    stepCount: (count) => `${count} 个步骤`,
+    toolCount: (count) => `${count} 个工具`
+  },
+  process: {
+    reasoningTitle: "模型推理",
+    providerReasoningRunning: "Provider 正在返回公开推理",
+    providerReasoningEnded: "Provider 公开推理已结束",
+    providerReasoningDuration: (duration) => `公开推理 ${duration}`,
+    questionAnswered: "用户已回答",
+    interactionOutcome: (outcome) => outcome === "approved"
+      ? "用户已批准"
+      : outcome === "denied"
+        ? "用户已拒绝"
+        : outcome === "completed"
+          ? "确认已执行"
+          : outcome === "failed"
+            ? "交互失败"
+            : outcome === "expired"
+              ? "交互已过期"
+              : "交互已取消",
+    sourcesTitle: "检索与来源",
+    verifiableSources: (count) => `${count} 个可验证来源`,
+    noDisplayableSources: "未命中可展示来源",
+    artifactsTitle: "本轮产物",
+    fileCount: (count) => `${count} 个文件`,
+    artifactCount: (count) => `${count} 个产物`,
+    fallbackTitle: (kind) => ({
+      task: "更新任务",
+      retrieval: "检索资料",
+      diff: "文件改动",
+      artifact: "生成产物",
+      tool: "执行工具",
+      interaction: "等待用户操作",
+      process: "处理上下文"
+    }[kind] ?? "处理上下文"),
+    activityTitle: (kind, name) => kind === "knowledge"
+      ? "检索本地知识"
+      : kind === "memory"
+        ? "核对个人记忆"
+        : kind === "task"
+          ? "推进任务"
+          : kind === "tool"
+            ? name ? `调用 ${name}` : "调用工具"
+            : "连接模型",
+    activityCompleted: (count) => `已完成 ${count}`,
+    activityStage: (stage) => ({
+      requesting: "请求模型",
+      searching: "检索中",
+      continuing_search: "继续检索",
+      reading_knowledge: "阅读知识",
+      comparing_memory: "比较记忆",
+      checking_conflicts_freshness: "核对冲突与时效",
+      refining_knowledge: "整理知识",
+      writing_and_readback: "写入并回读",
+      loading: "加载中",
+      catalog: "读取目录",
+      matching: "匹配中",
+      budgeting: "分配上下文",
+      assembling: "组装上下文",
+      pending: "等待开始",
+      in_progress: "进行中",
+      paused: "已暂停",
+      completed: "已完成",
+      failed: "失败",
+      cancelled: "已取消"
+    } as Record<string, string>)[stage] ?? stage,
+    publicReasoningRunning: "公开推理进行中",
+    publicReasoningCompleted: "公开推理已完成",
+    publicReasoningDuration: (duration) => `公开推理 · ${duration}`,
+    receivingPublicReasoning: "正在接收 Provider 公开推理",
+    taskAria: (title, completed, total) => `任务 ${title}，${completed}/${total} 已完成`,
+    taskProgress: (completed, total) => `${completed}/${total} 已完成`,
+    nodeStatus: (status) => ({
+      running: "进行中",
+      completed: "已完成",
+      failed: "失败",
+      cancelled: "已取消",
+      skipped: "已跳过",
+      waiting: "等待中"
+    } as Record<string, string>)[status] ?? "等待中"
+  },
+  action: {
+    commandFallback: "命令",
+    completedTitle: (kind, target) => ({
+      command: `已运行 ${target}`,
+      edit: `已编辑 ${target}`,
+      read: `已读取 ${target}`
+    } as Partial<Record<ConversationActionKind, string>>)[kind] ?? target,
+    agentFailed: "创建智能体失败",
+    agentFallback: "智能体动作",
+    fallbackTitle: (kind) => ({
+      read: "已读取文件",
+      search: "已搜索",
+      command: "已运行命令",
+      edit: "已编辑文件",
+      tool: "已调用工具",
+      agent: "智能体动作",
+      plan: "更新计划",
+      verify: "运行验证",
+      system: "系统动作"
+    })[kind],
+    summary: (count, status) => status === "running"
+      ? `正在处理 ${count} 个动作`
+      : status === "waiting_approval" || status === "blocked"
+        ? `${count} 个动作等待确认`
+        : status === "approved"
+          ? `${count} 个动作已批准`
+          : status === "verifying"
+            ? `${count} 个动作正在验证`
+            : status === "recovery-pending"
+              ? `${count} 个动作等待恢复`
+              : status === "recovery-blocked"
+                ? `${count} 个动作恢复受阻`
+                : status === "failed"
+                  ? `${count} 个动作失败`
+                  : status === "denied"
+                    ? `${count} 个动作已拒绝`
+                    : status === "uncertain"
+                      ? `${count} 个动作结果不确定`
+                      : status === "unconfirmed"
+                        ? `${count} 个动作状态未回传`
+                        : status === "interrupted"
+                          ? `${count} 个动作已中断`
+                          : status === "canceled"
+                            ? `${count} 个动作已取消`
+                            : count === 1 ? "已处理 1 个动作" : `已处理 ${count} 个动作`,
+    active: (kind, status, target) => {
+      const suffix = target ? ` ${target}` : "";
+      if (status === "failed") {
+        if (kind === "command") return `命令失败${suffix}`;
+        if (kind === "edit") return `文件改动失败${suffix}`;
+        if (kind === "agent") return `智能体动作失败${suffix}`;
+        return `动作失败${suffix}`;
+      }
+      if (status === "waiting_approval" || status === "blocked") return `等待确认${suffix}`;
+      if (status === "approved") return `已批准，等待执行${suffix}`;
+      if (status === "verifying") return `正在核对结果${suffix}`;
+      if (status === "denied") return `已拒绝${suffix}`;
+      if (status === "uncertain") return `结果不确定${suffix}`;
+      const labels: Record<ConversationActionKind, string> = {
+        read: "正在读取",
+        search: "正在检索",
+        command: "正在运行",
+        edit: "正在整理文件改动",
+        tool: "正在调用工具",
+        agent: "正在等待智能体",
+        plan: "正在更新计划",
+        verify: "正在验证",
+        system: "正在处理"
+      };
+      return `${labels[kind]}${suffix}`;
+    },
+    recoveryPending: "等待恢复上次维护过程",
+    recoveryBlocked: "上次维护恢复受阻",
+    statusUnconfirmed: "工具状态未回传",
+    processInterrupted: "过程已中断",
+    processCancelled: "过程已取消",
+    countLabel: (kind, count) => `${ZH_ACTION_COUNT_LABELS[kind]} ${count}`,
+    groupTitle: (kind, status, count, fileCount, hasFailure) => {
+      const label = ZH_ACTION_COUNT_LABELS[kind];
+      if (status === "unconfirmed") return count === 1 ? `${label}状态未回传` : `${label}状态未回传（${count}）`;
+      if (status === "interrupted" || status === "canceled") return count === 1 ? `${label}已中断` : `${label}已中断（${count}）`;
+      if (kind === "read") return `已读取 ${fileCount || count} 个文件`;
+      if (kind === "search") return `搜索了 ${count} 次`;
+      if (kind === "command") return count > 1 ? "运行了多个命令" : "已运行命令";
+      if (kind === "edit") return `已编辑 ${fileCount || count} 个文件`;
+      if (kind === "tool") return `调用了 ${count} 个工具`;
+      if (kind === "agent") return hasFailure ? `创建失败 ${count} 个智能体` : `处理了 ${count} 个智能体动作`;
+      if (kind === "plan") return count === 1 ? "更新了计划" : `更新了 ${count} 次计划`;
+      if (kind === "verify") return `运行了 ${count} 个验证`;
+      return count === 1 ? "系统动作" : `${count} 个系统动作`;
+    },
+    detailLabel: (kind, failed) => kind === "command"
+      ? failed ? "查看错误输出" : "查看 Shell 输出"
+      : kind === "edit"
+        ? "查看文件改动"
+        : kind === "tool" || kind === "agent"
+          ? "查看工具详情"
+          : "查看详情",
+    verb: (kind, status, confirmationExpired) => {
+      if (confirmationExpired) return `${ZH_ACTION_BASE_LABELS[kind]}确认已过期`;
+      const statusLabels: Partial<Record<ConversationActionStatus, string>> = {
+        unconfirmed: "状态未回传",
+        interrupted: "已中断",
+        canceled: "已取消",
+        waiting_approval: "等待确认",
+        approved: "已批准",
+        verifying: "验证中",
+        denied: "已拒绝",
+        uncertain: "结果不确定",
+        "recovery-pending": "等待恢复",
+        "recovery-blocked": "恢复受阻",
+        failed: "失败"
+      };
+      const suffix = statusLabels[status];
+      if (suffix) return `${ZH_ACTION_BASE_LABELS[kind]}${suffix}`;
+      if (status === "running" || status === "blocked") {
+        return ({
+          read: "正在读取",
+          search: "正在搜索",
+          command: "正在运行",
+          edit: "正在编辑",
+          tool: "正在调用",
+          agent: "正在处理",
+          plan: "正在更新",
+          verify: "正在验证",
+          system: "正在处理"
+        } as Record<ConversationActionKind, string>)[kind];
+      }
+      return ({
+        read: "已读取",
+        search: "已搜索",
+        command: "已运行",
+        edit: "已编辑",
+        tool: "已调用",
+        agent: "已处理",
+        plan: "已更新",
+        verify: "已验证",
+        system: "已记录"
+      } as Record<ConversationActionKind, string>)[kind];
+    },
+    moreFiles: (count) => ` 等 ${count} 个文件`,
+    itemTypeTitle: (itemType) => ({
+      plan: "更新计划",
+      commandExecution: "使用命令",
+      fileChange: "编辑文件",
+      mcpToolCall: "使用工具",
+      dynamicToolCall: "使用工具",
+      collabAgentToolCall: "使用工具"
+    } as Record<string, string>)[itemType ?? ""] ?? "工具",
+    statusLabel: (status) => ({
+      running: "进行中",
+      waiting_approval: "等待确认",
+      approved: "已批准",
+      verifying: "验证中",
+      completed: "完成",
+      error: "失败",
+      failed: "失败",
+      denied: "已拒绝",
+      uncertain: "结果不确定",
+      canceled: "已取消",
+      cancelled: "已取消",
+      expired: "确认已过期",
+      blocked: "等待确认",
+      interrupted: "中断",
+      unconfirmed: "状态未回传",
+      "recovery-pending": "等待恢复",
+      "recovery-blocked": "恢复受阻"
+    } as Record<string, string>)[status] ?? status
+  },
+  sources: {
+    usedDocuments: (count) => `使用了 ${count} 个文档`,
+    noEvidence: "没有命中文件，也没有引用片段；不会显示伪来源。",
+    personalMemoryCount: (count) => count > 0 ? `${count} 条 Personal Memory` : "Personal Memory 来源",
+    noPersonalMemory: "未记录可展示的 Personal Memory 来源。",
+    noVaultPath: "Personal Memory 没有 Vault 路径，无法打开",
+    openNote: (label) => `打开笔记 ${label}`,
+    openInObsidian: (path) => `在 Obsidian 中打开 ${path}`,
+    missingInVault: (path) => `当前 Vault 中找不到 ${path}，无法打开`,
+    lineRange: (start, end) => `第 ${start}-${end} 行`,
+    bucketLabel: (bucket) => ({ wiki: "知识", journal: "日志", outputs: "产物" } as Record<string, string>)[bucket] ?? bucket,
+    evidenceStatus: (status) => status === "strong" ? "强证据" : status === "weak" ? "弱相关" : "无本地依据"
+  },
+  details: {
+    input: "输入",
+    output: "输出",
+    contentUnavailable: "后端未提供可展示内容",
+    waitingForToolOutput: "正在等待工具输出",
+    receivingContent: "正在接收过程内容...",
+    noContent: "暂无内容",
+    emptyContent: "后端返回空内容",
+    fileChanges: "文件改动",
+    loadingFileChanges: "正在加载文件改动",
+    fileChangesLoadFailed: (error) => `文件改动加载失败：${error}`,
+    loadingCommandOutput: "正在加载命令输出",
+    commandOutputLoadFailed: (error) => `命令输出加载失败：${error}`,
+    changedFiles: (count) => `${count} 个文件已更改`,
+    previousPath: (path) => `原路径 ${path}`,
+    diffKind: (kind) => ({ add: "新增", delete: "删除", update: "修改", move: "移动", unknown: "改动" } as Record<string, string>)[kind] ?? "改动",
+    noDiff: "没有可展示的 diff 内容",
+    editedPrefix: "已编辑 ",
+    cannotOpenPath: (path) => `${path}（无法打开）`,
+    open: (label) => `打开 ${label}`,
+    loadingFullText: "正在加载全文",
+    fullTextLoadFailed: (error) => `全文加载失败：${error}`,
+    rawOutput: "原始输出",
+    lineCount: (count) => `${count} 行`,
+    fullTextPreserved: "展开后已保留全文"
+  },
+  approval: {
+    stateLabel: (state) => state === "waiting_approval"
+      ? "等待批准本次执行"
+      : state === "approved"
+        ? "已批准本次执行"
+        : state === "denied"
+          ? "已拒绝本次执行"
+          : state === "expired"
+            ? "审批已过期"
+            : "审批已取消",
+    target: "目标",
+    preview: "预览",
+    reject: "拒绝",
+    approve: "批准"
+  },
+  task: {
+    planLabel: (title) => `任务计划：${title}`,
+    statusLabel: (status) => ({
+      pending: "待执行",
+      in_progress: "进行中",
+      completed: "已完成",
+      failed: "失败",
+      paused: "已暂停",
+      interrupted: "已中断",
+      cancelled: "已取消"
+    } as Record<string, string>)[status] ?? status,
+    historyStatus: (status, completed, total) => status === "completed"
+      ? `${total}/${total} 已完成`
+      : status === "failed"
+        ? "任务失败"
+        : status === "cancelled"
+          ? "已取消"
+          : status === "paused"
+            ? "已中断，可继续"
+            : status === "pending"
+              ? "等待开始"
+              : `${completed}/${total} 已完成`
+  },
+  message: {
+    preparingReply: "正在准备回复",
+    generatingReply: "正在生成回复",
+    organizingContext: "正在整理上下文",
+    thinkingLiveCopies: ["先把问题看明白", "等模型接上话", "把上下文放到手边"],
+    thinking: "正在思考",
+    thinkingProcess: "思考过程",
+    thinkingComplete: "思考完成",
+    deriveConversation: "从这条回复新建会话",
+    copyMessage: "复制消息",
+    copyAnswer: "复制回答",
+    messageCopied: "消息已复制",
+    answerCopied: "回答已复制",
+    copyMessageFailed: "消息复制失败",
+    copyAnswerFailed: "回答复制失败",
+    copied: "已复制",
+    copyFailed: "复制失败",
+    suggestionsAria: "推荐问题",
+    suggestions: [
+      { id: "organize-knowledge-base", label: "整理知识库" },
+      { id: "summarize-current-note", label: "总结当前笔记" },
+      { id: "search-knowledge-base", label: "从知识库找答案" }
+    ]
+  }
+};
+
+const EN_CONVERSATION_COPY: ConversationCopy = {
+  sections: {
+    process: "Process",
+    reasoning: "Reasoning",
+    tools: "Tools & Sources",
+    answer: "Final Answer"
+  },
+  turn: {
+    processed: (duration) => `Processed in ${duration}`,
+    waitingForUser: "Waiting for your response",
+    processing: (current) => current ? `Processing · ${current}` : "Processing",
+    terminalPrefix: (status) => status === "completed"
+      ? "Completed"
+      : status === "failed"
+        ? "Failed"
+        : status === "cancelled"
+          ? "Cancelled"
+          : "Interrupted",
+    stepCount: (count) => `${count} ${count === 1 ? "step" : "steps"}`,
+    toolCount: (count) => `${count} ${count === 1 ? "tool" : "tools"}`
+  },
+  process: {
+    reasoningTitle: "Reasoning",
+    providerReasoningRunning: "Provider is returning public reasoning",
+    providerReasoningEnded: "Provider public reasoning finished",
+    providerReasoningDuration: (duration) => `Public reasoning ${duration}`,
+    questionAnswered: "User answered",
+    interactionOutcome: (outcome) => outcome === "approved"
+      ? "User approved"
+      : outcome === "denied"
+        ? "User denied"
+        : outcome === "completed"
+          ? "Confirmation completed"
+          : outcome === "failed"
+            ? "Interaction failed"
+            : outcome === "expired"
+              ? "Interaction expired"
+              : "Interaction cancelled",
+    sourcesTitle: "Search and sources",
+    verifiableSources: (count) => `${count} verifiable ${count === 1 ? "source" : "sources"}`,
+    noDisplayableSources: "No displayable sources",
+    artifactsTitle: "Turn artifacts",
+    fileCount: (count) => `${count} ${count === 1 ? "file" : "files"}`,
+    artifactCount: (count) => `${count} ${count === 1 ? "artifact" : "artifacts"}`,
+    fallbackTitle: (kind) => ({
+      task: "Update task",
+      retrieval: "Search sources",
+      diff: "File changes",
+      artifact: "Create artifacts",
+      tool: "Run tool",
+      interaction: "Wait for user action",
+      process: "Process context"
+    }[kind] ?? "Process context"),
+    activityTitle: (kind, name) => kind === "knowledge"
+      ? "Search local knowledge"
+      : kind === "memory"
+        ? "Check personal memory"
+        : kind === "task"
+          ? "Advance task"
+          : kind === "tool"
+            ? name ? `Call ${name}` : "Call tool"
+            : "Connect to model",
+    activityCompleted: (count) => `${count} completed`,
+    activityStage: (stage) => ({
+      requesting: "Requesting model",
+      searching: "Searching",
+      continuing_search: "Continuing search",
+      reading_knowledge: "Reading knowledge",
+      comparing_memory: "Comparing memory",
+      checking_conflicts_freshness: "Checking conflicts and freshness",
+      refining_knowledge: "Refining knowledge",
+      writing_and_readback: "Writing and verifying readback",
+      loading: "Loading",
+      catalog: "Reading catalog",
+      matching: "Matching",
+      budgeting: "Allocating context",
+      assembling: "Assembling context",
+      pending: "Waiting to start",
+      in_progress: "In progress",
+      paused: "Paused",
+      completed: "Completed",
+      failed: "Failed",
+      cancelled: "Cancelled"
+    } as Record<string, string>)[stage] ?? stage,
+    publicReasoningRunning: "Public reasoning in progress",
+    publicReasoningCompleted: "Public reasoning completed",
+    publicReasoningDuration: (duration) => `Public reasoning · ${duration}`,
+    receivingPublicReasoning: "Receiving Provider public reasoning",
+    taskAria: (title, completed, total) => `Task ${title}, ${completed} of ${total} completed`,
+    taskProgress: (completed, total) => `${completed}/${total} completed`,
+    nodeStatus: (status) => ({
+      running: "In progress",
+      completed: "Completed",
+      failed: "Failed",
+      cancelled: "Cancelled",
+      skipped: "Skipped",
+      waiting: "Waiting"
+    } as Record<string, string>)[status] ?? "Waiting"
+  },
+  action: {
+    commandFallback: "Command",
+    completedTitle: (kind, target) => ({
+      command: `Ran ${target}`,
+      edit: `Edited ${target}`,
+      read: `Read ${target}`
+    } as Partial<Record<ConversationActionKind, string>>)[kind] ?? target,
+    agentFailed: "Failed to create agent",
+    agentFallback: "Agent action",
+    fallbackTitle: (kind) => ({
+      read: "Read files",
+      search: "Searched",
+      command: "Ran command",
+      edit: "Edited files",
+      tool: "Called tool",
+      agent: "Agent action",
+      plan: "Updated plan",
+      verify: "Ran verification",
+      system: "System action"
+    })[kind],
+    summary: (count, status) => {
+      const actions = `${count} ${count === 1 ? "action" : "actions"}`;
+      if (status === "running") return `Processing ${actions}`;
+      if (status === "waiting_approval" || status === "blocked") return `${actions} awaiting confirmation`;
+      if (status === "approved") return `${actions} approved`;
+      if (status === "verifying") return `Verifying ${actions}`;
+      if (status === "recovery-pending") return `${actions} awaiting recovery`;
+      if (status === "recovery-blocked") return `${actions} recovery blocked`;
+      if (status === "failed") return `${actions} failed`;
+      if (status === "denied") return `${actions} denied`;
+      if (status === "uncertain") return `${actions} uncertain`;
+      if (status === "unconfirmed") return `${actions} status not reported`;
+      if (status === "interrupted") return `${actions} interrupted`;
+      if (status === "canceled") return `${actions} cancelled`;
+      return `${actions} completed`;
+    },
+    active: (kind, status, target) => {
+      const suffix = target ? ` ${target}` : "";
+      if (status === "failed") {
+        if (kind === "command") return `Command failed${suffix}`;
+        if (kind === "edit") return `File change failed${suffix}`;
+        if (kind === "agent") return `Agent action failed${suffix}`;
+        return `Action failed${suffix}`;
+      }
+      if (status === "waiting_approval" || status === "blocked") return `Awaiting confirmation${suffix}`;
+      if (status === "approved") return `Approved, awaiting execution${suffix}`;
+      if (status === "verifying") return `Verifying result${suffix}`;
+      if (status === "denied") return `Denied${suffix}`;
+      if (status === "uncertain") return `Result uncertain${suffix}`;
+      const labels: Record<ConversationActionKind, string> = {
+        read: "Reading",
+        search: "Searching",
+        command: "Running",
+        edit: "Preparing file changes",
+        tool: "Calling tool",
+        agent: "Waiting for agent",
+        plan: "Updating plan",
+        verify: "Verifying",
+        system: "Processing"
+      };
+      return `${labels[kind]}${suffix}`;
+    },
+    recoveryPending: "Waiting to recover the previous process",
+    recoveryBlocked: "Previous process recovery blocked",
+    statusUnconfirmed: "Tool status not reported",
+    processInterrupted: "Process interrupted",
+    processCancelled: "Process cancelled",
+    countLabel: (kind, count) => `${EN_ACTION_COUNT_LABELS[kind]} ${count}`,
+    groupTitle: (kind, status, count, fileCount, hasFailure) => {
+      const label = EN_ACTION_COUNT_LABELS[kind];
+      if (status === "unconfirmed") return count === 1 ? `${label} status not reported` : `${label} status not reported (${count})`;
+      if (status === "interrupted" || status === "canceled") return count === 1 ? `${label} interrupted` : `${label} interrupted (${count})`;
+      if (kind === "read") {
+        const files = fileCount || count;
+        return `Read ${files} ${files === 1 ? "file" : "files"}`;
+      }
+      if (kind === "search") return `Searched ${count} ${count === 1 ? "time" : "times"}`;
+      if (kind === "command") return count > 1 ? "Ran multiple commands" : "Ran command";
+      if (kind === "edit") {
+        const files = fileCount || count;
+        return `Edited ${files} ${files === 1 ? "file" : "files"}`;
+      }
+      if (kind === "tool") return `Called ${count} ${count === 1 ? "tool" : "tools"}`;
+      if (kind === "agent") return hasFailure
+        ? `Failed to create ${count} ${count === 1 ? "agent" : "agents"}`
+        : `Processed ${count} agent ${count === 1 ? "action" : "actions"}`;
+      if (kind === "plan") return count === 1 ? "Updated plan" : `Updated plan ${count} times`;
+      if (kind === "verify") return `Ran ${count} ${count === 1 ? "check" : "checks"}`;
+      return count === 1 ? "System action" : `${count} system actions`;
+    },
+    detailLabel: (kind, failed) => kind === "command"
+      ? failed ? "View error output" : "View Shell output"
+      : kind === "edit"
+        ? "View file changes"
+        : kind === "tool" || kind === "agent"
+          ? "View tool details"
+          : "View details",
+    verb: (kind, status, confirmationExpired) => {
+      if (confirmationExpired) return `${EN_ACTION_BASE_LABELS[kind]} confirmation expired`;
+      const statusLabels: Partial<Record<ConversationActionStatus, string>> = {
+        unconfirmed: "status not reported",
+        interrupted: "interrupted",
+        canceled: "cancelled",
+        waiting_approval: "awaiting confirmation",
+        approved: "approved",
+        verifying: "verifying",
+        denied: "denied",
+        uncertain: "result uncertain",
+        "recovery-pending": "awaiting recovery",
+        "recovery-blocked": "recovery blocked",
+        failed: "failed"
+      };
+      const suffix = statusLabels[status];
+      if (suffix) return `${EN_ACTION_BASE_LABELS[kind]} ${suffix}`;
+      if (status === "running" || status === "blocked") {
+        return ({
+          read: "Reading",
+          search: "Searching",
+          command: "Running",
+          edit: "Editing",
+          tool: "Calling",
+          agent: "Processing",
+          plan: "Updating",
+          verify: "Verifying",
+          system: "Processing"
+        } as Record<ConversationActionKind, string>)[kind];
+      }
+      return ({
+        read: "Read",
+        search: "Searched",
+        command: "Ran",
+        edit: "Edited",
+        tool: "Called",
+        agent: "Processed",
+        plan: "Updated",
+        verify: "Verified",
+        system: "Recorded"
+      } as Record<ConversationActionKind, string>)[kind];
+    },
+    moreFiles: (count) => ` and ${count - 1} more ${count === 2 ? "file" : "files"}`,
+    itemTypeTitle: (itemType) => ({
+      plan: "Update plan",
+      commandExecution: "Run command",
+      fileChange: "Edit files",
+      mcpToolCall: "Use tool",
+      dynamicToolCall: "Use tool",
+      collabAgentToolCall: "Use tool"
+    } as Record<string, string>)[itemType ?? ""] ?? "Tool",
+    statusLabel: (status) => ({
+      running: "In progress",
+      waiting_approval: "Awaiting confirmation",
+      approved: "Approved",
+      verifying: "Verifying",
+      completed: "Completed",
+      error: "Failed",
+      failed: "Failed",
+      denied: "Denied",
+      uncertain: "Result uncertain",
+      canceled: "Cancelled",
+      cancelled: "Cancelled",
+      expired: "Confirmation expired",
+      blocked: "Awaiting confirmation",
+      interrupted: "Interrupted",
+      unconfirmed: "Status not reported",
+      "recovery-pending": "Awaiting recovery",
+      "recovery-blocked": "Recovery blocked"
+    } as Record<string, string>)[status] ?? status
+  },
+  sources: {
+    usedDocuments: (count) => `Used ${count} ${count === 1 ? "document" : "documents"}`,
+    noEvidence: "No files or quoted passages matched; no sources are fabricated.",
+    personalMemoryCount: (count) => count > 0 ? `${count} Personal Memory ${count === 1 ? "source" : "sources"}` : "Personal Memory sources",
+    noPersonalMemory: "No displayable Personal Memory sources were recorded.",
+    noVaultPath: "Personal Memory has no Vault path and cannot be opened",
+    openNote: (label) => `Open note ${label}`,
+    openInObsidian: (path) => `Open ${path} in Obsidian`,
+    missingInVault: (path) => `${path} was not found in the current Vault and cannot be opened`,
+    lineRange: (start, end) => `Lines ${start}-${end}`,
+    bucketLabel: (bucket) => ({ wiki: "Knowledge", journal: "Journal", outputs: "Outputs" } as Record<string, string>)[bucket] ?? bucket,
+    evidenceStatus: (status) => status === "strong" ? "Strong evidence" : status === "weak" ? "Weak match" : "No local evidence"
+  },
+  details: {
+    input: "Input",
+    output: "Output",
+    contentUnavailable: "The backend did not provide displayable content",
+    waitingForToolOutput: "Waiting for tool output",
+    receivingContent: "Receiving process content...",
+    noContent: "No content",
+    emptyContent: "The backend returned empty content",
+    fileChanges: "File changes",
+    loadingFileChanges: "Loading file changes",
+    fileChangesLoadFailed: (error) => `Failed to load file changes: ${error}`,
+    loadingCommandOutput: "Loading command output",
+    commandOutputLoadFailed: (error) => `Failed to load command output: ${error}`,
+    changedFiles: (count) => `${count} ${count === 1 ? "file" : "files"} changed`,
+    previousPath: (path) => `Previous path ${path}`,
+    diffKind: (kind) => ({ add: "Added", delete: "Deleted", update: "Modified", move: "Moved", unknown: "Changed" } as Record<string, string>)[kind] ?? "Changed",
+    noDiff: "No displayable diff content",
+    editedPrefix: "Edited ",
+    cannotOpenPath: (path) => `${path} (cannot open)`,
+    open: (label) => `Open ${label}`,
+    loadingFullText: "Loading full text",
+    fullTextLoadFailed: (error) => `Failed to load full text: ${error}`,
+    rawOutput: "Raw output",
+    lineCount: (count) => `${count} ${count === 1 ? "line" : "lines"}`,
+    fullTextPreserved: "Full text is available when expanded"
+  },
+  approval: {
+    stateLabel: (state) => state === "waiting_approval"
+      ? "Awaiting approval to run"
+      : state === "approved"
+        ? "Approved to run"
+        : state === "denied"
+          ? "Run denied"
+          : state === "expired"
+            ? "Approval expired"
+            : "Approval cancelled",
+    target: "Target",
+    preview: "Preview",
+    reject: "Reject",
+    approve: "Approve"
+  },
+  task: {
+    planLabel: (title) => `Task plan: ${title}`,
+    statusLabel: (status) => ({
+      pending: "Pending",
+      in_progress: "In progress",
+      completed: "Completed",
+      failed: "Failed",
+      paused: "Paused",
+      interrupted: "Interrupted",
+      cancelled: "Cancelled"
+    } as Record<string, string>)[status] ?? status,
+    historyStatus: (status, completed, total) => status === "completed"
+      ? `${total}/${total} completed`
+      : status === "failed"
+        ? "Task failed"
+        : status === "cancelled"
+          ? "Cancelled"
+          : status === "paused"
+            ? "Interrupted, can continue"
+            : status === "pending"
+              ? "Waiting to start"
+              : `${completed}/${total} completed`
+  },
+  message: {
+    preparingReply: "Preparing reply",
+    generatingReply: "Generating reply",
+    organizingContext: "Organizing context",
+    thinkingLiveCopies: ["Reading the question", "Connecting to the model", "Bringing context together"],
+    thinking: "Thinking",
+    thinkingProcess: "Thinking process",
+    thinkingComplete: "Thinking complete",
+    deriveConversation: "Start a new conversation from this reply",
+    copyMessage: "Copy message",
+    copyAnswer: "Copy answer",
+    messageCopied: "Message copied",
+    answerCopied: "Answer copied",
+    copyMessageFailed: "Failed to copy message",
+    copyAnswerFailed: "Failed to copy answer",
+    copied: "Copied",
+    copyFailed: "Copy failed",
+    suggestionsAria: "Suggested questions",
+    suggestions: [
+      { id: "organize-knowledge-base", label: "Organize knowledge" },
+      { id: "summarize-current-note", label: "Summarize current note" },
+      { id: "search-knowledge-base", label: "Search knowledge" }
+    ]
+  }
+};
+
+export const CONVERSATION_COPY = {
+  "zh-CN": ZH_CONVERSATION_COPY,
+  en: EN_CONVERSATION_COPY
+} satisfies Record<SettingsLanguage, ConversationCopy>;
+
+export function conversationCopy(language: SettingsLanguage): ConversationCopy {
+  return CONVERSATION_COPY[language] ?? CONVERSATION_COPY["zh-CN"];
 }

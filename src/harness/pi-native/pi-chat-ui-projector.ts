@@ -2,6 +2,7 @@ import {
   extractProcessFileRefs,
   summarizeProcessEvent
 } from "../../core/mapping";
+import { buildDiffSummary } from "../../core/diff-summary";
 import type { ChatMessage, StoredAttachment } from "../../settings/settings";
 import type { KnowledgeReference } from "../../knowledge-base/types";
 import type { KnowledgeBaseMaintainReportPayload } from "../../knowledge-base/maintain-report-card";
@@ -56,6 +57,52 @@ export type {
   PiChatUiToolReceiptStatus,
   PiChatUiToolReceiptView
 } from "./pi-tool-product-state";
+
+export interface PiApprovalPreviewChangeProjection {
+  readonly path?: string;
+  readonly kind: "add" | "delete" | "update" | "move" | "unknown";
+  readonly added?: number;
+  readonly removed?: number;
+  readonly diff?: string;
+}
+
+export function piApprovalPreviewChangeProjection(
+  preview: string | undefined
+): PiApprovalPreviewChangeProjection | undefined {
+  if (!preview?.trim()) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(preview);
+  } catch {
+    return undefined;
+  }
+  const root = plainObject(parsed);
+  if (!root) return undefined;
+  const nestedChange = plainObject(root.change);
+  const change = nestedChange ?? root;
+  const path = visibleText(change.relativePath)
+    || visibleText(root.relativePath);
+  const kindValue = visibleText(change.kind);
+  const kind = kindValue === "add"
+    || kindValue === "delete"
+    || kindValue === "update"
+    || kindValue === "move"
+    ? kindValue
+    : "unknown";
+  const added = nonNegativeInteger(change.added);
+  const removed = nonNegativeInteger(change.removed);
+  const diff = typeof change.diff === "string" && change.diff.trim()
+    ? change.diff
+    : undefined;
+  if (!path && added === undefined && removed === undefined && !diff) return undefined;
+  return Object.freeze({
+    ...(path ? { path } : {}),
+    kind,
+    ...(added === undefined ? {} : { added }),
+    ...(removed === undefined ? {} : { removed }),
+    ...(diff ? { diff } : {})
+  });
+}
 
 /**
  * The narrow, structural subset of a Pi content block needed by the UI.
@@ -1683,8 +1730,10 @@ function applyToolProductStates(
     const key = toolProductIdentityKey(identity.value, message.runId);
     const approval = approvals.get(key);
     const receipt = receipts.get(key);
-    if (approval) message.approval = approvalSnapshot(approval);
-    else delete message.approval;
+    if (approval) {
+      message.approval = approvalSnapshot(approval);
+      applyApprovalPreviewProjection(message, approval);
+    } else delete message.approval;
     const toolId = projectedToolId(message);
     const knownRead = PHASE_TWO_READ_TOOL_IDS.has(toolId);
     const knownWrite = PHASE_TWO_WRITE_TOOL_IDS.has(toolId);
@@ -1744,6 +1793,46 @@ function approvalSnapshot(
     ...(preview ? { preview } : {}),
     ...(updatedAt > 0 ? { updatedAt } : {})
   });
+}
+
+function applyApprovalPreviewProjection(
+  message: ChatMessage,
+  approval: Readonly<PiChatUiToolApprovalView>
+): void {
+  const change = piApprovalPreviewChangeProjection(approval.preview);
+  const refs = extractProcessFileRefs([
+    approval.target,
+    change?.path
+  ], "");
+  if (refs.length) {
+    const byIdentity = new Map<string, NonNullable<ChatMessage["files"]>[number]>();
+    for (const ref of [...(message.files ?? []), ...refs]) {
+      byIdentity.set(`${ref.kind}\0${ref.path}`, ref);
+    }
+    message.files = [...byIdentity.values()];
+  }
+  if (message.diffSummary || !change?.path) return;
+  if (change.added === undefined && change.removed === undefined && !change.diff) return;
+  const summary = buildDiffSummary([{
+    path: change.path,
+    kind: change.kind,
+    diff: change.diff
+  }]);
+  const file = summary.files[0];
+  const added = change.added ?? file.added;
+  const removed = change.removed ?? file.removed;
+  message.diffSummary = {
+    totalFiles: 1,
+    added,
+    removed,
+    files: [{
+      path: file.path,
+      ...(file.previousPath ? { previousPath: file.previousPath } : {}),
+      kind: file.kind,
+      added,
+      removed
+    }]
+  };
 }
 
 interface ToolProductRecordIdentity {
@@ -1834,6 +1923,14 @@ function latestProductRecordTime(
 
 function finiteProductRecordTime(value: number | undefined): number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
+function nonNegativeInteger(value: unknown): number | undefined {
+  return typeof value === "number"
+    && Number.isSafeInteger(value)
+    && value >= 0
+    ? value
+    : undefined;
 }
 
 function toolProductStatusIsTerminal(status: PiChatUiToolProductStatus): boolean {

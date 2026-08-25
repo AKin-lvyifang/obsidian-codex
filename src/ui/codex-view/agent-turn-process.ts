@@ -1,4 +1,8 @@
-import type { ChatMessage } from "../../settings/settings";
+import type { ChatMessage, SettingsLanguage } from "../../settings/settings";
+import {
+  conversationCopy,
+  type ConversationCopy
+} from "../../settings/i18n";
 import { knowledgeUsageMessageData } from "../../knowledge-base/usage";
 import type {
   EchoInkAssistantTurnStatus,
@@ -9,6 +13,8 @@ import type {
   EchoInkTurnProcessNodeStatus
 } from "../../types/conversation-turn";
 import type { EchoInkReasoningActivity } from "../../types/reasoning-summary";
+import { stableHashedIdentity } from "../../core/mapping";
+import { piToolCallIdFromProjectedMessageId } from "../../harness/pi-native/pi-chat-ui-projector";
 
 const ACTIVE_STATUSES = new Set([
   "running",
@@ -113,7 +119,11 @@ export function isAgentTurnTerminalMessage(message: ChatMessage): boolean {
     && (!message.status || FAILED_STATUSES.has(message.status));
 }
 
-export function buildAgentTurns(messages: ChatMessage[]): AgentTurnView[] {
+export function buildAgentTurns(
+  messages: ChatMessage[],
+  language: SettingsLanguage = "zh-CN"
+): AgentTurnView[] {
+  const copy = conversationCopy(language);
   const indicesByKey = new Map<string, number[]>();
   messages.forEach((message, index) => {
     if (!isAssistantTurnMember(message)) return;
@@ -129,13 +139,16 @@ export function buildAgentTurns(messages: ChatMessage[]): AgentTurnView[] {
     const firstIndex = indices[0];
     const lastIndex = indices[indices.length - 1];
     if (hasForeignTurnBetween(messages, firstIndex, lastIndex, key)) continue;
-    turns.push(buildAgentTurn(messages, indices, key));
+    turns.push(buildAgentTurn(messages, indices, key, copy));
   }
   return turns.sort((left, right) => left.anchorIndex - right.anchorIndex);
 }
 
-export function buildCompletedAgentTurns(messages: ChatMessage[]): CompletedAgentTurn[] {
-  return buildAgentTurns(messages).flatMap((turn) => {
+export function buildCompletedAgentTurns(
+  messages: ChatMessage[],
+  language: SettingsLanguage = "zh-CN"
+): CompletedAgentTurn[] {
+  return buildAgentTurns(messages, language).flatMap((turn) => {
     if (!turn.finalAnswer || turn.finalAnswerIndex === undefined || !isTerminalTurnStatus(turn.status)) {
       return [];
     }
@@ -154,8 +167,11 @@ export function buildCompletedAgentTurns(messages: ChatMessage[]): CompletedAgen
   });
 }
 
-export function buildAgentTurnProjection(messages: ChatMessage[]): AgentTurnProjectionItem[] {
-  const turns = buildAgentTurns(messages);
+export function buildAgentTurnProjection(
+  messages: ChatMessage[],
+  language: SettingsLanguage = "zh-CN"
+): AgentTurnProjectionItem[] {
+  const turns = buildAgentTurns(messages, language);
   const turnByAnchor = new Map(turns.map((turn) => [turn.anchorIndex, turn]));
   const turnMessageIndices = new Set(turns.flatMap((turn) => [...turn.messageIndices]));
   const projection: AgentTurnProjectionItem[] = [];
@@ -198,30 +214,28 @@ export function settleAgentAnswer(
   return message;
 }
 
-export function formatAgentTurnDuration(durationMs: number): string {
-  return `已处理 ${formatAgentTurnDurationValue(durationMs)}`;
+export function formatAgentTurnDuration(
+  durationMs: number,
+  language: SettingsLanguage = "zh-CN"
+): string {
+  return conversationCopy(language).turn.processed(formatAgentTurnDurationValue(durationMs));
 }
 
 export function formatAgentTurnSummary(turn: Readonly<Pick<
   AgentTurnView,
   "status" | "completedSteps" | "toolCount" | "durationMs" | "currentNodeId" | "processNodes"
->>): string {
+>>, language: SettingsLanguage = "zh-CN"): string {
+  const copy = conversationCopy(language);
   if (!isTerminalTurnStatus(turn.status)) {
-    if (turn.status === "waiting_for_user") return "等待用户回应";
+    if (turn.status === "waiting_for_user") return copy.turn.waitingForUser;
     const current = turn.currentNodeId
       ? turn.processNodes.find((node) => node.nodeId === turn.currentNodeId)
       : undefined;
-    return current?.title ? `正在处理 · ${current.title}` : "正在处理";
+    return copy.turn.processing(current?.title);
   }
-  const prefix = turn.status === "completed"
-    ? "处理完成"
-    : turn.status === "failed"
-      ? "处理失败"
-      : turn.status === "cancelled"
-        ? "已取消"
-        : "已中断";
-  const parts = [`${turn.completedSteps} 个步骤`];
-  if (turn.toolCount > 0) parts.push(`${turn.toolCount} 个工具`);
+  const prefix = copy.turn.terminalPrefix(turn.status);
+  const parts = [copy.turn.stepCount(turn.completedSteps)];
+  if (turn.toolCount > 0) parts.push(copy.turn.toolCount(turn.toolCount));
   parts.push(formatAgentTurnDurationValue(turn.durationMs));
   return `${prefix} · ${parts.join(" · ")}`;
 }
@@ -236,7 +250,8 @@ export function isTerminalTurnStatus(status: EchoInkAssistantTurnStatus): boolea
 function buildAgentTurn(
   allMessages: ChatMessage[],
   indices: number[],
-  key: string
+  key: string,
+  copy: ConversationCopy
 ): AgentTurnView {
   const messages = indices.map((index) => allMessages[index]);
   const explicitTurn = latestExplicitTurn(messages);
@@ -264,7 +279,7 @@ function buildAgentTurn(
         updatedAt
       ], updatedAt)
     : undefined;
-  const processNodes = buildProcessNodes(messages, explicitTurn?.processNodes ?? []);
+  const processNodes = buildProcessNodes(messages, explicitTurn?.processNodes ?? [], copy);
   const currentNode = status === "waiting_for_user"
     ? undefined
     : processNodes.slice().reverse().find((node) => node.status === "running");
@@ -317,39 +332,54 @@ function buildAgentTurn(
 
 function buildProcessNodes(
   messages: readonly ChatMessage[],
-  explicitNodes: readonly Readonly<EchoInkTurnProcessNode>[]
+  explicitNodes: readonly Readonly<EchoInkTurnProcessNode>[],
+  copy: ConversationCopy
 ): Readonly<EchoInkTurnProcessNode>[] {
   const nodes: EchoInkTurnProcessNode[] = explicitNodes.map((node) => ({ ...node }));
   const nodeIds = new Set(nodes.map((node) => node.nodeId));
   const representedMessageIds = new Set(nodes.flatMap((node) =>
     node.sourceMessageId ? [node.sourceMessageId] : []
   ));
+  const representedToolActivityIds = new Set<string>();
+  for (const node of explicitNodes) {
+    if (node.toolCallId) {
+      representedToolActivityIds.add(reasoningToolActivityId(node.toolCallId));
+    }
+  }
+  for (const message of messages) {
+    const toolCallId = toolCallIdForMessage(message);
+    if (toolCallId) representedToolActivityIds.add(reasoningToolActivityId(toolCallId));
+  }
 
   for (const message of messages) {
     if (message.reasoningSummary && !representedMessageIds.has(message.id)) {
       for (const activity of message.reasoningSummary.activities) {
-        const node = nodeForReasoningActivity(message, activity);
+        if (
+          activity.kind === "tool"
+          && representedToolActivityIds.has(activity.id)
+        ) continue;
+        const node = nodeForReasoningActivity(message, activity, copy);
         if (!nodeIds.has(node.nodeId)) {
           nodes.push(node);
           nodeIds.add(node.nodeId);
         }
       }
       if (!message.reasoningSummary.activities.length) {
-        const node = nodeForMessage(message);
+        const node = nodeForMessage(message, copy);
         if (node && !nodeIds.has(node.nodeId)) {
           nodes.push(node);
           nodeIds.add(node.nodeId);
         }
       }
     } else if (!representedMessageIds.has(message.id)) {
-      const node = nodeForMessage(message);
+      const node = nodeForMessage(message, copy);
       if (node && !nodeIds.has(node.nodeId)) {
         nodes.push(node);
         nodeIds.add(node.nodeId);
       }
     }
 
-    for (const node of knowledgeNodesForMessage(message)) {
+    for (const node of knowledgeNodesForMessage(message, copy)) {
       if (!nodeIds.has(node.nodeId)) {
         nodes.push(node);
         nodeIds.add(node.nodeId);
@@ -366,12 +396,12 @@ function buildProcessNodes(
         nodeId,
         kind: "reasoning",
         status: providerReasoningNodeStatus(reasoning.status),
-        title: "模型推理",
+        title: copy.process.reasoningTitle,
         summary: reasoning.status === "running"
-          ? "Provider 正在返回公开推理"
+          ? copy.process.providerReasoningRunning
           : reasoning.durationMs === undefined
-            ? "Provider 公开推理已结束"
-            : `公开推理 ${formatAgentTurnDurationValue(reasoning.durationMs)}`,
+            ? copy.process.providerReasoningEnded
+            : copy.process.providerReasoningDuration(formatAgentTurnDurationValue(reasoning.durationMs)),
         startedAt: reasoning.startedAt,
         updatedAt: reasoning.updatedAt,
         ...(reasoning.completedAt === undefined ? {} : { completedAt: reasoning.completedAt })
@@ -391,7 +421,9 @@ function buildProcessNodes(
         : record.outcome === "cancelled" || record.outcome === "denied" || record.outcome === "expired"
           ? "cancelled"
           : "completed",
-      title: record.kind === "question" ? "用户已回答" : interactionOutcomeTitle(record.outcome),
+      title: record.kind === "question"
+        ? copy.process.questionAnswered
+        : copy.process.interactionOutcome(record.outcome),
       summary: record.summary,
       startedAt: record.updatedAt,
       updatedAt: record.updatedAt,
@@ -411,9 +443,13 @@ function buildProcessNodes(
     .map(({ node }) => Object.freeze({ ...node }));
 }
 
-function nodeForMessage(message: ChatMessage): EchoInkTurnProcessNode | null {
+function nodeForMessage(
+  message: ChatMessage,
+  copy: ConversationCopy
+): EchoInkTurnProcessNode | null {
   const kind = nodeKindForMessage(message);
   if (!kind) return null;
+  const toolCallId = toolCallIdForMessage(message);
   const status = processNodeStatus(message.status);
   const updatedAt = finiteTimestamp(message.completedAt) ?? finiteTimestamp(message.createdAt) ?? 0;
   return {
@@ -422,12 +458,13 @@ function nodeForMessage(message: ChatMessage): EchoInkTurnProcessNode | null {
       : `message:${message.id}`,
     kind,
     status,
-    title: processNodeTitle(message, kind),
+    title: processNodeTitle(message, kind, copy),
     ...(message.details?.trim() ? { summary: message.details.trim() } : {}),
     startedAt: finiteTimestamp(message.createdAt) ?? updatedAt,
     updatedAt,
     ...(status === "running" || status === "waiting" ? {} : { completedAt: updatedAt }),
     sourceMessageId: message.id,
+    ...(toolCallId ? { toolCallId } : {}),
     ...(message.taskPlan?.planId ? { taskPlanId: message.taskPlan.planId } : {}),
     ...(message.interactionRecord
       ? { interactionId: message.interactionRecord.interactionId }
@@ -435,7 +472,10 @@ function nodeForMessage(message: ChatMessage): EchoInkTurnProcessNode | null {
   };
 }
 
-function knowledgeNodesForMessage(message: ChatMessage): EchoInkTurnProcessNode[] {
+function knowledgeNodesForMessage(
+  message: ChatMessage,
+  copy: ConversationCopy
+): EchoInkTurnProcessNode[] {
   const usage = knowledgeUsageMessageData(message);
   const nodes: EchoInkTurnProcessNode[] = [];
   const sourceKeys = new Set<string>();
@@ -454,8 +494,10 @@ function knowledgeNodesForMessage(message: ChatMessage): EchoInkTurnProcessNode[
       nodeId: `sources:${message.id}`,
       kind: "retrieval",
       status: processNodeStatus(message.status),
-      title: "检索与来源",
-      summary: sourceCount > 0 ? `${sourceCount} 个可验证来源` : "未命中可展示来源",
+      title: copy.process.sourcesTitle,
+      summary: sourceCount > 0
+        ? copy.process.verifiableSources(sourceCount)
+        : copy.process.noDisplayableSources,
       startedAt: finiteTimestamp(message.createdAt) ?? 0,
       updatedAt: finiteTimestamp(message.completedAt) ?? finiteTimestamp(message.createdAt) ?? 0,
       sourceMessageId: message.id
@@ -466,8 +508,8 @@ function knowledgeNodesForMessage(message: ChatMessage): EchoInkTurnProcessNode[
       nodeId: `artifacts:${message.id}`,
       kind: "artifact",
       status: processNodeStatus(message.status),
-      title: "本轮产物",
-      summary: `${usage.producedPaths.length} 个文件`,
+      title: copy.process.artifactsTitle,
+      summary: copy.process.fileCount(usage.producedPaths.length),
       startedAt: finiteTimestamp(message.createdAt) ?? 0,
       updatedAt: finiteTimestamp(message.completedAt) ?? finiteTimestamp(message.createdAt) ?? 0,
       sourceMessageId: message.id
@@ -478,15 +520,17 @@ function knowledgeNodesForMessage(message: ChatMessage): EchoInkTurnProcessNode[
 
 function nodeForReasoningActivity(
   message: ChatMessage,
-  activity: Readonly<EchoInkReasoningActivity>
+  activity: Readonly<EchoInkReasoningActivity>,
+  copy: ConversationCopy
 ): EchoInkTurnProcessNode {
   const kind = reasoningActivityNodeKind(activity.kind);
+  const summary = reasoningActivitySummary(activity, copy);
   return {
     nodeId: `process-activity:${message.id}:${activity.id}`,
     kind,
     status: reasoningActivityNodeStatus(activity.status),
-    title: reasoningActivityTitle(activity),
-    ...(reasoningActivitySummary(activity) ? { summary: reasoningActivitySummary(activity) } : {}),
+    title: reasoningActivityTitle(activity, copy),
+    ...(summary ? { summary } : {}),
     startedAt: activity.startedAt,
     updatedAt: activity.updatedAt,
     ...(activity.status === "active" ? {} : { completedAt: activity.updatedAt }),
@@ -513,16 +557,19 @@ function nodeKindForMessage(message: ChatMessage): EchoInkTurnProcessNodeKind | 
   return null;
 }
 
-function processNodeTitle(message: ChatMessage, kind: EchoInkTurnProcessNodeKind): string {
+function processNodeTitle(
+  message: ChatMessage,
+  kind: EchoInkTurnProcessNodeKind,
+  copy: ConversationCopy
+): string {
   if (message.taskPlan) return message.taskPlan.title;
-  if (message.title?.trim()) return message.title.trim();
-  if (kind === "task") return "更新任务";
-  if (kind === "retrieval") return "检索资料";
-  if (kind === "diff") return "文件改动";
-  if (kind === "artifact") return "生成产物";
-  if (kind === "tool") return "执行工具";
-  if (kind === "interaction") return "等待用户操作";
-  return "处理上下文";
+  if (message.reasoningSummary) return copy.message.thinking;
+  if (message.interactionRecord) {
+    return message.interactionRecord.kind === "question"
+      ? copy.process.questionAnswered
+      : copy.process.interactionOutcome(message.interactionRecord.outcome);
+  }
+  return copy.process.fallbackTitle(kind);
 }
 
 function mergeInteractionRecords(
@@ -603,60 +650,51 @@ function reasoningActivityNodeStatus(
   return "completed";
 }
 
-function reasoningActivityTitle(activity: Readonly<EchoInkReasoningActivity>): string {
-  if (activity.kind === "knowledge") return "检索本地知识";
-  if (activity.kind === "memory") return "核对个人记忆";
-  if (activity.kind === "task") return "推进任务";
-  if (activity.kind === "tool") return activity.name ? `调用 ${activity.name}` : "调用工具";
-  return "连接模型";
+function reasoningActivityTitle(
+  activity: Readonly<EchoInkReasoningActivity>,
+  copy: ConversationCopy
+): string {
+  return copy.process.activityTitle(activity.kind, activity.name);
 }
 
-function reasoningActivitySummary(activity: Readonly<EchoInkReasoningActivity>): string {
+function reasoningActivitySummary(
+  activity: Readonly<EchoInkReasoningActivity>,
+  copy: ConversationCopy
+): string {
   const count = typeof activity.current === "number" && typeof activity.total === "number"
     ? `${activity.current}/${activity.total}`
     : typeof activity.completed === "number"
-      ? `已完成 ${activity.completed}`
+      ? copy.process.activityCompleted(activity.completed)
       : "";
-  const stage = activity.stage ? reasoningActivityStageLabel(activity.stage) : "";
+  const stage = activity.stage ? copy.process.activityStage(activity.stage) : "";
   return [stage, count].filter(Boolean).join(" · ");
-}
-
-function reasoningActivityStageLabel(stage: NonNullable<EchoInkReasoningActivity["stage"]>): string {
-  const labels: Partial<Record<NonNullable<EchoInkReasoningActivity["stage"]>, string>> = {
-    requesting: "请求模型",
-    searching: "检索中",
-    continuing_search: "继续检索",
-    reading_knowledge: "阅读知识",
-    comparing_memory: "比较记忆",
-    checking_conflicts_freshness: "核对冲突与时效",
-    refining_knowledge: "整理知识",
-    writing_and_readback: "写入并回读",
-    loading: "加载中",
-    catalog: "读取目录",
-    matching: "匹配中",
-    budgeting: "分配上下文",
-    assembling: "组装上下文",
-    pending: "等待开始",
-    in_progress: "进行中",
-    paused: "已暂停",
-    completed: "已完成",
-    failed: "失败",
-    cancelled: "已取消"
-  };
-  return labels[stage] ?? stage;
 }
 
 function countTools(
   messages: readonly ChatMessage[],
   nodes: readonly Readonly<EchoInkTurnProcessNode>[]
 ): number {
-  const messageIds = new Set(messages.filter(isToolMessage).map((message) => message.id));
-  const explicitToolIds = new Set(nodes.flatMap((node) => {
-    if (node.kind !== "tool" && node.kind !== "diff") return [];
-    if (node.sourceMessageId && messageIds.has(node.sourceMessageId)) return [];
-    return [node.toolCallId ?? node.nodeId];
+  const toolMessages = messages.filter(isToolMessage);
+  const messageIds = new Set(toolMessages.map((message) => message.id));
+  const toolIds = new Set(toolMessages.map((message) => {
+    const toolCallId = toolCallIdForMessage(message);
+    return toolCallId ? `tool:${toolCallId}` : `message:${message.id}`;
   }));
-  return messageIds.size + explicitToolIds.size;
+  for (const node of nodes) {
+    if (node.kind !== "tool" && node.kind !== "diff") continue;
+    if (node.sourceMessageId && messageIds.has(node.sourceMessageId)) continue;
+    toolIds.add(node.toolCallId ? `tool:${node.toolCallId}` : `node:${node.nodeId}`);
+  }
+  return toolIds.size;
+}
+
+function toolCallIdForMessage(message: ChatMessage): string | undefined {
+  if (!isToolMessage(message)) return undefined;
+  return piToolCallIdFromProjectedMessageId(message.id);
+}
+
+function reasoningToolActivityId(toolCallId: string): string {
+  return stableHashedIdentity("reasoning-tool", toolCallId);
 }
 
 function isToolMessage(message: ChatMessage): boolean {
@@ -728,15 +766,6 @@ function hasForeignTurnBetween(
     if (!candidate && message.role === "assistant" && isAgentTurnTerminalMessage(message)) return true;
   }
   return false;
-}
-
-function interactionOutcomeTitle(outcome: EchoInkTurnInteractionRecord["outcome"]): string {
-  if (outcome === "approved") return "用户已批准";
-  if (outcome === "denied") return "用户已拒绝";
-  if (outcome === "completed") return "确认已执行";
-  if (outcome === "failed") return "交互失败";
-  if (outcome === "expired") return "交互已过期";
-  return "交互已取消";
 }
 
 function formatAgentTurnDurationValue(durationMs: number): string {

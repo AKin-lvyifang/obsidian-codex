@@ -123,6 +123,7 @@ import {
   type EchoInkTurnInteractionRecord
 } from "../../types/conversation-turn";
 import { PI_USER_QUESTION_TOOL_ID } from "./pi-user-question-tool";
+import { stableHashedIdentity as stableId } from "../../core/mapping";
 
 const BUILTIN_TOOL_NAMES = new Set([
   "bash",
@@ -5440,13 +5441,6 @@ function reasoningSummaryTerminalStatus(
   if (terminalState === "completed") return "completed";
   if (terminalState === "failed") return "failed";
   return abortRequested ? "cancelled" : "interrupted";
-}
-
-function stableId(namespace: string, ...parts: string[]): string {
-  return `${namespace}-${createHash("sha256")
-    .update([namespace, ...parts].join("\0"), "utf8")
-    .digest("hex")
-    .slice(0, 32)}`;
 }
 
 function safeIdentifier(value: unknown): value is string {

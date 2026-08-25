@@ -7,11 +7,15 @@ import type {
   SettingsLanguage,
   StoredAttachment
 } from "../../settings/settings";
-import type { KnowledgeBaseCitation, KnowledgeBaseCitationBucket, KnowledgeBaseCitationSummary, KnowledgeWorkflowEvent, KnowledgeWorkflowPhaseId } from "../../knowledge-base/types";
+import type { KnowledgeBaseCitation, KnowledgeBaseCitationSummary, KnowledgeWorkflowEvent, KnowledgeWorkflowPhaseId } from "../../knowledge-base/types";
 import type { ProcessFileRef, TokenUsage } from "../../types/app-server";
 import { showItemInFinder } from "../../core/electron";
 import { basename, normalizeProcessFileRef } from "../../core/mapping";
-import { diffSummaryLabel, parseFileChangeDiff, type ParsedDiffFile } from "../../core/diff-summary";
+import { parseFileChangeDiff, type ParsedDiffFile } from "../../core/diff-summary";
+import {
+  conversationCopy,
+  type ConversationCopy
+} from "../../settings/i18n";
 import { displayTextForMessage, isLargeRawMessage } from "../../core/raw-message-store";
 import { calculateVirtualWindow, isNearVirtualBottom, scrollTopForVirtualBottom } from "../../core/virtual-window";
 import { extractKnowledgeBaseResultTitle } from "../knowledge-base-result-title";
@@ -30,7 +34,11 @@ import {
   type CompletedAgentTurn
 } from "./agent-turn-process";
 import { copyAnswerMarkdown } from "./answer-copy";
-import { piEntryIdFromProjectedMessageId } from "../../harness/pi-native/pi-chat-ui-projector";
+import {
+  piApprovalPreviewChangeProjection,
+  piEntryIdFromProjectedMessageId,
+  type PiApprovalPreviewChangeProjection
+} from "../../harness/pi-native/pi-chat-ui-projector";
 import {
   createAttachmentResourceResolver,
   type EchoInkAttachmentResourceResolver
@@ -46,10 +54,7 @@ import {
   type EchoInkTaskPlanStepStatus,
   type EchoInkTaskPlanStatus
 } from "../../types/task-plan";
-import {
-  ECHOINK_ASSISTANT_TURN_SECTION_LABELS,
-  type EchoInkTurnProcessNode
-} from "../../types/conversation-turn";
+import type { EchoInkTurnProcessNode } from "../../types/conversation-turn";
 import { renderProviderBrandIcon, type ProviderBrandId } from "../../settings/provider-brand-icons";
 import { API_PROVIDER_PRESETS } from "../../settings/provider-presets";
 import {
@@ -185,14 +190,6 @@ const MESSAGE_LIST_BOTTOM_PIN_EPSILON_PX = 2;
 const VIRTUAL_RERENDER_BURST_LIMIT = 24;
 const VIRTUAL_RERENDER_WINDOW_MS = 1000;
 const AGENT_LIVE_COPY_INTERVAL_MS = 1800;
-const PROCESS_CONTENT_UNAVAILABLE_TEXT = "后端未提供可展示内容";
-const COLD_START_STATUS_TEXT = "正在整理上下文";
-const COLD_START_COPY_TEXTS = ["先把问题看明白", "等模型接上话", "把上下文放到手边"];
-const EMPTY_CONVERSATION_SUGGESTIONS = [
-  { id: "organize-knowledge-base", label: "整理知识库" },
-  { id: "summarize-current-note", label: "总结当前笔记" },
-  { id: "search-knowledge-base", label: "从知识库找答案" }
-] as const;
 
 export interface KnowledgeBaseRunProgressState {
   totalCells: number;
@@ -267,9 +264,10 @@ export function shouldPinMessageListBottom(options: MessageListRenderOptions, ne
 }
 
 export function piConversationDeriveActionLabel(
-  message: Pick<ChatMessage, "role">
-): "从这条回复新建会话" | null {
-  if (message.role === "assistant") return "从这条回复新建会话";
+  message: Pick<ChatMessage, "role">,
+  language: SettingsLanguage = "zh-CN"
+): string | null {
+  if (message.role === "assistant") return conversationCopy(language).message.deriveConversation;
   return null;
 }
 
@@ -285,12 +283,17 @@ export function knowledgeBaseMaintainReportItemPath(item: KnowledgeBaseMaintainR
 }
 
 /** Empty source metadata can mean an older event did not persist it. */
-export function personalMemorySourceCountLabel(count: number): string {
-  return count > 0 ? `${count} 条 Personal Memory` : "Personal Memory 来源";
+export function personalMemorySourceCountLabel(
+  count: number,
+  language: SettingsLanguage = "zh-CN"
+): string {
+  return conversationCopy(language).sources.personalMemoryCount(count);
 }
 
-export function personalMemorySourceEmptyStateLabel(): string {
-  return "未记录可展示的 Personal Memory 来源。";
+export function personalMemorySourceEmptyStateLabel(
+  language: SettingsLanguage = "zh-CN"
+): string {
+  return conversationCopy(language).sources.noPersonalMemory;
 }
 
 export interface ReasoningDisclosureState {
@@ -371,6 +374,7 @@ export class CodexMessageListRenderer {
     this.disconnectVisibleRowsObserver();
     virtualListEl.empty();
     if (messages.length === 0) {
+      const copy = conversationCopy(env.settingsLanguage);
       virtualListEl.setCssStyles({ height: "100%" });
       const welcome = virtualListEl.createDiv({ cls: "codex-welcome" });
       welcome.createDiv({ cls: "codex-welcome-title", text: env.welcomeCopy.title });
@@ -380,8 +384,9 @@ export class CodexMessageListRenderer {
       );
       const suggestions = renderSmoothAISuggestions(
         welcome,
-        EMPTY_CONVERSATION_SUGGESTIONS,
-        (suggestion) => env.onSuggestionSelect?.(suggestion.label)
+        copy.message.suggestions,
+        (suggestion) => env.onSuggestionSelect?.(suggestion.label),
+        copy.message.suggestionsAria
       );
       suggestions.addClass("codex-welcome-suggestions");
       return;
@@ -515,6 +520,10 @@ export class CodexMessageListRenderer {
   private requireEnv(): MessageListEnvironment {
     if (!this.env) throw new Error("Message list renderer has not been initialized");
     return this.env;
+  }
+
+  private copy(): ConversationCopy {
+    return conversationCopy(this.requireEnv().settingsLanguage);
   }
 
   private observeMessageViewport(messagesEl: HTMLElement): void {
@@ -702,7 +711,7 @@ export class CodexMessageListRenderer {
     const rows: MessageRenderRow[] = [];
     const agentHeaderKeys = new Set<string>();
     const footerMessageIds = terminalAnswerFooterMessageIds(messages);
-    for (const item of buildAgentTurnProjection(messages)) {
+    for (const item of buildAgentTurnProjection(messages, this.requireEnv().settingsLanguage)) {
       if (item.kind === "assistantTurn") {
         const turn = item.turn;
         const identityMessage = turn.messages[0] ?? turn.finalAnswer;
@@ -868,6 +877,7 @@ export class CodexMessageListRenderer {
         ?? this.openProcessItems.get(message.id)
         ?? message.status === "running";
       const status = message.reasoningSummary?.status ?? message.status;
+      const copy = this.copy();
       const reasoning = createSmoothAIReasoning(content, {
         bodyId,
         open,
@@ -875,8 +885,8 @@ export class CodexMessageListRenderer {
           ? "error"
           : smoothAIStatus(status),
         summary: message.reasoningSummary
-          ? message.title ?? "正在思考"
-          : message.status === "running" ? "正在思考" : "思考过程"
+          ? message.title ?? copy.message.thinking
+          : message.status === "running" ? copy.message.thinking : copy.message.thinkingProcess
       });
       let pendingUserDisclosureIntent = false;
       if (message.reasoningSummary) {
@@ -948,7 +958,7 @@ export class CodexMessageListRenderer {
     const text = displayTextForMessage(message);
     if (message.status === "running" && !text.trim()) {
       container.empty();
-      renderSmoothAILoader(container, "正在生成回复");
+      renderSmoothAILoader(container, this.copy().message.generatingReply);
       return;
     }
     renderRichText(env.app, env.component, container, text);
@@ -968,7 +978,7 @@ export class CodexMessageListRenderer {
     const stepsId = `codex-task-plan-steps-${safeDomIdentity(message.id)}`;
     const task = createAIElementsTask(container, {
       bodyId: stepsId,
-      label: `任务计划：${plan.title}`,
+      label: this.copy().task.planLabel(plan.title),
       open: expanded
     });
     task.root.addClass(`is-${plan.status}`);
@@ -981,7 +991,12 @@ export class CodexMessageListRenderer {
     heading.createSpan({ cls: "codex-task-plan-title", text: plan.title });
     heading.createSpan({
       cls: "codex-task-plan-progress",
-      text: taskPlanHistoryStatus(plan.status, progress.completed, progress.total)
+      text: taskPlanHistoryStatus(
+        plan.status,
+        progress.completed,
+        progress.total,
+        env.settingsLanguage
+      )
     });
     const disclosure = header.createSpan({
       cls: "codex-task-plan-disclosure",
@@ -1023,7 +1038,10 @@ export class CodexMessageListRenderer {
   ): void {
     container.addClass(`is-${status}`);
     container.setAttribute("role", "img");
-    container.setAttribute("aria-label", taskPlanStatusLabel(status));
+    container.setAttribute("aria-label", taskPlanStatusLabel(
+      status,
+      this.requireEnv().settingsLanguage
+    ));
     setIcon(container, taskPlanStatusIcon(status));
   }
 
@@ -1034,7 +1052,7 @@ export class CodexMessageListRenderer {
   ): void {
     const env = this.requireEnv();
     const entryId = piEntryIdFromProjectedMessageId(message.id);
-    const label = piConversationDeriveActionLabel(message);
+    const label = piConversationDeriveActionLabel(message, env.settingsLanguage);
     if (!entryId || !label || !env.onDerivePiConversation) return;
     const actions = inline
       ? container
@@ -1073,9 +1091,10 @@ export class CodexMessageListRenderer {
     userMessage: boolean
   ): HTMLButtonElement {
     const env = this.requireEnv();
-    const idleLabel = userMessage ? "复制消息" : "复制回答";
-    const successLabel = userMessage ? "消息已复制" : "回答已复制";
-    const failureLabel = userMessage ? "消息复制失败" : "回答复制失败";
+    const copy = this.copy();
+    const idleLabel = userMessage ? copy.message.copyMessage : copy.message.copyAnswer;
+    const successLabel = userMessage ? copy.message.messageCopied : copy.message.answerCopied;
+    const failureLabel = userMessage ? copy.message.copyMessageFailed : copy.message.copyAnswerFailed;
     const copyButton = container.createEl("button", {
       cls: `codex-message-action ${userMessage ? "codex-user-message-copy" : "codex-answer-copy"}`,
       attr: {
@@ -1106,13 +1125,13 @@ export class CodexMessageListRenderer {
       );
       if (result.status === "success") {
         renderIcon("check");
-        copyButton.setAttr("title", "已复制");
+        copyButton.setAttr("title", copy.message.copied);
         copyButton.setAttr("aria-label", successLabel);
       } else {
         renderIcon("triangle-alert");
-        copyButton.setAttr("title", "复制失败");
+        copyButton.setAttr("title", copy.message.copyFailed);
         copyButton.setAttr("aria-label", failureLabel);
-        new Notice(`复制失败：${result.error instanceof Error ? result.error.message : String(result.error)}`);
+        new Notice(`${copy.message.copyFailed}: ${result.error instanceof Error ? result.error.message : String(result.error)}`);
       }
       window.setTimeout(() => {
         renderIcon("copy");
@@ -1340,13 +1359,16 @@ export class CodexMessageListRenderer {
     usage: KnowledgeUsageMessageData,
     citations?: KnowledgeBaseCitationSummary
   ): void {
+    const env = this.requireEnv();
+    const copy = this.copy();
     const documents = localDocumentSources(citations, usage);
     if (documents.length) {
       const stateKey = `knowledge-documents:${messageId}`;
       const sources = createAIElementsDocumentSources(
         container,
         documents.length,
-        this.openKnowledgeBaseCitations.get(stateKey) ?? false
+        this.openKnowledgeBaseCitations.get(stateKey) ?? false,
+        env.settingsLanguage
       );
       sources.root.ontoggle = () => {
         this.openKnowledgeBaseCitations.set(stateKey, sources.root.open);
@@ -1360,12 +1382,12 @@ export class CodexMessageListRenderer {
       container.createDiv({
         cls: "codex-kb-no-evidence codex-ai-elements-sources-empty",
         text: citations
-          ? "没有命中文件，也没有引用片段；不会显示伪来源。"
-          : personalMemorySourceEmptyStateLabel()
+          ? copy.sources.noEvidence
+          : personalMemorySourceEmptyStateLabel(env.settingsLanguage)
       });
     }
     if (usage.producedPaths.length) {
-      const artifact = createSmoothAIArtifact(container, "本轮产物");
+      const artifact = createSmoothAIArtifact(container, copy.process.artifactsTitle);
       artifact.root.addClass("codex-knowledge-produced-artifact");
       for (const producedPath of usage.producedPaths) {
         this.renderKnowledgeProducedPath(artifact.body, producedPath);
@@ -1378,6 +1400,7 @@ export class CodexMessageListRenderer {
     document: LocalDocumentSource,
     evidenceStatus?: KnowledgeBaseCitationSummary["status"]
   ): void {
+    const copy = this.copy();
     const item = container.createDiv({
       cls: `codex-ai-elements-source is-${document.kind}`,
       attr: { "data-source-key": document.key }
@@ -1392,7 +1415,7 @@ export class CodexMessageListRenderer {
       header.createSpan({
         cls: "codex-ai-elements-source-title codex-message-note-link is-disabled",
         text: document.source.title,
-        attr: { title: "Personal Memory 没有 Vault 路径，无法打开" }
+        attr: { title: copy.sources.noVaultPath }
       });
       return;
     }
@@ -1406,9 +1429,9 @@ export class CodexMessageListRenderer {
         text: noteName,
         attr: {
           type: "button",
-          "aria-label": `打开笔记 ${noteName}`,
+          "aria-label": copy.sources.openNote(noteName),
           "data-path": document.path,
-          title: `在 Obsidian 中打开 ${document.path}`
+          title: copy.sources.openInObsidian(document.path)
         }
       });
       title.onclick = (event) => {
@@ -1420,11 +1443,15 @@ export class CodexMessageListRenderer {
       header.createSpan({
         cls: "codex-ai-elements-source-title codex-message-note-link is-disabled",
         text: noteName,
-        attr: { title: `当前 Vault 中找不到 ${document.path}，无法打开` }
+        attr: { title: copy.sources.missingInVault(document.path) }
       });
     }
 
-    const metadata = localDocumentMetadata(document, evidenceStatus);
+    const metadata = localDocumentMetadata(
+      document,
+      evidenceStatus,
+      this.requireEnv().settingsLanguage
+    );
     if (metadata.length) {
       const meta = item.createDiv({ cls: "codex-ai-elements-source-meta" });
       for (const label of metadata) meta.createSpan({ text: label });
@@ -1438,6 +1465,7 @@ export class CodexMessageListRenderer {
   }
 
   private renderKnowledgeProducedPath(container: HTMLElement, producedPath: string): void {
+    const copy = this.copy();
     const item = container.createDiv({ cls: "codex-kb-citation-item codex-knowledge-produced-path" });
     const header = item.createDiv({ cls: "codex-kb-citation-header" });
     const title = header.createEl("button", {
@@ -1445,9 +1473,9 @@ export class CodexMessageListRenderer {
       text: noteNameForPath(producedPath),
       attr: {
         type: "button",
-        "aria-label": `打开笔记 ${noteNameForPath(producedPath)}`,
+        "aria-label": copy.sources.openNote(noteNameForPath(producedPath)),
         "data-path": producedPath,
-        title: `打开 ${producedPath}`
+        title: copy.details.open(producedPath)
       }
     });
     title.onclick = (event) => {
@@ -1516,6 +1544,7 @@ export class CodexMessageListRenderer {
     showAgentHeader: boolean
   ): void {
     const env = this.requireEnv();
+    const copy = this.copy();
     const identityMessage = turn.finalAnswer ?? turn.messages[0];
     const wrapper = container.createDiv({
       cls: `codex-message codex-message-assistant codex-message-type-assistantTurn is-${turn.status}`
@@ -1542,7 +1571,7 @@ export class CodexMessageListRenderer {
       answerSection.dataset.messageId = answer.id;
       this.renderAssistantTurnSectionLabel(
         answerSection,
-        ECHOINK_ASSISTANT_TURN_SECTION_LABELS.answer
+        copy.sections.answer
       );
       const answerContent = answerSection.createDiv({
         cls: "codex-message-content codex-assistant-turn-answer",
@@ -1557,7 +1586,7 @@ export class CodexMessageListRenderer {
 
     if (!turn.processNodes.length && !answer) {
       const empty = bodyHost.createDiv({ cls: "codex-assistant-turn-empty" });
-      renderSmoothAILoader(empty, "正在准备回复");
+      renderSmoothAILoader(empty, copy.message.preparingReply);
       env.onScheduleRunProgress();
     }
   }
@@ -1567,6 +1596,7 @@ export class CodexMessageListRenderer {
     turn: AgentTurnView
   ): void {
     const env = this.requireEnv();
+    const copy = this.copy();
     const stateKey = `${env.sessionId}\0${turn.key}`;
     const disclosureStatus = isTerminalTurnStatus(turn.status) ? turn.status : "running";
     const disclosure = nextReasoningDisclosureState(
@@ -1593,11 +1623,11 @@ export class CodexMessageListRenderer {
     });
     this.renderAssistantTurnSectionLabel(
       summary,
-      ECHOINK_ASSISTANT_TURN_SECTION_LABELS.process
+      copy.sections.process
     );
     summary.createSpan({
       cls: "codex-assistant-turn-summary-copy",
-      text: formatAgentTurnSummary(turn)
+      text: formatAgentTurnSummary(turn, env.settingsLanguage)
     });
     const caret = summary.createSpan({
       cls: "codex-assistant-turn-summary-caret",
@@ -1636,8 +1666,76 @@ export class CodexMessageListRenderer {
       attr: { id: bodyId }
     });
     const spine = body.createDiv({ cls: "codex-assistant-turn-spine" });
-    for (const node of turn.processNodes) {
-      this.renderAssistantTurnProcessNode(spine, turn, node);
+    for (let index = 0; index < turn.processNodes.length;) {
+      const node = turn.processNodes[index];
+      if (!actionMessageForProcessNode(turn, node)) {
+        this.renderAssistantTurnProcessNode(spine, turn, node);
+        index += 1;
+        continue;
+      }
+      const actionNodes: Readonly<EchoInkTurnProcessNode>[] = [];
+      while (
+        index < turn.processNodes.length
+        && actionMessageForProcessNode(turn, turn.processNodes[index])
+      ) {
+        actionNodes.push(turn.processNodes[index]);
+        index += 1;
+      }
+      this.renderAssistantTurnActionLedger(spine, turn, actionNodes);
+    }
+  }
+
+  private renderAssistantTurnActionLedger(
+    container: HTMLElement,
+    turn: AgentTurnView,
+    nodes: readonly Readonly<EchoInkTurnProcessNode>[]
+  ): void {
+    const messages: ChatMessage[] = [];
+    const nodesByMessageId = new Map<string, Readonly<EchoInkTurnProcessNode>>();
+    for (const node of nodes) {
+      const message = actionMessageForProcessNode(turn, node);
+      if (!message || nodesByMessageId.has(message.id)) continue;
+      messages.push(message);
+      nodesByMessageId.set(message.id, node);
+    }
+    const timeline = buildActionTimeline(messages, this.requireEnv().settingsLanguage);
+    const items = timeline.groups.flatMap((group) => group.items);
+    if (!items.length) {
+      for (const node of nodes) this.renderAssistantTurnProcessNode(container, turn, node);
+      return;
+    }
+
+    const ledger = container.createDiv({
+      cls: `codex-assistant-turn-action-ledger is-${timeline.runStatus}`,
+      attr: {
+        "data-action-count": String(timeline.totalCount),
+        "data-action-status": timeline.runStatus
+      }
+    });
+    const summaryText = timeline.summaryDetail || timeline.summaryTitle;
+    ledger.createDiv({
+      cls: "codex-assistant-turn-action-ledger-summary",
+      text: summaryText,
+      attr: {
+        role: "heading",
+        "aria-level": "4",
+        "aria-label": timeline.summaryDetail
+          ? `${timeline.summaryTitle}, ${timeline.summaryDetail}`
+          : timeline.summaryTitle
+      }
+    });
+    for (const item of items) {
+      const node = nodesByMessageId.get(item.source.id);
+      const row = this.renderActionItem(ledger, item, {
+        standalone: false,
+        showApprovalCard: false
+      });
+      row.addClass("codex-assistant-turn-action-node");
+      if (!node) continue;
+      row.dataset.nodeId = node.nodeId;
+      row.dataset.messageId = item.source.id;
+      row.dataset.nodeStatus = node.status;
+      row.toggleClass("is-current", node.nodeId === turn.currentNodeId);
     }
   }
 
@@ -1646,6 +1744,7 @@ export class CodexMessageListRenderer {
     turn: AgentTurnView,
     node: Readonly<EchoInkTurnProcessNode>
   ): void {
+    const copy = this.copy();
     const row = container.createDiv({
       cls: `codex-assistant-turn-node is-${node.status} is-${node.kind}`
     });
@@ -1657,20 +1756,25 @@ export class CodexMessageListRenderer {
       cls: "codex-assistant-turn-node-marker",
       attr: {
         "aria-hidden": "true",
-        title: assistantTurnNodeStatusLabel(node.status)
+        title: copy.process.nodeStatus(node.status)
       }
     });
     setIcon(marker, assistantTurnNodeStatusIcon(node.status));
 
     const content = row.createDiv({ cls: "codex-assistant-turn-node-content" });
     const heading = content.createDiv({ cls: "codex-assistant-turn-node-heading" });
-    this.renderAssistantTurnSectionLabel(heading, sectionLabelForProcessNode(node));
+    this.renderAssistantTurnSectionLabel(
+      heading,
+      sectionLabelForProcessNode(node, copy)
+    );
     const title = heading.createSpan({
       cls: "codex-assistant-turn-node-title",
       text: node.title,
       attr: { title: node.title }
     });
-    if (node.status === "running") title.setAttribute("aria-label", `${node.title}，进行中`);
+    if (node.status === "running") {
+      title.setAttribute("aria-label", `${node.title}, ${copy.process.nodeStatus(node.status)}`);
+    }
     if (node.summary) {
       heading.createSpan({
         cls: "codex-assistant-turn-node-summary",
@@ -1716,12 +1820,17 @@ export class CodexMessageListRenderer {
       return;
     }
     if (source.itemType === "thinking") {
-      if (source.status === "running") renderSmoothAILoader(container, source.text || COLD_START_STATUS_TEXT);
+      if (source.status === "running") {
+        renderSmoothAILoader(container, source.text || this.copy().message.organizingContext);
+      }
       return;
     }
     if (source.reasoningSummary) return;
     if (isActionTimelineItem(source)) {
-      const item = buildActionTimeline([source]).groups[0]?.items[0];
+      const item = buildActionTimeline(
+        [source],
+        this.requireEnv().settingsLanguage
+      ).groups[0]?.items[0];
       if (item) this.renderActionItem(
         container.createDiv({ cls: "codex-action-region codex-action-stream" }),
         item,
@@ -1748,6 +1857,7 @@ export class CodexMessageListRenderer {
     turn: AgentTurnView
   ): void {
     const env = this.requireEnv();
+    const copy = this.copy();
     const reasoning = turn.providerReasoning;
     if (!reasoning) return;
     const disclosureKey = `${env.sessionId}\0${turn.key}\0provider-reasoning`;
@@ -1764,10 +1874,10 @@ export class CodexMessageListRenderer {
         ? "error"
         : smoothAIStatus(reasoning.status),
       summary: reasoning.status === "running"
-        ? "公开推理进行中"
+        ? copy.process.publicReasoningRunning
         : reasoning.durationMs === undefined
-          ? "公开推理已完成"
-          : `公开推理 · ${formatCompactDuration(reasoning.durationMs)}`
+          ? copy.process.publicReasoningCompleted
+          : copy.process.publicReasoningDuration(formatCompactDuration(reasoning.durationMs))
     });
     let pendingUserDisclosureIntent = false;
     elements.summary.onclick = (event) => {
@@ -1795,19 +1905,20 @@ export class CodexMessageListRenderer {
     if (reasoning.text.trim()) {
       renderRichText(env.app, env.component, elements.body, reasoning.text);
     } else if (reasoning.status === "running") {
-      renderSmoothAILoader(elements.body, "正在接收 Provider 公开推理");
+      renderSmoothAILoader(elements.body, copy.process.receivingPublicReasoning);
     }
   }
 
   private renderCompactTaskPlanNode(container: HTMLElement, message: ChatMessage): void {
     const plan = message.taskPlan;
     if (!plan) return;
+    const chrome = this.copy();
     const progress = taskPlanProgress(plan);
     const current = plan.steps.find((step) => step.stepId === plan.currentStepId);
     const compact = container.createDiv({
       cls: `codex-assistant-turn-task-summary is-${plan.status}`,
       attr: {
-        "aria-label": `任务 ${plan.title}，${progress.completed}/${progress.total} 已完成`
+        "aria-label": chrome.process.taskAria(plan.title, progress.completed, progress.total)
       }
     });
     this.renderTaskPlanStatusIcon(
@@ -1817,7 +1928,7 @@ export class CodexMessageListRenderer {
     const copy = compact.createDiv({ cls: "codex-assistant-turn-task-copy" });
     copy.createSpan({
       cls: "codex-assistant-turn-task-progress",
-      text: `${progress.completed}/${progress.total} 已完成`
+      text: chrome.process.taskProgress(progress.completed, progress.total)
     });
     if (current?.text) {
       copy.createSpan({
@@ -1845,7 +1956,7 @@ export class CodexMessageListRenderer {
     const disclosure = this.createAssistantTurnResourceDisclosure(
       container,
       `${turn.key}:${node.nodeId}`,
-      `${usage.producedPaths.length} 个产物`
+      this.copy().process.artifactCount(usage.producedPaths.length)
     );
     for (const producedPath of usage.producedPaths) {
       this.renderKnowledgeProducedPath(disclosure.body, producedPath);
@@ -1884,7 +1995,7 @@ export class CodexMessageListRenderer {
 
   private renderAssistantTurnSectionLabel(
     container: HTMLElement,
-    label: Readonly<{ primary: string; secondary: string }>
+    label: string
   ): HTMLElement {
     const heading = container.createSpan({
       cls: "codex-assistant-turn-section-label",
@@ -1892,17 +2003,13 @@ export class CodexMessageListRenderer {
     });
     heading.createSpan({
       cls: "codex-assistant-turn-section-primary",
-      text: label.primary
-    });
-    heading.createSpan({
-      cls: "codex-assistant-turn-section-secondary",
-      text: label.secondary
+      text: label
     });
     return heading;
   }
 
   private renderActionStreamItem(container: HTMLElement, message: ChatMessage, showAgentHeader: boolean): void {
-    const timeline = buildActionTimeline([message]);
+    const timeline = buildActionTimeline([message], this.requireEnv().settingsLanguage);
     const item = timeline.groups[0]?.items[0];
     if (!item) return;
     const wrapper = container.createDiv({ cls: "codex-message codex-message-tool codex-message-type-actionStream" });
@@ -1933,7 +2040,10 @@ export class CodexMessageListRenderer {
         "aria-expanded": String(open)
       }
     });
-    summary.createSpan({ cls: "codex-turn-process-title", text: formatAgentTurnDuration(turn.durationMs) });
+    summary.createSpan({
+      cls: "codex-turn-process-title",
+      text: formatAgentTurnDuration(turn.durationMs, this.requireEnv().settingsLanguage)
+    });
     const caret = summary.createSpan({ cls: "codex-turn-process-caret" });
     setIcon(caret, open ? "chevron-down" : "chevron-right");
     summary.onclick = (event) => {
@@ -1956,7 +2066,10 @@ export class CodexMessageListRenderer {
 
   private renderTurnProcessMessage(container: HTMLElement, message: ChatMessage): void {
     if (isActionTimelineItem(message)) {
-      const item = buildActionTimeline([message]).groups[0]?.items[0];
+      const item = buildActionTimeline(
+        [message],
+        this.requireEnv().settingsLanguage
+      ).groups[0]?.items[0];
       if (item) this.renderActionItem(container.createDiv({ cls: "codex-action-region codex-action-stream" }), item, { standalone: false });
       return;
     }
@@ -1972,10 +2085,9 @@ export class CodexMessageListRenderer {
     container: HTMLElement,
     item: ActionItemViewModel,
     options: { standalone: boolean; showApprovalCard?: boolean }
-  ): void {
+  ): HTMLElement {
     if (hasActionItemDetails(item)) {
-      this.renderExpandableActionItem(container, item, options);
-      return;
+      return this.renderExpandableActionItem(container, item, options);
     }
     const row = container.createDiv({ cls: `codex-action-item codex-action-item-${item.kind}` });
     markSmoothAIToolCall(row, item.status);
@@ -1987,13 +2099,14 @@ export class CodexMessageListRenderer {
     const head = row.createDiv({ cls: "codex-action-item-head" });
     this.renderActionItemHead(head, item);
     if (options.showApprovalCard !== false) this.renderApprovalCard(row, item.source);
+    return row;
   }
 
   private renderExpandableActionItem(
     container: HTMLElement,
     item: ActionItemViewModel,
     options: { standalone: boolean; showApprovalCard?: boolean }
-  ): void {
+  ): HTMLElement {
     const detailId = stableDomId(`codex-action-detail-${item.id}`);
     const details = container.createEl("details", { cls: `codex-action-item codex-action-item-${item.kind} codex-action-item-expandable` });
     markSmoothAIToolCall(details, item.status);
@@ -2002,8 +2115,7 @@ export class CodexMessageListRenderer {
     details.toggleClass("is-standalone", options.standalone);
     details.toggleClass("is-failed", isAttentionActionStatus(item.status));
     details.toggleClass("is-running", isActiveActionStatus(item.status));
-    details.open = this.openActionItemDetails.get(item.id)
-      ?? (isAttentionActionStatus(item.status) && item.kind !== "edit");
+    details.open = this.openActionItemDetails.get(item.id) ?? false;
     let summary: HTMLElement | null = null;
     let caret: HTMLElement | null = null;
     let body: HTMLElement | null = null;
@@ -2027,7 +2139,7 @@ export class CodexMessageListRenderer {
       attr: {
         "aria-controls": detailId,
         "aria-expanded": String(details.open),
-        title: actionItemDetailLabel(item)
+        title: actionItemDetailLabel(item, this.requireEnv().settingsLanguage)
       }
     });
     this.renderActionItemHead(summary, item);
@@ -2037,6 +2149,7 @@ export class CodexMessageListRenderer {
       this.renderApprovalCard(container, item.source);
     }
     if (details.open) renderBody();
+    return details;
   }
 
   private renderActionItemHead(head: HTMLElement, item: ActionItemViewModel): void {
@@ -2045,30 +2158,38 @@ export class CodexMessageListRenderer {
     setIcon(icon, iconForActionKind(item.kind, item.status));
     const main = head.createDiv({ cls: "codex-action-item-main" });
     this.renderActionItemTitle(main, item);
-    const meta = actionItemMeta(item);
-    if (meta) main.createSpan({ cls: "codex-action-item-detail", text: meta });
     this.renderActionItemStats(head, item);
-    const time = formatMessageHeaderTime(item.createdAt);
-    if (time) head.createSpan({ cls: "codex-action-item-time", text: time });
   }
 
   private renderActionItemTitle(container: HTMLElement, item: ActionItemViewModel): void {
-    const prefix = actionVerb(item);
+    const prefix = actionVerb(item, this.requireEnv().settingsLanguage);
+    container.createSpan({ cls: "codex-action-item-prefix", text: `${prefix} ` });
+    if (typeof item.durationMs === "number") {
+      container.createSpan({
+        cls: "codex-action-item-duration",
+        text: `${formatActionDuration(item.durationMs)} `
+      });
+    }
     if (item.kind === "edit" && item.source.diffSummary?.files.length) {
       const file = item.source.diffSummary.files[0];
-      container.createSpan({ cls: "codex-action-item-prefix", text: `${prefix} ` });
       const ref = findProcessFileRef(item.source.files ?? [], file.path) ?? normalizeProcessFileRef(file.path, this.requireEnv().vaultPath);
       this.renderProcessFileTextLink(container, ref, basename(file.path), "codex-action-item-file");
-      if (item.source.diffSummary.files.length > 1) container.createSpan({ cls: "codex-action-item-extra", text: ` 等 ${item.source.diffSummary.files.length} 个文件` });
+      if (item.source.diffSummary.files.length > 1) {
+        container.createSpan({
+          cls: "codex-action-item-extra",
+          text: this.copy().action.moreFiles(item.source.diffSummary.files.length)
+        });
+      }
       return;
     }
     if (item.file) {
-      container.createSpan({ cls: "codex-action-item-prefix", text: `${prefix} ` });
       this.renderProcessFileTextLink(container, item.file, item.file.name || item.file.displayPath, "codex-action-item-file");
       return;
     }
-    container.createSpan({ cls: "codex-action-item-prefix", text: `${prefix} ` });
-    container.createSpan({ cls: "codex-action-item-title", text: actionItemTarget(item) || item.title });
+    container.createSpan({
+      cls: "codex-action-item-title",
+      text: actionItemTarget(item, this.requireEnv().settingsLanguage) || item.title
+    });
   }
 
   private renderActionItemStats(container: HTMLElement, item: ActionItemViewModel): void {
@@ -2088,7 +2209,8 @@ export class CodexMessageListRenderer {
       state,
       target: message.approval?.target || binding?.target,
       preview: message.approval?.preview || binding?.preview,
-      controlled: state === "waiting_approval" && Boolean(binding)
+      controlled: state === "waiting_approval" && Boolean(binding),
+      language: env.settingsLanguage
     });
     if (!binding || !elements.approveButton || !elements.rejectButton) return;
     const buttons = [elements.approveButton, elements.rejectButton];
@@ -2191,16 +2313,23 @@ export class CodexMessageListRenderer {
 
   private renderThinkingMessage(container: HTMLElement, message: ChatMessage): void {
     const env = this.requireEnv();
+    const copy = this.copy();
     const shell = container.createDiv({ cls: "codex-thinking-shell" });
     markSmoothAIReasoning(shell, message.status);
     if (message.status === "running") {
       const row = shell.createDiv({ cls: "codex-thinking-live" });
-      renderSmoothAILoader(row, message.text || COLD_START_STATUS_TEXT);
-      row.createSpan({ cls: "codex-agent-live-copy", text: ` · ${rotatingChoice(COLD_START_COPY_TEXTS, message.createdAt)}` });
+      renderSmoothAILoader(row, message.text || copy.message.organizingContext);
+      row.createSpan({
+        cls: "codex-agent-live-copy",
+        text: ` · ${rotatingChoice(copy.message.thinkingLiveCopies, message.createdAt)}`
+      });
       env.onScheduleRunProgress();
       return;
     }
-    shell.createEl("em", { cls: "codex-response-footer", text: message.text || "思考完成" });
+    shell.createEl("em", {
+      cls: "codex-response-footer",
+      text: message.text || copy.message.thinkingComplete
+    });
   }
 
   private renderProcessMessage(
@@ -2244,25 +2373,40 @@ export class CodexMessageListRenderer {
     if (message.itemType === "fileChange" && message.diffSummary?.files.length) {
       this.renderProcessEditSummary(main, message);
     } else {
-      main.createSpan({ cls: "codex-structured-title codex-process-title", text: titleForItemType(message) });
+      main.createSpan({
+        cls: "codex-structured-title codex-process-title",
+        text: titleForItemType(message, this.requireEnv().settingsLanguage)
+      });
       if (message.itemType === "fileChange" && message.diffSummary) this.renderDiffStats(main, message.diffSummary);
       if (message.details) main.createDiv({ cls: "codex-process-detail", text: message.details });
       if (message.itemType === "fileChange" && message.files?.length) this.renderProcessFileChips(main.createDiv({ cls: "codex-process-files" }), message.files);
     }
-    if (message.status) summary.createSpan({ cls: "codex-structured-status", text: labelForStatus(message.status) });
+    if (message.status) {
+      summary.createSpan({
+        cls: "codex-structured-status",
+        text: labelForStatus(message.status, this.requireEnv().settingsLanguage)
+      });
+    }
     if (showApprovalCard) this.renderApprovalCard(container, message);
     if (details.open) renderBody();
   }
 
   private renderProcessBody(body: HTMLElement, message: ChatMessage): void {
     const hasExplicitChannels = hasExplicitProcessChannels(message);
+    const approvalChange = piApprovalPreviewChangeProjection(message.approval?.preview);
     const env = this.requireEnv();
+    const copy = this.copy();
     if (!hasExplicitChannels && message.processContentAvailability === "unavailable") {
-      if (isActiveProcessStatus(message.status)) this.renderProcessLoader(body, "正在等待工具输出");
-      else body.createDiv({ cls: "codex-process-raw-loading", text: PROCESS_CONTENT_UNAVAILABLE_TEXT });
+      if (isActiveProcessStatus(message.status)) {
+        this.renderProcessLoader(body, copy.details.waitingForToolOutput);
+      } else {
+        body.createDiv({ cls: "codex-process-raw-loading", text: copy.details.contentUnavailable });
+      }
       return;
     }
-    const fallback = message.status === "running" ? "正在接收过程内容..." : "暂无内容";
+    const fallback = message.status === "running"
+      ? copy.details.receivingContent
+      : copy.details.noContent;
     if (message.itemType === "commandExecution") {
       if (hasExplicitChannels) this.renderProcessChannels(body, message);
       else this.renderCommandExecutionBody(body, message, fallback);
@@ -2278,6 +2422,12 @@ export class CodexMessageListRenderer {
     }
     if (hasExplicitChannels) {
       this.renderProcessChannels(body, message);
+      this.renderApprovalPreviewDiff(body, message, approvalChange);
+      return;
+    }
+    if (this.renderApprovalPreviewDiff(body, message, approvalChange)) {
+      const text = displayTextForMessage(message).trim();
+      if (text) this.renderPlainTextBlock(body, text);
       return;
     }
     const rawLike = message.itemType === "commandExecution" || message.itemType === "fileChange" || message.itemType === "mcpToolCall" || message.itemType === "dynamicToolCall" || message.itemType === "collabAgentToolCall";
@@ -2294,10 +2444,35 @@ export class CodexMessageListRenderer {
     renderRichText(env.app, env.component, body, text);
   }
 
+  private renderApprovalPreviewDiff(
+    body: HTMLElement,
+    message: ChatMessage,
+    change: PiApprovalPreviewChangeProjection | undefined
+  ): boolean {
+    if (!change?.diff || !message.diffSummary) return false;
+    const channel = body.createDiv({
+      cls: "codex-process-channel codex-process-channel-diff"
+    });
+    const projected: ChatMessage = {
+      ...message,
+      itemType: "fileChange",
+      text: change.diff,
+      previewText: undefined,
+      rawRef: undefined,
+      processInput: undefined,
+      processOutput: undefined,
+      processInputAvailability: undefined,
+      processOutputAvailability: undefined
+    };
+    this.renderFileChangeBody(channel, projected, this.copy().details.noContent);
+    return true;
+  }
+
   private renderProcessChannels(body: HTMLElement, message: ChatMessage): void {
     const active = isActiveProcessStatus(message.status);
-    this.renderProcessChannel(body, "输入", message.processInputAvailability, message.processInput, false, false);
-    this.renderProcessChannel(body, "输出", message.processOutputAvailability, message.processOutput, true, active);
+    const copy = this.copy();
+    this.renderProcessChannel(body, copy.details.input, message.processInputAvailability, message.processInput, false, false);
+    this.renderProcessChannel(body, copy.details.output, message.processOutputAvailability, message.processOutput, true, active);
   }
 
   private renderProcessChannel(
@@ -2314,15 +2489,15 @@ export class CodexMessageListRenderer {
     artifactElements?.root.addClass("codex-process-channel");
     if (!artifact) channel.createDiv({ cls: "codex-process-raw-title", text: label });
     if (availability === "unavailable") {
-      if (activeWait) this.renderProcessLoader(channel, "正在等待工具输出");
-      else channel.createDiv({ cls: "codex-process-raw-loading", text: PROCESS_CONTENT_UNAVAILABLE_TEXT });
+      if (activeWait) this.renderProcessLoader(channel, this.copy().details.waitingForToolOutput);
+      else channel.createDiv({ cls: "codex-process-raw-loading", text: this.copy().details.contentUnavailable });
       return;
     }
     if (availability === "empty") {
-      channel.createDiv({ cls: "codex-process-raw-loading", text: "后端返回空内容" });
+      channel.createDiv({ cls: "codex-process-raw-loading", text: this.copy().details.emptyContent });
       return;
     }
-    const content = text?.trim() ? text : PROCESS_CONTENT_UNAVAILABLE_TEXT;
+    const content = text?.trim() ? text : this.copy().details.contentUnavailable;
     if (artifact) {
       const env = this.requireEnv();
       renderPreformattedVaultNoteText(env.app, env.component, channel, content);
@@ -2332,9 +2507,10 @@ export class CodexMessageListRenderer {
   }
 
   private renderFileChangeBody(body: HTMLElement, message: ChatMessage, fallback: string): void {
+    const copy = this.copy();
     const renderDiff = (text: string) => {
       body.empty();
-      const artifact = createSmoothAIArtifact(body, "文件改动");
+      const artifact = createSmoothAIArtifact(body, copy.details.fileChanges);
       const artifactBody = artifact.body;
       const files = parseFileChangeDiff(text || fallback, message.diffSummary);
       if (!hasRenderableDiff(files)) {
@@ -2346,7 +2522,7 @@ export class CodexMessageListRenderer {
       this.renderDiffFiles(artifactBody, files, message.files ?? []);
     };
     if (message.rawRef) {
-      this.renderProcessLoader(body, "正在加载文件改动");
+      this.renderProcessLoader(body, copy.details.loadingFileChanges);
       void this.loadRawText(message)
         .then((text) => {
           renderDiff(text);
@@ -2354,7 +2530,12 @@ export class CodexMessageListRenderer {
         })
         .catch((error) => {
           body.empty();
-          body.createDiv({ cls: "codex-process-raw-loading", text: `文件改动加载失败：${error instanceof Error ? error.message : String(error)}` });
+          body.createDiv({
+            cls: "codex-process-raw-loading",
+            text: copy.details.fileChangesLoadFailed(
+              error instanceof Error ? error.message : String(error)
+            )
+          });
           this.renderPlainTextBlock(body, displayTextForMessage(message) || fallback);
           this.requireEnv().onScheduleMeasure();
         });
@@ -2364,6 +2545,7 @@ export class CodexMessageListRenderer {
   }
 
   private renderCommandExecutionBody(body: HTMLElement, message: ChatMessage, fallback: string): void {
+    const copy = this.copy();
     const renderShell = (text: string) => {
       body.empty();
       const shell = body.createDiv({ cls: "codex-shell-block" });
@@ -2371,7 +2553,7 @@ export class CodexMessageListRenderer {
       shell.createEl("pre", { cls: "codex-shell-output", text: shellTranscript(text || fallback) });
     };
     if (message.rawRef) {
-      this.renderProcessLoader(body, "正在加载命令输出");
+      this.renderProcessLoader(body, copy.details.loadingCommandOutput);
       void this.loadRawText(message)
         .then((text) => {
           renderShell(text);
@@ -2379,7 +2561,12 @@ export class CodexMessageListRenderer {
         })
         .catch((error) => {
           body.empty();
-          body.createDiv({ cls: "codex-process-raw-loading", text: `命令输出加载失败：${error instanceof Error ? error.message : String(error)}` });
+          body.createDiv({
+            cls: "codex-process-raw-loading",
+            text: copy.details.commandOutputLoadFailed(
+              error instanceof Error ? error.message : String(error)
+            )
+          });
           renderShell(displayTextForMessage(message) || fallback);
           this.requireEnv().onScheduleMeasure();
         });
@@ -2390,7 +2577,10 @@ export class CodexMessageListRenderer {
 
   private renderDiffOverview(container: HTMLElement, summary: DiffSummary): void {
     const row = container.createDiv({ cls: "codex-diff-overview" });
-    row.createSpan({ cls: "codex-diff-overview-title", text: diffSummaryLabel(summary) });
+    row.createSpan({
+      cls: "codex-diff-overview-title",
+      text: this.copy().details.changedFiles(summary.totalFiles)
+    });
     this.renderDiffStats(row, summary);
   }
 
@@ -2427,8 +2617,16 @@ export class CodexMessageListRenderer {
       } else {
         main.createSpan({ cls: "codex-diff-file-path", text: file.path });
       }
-      if (file.previousPath) main.createSpan({ cls: "codex-diff-file-previous", text: `原路径 ${file.previousPath}` });
-      summary.createSpan({ cls: "codex-diff-file-kind", text: labelForDiffKind(file.kind) });
+      if (file.previousPath) {
+        main.createSpan({
+          cls: "codex-diff-file-previous",
+          text: this.copy().details.previousPath(file.previousPath)
+        });
+      }
+      summary.createSpan({
+        cls: "codex-diff-file-kind",
+        text: this.copy().details.diffKind(file.kind)
+      });
       const stats = summary.createSpan({ cls: "codex-diff-file-stats" });
       stats.createSpan({ cls: "codex-diff-stat codex-diff-stat-add", text: `+${file.added}` });
       stats.createSpan({ cls: "codex-diff-stat codex-diff-stat-remove", text: `-${file.removed}` });
@@ -2439,7 +2637,7 @@ export class CodexMessageListRenderer {
   private renderDiffFileBody(container: HTMLElement, file: ParsedDiffFile): void {
     const body = container.createDiv({ cls: "codex-diff-file-body" });
     if (!file.lines.length) {
-      body.createDiv({ cls: "codex-diff-empty", text: "没有可展示的 diff 内容" });
+      body.createDiv({ cls: "codex-diff-empty", text: this.copy().details.noDiff });
       return;
     }
     for (const line of file.lines) {
@@ -2455,7 +2653,7 @@ export class CodexMessageListRenderer {
     const list = container.createDiv({ cls: "codex-process-edit-list" });
     for (const file of message.diffSummary?.files ?? []) {
       const row = list.createDiv({ cls: "codex-process-edit-row" });
-      row.createSpan({ cls: "codex-process-edit-prefix", text: "已编辑 " });
+      row.createSpan({ cls: "codex-process-edit-prefix", text: this.copy().details.editedPrefix });
       const ref = findProcessFileRef(message.files ?? [], file.path) ?? normalizeProcessFileRef(file.path, this.requireEnv().vaultPath);
       this.renderProcessFileTextLink(row, ref, basename(file.path), "codex-process-edit-file");
       row.createSpan({ cls: "codex-diff-stat codex-diff-stat-add", text: ` +${file.added}` });
@@ -2469,7 +2667,7 @@ export class CodexMessageListRenderer {
       return container.createSpan({
         cls: `codex-process-file-text is-disabled ${extraClass}`.trim(),
         text: displayLabel,
-        attr: { title: `${file.displayPath}（无法打开）` }
+        attr: { title: this.copy().details.cannotOpenPath(file.displayPath) }
       });
     }
     const link = container.createEl("span", {
@@ -2479,7 +2677,7 @@ export class CodexMessageListRenderer {
         role: "button",
         tabindex: "0",
         title: file.displayPath,
-        "aria-label": `打开 ${displayLabel}`
+        "aria-label": this.copy().details.open(displayLabel)
       }
     });
     link.onclick = (event) => {
@@ -2497,7 +2695,7 @@ export class CodexMessageListRenderer {
   }
 
   private renderDeferredRawText(container: HTMLElement, message: ChatMessage, fallback: string): void {
-    const status = this.renderProcessLoader(container, "正在加载全文");
+    const status = this.renderProcessLoader(container, this.copy().details.loadingFullText);
     const pre = container.createEl("pre", { cls: "codex-process-fulltext" });
     pre.setText(displayTextForMessage(message) || fallback);
     void this.loadRawText(message)
@@ -2509,7 +2707,9 @@ export class CodexMessageListRenderer {
       })
       .catch((error) => {
         status.empty();
-        status.setText(`全文加载失败：${error instanceof Error ? error.message : String(error)}`);
+        status.setText(this.copy().details.fullTextLoadFailed(
+          error instanceof Error ? error.message : String(error)
+        ));
         this.requireEnv().onScheduleMeasure();
       });
   }
@@ -2522,17 +2722,22 @@ export class CodexMessageListRenderer {
       if (!details.open || loaded) return;
       loaded = true;
       const body = details.createDiv({ cls: "codex-raw-message-body" });
-      this.renderProcessLoader(body, "正在加载全文");
+      this.renderProcessLoader(body, this.copy().details.loadingFullText);
       this.requireEnv().onScheduleMeasure();
       void this.loadRawText(message)
         .then((text) => {
           body.empty();
-          this.renderPlainTextBlock(body, text || "暂无内容");
+          this.renderPlainTextBlock(body, text || this.copy().details.noContent);
           this.requireEnv().onScheduleMeasure();
         })
         .catch((error) => {
           body.empty();
-          body.createDiv({ cls: "codex-process-raw-loading", text: `全文加载失败：${error instanceof Error ? error.message : String(error)}` });
+          body.createDiv({
+            cls: "codex-process-raw-loading",
+            text: this.copy().details.fullTextLoadFailed(
+              error instanceof Error ? error.message : String(error)
+            )
+          });
           this.requireEnv().onScheduleMeasure();
         });
     };
@@ -2566,10 +2771,11 @@ export class CodexMessageListRenderer {
   private rawMetaLabel(message: ChatMessage, loadedText?: string): string {
     const size = message.rawSize ?? loadedText?.length ?? displayTextForMessage(message).length;
     const lines = message.rawLines ?? (loadedText ? countLines(loadedText) : null);
-    const parts = ["原始输出"];
+    const copy = this.copy();
+    const parts = [copy.details.rawOutput];
     if (size) parts.push(formatBytes(size));
-    if (lines) parts.push(`${lines} 行`);
-    if (message.rawRef) parts.push("展开后已保留全文");
+    if (lines) parts.push(copy.details.lineCount(lines));
+    if (message.rawRef) parts.push(copy.details.fullTextPreserved);
     return parts.join(" · ");
   }
 
@@ -2580,8 +2786,8 @@ export class CodexMessageListRenderer {
         cls: `codex-process-file-chip codex-process-file-${file.kind}`,
         attr: {
           type: "button",
-          title: file.openable ? file.displayPath : `${file.displayPath}（无法打开）`,
-          "aria-label": `打开 ${displayName}`
+          title: file.openable ? file.displayPath : this.copy().details.cannotOpenPath(file.displayPath),
+          "aria-label": this.copy().details.open(displayName)
         }
       });
       chip.toggleClass("is-disabled", !file.openable);
@@ -2666,15 +2872,10 @@ function isAgentHeaderCandidate(message: ChatMessage): boolean {
 }
 
 function taskPlanStatusLabel(
-  status: EchoInkTaskPlanStatus | EchoInkTaskPlanStepStatus
+  status: EchoInkTaskPlanStatus | EchoInkTaskPlanStepStatus,
+  language: SettingsLanguage = "zh-CN"
 ): string {
-  if (status === "pending") return "待执行";
-  if (status === "in_progress") return "进行中";
-  if (status === "completed") return "已完成";
-  if (status === "failed") return "失败";
-  if (status === "paused") return "已暂停";
-  if (status === "interrupted") return "已中断";
-  return "已取消";
+  return conversationCopy(language).task.statusLabel(status);
 }
 
 function taskPlanStatusIcon(
@@ -2692,14 +2893,10 @@ function taskPlanStatusIcon(
 function taskPlanHistoryStatus(
   status: EchoInkTaskPlanStatus,
   completed: number,
-  total: number
+  total: number,
+  language: SettingsLanguage = "zh-CN"
 ): string {
-  if (status === "completed") return `${total}/${total} 已完成`;
-  if (status === "failed") return "任务失败";
-  if (status === "cancelled") return "已取消";
-  if (status === "paused") return "已中断，可继续";
-  if (status === "pending") return "等待开始";
-  return `${completed}/${total} 已完成`;
+  return conversationCopy(language).task.historyStatus(status, completed, total);
 }
 
 function safeDomIdentity(value: string): string {
@@ -2779,28 +2976,35 @@ function completedTurnRowId(turn: CompletedAgentTurn): string {
 }
 
 function sectionLabelForProcessNode(
-  node: Readonly<EchoInkTurnProcessNode>
-): Readonly<{ primary: string; secondary: string }> {
-  if (node.kind === "reasoning") return ECHOINK_ASSISTANT_TURN_SECTION_LABELS.reasoning;
+  node: Readonly<EchoInkTurnProcessNode>,
+  copy: ConversationCopy
+): string {
+  if (node.kind === "reasoning") return copy.sections.reasoning;
   if (
     node.kind === "retrieval"
     || node.kind === "tool"
     || node.kind === "task"
     || node.kind === "artifact"
     || node.kind === "diff"
-  ) return ECHOINK_ASSISTANT_TURN_SECTION_LABELS.tools;
-  return ECHOINK_ASSISTANT_TURN_SECTION_LABELS.process;
+  ) return copy.sections.tools;
+  return copy.sections.process;
 }
 
-function assistantTurnNodeStatusLabel(
-  status: Readonly<EchoInkTurnProcessNode>["status"]
-): string {
-  if (status === "running") return "进行中";
-  if (status === "completed") return "已完成";
-  if (status === "failed") return "失败";
-  if (status === "cancelled") return "已取消";
-  if (status === "skipped") return "已跳过";
-  return "等待中";
+function actionMessageForProcessNode(
+  turn: AgentTurnView,
+  node: Readonly<EchoInkTurnProcessNode>
+): ChatMessage | undefined {
+  if (node.nodeId.startsWith("sources:") || node.nodeId.startsWith("artifacts:")) {
+    return undefined;
+  }
+  if (
+    node.kind !== "tool"
+    && node.kind !== "diff"
+    && node.kind !== "retrieval"
+  ) return undefined;
+  if (!node.sourceMessageId) return undefined;
+  const source = turn.messages.find((message) => message.id === node.sourceMessageId);
+  return source && isActionTimelineItem(source) ? source : undefined;
 }
 
 function assistantTurnNodeStatusIcon(
@@ -2822,21 +3026,34 @@ function formatCompactDuration(durationMs: number): string {
   return `${seconds}s`;
 }
 
-function actionItemMeta(item: ActionItemViewModel): string {
-  if (item.status === "failed" && item.detail) return item.detail;
-  if (item.kind === "tool" && item.detail) return item.detail;
-  if (item.kind === "agent" && item.detail) return item.detail;
-  if (item.kind === "system" && item.detail) return item.detail;
-  return "";
+function formatActionDuration(durationMs: number): string {
+  const bounded = Math.max(0, durationMs);
+  if (bounded < 1_000) return `${Math.round(bounded)}ms`;
+  if (bounded < 60_000) {
+    const seconds = bounded / 1_000;
+    const precision = seconds < 10 && !Number.isInteger(seconds) ? 1 : 0;
+    return `${seconds.toFixed(precision).replace(/\.0$/u, "")}s`;
+  }
+  const totalSeconds = Math.round(bounded / 1_000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
 }
 
-function actionItemTarget(item: ActionItemViewModel): string {
+function actionItemTarget(
+  item: ActionItemViewModel,
+  language: SettingsLanguage = "zh-CN"
+): string {
   if (item.kind === "command" && item.command?.summary) return item.command.summary;
-  const prefix = actionVerb(item);
+  const prefix = actionVerb(item, language);
   const title = item.title.startsWith(prefix) ? item.title.slice(prefix.length).trim() : item.title;
-  return title
-    .replace(/^(?:已运行|已读取|已搜索|已编辑|已调用|已处理|已更新|已验证|已记录|正在编辑|创建失败)\s*/, "")
-    .replace(/^命令\s*/, "")
+  const withoutActionVerb = title
+    .replace(/^(?:已运行|已读取|已搜索|已编辑|已调用|已处理|已更新|已验证|已记录|正在编辑|创建失败|Ran|Read|Searched|Edited|Called|Processed|Updated|Verified|Recorded|Editing|Failed to create)\s*/iu, "")
+    .replace(/^(?:命令|Command)\s*/iu, "")
+    .trim();
+  if (item.kind !== "tool" && item.kind !== "agent") return withoutActionVerb;
+  return withoutActionVerb
+    .replace(/^(?:使用工具|调用工具|Use tool|Called tool)\s*[:：]?\s*/iu, "")
     .trim();
 }
 
@@ -2860,66 +3077,25 @@ function hasExplicitProcessChannels(message: ChatMessage): boolean {
   return Boolean(message.processInputAvailability || message.processOutputAvailability);
 }
 
-function actionItemDetailLabel(item: ActionItemViewModel): string {
-  if (item.kind === "command") return item.status === "failed" ? "查看错误输出" : "查看 Shell 输出";
-  if (item.kind === "edit") return "查看文件改动";
-  if (item.kind === "tool" || item.kind === "agent") return "查看工具详情";
-  return "查看详情";
+function actionItemDetailLabel(
+  item: ActionItemViewModel,
+  language: SettingsLanguage = "zh-CN"
+): string {
+  return conversationCopy(language).action.detailLabel(
+    item.kind,
+    item.status === "failed"
+  );
 }
 
-export function actionVerb(item: ActionItemViewModel): string {
-  if (item.source.status === "expired") return statusActionVerb(item.kind, "确认已过期");
-  if (item.status === "unconfirmed") return statusActionVerb(item.kind, "状态未回传");
-  if (item.status === "interrupted") return statusActionVerb(item.kind, "已中断");
-  if (item.status === "canceled") return statusActionVerb(item.kind, "已取消");
-  if (item.status === "waiting_approval") return statusActionVerb(item.kind, "等待确认");
-  if (item.status === "approved") return statusActionVerb(item.kind, "已批准");
-  if (item.status === "verifying") return statusActionVerb(item.kind, "验证中");
-  if (item.status === "denied") return statusActionVerb(item.kind, "已拒绝");
-  if (item.status === "uncertain") return statusActionVerb(item.kind, "结果不确定");
-  if (item.status === "recovery-pending") return statusActionVerb(item.kind, "等待恢复");
-  if (item.status === "recovery-blocked") return statusActionVerb(item.kind, "恢复受阻");
-  if (item.status === "running" || item.status === "blocked") return runningActionVerb(item.kind);
-  if (item.status === "failed") return statusActionVerb(item.kind, "失败");
-  if (item.kind === "read") return "已读取";
-  if (item.kind === "search") return "已搜索";
-  if (item.kind === "command") return "已运行";
-  if (item.kind === "edit") return "已编辑";
-  if (item.kind === "tool") return "已调用";
-  if (item.kind === "agent") return "已处理";
-  if (item.kind === "plan") return "已更新";
-  if (item.kind === "verify") return "已验证";
-  return "已记录";
-}
-
-function statusActionVerb(kind: ActionGroupKind, suffix: string): string {
-  const labels: Record<ActionGroupKind, string> = {
-    read: "读取",
-    search: "搜索",
-    command: "运行",
-    edit: "编辑",
-    tool: "工具调用",
-    agent: "智能体动作",
-    plan: "计划更新",
-    verify: "验证",
-    system: "系统动作"
-  };
-  return `${labels[kind]}${suffix}`;
-}
-
-function runningActionVerb(kind: ActionGroupKind): string {
-  const labels: Record<ActionGroupKind, string> = {
-    read: "正在读取",
-    search: "正在搜索",
-    command: "正在运行",
-    edit: "正在编辑",
-    tool: "正在调用",
-    agent: "正在处理",
-    plan: "正在更新",
-    verify: "正在验证",
-    system: "正在处理"
-  };
-  return labels[kind];
+export function actionVerb(
+  item: ActionItemViewModel,
+  language: SettingsLanguage = "zh-CN"
+): string {
+  return conversationCopy(language).action.verb(
+    item.kind,
+    item.status,
+    item.source.status === "expired"
+  );
 }
 
 function iconForActionKind(kind: ActionGroupKind, status?: string): string {
@@ -2990,40 +3166,19 @@ function iconForItemType(itemType?: string): string {
   return icons[itemType ?? ""] ?? "chevron-right";
 }
 
-function titleForItemType(message: ChatMessage): string {
+function titleForItemType(
+  message: ChatMessage,
+  language: SettingsLanguage = "zh-CN"
+): string {
   if (message.title) return message.title;
-  const titles: Record<string, string> = {
-    plan: "更新计划",
-    commandExecution: "使用命令",
-    fileChange: "编辑文件",
-    mcpToolCall: "使用工具",
-    dynamicToolCall: "使用工具",
-    collabAgentToolCall: "使用工具"
-  };
-  return titles[message.itemType ?? ""] ?? "工具";
+  return conversationCopy(language).action.itemTypeTitle(message.itemType);
 }
 
-function labelForStatus(status: string): string {
-  const labels: Record<string, string> = {
-    running: "进行中",
-    waiting_approval: "等待确认",
-    approved: "已批准",
-    verifying: "验证中",
-    completed: "完成",
-    error: "失败",
-    failed: "失败",
-    denied: "已拒绝",
-    uncertain: "结果不确定",
-    canceled: "已取消",
-    cancelled: "已取消",
-    expired: "确认已过期",
-    blocked: "等待确认",
-    interrupted: "中断",
-    unconfirmed: "状态未回传",
-    "recovery-pending": "等待恢复",
-    "recovery-blocked": "恢复受阻"
-  };
-  return labels[status] ?? status;
+function labelForStatus(
+  status: string,
+  language: SettingsLanguage = "zh-CN"
+): string {
+  return conversationCopy(language).action.statusLabel(status);
 }
 
 function isActiveActionStatus(status: ActionItemViewModel["status"]): boolean {
@@ -3087,17 +3242,6 @@ function renderUnavailablePiImage(
   return unavailable;
 }
 
-function labelForDiffKind(kind: string): string {
-  const labels: Record<string, string> = {
-    add: "新增",
-    delete: "删除",
-    update: "修改",
-    move: "移动",
-    unknown: "改动"
-  };
-  return labels[kind] ?? "改动";
-}
-
 function localDocumentSources(
   citations: KnowledgeBaseCitationSummary | undefined,
   usage: KnowledgeUsageMessageData
@@ -3143,13 +3287,17 @@ function localDocumentSources(
 
 function localDocumentMetadata(
   document: LocalVaultDocumentSource,
-  evidenceStatus?: KnowledgeBaseCitationSummary["status"]
+  evidenceStatus?: KnowledgeBaseCitationSummary["status"],
+  language: SettingsLanguage = "zh-CN"
 ): string[] {
+  const copy = conversationCopy(language);
   const labels = new Set<string>();
-  for (const citation of document.citations) labels.add(kbBucketLabel(citation.bucket));
-  if (document.citations.length && evidenceStatus) labels.add(kbEvidenceStatusLabel(evidenceStatus));
+  for (const citation of document.citations) labels.add(copy.sources.bucketLabel(citation.bucket));
+  if (document.citations.length && evidenceStatus) {
+    labels.add(copy.sources.evidenceStatus(evidenceStatus));
+  }
   for (const reference of document.references) {
-    labels.add(`第 ${reference.lineStart}-${reference.lineEnd} 行`);
+    labels.add(copy.sources.lineRange(reference.lineStart, reference.lineEnd));
   }
   return Array.from(labels);
 }
@@ -3173,18 +3321,6 @@ function hasRenderableDiff(files: ParsedDiffFile[]): boolean {
     || line.type === "remove"
     || line.type === "context"
   ));
-}
-
-function kbBucketLabel(bucket: KnowledgeBaseCitationBucket): string {
-  if (bucket === "wiki") return "Wiki";
-  if (bucket === "journal") return "Journal";
-  return "Outputs";
-}
-
-function kbEvidenceStatusLabel(status: KnowledgeBaseCitationSummary["status"]): string {
-  if (status === "strong") return "强证据";
-  if (status === "weak") return "弱相关";
-  return "无本地依据";
 }
 
 function formatAbsoluteTime(value: number): string {

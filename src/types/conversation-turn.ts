@@ -3,13 +3,6 @@ export const ECHOINK_TURN_INTERACTION_RECORD_ENTRY_TYPE =
   "echoink.turn-interaction-record.v1" as const;
 export const ECHOINK_TURN_INTERACTION_RECORD_SCHEMA_VERSION = 1 as const;
 
-export const ECHOINK_ASSISTANT_TURN_SECTION_LABELS = Object.freeze({
-  process: Object.freeze({ primary: "处理过程", secondary: "Process" }),
-  reasoning: Object.freeze({ primary: "模型推理", secondary: "Reasoning" }),
-  tools: Object.freeze({ primary: "执行动作", secondary: "Tools & Sources" }),
-  answer: Object.freeze({ primary: "最终回答", secondary: "Final Answer" })
-});
-
 export type EchoInkAssistantTurnStatus =
   | "preparing"
   | "running"

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import * as os from "os";
 import * as path from "path";
 import type {
@@ -18,6 +19,14 @@ import { normalizeSlashes } from "./path-utils";
 
 export const DEFAULT_REPLY_STYLE_INSTRUCTION =
   "回复格式要求：使用中文；先给结论，再给关键依据；短段落；能用列表就用列表；对比、取舍、验收项优先用 Markdown 表格；避免整段长文。";
+
+/** One deterministic identity shared by runtime events and their UI projection. */
+export function stableHashedIdentity(namespace: string, ...parts: string[]): string {
+  return `${namespace}-${createHash("sha256")
+    .update([namespace, ...parts].join("\0"), "utf8")
+    .digest("hex")
+    .slice(0, 32)}`;
+}
 
 export function normalizeServiceTier(value: ServiceTierChoice): "fast" | "flex" | null {
   if (value === "fast" || value === "flex") return value;
@@ -290,6 +299,9 @@ export function extractProcessFileRefs(value: unknown, vaultPath: string, basePa
   const text = collectSearchableText(value);
   const candidates = new Set<string>();
   for (const match of text.matchAll(/(?:^|[\s"'`([{])((?:\.{1,2}\/)?(?:[\w\u4e00-\u9fa5@+.-]+\/)+[\w\u4e00-\u9fa5@+.-]+\.[\w.-]+)/g)) {
+    candidates.add(match[1]);
+  }
+  for (const match of text.matchAll(/(?:^|[\s"'`([{])([\w\u4e00-\u9fa5@+.-]+\.[a-z][a-z0-9]{0,7})(?=$|[\s"'`)\]},:;|])/giu)) {
     candidates.add(match[1]);
   }
   for (const match of text.matchAll(/(?:^|[\s"'`([{])((?:\/Users|\/Volumes|\/private|\/tmp|\/var|\/opt|\/usr|\/Applications)\/[^\s"'`)\]}<>]+)/g)) {

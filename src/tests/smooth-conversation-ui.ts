@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { TFile } from "obsidian";
-import type { ChatMessage } from "../settings/settings";
+import type { ChatMessage, SettingsLanguage } from "../settings/settings";
+import { settingsCopy } from "../settings/i18n";
+import { extractProcessFileRefs, stableHashedIdentity } from "../core/mapping";
+import { PiChatUiProjector } from "../harness/pi-native/pi-chat-ui-projector";
 import { PiAgentApprovalBroker } from "../plugin/pi-agent-approval-broker";
 import { PiTurnInteractionBroker } from "../plugin/pi-turn-interaction-broker";
 import { renderRichText } from "../ui/render-message";
@@ -10,6 +13,7 @@ import {
   nextReasoningDisclosureState
 } from "../ui/codex-view/message-list";
 import { buildAgentTurnProjection } from "../ui/codex-view/agent-turn-process";
+import { buildActionTimeline } from "../ui/codex-view/action-timeline";
 import {
   createAIElementsDocumentSources,
   createSmoothAIArtifact,
@@ -306,7 +310,11 @@ function createTestContext(): TestContext {
   return { app, component, openedPaths };
 }
 
-function bindRenderer(renderer: CodexMessageListRenderer, context: TestContext): void {
+function bindRenderer(
+  renderer: CodexMessageListRenderer,
+  context: TestContext,
+  settingsLanguage: SettingsLanguage = "zh-CN"
+): void {
   (renderer as unknown as { env: unknown }).env = {
     app: context.app,
     component: context.component,
@@ -314,7 +322,7 @@ function bindRenderer(renderer: CodexMessageListRenderer, context: TestContext):
     virtualListEl: new FakeElement("div"),
     sessionId: "smooth-ui-test",
     welcomeCopy: { title: "EchoInk", subtitle: "从一个问题开始" },
-    settingsLanguage: "zh",
+    settingsLanguage,
     messages: [],
     vaultPath: "/test-vault",
     readRawMessageText: async () => "",
@@ -549,6 +557,14 @@ function taskPlanMessage(
 }
 
 export async function runSmoothConversationUiTests(): Promise<void> {
+  assert.equal(
+    settingsCopy("zh-CN").general.settingsLanguageDesc,
+    "控制 EchoInk 界面语言；不会改写 Prompt、会话内容或用户自定义名称。"
+  );
+  assert.equal(
+    settingsCopy("en").general.settingsLanguageDesc,
+    "Controls the EchoInk interface language. Prompts, chats, and custom names are unchanged."
+  );
   const initialDisclosure = nextReasoningDisclosureState(undefined, "running");
   assert.deepEqual(initialDisclosure, {
     open: true,
@@ -885,6 +901,112 @@ export async function runSmoothConversationUiTests(): Promise<void> {
   );
   suggestionButtons[1].onclick?.({} as never);
   assert.deepEqual(selectedSuggestions, ["总结当前笔记"], "suggestion click only selects its exact visible text");
+
+  assert.deepEqual(
+    extractProcessFileRefs("读取 Foo.md 后继续", "/test-vault").map((file) => file.path),
+    ["Foo.md"],
+    "a root-level Vault filename is projected like a nested path"
+  );
+  const durationFixture: ChatMessage = {
+    id: "duration-tool",
+    role: "tool",
+    itemType: "dynamicToolCall",
+    processKind: "view",
+    title: "read",
+    text: "result",
+    status: "completed",
+    createdAt: 1_000,
+    completedAt: 2_250
+  };
+  assert.equal(
+    buildActionTimeline([durationFixture]).groups[0]?.items[0]?.durationMs,
+    1_250,
+    "the compact ledger uses completion minus start"
+  );
+  assert.equal(
+    buildActionTimeline([{ ...durationFixture, id: "missing-duration", completedAt: undefined }])
+      .groups[0]?.items[0]?.durationMs,
+    undefined,
+    "a missing completion timestamp never fabricates duration"
+  );
+  assert.equal(
+    buildActionTimeline([{ ...durationFixture, id: "reverse-duration", completedAt: 999 }])
+      .groups[0]?.items[0]?.durationMs,
+    undefined,
+    "a reversed timestamp pair is not displayed as duration"
+  );
+
+  const approvalToolCallId = "approval-preview-Foo";
+  const approvalMessageId = `pi:session-ledger:leaf:leaf-ledger:tool:${encodeURIComponent(approvalToolCallId)}`;
+  const approvalDiff = [
+    "--- a/Foo.md",
+    "+++ b/Foo.md",
+    "@@ -1 +1 @@",
+    "-old",
+    "+new"
+  ].join("\n");
+  const approvalPreview = JSON.stringify({
+    operation: "note_update",
+    relativePath: "Foo.md",
+    change: {
+      kind: "update",
+      relativePath: "Foo.md",
+      added: 1,
+      removed: 1,
+      diff: approvalDiff
+    }
+  });
+  const projector = new PiChatUiProjector();
+  const approvalBase = projector.createEmpty({
+    piSessionId: "session-ledger",
+    activeLeafId: "leaf-ledger",
+    now: 3_000
+  });
+  approvalBase.productRunId = "run-approval-ledger";
+  approvalBase.runState = "running";
+  approvalBase.messages = [{
+    id: approvalMessageId,
+    role: "tool",
+    itemType: "dynamicToolCall",
+    processKind: "tool",
+    title: "note_update",
+    text: "",
+    processInput: "{\"relativePath\":\"Foo.md\"}",
+    processInputAvailability: "provided",
+    processOutputAvailability: "unavailable",
+    status: "running",
+    runId: "run-approval-ledger",
+    turnId: "run-approval-ledger",
+    createdAt: 3_000
+  }];
+  approvalBase.provisionalMessageIds = [approvalMessageId];
+  approvalBase.pendingToolCallIds = [approvalToolCallId];
+  const approvalRecords = [{
+    piSessionId: "session-ledger",
+    toolCallId: approvalToolCallId,
+    productRunId: "run-approval-ledger",
+    status: "pending" as const,
+    target: "{\"relativePath\":\"Foo.md\"}",
+    preview: approvalPreview,
+    updatedAt: 3_100
+  }];
+  const approvalProjected = projector.decorateToolProductState(approvalBase, {
+    approvals: approvalRecords
+  });
+  const approvalProjectionMessage = approvalProjected.messages[0]!;
+  assert.equal(approvalProjectionMessage.status, "waiting_approval");
+  assert.equal(approvalProjectionMessage.files?.[0]?.path, "Foo.md");
+  assert.deepEqual(approvalProjectionMessage.diffSummary, {
+    totalFiles: 1,
+    added: 1,
+    removed: 1,
+    files: [{ path: "Foo.md", kind: "update", added: 1, removed: 1 }]
+  });
+  assert.deepEqual(
+    projector.decorateToolProductState(approvalBase, { approvals: approvalRecords }).messages,
+    approvalProjected.messages,
+    "reopening from the same durable Approval preview rebuilds the same Tool projection"
+  );
 
   const context = createTestContext();
   const renderer = new CodexMessageListRenderer();
@@ -1476,7 +1598,7 @@ export async function runSmoothConversationUiTests(): Promise<void> {
         id: "tool-separated",
         role: "tool",
         itemType: "dynamicToolCall",
-        title: "工具",
+        title: "使用工具：vault_search",
         text: siblingCanaries.toolResult,
         processInput: siblingCanaries.toolArgument,
         processOutput: siblingCanaries.toolResult,
@@ -1587,6 +1709,11 @@ export async function runSmoothConversationUiTests(): Promise<void> {
         completedAt: 10
       }
     ];
+    const sourceSibling = siblingMessages.find((message) => message.id === "sources-separated") as
+      | (ChatMessage & { knowledgeProducedPaths?: string[] })
+      | undefined;
+    assert.ok(sourceSibling);
+    sourceSibling!.knowledgeProducedPaths = ["outputs/Generated.md"];
     const separatedProjection = buildAgentTurnProjection(siblingMessages);
     assert.equal(
       separatedProjection.some((item) => item.kind === "completedProcess"),
@@ -1606,9 +1733,93 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     assert.equal(unifiedTurn!.status, "completed");
     assert.equal(unifiedTurn!.currentNodeId, undefined);
     assert.deepEqual(
-      new Set(unifiedTurn!.processNodes.map((node) => node.kind)),
-      new Set(["process", "reasoning", "tool", "task", "retrieval", "diff", "interaction"]),
-      "Reasoning, retrieval, Tool, Task, Diff, and interaction history share one process model"
+      unifiedTurn!.processNodes.map((node) => node.kind),
+      ["process", "reasoning", "tool", "task", "retrieval", "artifact", "diff", "interaction"],
+      "Reasoning, Tool, Task, Sources, Artifact, Diff, and interaction retain chronological order"
+    );
+
+    const uniqueToolCallId = "call:read/Foo.md";
+    const projectedToolMessageId = `pi:session-unique-tool:leaf:leaf-unique-tool:tool:${encodeURIComponent(uniqueToolCallId)}`;
+    const duplicateToolActivityId = stableHashedIdentity("reasoning-tool", uniqueToolCallId);
+    const uniqueToolMessages: ChatMessage[] = [
+      {
+        id: "unique-tool-user",
+        role: "user",
+        text: "读取文件",
+        runId: "run-unique-tool",
+        turnId: "run-unique-tool",
+        createdAt: 10
+      },
+      {
+        id: "unique-tool-reasoning",
+        role: "assistant",
+        itemType: "reasoning",
+        text: "",
+        status: "completed",
+        reasoningSummary: {
+          schemaVersion: 1,
+          conversationId: "conversation-unique-tool",
+          piSessionId: "session-unique-tool",
+          productRunId: "run-unique-tool",
+          status: "completed",
+          startedAt: 11,
+          updatedAt: 14,
+          firstAssistantTextAt: 14,
+          activities: [{
+            id: duplicateToolActivityId,
+            kind: "tool",
+            status: "completed",
+            name: "read",
+            startedAt: 12,
+            updatedAt: 13
+          }]
+        },
+        runId: "run-unique-tool",
+        turnId: "run-unique-tool",
+        createdAt: 11,
+        completedAt: 14
+      },
+      {
+        id: projectedToolMessageId,
+        role: "tool",
+        itemType: "dynamicToolCall",
+        processKind: "view",
+        title: "read",
+        text: "Foo contents",
+        status: "completed",
+        runId: "run-unique-tool",
+        turnId: "run-unique-tool",
+        createdAt: 12,
+        completedAt: 13
+      },
+      {
+        id: "unique-tool-answer",
+        role: "assistant",
+        text: "读取完成",
+        status: "completed",
+        runId: "run-unique-tool",
+        turnId: "run-unique-tool",
+        createdAt: 14,
+        completedAt: 15
+      }
+    ];
+    const uniqueToolProjection = buildAgentTurnProjection(uniqueToolMessages);
+    const uniqueToolTurn = uniqueToolProjection[1]?.kind === "assistantTurn"
+      ? uniqueToolProjection[1].turn
+      : null;
+    assert.ok(uniqueToolTurn);
+    const uniqueToolNodes = uniqueToolTurn!.processNodes.filter(
+      (node) => node.toolCallId === uniqueToolCallId
+    );
+    assert.equal(uniqueToolNodes.length, 1, "one toolCallId produces one process node");
+    assert.equal(uniqueToolNodes[0]?.toolCallId, uniqueToolCallId);
+    assert.equal(uniqueToolNodes[0]?.sourceMessageId, projectedToolMessageId,
+      "the real Tool message remains the one content authority");
+    assert.equal(uniqueToolTurn!.toolCount, 1, "the duplicate reasoning activity is not counted twice");
+    assert.equal(
+      uniqueToolMessages[1]?.reasoningSummary?.activities[0]?.id,
+      duplicateToolActivityId,
+      "the durable Reasoning snapshot remains unchanged"
     );
 
     const processOutput = [
@@ -1906,7 +2117,7 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       "local documents never populate SmoothUI webpage Sources");
     assert.equal(
       localSourcesRoot!.findByClass("codex-ai-elements-sources-label")?.textContent,
-      "Used 5 documents",
+      "使用了 5 个文档",
       "count uses unique citations, references, and Memory ids but excludes produced paths"
     );
     const localRows = localSourcesRoot!.findAllByClass("codex-ai-elements-source");
@@ -1955,7 +2166,7 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     }, { showAgentFooter: false, showAgentHeader: false });
     assert.equal(emptyAttributionMessage.findAllByClass("codex-ai-elements-sources").length, 0);
     assert.match(renderedText(emptyAttributionMessage), /不会显示伪来源/u);
-    assert.doesNotMatch(renderedText(emptyAttributionMessage), /Used 0 documents/u);
+    assert.doesNotMatch(renderedText(emptyAttributionMessage), /使用了 0 个文档/u);
 
     const diffMessage = renderMessage(renderer, {
       id: "file-change-diff",
@@ -2075,7 +2286,7 @@ export async function runSmoothConversationUiTests(): Promise<void> {
         .map((label) => label.textContent)
     );
     assert.deepEqual(primaryLabels, new Set(["处理过程", "模型推理", "执行动作", "最终回答"]));
-    assert.deepEqual(secondaryLabels, new Set(["Process", "Reasoning", "Tools & Sources", "Final Answer"]));
+    assert.deepEqual(secondaryLabels, new Set());
 
     for (const componentClass of [
       "codex-smooth-ai-tool-call",
@@ -2092,6 +2303,36 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     assert.equal(assistantTurnRoot.findAllByClass("codex-smooth-ai-approval-card").length, 0,
       "resolved Confirmation does not leave an interactive approval card in history");
 
+    const unifiedLedgers = assistantTurnRoot.findAllByClass(
+      "codex-assistant-turn-action-ledger"
+    );
+    assert.equal(unifiedLedgers.length, 2,
+      "Task and Sources keep the two chronological Action ledger groups separated");
+    assert.deepEqual(
+      unifiedLedgers.map((ledger) =>
+        ledger.findByClass("codex-assistant-turn-action-ledger-summary")?.textContent
+      ),
+      ["调用 1", "编辑 1"]
+    );
+    const unifiedActions = assistantTurnRoot.findAllByClass("codex-action-item");
+    assert.equal(unifiedActions.length, 2);
+    assert.equal(
+      unifiedActions.find((action) => action.dataset.messageId === "tool-separated")
+        ?.findByClass("codex-action-item-title")?.textContent,
+      "vault_search",
+      "persisted Tool chrome is stripped so the Chinese action row keeps only the raw tool name"
+    );
+    assert.ok(unifiedActions.every((action) => action.closest(".codex-assistant-turn-node") === null),
+      "an Action row is not wrapped in a second titled process node");
+    assert.ok(unifiedActions.every((action) =>
+      action.findAllByClass("codex-smooth-ai-tool-status").length === 1
+    ), "each collapsed Action owns one status icon");
+    assert.equal(assistantTurnRoot.findAllByClass("codex-action-item-time").length, 0,
+      "message clock time is never presented as Tool duration");
+    assert.equal(assistantTurnRoot.findAllByClass("codex-action-item-detail").length, 0,
+      "Tool details and error copy are not repeated as a collapsed second title");
+    assert.ok(assistantTurnRoot.findAllByClass("codex-action-item-expandable")
+      .every((action) => !action.open), "Action rows start collapsed");
     for (const action of assistantTurnRoot.findAllByClass("codex-action-item-expandable")) {
       action.open = true;
       action.ontoggle?.({ isTrusted: false });
@@ -2147,6 +2388,364 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       new RegExp(siblingCanaries.approvalPayload, "u"),
       "resolved Confirmation history does not expose its live approval payload"
     );
+
+    const approvalTurnProjection = buildAgentTurnProjection([{
+      id: "approval-ledger-user",
+      role: "user",
+      text: "更新根目录文件",
+      runId: "run-approval-ledger",
+      turnId: "run-approval-ledger",
+      createdAt: 2_900
+    }, approvalProjectionMessage]);
+    const approvalTurn = approvalTurnProjection[1]?.kind === "assistantTurn"
+      ? approvalTurnProjection[1].turn
+      : null;
+    assert.ok(approvalTurn);
+    const approvalTurnSurface = new FakeElement("div");
+    (renderer as unknown as {
+      renderAssistantTurn(
+        container: unknown,
+        turn: NonNullable<typeof approvalTurn>,
+        showAgentHeader: boolean
+      ): void;
+    }).renderAssistantTurn(approvalTurnSurface, approvalTurn!, false);
+    const approvalTurnRoot = approvalTurnSurface.findByClass(
+      "codex-message-type-assistantTurn"
+    )!;
+    assert.equal(approvalTurnRoot.findAllByClass("codex-smooth-ai-approval-card").length, 0,
+      "Approval preview remains inside its Tool Action instead of a sibling card");
+    assert.equal(
+      approvalTurnRoot.findByClass("codex-assistant-turn-action-ledger-summary")?.textContent,
+      "调用 1"
+    );
+    assert.deepEqual(
+      approvalTurnRoot.findAllByClass("codex-diff-stat").map((stat) => stat.textContent),
+      ["+1", "-1"]
+    );
+    const approvalAction = approvalTurnRoot.findByClass("codex-action-item-expandable")!;
+    assert.equal(approvalAction.open, false);
+    approvalAction.open = true;
+    approvalAction.ontoggle?.({ isTrusted: false });
+    assert.ok(approvalAction.findByClass("codex-smooth-ai-diff"),
+      "the expanded Approval Tool exposes the structured preview Diff");
+    assert.match(renderedText(approvalAction), /Foo\.md/u);
+    assert.match(renderedText(approvalAction), /new/u);
+
+    const reopenedRenderer = new CodexMessageListRenderer();
+    bindRenderer(reopenedRenderer, context);
+    const reopenedApprovalSurface = new FakeElement("div");
+    (reopenedRenderer as unknown as {
+      renderAssistantTurn(
+        container: unknown,
+        turn: NonNullable<typeof approvalTurn>,
+        showAgentHeader: boolean
+      ): void;
+    }).renderAssistantTurn(reopenedApprovalSurface, approvalTurn!, false);
+    assert.equal(
+      reopenedApprovalSurface.findByClass("codex-action-item-expandable")?.open,
+      false,
+      "reopening a durable Tool rebuilds the same collapsed Action without stale disclosure state"
+    );
+    assert.deepEqual(
+      reopenedApprovalSurface.findAllByClass("codex-diff-stat").map((stat) => stat.textContent),
+      ["+1", "-1"]
+    );
+
+    const failedToolError = "FAILED_TOOL_ERROR_ONLY_IN_DETAILS";
+    const ledgerMessages: ChatMessage[] = [{
+      id: "ledger-user",
+      role: "user",
+      text: "处理 Foo.md",
+      runId: "run-compact-ledger",
+      turnId: "run-compact-ledger",
+      createdAt: 1_000
+    }, {
+      id: "ledger-read",
+      role: "tool",
+      itemType: "dynamicToolCall",
+      processKind: "view",
+      title: "read",
+      text: "old",
+      processInput: "Foo.md",
+      processOutput: "old",
+      processInputAvailability: "provided",
+      processOutputAvailability: "provided",
+      files: [{
+        name: "Foo.md",
+        path: "Foo.md",
+        displayPath: "Foo.md",
+        kind: "vault",
+        openable: true
+      }],
+      status: "completed",
+      runId: "run-compact-ledger",
+      turnId: "run-compact-ledger",
+      createdAt: 2_000,
+      completedAt: 3_250
+    }, {
+      id: "ledger-edit",
+      role: "tool",
+      itemType: "fileChange",
+      processKind: "edit",
+      title: "file change",
+      text: approvalDiff,
+      diffSummary: {
+        totalFiles: 1,
+        added: 1,
+        removed: 1,
+        files: [{ path: "Foo.md", kind: "update", added: 1, removed: 1 }]
+      },
+      files: [{
+        name: "Foo.md",
+        path: "Foo.md",
+        displayPath: "Foo.md",
+        kind: "vault",
+        openable: true
+      }],
+      status: "completed",
+      runId: "run-compact-ledger",
+      turnId: "run-compact-ledger",
+      createdAt: 3_300,
+      completedAt: 4_300
+    }, {
+      id: "ledger-task",
+      role: "assistant",
+      itemType: "taskPlan",
+      text: "",
+      taskPlan: {
+        schemaVersion: 1,
+        planId: "ledger-plan",
+        title: "账本任务",
+        status: "completed",
+        version: 1,
+        steps: [{ stepId: "ledger-step", text: "核对结果", status: "completed" }],
+        source: "agent",
+        productRunId: "run-compact-ledger",
+        createdAt: 4_400,
+        updatedAt: 4_400
+      },
+      status: "completed",
+      runId: "run-compact-ledger",
+      turnId: "run-compact-ledger",
+      createdAt: 4_400,
+      completedAt: 4_400
+    }, {
+      id: "ledger-failed-tool",
+      role: "tool",
+      itemType: "dynamicToolCall",
+      processKind: "tool",
+      title: "danger_tool",
+      details: failedToolError,
+      text: failedToolError,
+      processInput: "{\"path\":\"Foo.md\"}",
+      processOutput: failedToolError,
+      processInputAvailability: "provided",
+      processOutputAvailability: "provided",
+      status: "failed",
+      runId: "run-compact-ledger",
+      turnId: "run-compact-ledger",
+      createdAt: 4_500,
+      completedAt: 5_000
+    }, {
+      id: "ledger-answer",
+      role: "assistant",
+      text: "已报告失败",
+      status: "completed",
+      runId: "run-compact-ledger",
+      turnId: "run-compact-ledger",
+      createdAt: 5_100,
+      completedAt: 5_200
+    }];
+    const ledgerProjection = buildAgentTurnProjection(ledgerMessages);
+    const ledgerTurn = ledgerProjection[1]?.kind === "assistantTurn"
+      ? ledgerProjection[1].turn
+      : null;
+    assert.ok(ledgerTurn);
+    const ledgerSurface = new FakeElement("div");
+    const ledgerRenderer = new CodexMessageListRenderer();
+    bindRenderer(ledgerRenderer, context);
+    (ledgerRenderer as unknown as {
+      renderAssistantTurn(
+        container: unknown,
+        turn: NonNullable<typeof ledgerTurn>,
+        showAgentHeader: boolean
+      ): void;
+    }).renderAssistantTurn(ledgerSurface, ledgerTurn!, false);
+    const ledgerRoot = ledgerSurface.findByClass("codex-message-type-assistantTurn")!;
+    assert.deepEqual(
+      ledgerRoot.findAllByClass("codex-assistant-turn-action-ledger-summary")
+        .map((summary) => summary.textContent),
+      ["读取 1 · 编辑 1", "调用 1"],
+      "adjacent actions aggregate once while Task preserves the chronological break"
+    );
+    const ledgerActions = ledgerRoot.findAllByClass("codex-action-item");
+    assert.equal(ledgerActions.length, 3);
+    assert.deepEqual(
+      ledgerRoot.findAllByClass("codex-action-item-duration")
+        .map((duration) => duration.textContent.trim()),
+      ["1.3s", "1s", "500ms"]
+    );
+    const readAction = ledgerActions.find((action) =>
+      action.dataset.messageId === "ledger-read"
+    )!;
+    assert.equal(readAction.findByClass("codex-action-item-file")?.attributes.get("title"), "Foo.md");
+    const editAction = ledgerActions.find((action) =>
+      action.dataset.messageId === "ledger-edit"
+    )!;
+    assert.deepEqual(
+      editAction.findAllByClass("codex-diff-stat").map((stat) => stat.textContent),
+      ["+1", "-1"]
+    );
+    const failedAction = ledgerActions.find((action) =>
+      action.dataset.messageId === "ledger-failed-tool"
+    )!;
+    assert.equal(failedAction.open, false);
+    assert.doesNotMatch(renderedText(failedAction), new RegExp(failedToolError, "u"),
+      "the collapsed failed row does not repeat its error as a second title");
+    assert.equal(renderedText(failedAction).match(/失败/gu)?.length, 1,
+      "the failed state is expressed once in the collapsed action copy");
+    failedAction.open = true;
+    failedAction.ontoggle?.({ isTrusted: false });
+    assert.match(renderedText(failedAction), new RegExp(failedToolError, "u"),
+      "the original backend error remains reachable after expansion");
+
+    const sourcedToolProjection = buildAgentTurnProjection([{
+      id: "sourced-tool-user",
+      role: "user",
+      text: "检索来源",
+      runId: "run-sourced-tool",
+      turnId: "run-sourced-tool",
+      createdAt: 6_000
+    }, {
+      id: "sourced-tool",
+      role: "tool",
+      itemType: "dynamicToolCall",
+      processKind: "search",
+      title: "vault_search",
+      text: "matched",
+      status: "completed",
+      citations: {
+        status: "strong",
+        counts: { wiki: 1, journal: 0, outputs: 0 },
+        citations: [{
+          bucket: "wiki",
+          title: "Foo",
+          path: "Foo.md",
+          excerptLines: ["matched"],
+          relevance: "strong",
+          reason: "matched",
+          score: 1
+        }]
+      },
+      runId: "run-sourced-tool",
+      turnId: "run-sourced-tool",
+      createdAt: 6_100,
+      completedAt: 6_200
+    }, {
+      id: "sourced-tool-answer",
+      role: "assistant",
+      text: "找到来源",
+      status: "completed",
+      runId: "run-sourced-tool",
+      turnId: "run-sourced-tool",
+      createdAt: 6_300,
+      completedAt: 6_400
+    }]);
+    const sourcedToolTurn = sourcedToolProjection[1]?.kind === "assistantTurn"
+      ? sourcedToolProjection[1].turn
+      : null;
+    assert.ok(sourcedToolTurn);
+    const sourcedToolSurface = new FakeElement("div");
+    (ledgerRenderer as unknown as {
+      renderAssistantTurn(
+        container: unknown,
+        turn: NonNullable<typeof sourcedToolTurn>,
+        showAgentHeader: boolean
+      ): void;
+    }).renderAssistantTurn(sourcedToolSurface, sourcedToolTurn!, false);
+    assert.equal(sourcedToolSurface.findAllByClass("codex-action-item").length, 1);
+    assert.equal(sourcedToolSurface.findAllByClass("codex-ai-elements-sources").length, 1,
+      "a Sources node derived from the same Tool message keeps its own chronological projection");
+
+    const englishProjection = buildAgentTurnProjection(siblingMessages, "en");
+    const englishTurn = englishProjection[1]?.kind === "assistantTurn"
+      ? englishProjection[1].turn
+      : null;
+    assert.ok(englishTurn, "the English projection retains the unified Assistant Turn");
+    const englishRenderer = new CodexMessageListRenderer();
+    bindRenderer(englishRenderer, context, "en");
+    const englishSurface = new FakeElement("div");
+    (englishRenderer as unknown as {
+      renderAssistantTurn(
+        container: unknown,
+        turn: NonNullable<typeof englishTurn>,
+        showAgentHeader: boolean
+      ): void;
+    }).renderAssistantTurn(englishSurface, englishTurn!, false);
+    const englishRoot = englishSurface.findByClass("codex-message-type-assistantTurn")!;
+    assert.equal(
+      englishRoot.findByClass("codex-assistant-turn-summary-copy")?.textContent,
+      "Completed · 7 steps · 2 tools · 8s"
+    );
+    assert.deepEqual(
+      new Set(
+        englishRoot.findAllByClass("codex-assistant-turn-section-primary")
+          .map((label) => label.textContent)
+      ),
+      new Set(["Process", "Reasoning", "Tools & Sources", "Final Answer"])
+    );
+    assert.deepEqual(
+      new Set(
+        englishRoot.findAllByClass("codex-assistant-turn-section-secondary")
+          .map((label) => label.textContent)
+      ),
+      new Set()
+    );
+    assert.ok(
+      englishRoot.findAllByClass("codex-ai-elements-sources-label")
+        .some((label) => label.textContent === "Used 1 document"),
+      "English source chrome uses the Turn's single-source count"
+    );
+    assert.match(renderedText(englishRoot), /Public reasoning · 2s/u);
+    assert.match(renderedText(englishRoot), /Called/u);
+    assert.equal(
+      englishRoot.findAllByClass("codex-action-item")
+        .find((action) => action.dataset.messageId === "tool-separated")
+        ?.findByClass("codex-action-item-title")?.textContent,
+      "vault_search",
+      "English action chrome strips a persisted Chinese Tool prefix without rewriting the tool name"
+    );
+    assert.doesNotMatch(renderedText(englishRoot), /使用工具/u,
+      "English action chrome does not inherit the persisted Chinese Tool prefix");
+    assert.deepEqual(
+      englishRoot.findAllByClass("codex-assistant-turn-action-ledger-summary")
+        .map((summary) => summary.textContent),
+      ["Calls 1", "Edits 1"],
+      "English Tool ledgers use one English-only dynamic summary"
+    );
+    assert.ok(
+      englishRoot.findAllByClass("codex-action-item-head")
+        .some((head) => head.attributes.get("title") === "View tool details"),
+      "English action details expose English accessible chrome"
+    );
+    assert.ok(
+      englishRoot.findAllByClass("codex-assistant-turn-node-marker")
+        .every((marker) => marker.attributes.get("title") === "Completed"),
+      "English terminal node status ARIA stays English"
+    );
+    for (const action of englishRoot.findAllByClass("codex-action-item-expandable")) {
+      action.open = true;
+      action.ontoggle?.({ isTrusted: false });
+    }
+    for (const canary of visibleTurnCanaries) {
+      assert.match(renderedText(englishRoot), new RegExp(canary, "u"),
+        `${canary} remains byte-for-byte visible in the English Turn`);
+    }
+    assert.doesNotMatch(
+      renderedText(englishRoot),
+      new RegExp(siblingCanaries.privateReasoning, "u"),
+      "the English Turn does not expose private reasoning"
+    );
   } finally {
     if (previousDocument === undefined) delete (globalThis as unknown as { document?: unknown }).document;
     else Object.defineProperty(globalThis, "document", { configurable: true, value: previousDocument });
@@ -2192,8 +2791,17 @@ export async function runSmoothConversationUiTests(): Promise<void> {
   assert.match(styles, /\.codex-assistant-turn-section-secondary\s*\{[\s\S]*?font-size:\s*var\(--echoink-conversation-font-label-secondary\);/u);
   assert.match(styles, /\.codex-assistant-turn-summary-copy\s*\{[\s\S]*?font-variant-numeric:\s*tabular-nums;[\s\S]*?text-wrap:\s*pretty;/u);
   assert.match(styles, /\.codex-assistant-turn-answer\s*\{[\s\S]*?max-width:\s*min\(72ch, 100%\);[\s\S]*?overflow-wrap:\s*anywhere;/u);
-  assert.match(styles, /details\.codex-action-item\.codex-smooth-ai-tool-call:not\(\[open\]\)[\s\S]*?border-color:\s*transparent;/u);
+  assert.match(styles, /\.codex-assistant-turn-action-ledger-summary\s*\{[\s\S]*?font-weight:\s*400;[\s\S]*?font-variant-numeric:\s*tabular-nums;[\s\S]*?text-wrap:\s*pretty;/u);
+  assert.match(styles, /\.codex-assistant-turn-action-node\.is-success\s*\{[\s\S]*?opacity:\s*0\.66;/u);
+  assert.match(styles, /\.codex-assistant-turn-action-ledger \.codex-action-item-main\s*\{[\s\S]*?flex-wrap:\s*wrap;[\s\S]*?font-size:\s*var\(--echoink-conversation-font-body\);[\s\S]*?line-height:\s*var\(--echoink-conversation-line-body\);/u);
+  assert.match(styles, /\.codex-assistant-turn-action-ledger \.codex-action-item-duration,[\s\S]*?font-variant-numeric:\s*tabular-nums;/u);
+  assert.match(styles, /\.codex-assistant-turn-action-ledger[\s\S]*?\.codex-process-file-text\.codex-action-item-file\s*\{[\s\S]*?overflow-wrap:\s*anywhere;[\s\S]*?text-overflow:\s*clip;[\s\S]*?white-space:\s*normal;/u);
+  assert.match(styles, /\.codex-assistant-turn-action-node > \.codex-action-item-head:focus-visible\s*\{[\s\S]*?outline:\s*2px solid var\(--echoink-conversation-focus\);/u);
+  assert.match(styles, /details\.codex-action-item\.codex-smooth-ai-tool-call:not\(\[open\]\)[\s\S]*?border:\s*0;/u);
   assert.match(styles, /details\.codex-action-item\.codex-smooth-ai-tool-call\[open\][\s\S]*?border:\s*1px solid var\(--background-modifier-border\);/u);
+  assert.match(styles, /\.codex-assistant-turn-action-node\[open\] \.codex-smooth-ai-artifact,[\s\S]*?\.codex-assistant-turn-resource\[open\] \.codex-diff-files\s*\{[\s\S]*?border:\s*0;/u);
+  assert.match(styles, /@media \(prefers-reduced-motion:\s*no-preference\)[\s\S]*?\.codex-assistant-turn-action-node\.is-current[\s\S]*?codex-smooth-tool-ring/u);
+  assert.match(styles, /@media \(prefers-reduced-motion:\s*reduce\)[\s\S]*?\.codex-assistant-turn-action-node\.is-current[\s\S]*?animation:\s*none;/u);
   assert.match(styles, /\.codex-assistant-turn-resource\s*\{[\s\S]*?border:\s*0;/u);
   assert.match(styles, /\.codex-assistant-turn-resource\[open\]\s*\{[\s\S]*?border:\s*1px solid var\(--background-modifier-border\);/u);
   assert.match(styles, /\.codex-interaction-progress\s*\{[\s\S]*?font-variant-numeric:\s*tabular-nums;/u);
