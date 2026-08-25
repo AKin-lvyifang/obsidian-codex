@@ -12,6 +12,11 @@ import type {
 import type {
   EchoInkReasoningSummarySnapshot
 } from "../../types/reasoning-summary";
+import type { ReasoningEffort } from "../../types/app-server";
+import type {
+  EchoInkTurnInteraction,
+  EchoInkTurnInteractionRecord
+} from "../../types/conversation-turn";
 
 export type PiConversationMemoryMode = "normal" | "no_memory";
 export type PiChatMode = "agent" | "plan";
@@ -326,6 +331,8 @@ export interface PiChatSubmitRequest {
   images?: readonly Readonly<PiChatPreparedImage>[];
   /** The composer mode captured for this exact queued turn. */
   mode?: PiChatMode;
+  /** Exact per-turn selection to map to Pi's Provider thinking level. */
+  reasoning?: ReasoningEffort;
   memoryMode?: PiConversationMemoryMode;
   skillPath?: string;
   skillName?: string;
@@ -383,6 +390,32 @@ export type PiChatRuntimeEvent =
   | (PiChatRuntimeEventBase & {
       type: "reasoning_summary";
       summary: Readonly<EchoInkReasoningSummarySnapshot>;
+    })
+  | (PiChatRuntimeEventBase & {
+      type: "provider_reasoning_start";
+      messageKey: string;
+      reasoningId: string;
+    })
+  | (PiChatRuntimeEventBase & {
+      type: "provider_reasoning_delta";
+      messageKey: string;
+      reasoningId: string;
+      textDelta: string;
+    })
+  | (PiChatRuntimeEventBase & {
+      type: "provider_reasoning_end";
+      messageKey: string;
+      reasoningId: string;
+      text: string;
+      status: "completed" | "failed" | "cancelled" | "interrupted";
+    })
+  | (PiChatRuntimeEventBase & {
+      type: "interaction_requested";
+      interaction: Readonly<EchoInkTurnInteraction>;
+    })
+  | (PiChatRuntimeEventBase & {
+      type: "interaction_resolved";
+      record: Readonly<EchoInkTurnInteractionRecord>;
     })
   | (PiChatRuntimeEventBase & {
       type: "knowledge_progress";

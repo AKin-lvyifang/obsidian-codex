@@ -28,6 +28,17 @@ const MIME_EXTENSIONS: Record<string, string> = {
   "image/heif": "heif"
 };
 
+const EXTENSION_MIME_TYPES: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  svg: "image/svg+xml",
+  bmp: "image/bmp",
+  heic: "image/heic",
+  heif: "image/heif"
+};
+
 export function extractClipboardImageFiles(data: ClipboardDataLike | null | undefined): File[] {
   if (!data) return [];
   const itemFiles = Array.from(data.items ?? [])
@@ -54,11 +65,18 @@ export async function saveClipboardImageAttachment(file: File, options: { vaultP
   const timestamp = options.timestamp ?? Date.now();
   const index = options.index ?? 0;
   const extension = imageExtensionForMime(file.type, file.name) ?? "png";
-  const name = `clipboard-${timestamp}-${index}.${extension}`;
-  const target = path.join(pluginDataDir(vaultPath, options.pluginDir), "clipboard", name);
+  const internalName = `clipboard-${timestamp}-${index}.${extension}`;
+  const displayName = `粘贴图片 ${index + 1}.${extension}`;
+  const target = path.join(pluginDataDir(vaultPath, options.pluginDir), "clipboard", internalName);
   await mkdir(path.dirname(target), { recursive: true });
   await writeFile(target, Buffer.from(await file.arrayBuffer()));
-  return { type: "image", name, path: target };
+  return {
+    type: "image",
+    name: displayName,
+    path: target,
+    mimeType: clipboardImageMimeType(file.type, extension),
+    availability: "available"
+  };
 }
 
 export async function saveClipboardImageAttachments(files: File[], options: { vaultPath: string; pluginDir?: string; timestamp?: number }): Promise<StoredAttachment[]> {
@@ -72,4 +90,13 @@ export async function saveClipboardImageAttachments(files: File[], options: { va
 
 function isImageFile(file: File): boolean {
   return Boolean(imageExtensionForMime(file.type, file.name));
+}
+
+function clipboardImageMimeType(value: string, extension: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "image/jpg") return "image/jpeg";
+  if (normalized.startsWith("image/") && normalized.length > "image/".length) {
+    return normalized;
+  }
+  return EXTENSION_MIME_TYPES[extension] ?? "image/png";
 }

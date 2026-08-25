@@ -50,6 +50,13 @@ import {
   appendTaskPlanEntry
 } from "../../harness/pi-native/pi-task-plan";
 import {
+  PI_USER_QUESTION_TOOL_ID,
+  PiUserQuestionToolSecurity
+} from "../../harness/pi-native/pi-user-question-tool";
+import {
+  createPiVaultToolSecurityAdapter
+} from "../../harness/pi-native/pi-vault-tool-security-extension";
+import {
   closeReasoningSummary,
   completeReasoningAtFirstText,
   createReasoningSummary,
@@ -73,6 +80,7 @@ import {
   reasoningSummaryFromSessionEntry,
   type EchoInkReasoningSummarySnapshot
 } from "../../types/reasoning-summary";
+import { stableHashedIdentity } from "../../core/mapping";
 
 const API: PiSessionManagerApi = {
   codingAgentVersion: VERSION,
@@ -87,6 +95,7 @@ const QUERY_MAINTENANCE_SCOPE = Object.freeze({
 });
 
 export async function runPiNativeConversationRuntimeTests(): Promise<void> {
+  await assertUserQuestionUsesCentralFailClosedSecurity();
   assertReasoningSummaryLifecycleSemantics();
   await assertReasoningSummaryRuntimeLifecycle();
   assertKnowledgeMaintenanceRequiresExplicitCommand();
@@ -116,6 +125,137 @@ export async function runPiNativeConversationRuntimeTests(): Promise<void> {
   await assertDerivationExcludesIdentityBoundOperationalState();
   await assertDerivedActivationFailureRemainsAVisibleDurableConversation();
   await runPiNativeTaskPlanRuntimeTests();
+}
+
+async function assertUserQuestionUsesCentralFailClosedSecurity(): Promise<void> {
+  const questionSecurity = new PiUserQuestionToolSecurity();
+  const adapter = createPiVaultToolSecurityAdapter({
+    authorization: {
+      async authorize() {
+        throw new Error("unexpected_vault_authorization");
+      }
+    },
+    additionalToolSecurities: [questionSecurity],
+    resultCorrection: {
+      async correct() {
+        throw new Error("unexpected_vault_result_correction");
+      }
+    }
+  });
+  const handlers = new Map<
+    string,
+    (...args: unknown[]) => unknown
+  >();
+  await adapter.inlineExtension.factory({
+    on(name: string, handler: unknown) {
+      handlers.set(name, handler as (...args: unknown[]) => unknown);
+    }
+  } as never);
+  const handleToolCall = handlers.get("tool_call");
+  const handleToolResult = handlers.get("tool_result");
+  assert.ok(handleToolCall);
+  assert.ok(handleToolResult);
+
+  const argumentsValue = {
+    questions: [{
+      questionId: "question-1",
+      prompt: "请选择继续方式",
+      selection: "single",
+      options: [
+        { optionId: "continue", label: "继续" },
+        { optionId: "stop", label: "停止" }
+      ],
+      allowSupplement: true
+    }]
+  } as const;
+  const allowed = await handleToolCall({
+    toolName: PI_USER_QUESTION_TOOL_ID,
+    toolCallId: "user-question-valid",
+    input: argumentsValue
+  }, { signal: undefined });
+  assert.equal(allowed, undefined, "valid structured Question is centrally authorized");
+
+  const questions = questionSecurity.consume(
+    "user-question-valid",
+    structuredClone(argumentsValue)
+  );
+  assert.equal(questions[0]?.prompt, "请选择继续方式");
+  questionSecurity.complete("user-question-valid", {
+    interactionId: "question:fixture",
+    outcome: "answered",
+    questionCount: 1,
+    text: "请选择继续方式\n回答：继续"
+  });
+  const corrected = await handleToolResult({
+    toolName: PI_USER_QUESTION_TOOL_ID,
+    toolCallId: "user-question-valid",
+    content: [{ type: "text", text: "UNTRUSTED_TOOL_RESULT" }],
+    details: { private: "UNTRUSTED_DETAILS" },
+    isError: false
+  }) as Readonly<{
+    content: readonly Readonly<{ type: "text"; text: string }>[];
+    details: Readonly<Record<string, unknown>>;
+    isError: boolean;
+  }>;
+  assert.deepEqual(corrected.content, [{
+    type: "text",
+    text: "请选择继续方式\n回答：继续"
+  }]);
+  assert.deepEqual(corrected.details, {
+    source: "echoink-turn-interaction",
+    schemaVersion: 1,
+    toolCallId: "user-question-valid",
+    interactionId: "question:fixture",
+    outcome: "answered",
+    questionCount: 1
+  });
+  assert.equal(corrected.isError, false);
+  assert.doesNotMatch(JSON.stringify(corrected), /UNTRUSTED/u);
+
+  assert.deepEqual(await handleToolCall({
+    toolName: PI_USER_QUESTION_TOOL_ID,
+    toolCallId: "user-question-valid",
+    input: argumentsValue
+  }, { signal: undefined }), {
+    block: true,
+    reason: "authorization_failed"
+  }, "a completed toolCallId cannot be replayed");
+
+  assert.equal(await handleToolCall({
+    toolName: PI_USER_QUESTION_TOOL_ID,
+    toolCallId: "user-question-forged",
+    input: argumentsValue
+  }, { signal: undefined }), undefined);
+  assert.throws(() => questionSecurity.consume("user-question-forged", {
+    questions: [{
+      ...argumentsValue.questions[0],
+      prompt: "被替换的问题"
+    }]
+  }), /user_question_authorization_failed/u);
+  assert.deepEqual(await handleToolResult({
+    toolName: PI_USER_QUESTION_TOOL_ID,
+    toolCallId: "user-question-forged",
+    content: [],
+    details: {},
+    isError: false
+  }), {
+    content: [{ type: "text", text: "authorization_failed" }],
+    details: {
+      source: "echoink-turn-interaction",
+      toolCallId: "user-question-forged",
+      status: "failed"
+    },
+    isError: true
+  }, "execute-time argument replacement fails closed");
+
+  assert.deepEqual(await handleToolCall({
+    toolName: "unregistered_product_tool",
+    toolCallId: "unknown-tool",
+    input: {}
+  }, { signal: undefined }), {
+    block: true,
+    reason: "tool_policy_blocked"
+  }, "unknown tools remain fail-closed");
 }
 
 function assertReasoningSummaryLifecycleSemantics(): void {
@@ -234,6 +374,11 @@ async function assertReasoningSummaryRuntimeLifecycle(): Promise<void> {
     assert.deepEqual(
       new Set(taskSummaries[1]?.activities.map((activity) => activity.kind)),
       new Set(["provider", "tool", "task"])
+    );
+    assert.equal(
+      taskSummaries[1]?.activities.find((activity) => activity.kind === "tool")?.id,
+      stableHashedIdentity("reasoning-tool", "reasoning-task-update"),
+      "runtime Tool activity and projected Tool message share one toolCallId identity"
     );
     assert.doesNotMatch(
       JSON.stringify(taskSummaries),

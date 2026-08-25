@@ -1,3 +1,6 @@
+import type { SettingsLanguage } from "../../settings/settings";
+import { conversationCopy } from "../../settings/i18n";
+
 export const SMOOTH_BLUR_OUT_UP_DURATION_MS = 560;
 export const SMOOTH_BLUR_OUT_UP_EASING = "cubic-bezier(0.22, 1, 0.36, 1)";
 export const SMOOTH_BLUR_OUT_UP_STAGGER_MS = 28;
@@ -225,6 +228,37 @@ export function markSmoothAIApproval(container: HTMLElement, state: SmoothAIAppr
   container.setAttribute("data-approval-state", state);
 }
 
+/** Native Obsidian DOM marker for Vercel AI Elements Question semantics. */
+export function markAIElementsQuestion(container: HTMLElement): void {
+  container.addClass("codex-ai-elements-question");
+  container.setAttribute("data-ai-elements-pattern", "question");
+}
+
+export type AIElementsAttachmentVariant = "grid" | "inline" | "list";
+
+/** Native Obsidian DOM marker for Vercel AI Elements Attachments semantics. */
+export function markAIElementsAttachments(
+  container: HTMLElement,
+  variant: AIElementsAttachmentVariant,
+  accessibleLabel: string
+): void {
+  container.addClass("codex-ai-elements-attachments");
+  container.addClass(`is-${variant}`);
+  container.setAttribute("data-ai-elements-pattern", "attachments");
+  container.setAttribute("data-attachment-variant", variant);
+  container.setAttribute("role", "list");
+  container.setAttribute("aria-label", accessibleLabel);
+}
+
+export function markAIElementsAttachmentItem(
+  container: HTMLElement,
+  mediaCategory: "image" | "document"
+): void {
+  container.addClass("codex-ai-elements-attachment");
+  container.setAttribute("data-attachment-media", mediaCategory);
+  container.setAttribute("role", "listitem");
+}
+
 export function createSmoothAIApprovalCard(
   container: HTMLElement,
   options: Readonly<{
@@ -232,12 +266,14 @@ export function createSmoothAIApprovalCard(
     target?: string;
     preview?: string;
     controlled?: boolean;
+    language?: SettingsLanguage;
   }>
 ): SmoothAIApprovalCardElements {
+  const copy = conversationCopy(options.language ?? "zh-CN");
   const root = container.createDiv({
     cls: "codex-smooth-ai-approval-card",
     attr: {
-      "aria-label": approvalStateLabel(options.state),
+      "aria-label": copy.approval.stateLabel(options.state),
       "aria-busy": "false",
       role: "group"
     }
@@ -246,11 +282,11 @@ export function createSmoothAIApprovalCard(
   const header = root.createDiv({ cls: "codex-smooth-ai-approval-header" });
   header.createSpan({
     cls: "codex-smooth-ai-approval-state",
-    text: approvalStateLabel(options.state)
+    text: copy.approval.stateLabel(options.state)
   });
   if (options.target?.trim()) {
     const target = root.createDiv({ cls: "codex-smooth-ai-approval-section" });
-    target.createSpan({ cls: "codex-smooth-ai-approval-label", text: "目标" });
+    target.createSpan({ cls: "codex-smooth-ai-approval-label", text: copy.approval.target });
     target.createEl("pre", {
       cls: "codex-smooth-ai-approval-content",
       text: options.target
@@ -258,7 +294,7 @@ export function createSmoothAIApprovalCard(
   }
   if (options.preview?.trim()) {
     const preview = root.createDiv({ cls: "codex-smooth-ai-approval-section" });
-    preview.createSpan({ cls: "codex-smooth-ai-approval-label", text: "预览" });
+    preview.createSpan({ cls: "codex-smooth-ai-approval-label", text: copy.approval.preview });
     preview.createEl("pre", {
       cls: "codex-smooth-ai-approval-content",
       text: options.preview
@@ -270,15 +306,32 @@ export function createSmoothAIApprovalCard(
   const actions = root.createDiv({ cls: "codex-smooth-ai-approval-actions" });
   const rejectButton = actions.createEl("button", {
     cls: "codex-smooth-ai-approval-button is-reject",
-    text: "拒绝",
+    text: copy.approval.reject,
     attr: { type: "button" }
   });
   const approveButton = actions.createEl("button", {
     cls: "codex-smooth-ai-approval-button is-approve mod-cta",
-    text: "批准",
+    text: copy.approval.approve,
     attr: { type: "button" }
   });
   return { root, approveButton, rejectButton };
+}
+
+/** AI Elements Confirmation semantics with EchoInk's existing Smooth approval motion. */
+export function createAIElementsConfirmation(
+  container: HTMLElement,
+  options: Readonly<{
+    state: SmoothAIApprovalState;
+    target?: string;
+    preview?: string;
+    controlled?: boolean;
+    language?: SettingsLanguage;
+  }>
+): SmoothAIApprovalCardElements {
+  const elements = createSmoothAIApprovalCard(container, options);
+  elements.root.addClass("codex-ai-elements-confirmation");
+  elements.root.setAttribute("data-ai-elements-pattern", "confirmation");
+  return elements;
 }
 
 export function markSmoothAISources(container: HTMLElement): void {
@@ -289,8 +342,10 @@ export function markSmoothAISources(container: HTMLElement): void {
 export function createAIElementsDocumentSources(
   container: HTMLElement,
   count: number,
-  open: boolean
+  open: boolean,
+  language: SettingsLanguage = "en"
 ): AIElementsDocumentSourcesElements {
+  const copy = conversationCopy(language);
   const documentCount = Math.max(0, Math.trunc(count));
   const root = container.createEl("details", {
     cls: "codex-ai-elements-sources",
@@ -303,7 +358,7 @@ export function createAIElementsDocumentSources(
   });
   summary.createSpan({
     cls: "codex-ai-elements-sources-label",
-    text: documentCount === 1 ? "Used 1 document" : `Used ${documentCount} documents`
+    text: copy.sources.usedDocuments(documentCount)
   });
   summary.createSpan({
     cls: "codex-ai-elements-sources-chevron",
@@ -353,12 +408,13 @@ export function markSmoothAIResponse(container: HTMLElement, isStreaming: boolea
 export function renderSmoothAISuggestions(
   container: HTMLElement,
   suggestions: readonly SmoothAISuggestion[],
-  onSelect: (suggestion: SmoothAISuggestion) => void
+  onSelect: (suggestion: SmoothAISuggestion) => void,
+  accessibleLabel = "推荐问题"
 ): HTMLElement {
   const root = container.createDiv({
     cls: "codex-smooth-ai-suggestions",
     attr: {
-      "aria-label": "推荐问题",
+      "aria-label": accessibleLabel,
       "data-smooth-ui-pattern": "ai-suggestions"
     }
   });
@@ -405,12 +461,4 @@ function finiteNonNegative(value: number | undefined, fallback: number): number 
   return typeof value === "number" && Number.isFinite(value)
     ? Math.max(0, value)
     : fallback;
-}
-
-function approvalStateLabel(state: SmoothAIApprovalState): string {
-  if (state === "waiting_approval") return "等待批准本次执行";
-  if (state === "approved") return "已批准本次执行";
-  if (state === "denied") return "已拒绝本次执行";
-  if (state === "expired") return "审批已过期";
-  return "审批已取消";
 }

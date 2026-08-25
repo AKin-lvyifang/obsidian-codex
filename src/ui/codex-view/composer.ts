@@ -19,6 +19,11 @@ import { composerPrimaryActionForState, composerStateForRuntimeState } from "../
 import { handleKnowledgeCommandMenuKeyDown } from "../knowledge-command-menu";
 import type { QueuedTurnItem } from "../turn-queue";
 import { renderAnimateIcon } from "../animate-icon";
+import type { EchoInkAttachmentResourceResolver } from "./attachment-resource";
+import {
+  markAIElementsAttachmentItem,
+  markAIElementsAttachments
+} from "./smooth-chat-ui";
 
 let knowledgeCommandMenuId = 0;
 
@@ -132,6 +137,7 @@ export interface TurnQueueCallbacks {
 export interface ComposerAttachmentsState {
   selectedSkill: EchoInkResource | null;
   attachments: StoredAttachment[];
+  attachmentResolver: EchoInkAttachmentResourceResolver;
 }
 
 export interface ComposerAttachmentsCallbacks {
@@ -146,8 +152,8 @@ export function shouldShowComposerPlanIndicator(selectedMode: UiMode): boolean {
 export function renderComposerShell(rootEl: HTMLElement, callbacks: ComposerShellCallbacks): ComposerShellRefs {
   const inputWrap = rootEl.createDiv({ cls: "codex-input-wrap" });
   const queueEl = inputWrap.createDiv({ cls: "codex-turn-queue" });
-  const attachmentsEl = inputWrap.createDiv({ cls: "codex-attachments" });
   const workspaceEl = inputWrap.createDiv({ cls: "codex-composer-workspace" });
+  const attachmentsEl = inputWrap.createDiv({ cls: "codex-attachments" });
   const commandMenuId = `codex-knowledge-command-menu-${++knowledgeCommandMenuId}`;
   const inputEl = inputWrap.createEl("textarea", {
     cls: "codex-input",
@@ -331,7 +337,9 @@ export function renderComposerToolbar(
     sendButton.setAttribute("title", "提示词增强完成后再发送");
   }
   if (action === "send") {
-    renderAnimateIcon(sendButton, "send");
+    renderAnimateIcon(sendButton, "send-horizontal");
+  } else if (action === "stop-turn" || action === "cancel-knowledge-task") {
+    renderAnimateIcon(sendButton, "circle-stop");
   } else {
     const sendIconWrap = sendButton.createSpan({
       cls: "codex-composer-send-icon-wrap",
@@ -810,66 +818,83 @@ export function renderComposerAttachments(container: HTMLElement, state: Compose
     setIcon(remove, "x");
     remove.onclick = callbacks.onRemoveSkill;
   }
+  if (!state.attachments.length) return;
+  const list = container.createDiv({ cls: "codex-ai-elements-attachments-list" });
+  markAIElementsAttachments(list, "grid", "待发送附件");
+  let imageIndex = 0;
   for (const item of state.attachments) {
+    const displayIndex = item.type === "image" ? imageIndex++ : 0;
+    const resource = state.attachmentResolver.resolve(item, displayIndex);
+    const displayName = resource.displayName;
     if (item.type === "image") {
-      const thumbnail = container.createDiv({
+      const thumbnail = list.createDiv({
         cls: "codex-attachment-thumbnail",
-        attr: { title: item.path }
+        attr: {
+          title: resource.availability === "available"
+            ? displayName
+            : `${displayName} · 无法预览`,
+          "aria-label": resource.availability === "available"
+            ? `图片：${displayName}`
+            : `图片：${displayName}，无法预览`
+        }
       });
+      markAIElementsAttachmentItem(thumbnail, "image");
       const preview = thumbnail.createDiv({ cls: "codex-attachment-thumbnail-preview" });
-      const image = preview.createEl("img", {
-        cls: "codex-attachment-thumbnail-image",
-        attr: { alt: item.name, draggable: "false" }
-      });
-      image.src = composerAttachmentImageSrc(item.path);
       const fallback = preview.createDiv({
         cls: "codex-attachment-thumbnail-fallback",
         attr: { "aria-hidden": "true" }
       });
       const fallbackIcon = fallback.createSpan({ cls: "codex-attachment-thumbnail-fallback-icon" });
-      setIcon(fallbackIcon, "image");
-      fallback.createSpan({ cls: "codex-attachment-thumbnail-name", text: item.name });
-      image.onload = () => thumbnail.removeClass("is-broken");
-      image.onerror = () => thumbnail.addClass("is-broken");
+      setIcon(fallbackIcon, "image-off");
+      fallback.createSpan({
+        cls: "codex-attachment-thumbnail-name",
+        text: `${displayName} · 无法预览`
+      });
+      if (resource.resourceUri && resource.availability === "available") {
+        const image = preview.createEl("img", {
+          cls: "codex-attachment-thumbnail-image",
+          attr: { alt: displayName, draggable: "false" }
+        });
+        image.src = resource.resourceUri;
+        image.onload = () => thumbnail.removeClass("is-broken");
+        image.onerror = () => thumbnail.addClass("is-broken");
+      } else {
+        thumbnail.addClass("is-broken");
+      }
       const remove = thumbnail.createEl("button", {
         cls: "codex-attachment-thumbnail-remove",
         attr: {
           type: "button",
-          "aria-label": `移除图片：${item.name}`,
-          title: `移除 ${item.name}`
+          "aria-label": `移除图片：${displayName}`,
+          title: `移除 ${displayName}`
         }
       });
       setIcon(remove, "x");
       remove.onclick = () => callbacks.onRemoveAttachment(item.path);
       continue;
     }
-    const chip = container.createDiv({
+    const chip = list.createDiv({
       cls: "codex-attachment-chip codex-attachment-file-chip",
-      attr: { title: item.path }
+      attr: { title: displayName }
     });
+    markAIElementsAttachmentItem(chip, "document");
     const icon = chip.createSpan({
       cls: "codex-attachment-file-icon",
       attr: { "aria-hidden": "true" }
     });
     setIcon(icon, "file-text");
-    chip.createSpan({ cls: "codex-attachment-name", text: item.name });
+    chip.createSpan({ cls: "codex-attachment-name", text: displayName });
     const remove = chip.createEl("button", {
       cls: "codex-attachment-file-remove",
       attr: {
         type: "button",
-        "aria-label": `移除文件：${item.name}`,
-        title: `移除 ${item.name}`
+        "aria-label": `移除文件：${displayName}`,
+        title: `移除 ${displayName}`
       }
     });
     setIcon(remove, "x");
     remove.onclick = () => callbacks.onRemoveAttachment(item.path);
   }
-}
-
-export function composerAttachmentImageSrc(filePath: string): string {
-  if (/^(?:blob:|data:|file:|https?:)/iu.test(filePath)) return filePath;
-  const encodedPath = encodeURI(filePath).replace(/#/gu, "%23").replace(/\?/gu, "%3F");
-  return `file://${encodedPath}`;
 }
 
 export function labelFor(value: string): string {

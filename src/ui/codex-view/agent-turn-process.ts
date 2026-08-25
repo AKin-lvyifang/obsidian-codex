@@ -1,4 +1,20 @@
-import type { ChatMessage } from "../../settings/settings";
+import type { ChatMessage, SettingsLanguage } from "../../settings/settings";
+import {
+  conversationCopy,
+  type ConversationCopy
+} from "../../settings/i18n";
+import { knowledgeUsageMessageData } from "../../knowledge-base/usage";
+import type {
+  EchoInkAssistantTurnStatus,
+  EchoInkProviderReasoningSnapshot,
+  EchoInkTurnInteractionRecord,
+  EchoInkTurnProcessNode,
+  EchoInkTurnProcessNodeKind,
+  EchoInkTurnProcessNodeStatus
+} from "../../types/conversation-turn";
+import type { EchoInkReasoningActivity } from "../../types/reasoning-summary";
+import { stableHashedIdentity } from "../../core/mapping";
+import { piToolCallIdFromProjectedMessageId } from "../../harness/pi-native/pi-chat-ui-projector";
 
 const ACTIVE_STATUSES = new Set([
   "running",
@@ -8,9 +24,13 @@ const ACTIVE_STATUSES = new Set([
   "blocked",
   "waiting_approval",
   "approved",
-  "verifying"
+  "verifying",
+  "recovery-pending"
 ]);
-const FAILED_STATUSES = new Set(["failed", "error", "canceled", "cancelled", "interrupted"]);
+const WAITING_USER_STATUSES = new Set(["approval", "blocked", "waiting_approval"]);
+const FAILED_STATUSES = new Set(["failed", "error", "recovery-blocked"]);
+const CANCELLED_STATUSES = new Set(["canceled", "cancelled", "denied"]);
+const INTERRUPTED_STATUSES = new Set(["interrupted", "unconfirmed", "uncertain"]);
 const ATTENTION_PROCESS_STATUSES = new Set([
   "unconfirmed",
   "interrupted",
@@ -19,9 +39,38 @@ const ATTENTION_PROCESS_STATUSES = new Set([
   "canceled",
   "cancelled",
   "denied",
-  "uncertain"
+  "uncertain",
+  "recovery-blocked"
 ]);
 
+/** One stable, bubble-free row for every keyed assistant run or turn. */
+export interface AgentTurnView {
+  readonly key: string;
+  readonly runId: string;
+  readonly turnId: string;
+  readonly status: EchoInkAssistantTurnStatus;
+  readonly messages: readonly ChatMessage[];
+  readonly messageIndices: readonly number[];
+  readonly processMessages: readonly ChatMessage[];
+  readonly processIndices: readonly number[];
+  readonly processNodes: readonly Readonly<EchoInkTurnProcessNode>[];
+  readonly providerReasoning?: Readonly<EchoInkProviderReasoningSnapshot>;
+  readonly interactionRecords: readonly Readonly<EchoInkTurnInteractionRecord>[];
+  readonly finalAnswer?: ChatMessage;
+  readonly finalAnswerIndex?: number;
+  readonly anchorIndex: number;
+  readonly startedAt: number;
+  readonly updatedAt: number;
+  readonly completedAt?: number;
+  readonly durationMs: number;
+  readonly completedSteps: number;
+  readonly toolCount: number;
+  readonly currentNodeId?: string;
+  readonly failed: boolean;
+  readonly requiresAttention: boolean;
+}
+
+/** Legacy completed-turn shape retained for callers that only need closeout data. */
 export interface CompletedAgentTurn {
   key: string;
   runId: string;
@@ -37,6 +86,8 @@ export interface CompletedAgentTurn {
 
 export type AgentTurnProjectionItem =
   | { kind: "message"; index: number; message: ChatMessage }
+  | { kind: "assistantTurn"; index: number; turn: AgentTurnView }
+  /** Kept in the public union for source compatibility; no longer emitted. */
   | { kind: "completedProcess"; index: number; turn: CompletedAgentTurn };
 
 export function isAgentProcessItemType(itemType?: string): boolean {
@@ -47,6 +98,7 @@ export function isAgentProcessItemType(itemType?: string): boolean {
     itemType === "mcpToolCall" ||
     itemType === "dynamicToolCall" ||
     itemType === "collabAgentToolCall" ||
+    itemType === "interactionRecord" ||
     itemType === "plan" ||
     itemType === "contextCompaction";
 }
@@ -62,12 +114,19 @@ export function isAgentAnswerMessage(message: ChatMessage): boolean {
 
 export function isAgentTurnTerminalMessage(message: ChatMessage): boolean {
   if (isAgentAnswerMessage(message)) return true;
-  return message.role === "system" && message.itemType === "error" && (!message.status || FAILED_STATUSES.has(message.status));
+  return message.role === "system"
+    && message.itemType === "error"
+    && (!message.status || FAILED_STATUSES.has(message.status));
 }
 
-export function buildCompletedAgentTurns(messages: ChatMessage[]): CompletedAgentTurn[] {
+export function buildAgentTurns(
+  messages: ChatMessage[],
+  language: SettingsLanguage = "zh-CN"
+): AgentTurnView[] {
+  const copy = conversationCopy(language);
   const indicesByKey = new Map<string, number[]>();
   messages.forEach((message, index) => {
+    if (!isAssistantTurnMember(message)) return;
     const key = agentTurnKey(message);
     if (!key) return;
     const indices = indicesByKey.get(key) ?? [];
@@ -75,57 +134,54 @@ export function buildCompletedAgentTurns(messages: ChatMessage[]): CompletedAgen
     indicesByKey.set(key, indices);
   });
 
-  const turns: CompletedAgentTurn[] = [];
+  const turns: AgentTurnView[] = [];
   for (const [key, indices] of indicesByKey) {
-    if (indices.some((index) =>
-      messages[index].itemType === "reasoning"
-      && Boolean(messages[index].reasoningSummary)
-    )) continue;
-    const finalAnswerIndex = indices.slice().reverse().find((index) => isAgentTurnTerminalMessage(messages[index]));
-    if (finalAnswerIndex === undefined) continue;
-    const relevantIndices = indices.filter((index) => index <= finalAnswerIndex);
-    if (indices.some((index) => ACTIVE_STATUSES.has(messages[index].status ?? ""))) continue;
-    const processIndices = relevantIndices.filter((index) => {
-      const message = messages[index];
-      if (index === finalAnswerIndex || message.role === "user" || message.itemType === "knowledgeBase") return false;
-      return isAgentProcessItemType(message.itemType) || isAgentAnswerMessage(message);
-    });
-    if (!processIndices.length) continue;
-    const processStartIndex = processIndices[0];
-    if (hasForeignTurnBetween(messages, processStartIndex, finalAnswerIndex, key)) continue;
-    const finalAnswer = messages[finalAnswerIndex];
-    const timestamps = relevantIndices.map((index) => messages[index].createdAt).filter(isFiniteTimestamp);
-    const startedAt = timestamps.length ? Math.min(...timestamps) : 0;
-    const fallbackCompletedAt = timestamps.length ? Math.max(...timestamps) : startedAt;
-    const completedAt = isFiniteTimestamp(finalAnswer.completedAt) ? finalAnswer.completedAt : fallbackCompletedAt;
-    turns.push({
-      key,
-      runId: finalAnswer.runId ?? finalAnswer.turnId ?? "",
-      finalAnswer,
-      processMessages: processIndices.map((index) => messages[index]),
-      processIndices,
-      processStartIndex,
-      finalAnswerIndex,
-      durationMs: Math.max(0, completedAt - startedAt),
-      failed: finalAnswer.itemType === "error" || FAILED_STATUSES.has(finalAnswer.status ?? ""),
-      requiresAttention: processIndices.some((index) => ATTENTION_PROCESS_STATUSES.has(messages[index].status ?? ""))
-    });
+    const firstIndex = indices[0];
+    const lastIndex = indices[indices.length - 1];
+    if (hasForeignTurnBetween(messages, firstIndex, lastIndex, key)) continue;
+    turns.push(buildAgentTurn(messages, indices, key, copy));
   }
-  return turns.sort((a, b) => a.processStartIndex - b.processStartIndex);
+  return turns.sort((left, right) => left.anchorIndex - right.anchorIndex);
 }
 
-export function buildAgentTurnProjection(messages: ChatMessage[]): AgentTurnProjectionItem[] {
-  const completedTurns = buildCompletedAgentTurns(messages);
-  const completedTurnByStart = new Map(completedTurns.map((turn) => [turn.processStartIndex, turn]));
-  const foldedIndices = new Set(completedTurns.flatMap((turn) => turn.processIndices));
+export function buildCompletedAgentTurns(
+  messages: ChatMessage[],
+  language: SettingsLanguage = "zh-CN"
+): CompletedAgentTurn[] {
+  return buildAgentTurns(messages, language).flatMap((turn) => {
+    if (!turn.finalAnswer || turn.finalAnswerIndex === undefined || !isTerminalTurnStatus(turn.status)) {
+      return [];
+    }
+    return [{
+      key: turn.key,
+      runId: turn.runId,
+      finalAnswer: turn.finalAnswer,
+      processMessages: [...turn.processMessages],
+      processIndices: [...turn.processIndices],
+      processStartIndex: turn.processIndices[0] ?? turn.anchorIndex,
+      finalAnswerIndex: turn.finalAnswerIndex,
+      durationMs: turn.durationMs,
+      failed: turn.failed,
+      requiresAttention: turn.requiresAttention
+    }];
+  });
+}
+
+export function buildAgentTurnProjection(
+  messages: ChatMessage[],
+  language: SettingsLanguage = "zh-CN"
+): AgentTurnProjectionItem[] {
+  const turns = buildAgentTurns(messages, language);
+  const turnByAnchor = new Map(turns.map((turn) => [turn.anchorIndex, turn]));
+  const turnMessageIndices = new Set(turns.flatMap((turn) => [...turn.messageIndices]));
   const projection: AgentTurnProjectionItem[] = [];
   for (let index = 0; index < messages.length; index += 1) {
-    const completedTurn = completedTurnByStart.get(index);
-    if (completedTurn) {
-      projection.push({ kind: "completedProcess", index, turn: completedTurn });
+    const turn = turnByAnchor.get(index);
+    if (turn) {
+      projection.push({ kind: "assistantTurn", index, turn });
       continue;
     }
-    if (foldedIndices.has(index)) continue;
+    if (turnMessageIndices.has(index)) continue;
     projection.push({ kind: "message", index, message: messages[index] });
   }
   return projection;
@@ -158,14 +214,529 @@ export function settleAgentAnswer(
   return message;
 }
 
-export function formatAgentTurnDuration(durationMs: number): string {
-  const totalSeconds = Math.max(1, Math.round(Math.max(0, durationMs) / 1000));
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  if (hours > 0) return `已处理 ${hours}h ${String(minutes).padStart(2, "0")}m ${String(seconds).padStart(2, "0")}s`;
-  if (minutes > 0) return `已处理 ${minutes}m ${String(seconds).padStart(2, "0")}s`;
-  return `已处理 ${seconds}s`;
+export function formatAgentTurnDuration(
+  durationMs: number,
+  language: SettingsLanguage = "zh-CN"
+): string {
+  return conversationCopy(language).turn.processed(formatAgentTurnDurationValue(durationMs));
+}
+
+export function formatAgentTurnSummary(turn: Readonly<Pick<
+  AgentTurnView,
+  "status" | "completedSteps" | "toolCount" | "durationMs" | "currentNodeId" | "processNodes"
+>>, language: SettingsLanguage = "zh-CN"): string {
+  const copy = conversationCopy(language);
+  if (!isTerminalTurnStatus(turn.status)) {
+    if (turn.status === "waiting_for_user") return copy.turn.waitingForUser;
+    const current = turn.currentNodeId
+      ? turn.processNodes.find((node) => node.nodeId === turn.currentNodeId)
+      : undefined;
+    return copy.turn.processing(current?.title);
+  }
+  const prefix = copy.turn.terminalPrefix(turn.status);
+  const parts = [copy.turn.stepCount(turn.completedSteps)];
+  if (turn.toolCount > 0) parts.push(copy.turn.toolCount(turn.toolCount));
+  parts.push(formatAgentTurnDurationValue(turn.durationMs));
+  return `${prefix} · ${parts.join(" · ")}`;
+}
+
+export function isTerminalTurnStatus(status: EchoInkAssistantTurnStatus): boolean {
+  return status === "completed"
+    || status === "failed"
+    || status === "cancelled"
+    || status === "interrupted";
+}
+
+function buildAgentTurn(
+  allMessages: ChatMessage[],
+  indices: number[],
+  key: string,
+  copy: ConversationCopy
+): AgentTurnView {
+  const messages = indices.map((index) => allMessages[index]);
+  const explicitTurn = latestExplicitTurn(messages);
+  const finalAnswerIndex = explicitFinalAnswerIndex(allMessages, indices, explicitTurn?.finalAnswerMessageId)
+    ?? implicitFinalAnswerIndex(allMessages, indices);
+  const finalAnswer = finalAnswerIndex === undefined ? undefined : allMessages[finalAnswerIndex];
+  const processIndices = indices.filter((index) => index !== finalAnswerIndex);
+  const processMessages = processIndices.map((index) => allMessages[index]);
+  const startedAt = minimumTimestamp([
+    explicitTurn?.startedAt,
+    ...messages.map((message) => message.createdAt),
+    explicitTurn?.providerReasoning?.startedAt
+  ]);
+  const updatedAt = maximumTimestamp([
+    explicitTurn?.updatedAt,
+    ...messages.flatMap((message) => [message.createdAt, message.completedAt]),
+    explicitTurn?.providerReasoning?.updatedAt
+  ], startedAt);
+  const status = explicitTurn?.status ?? statusForMessages(messages, finalAnswer);
+  const completedAt = isTerminalTurnStatus(status)
+    ? maximumTimestamp([
+        explicitTurn?.completedAt,
+        ...messages.map((message) => message.completedAt),
+        explicitTurn?.providerReasoning?.completedAt,
+        updatedAt
+      ], updatedAt)
+    : undefined;
+  const processNodes = buildProcessNodes(messages, explicitTurn?.processNodes ?? [], copy);
+  const currentNode = status === "waiting_for_user"
+    ? undefined
+    : processNodes.slice().reverse().find((node) => node.status === "running");
+  const completedSteps = explicitTurn?.summary?.completedSteps
+    ?? processNodes.filter((node) => node.status === "completed" || node.status === "skipped").length;
+  const toolCount = explicitTurn?.summary?.toolCount ?? countTools(messages, processNodes);
+  const durationMs = explicitTurn?.summary?.durationMs
+    ?? Math.max(0, (completedAt ?? updatedAt) - startedAt);
+  const runId = messages.find((message) => message.runId)?.runId ?? "";
+  const turnId = explicitTurn?.turnId
+    ?? messages.find((message) => message.turnId)?.turnId
+    ?? runId;
+  const requiresAttention = messages.some((message) =>
+    ATTENTION_PROCESS_STATUSES.has(message.status ?? "")
+  ) || processNodes.some((node) => node.status === "failed" || node.status === "cancelled");
+
+  return {
+    key,
+    runId,
+    turnId,
+    status,
+    messages,
+    messageIndices: [...indices],
+    processMessages,
+    processIndices,
+    processNodes,
+    ...(explicitTurn?.providerReasoning
+      ? { providerReasoning: explicitTurn.providerReasoning }
+      : {}),
+    interactionRecords: mergeInteractionRecords(
+      explicitTurn?.interactionRecords ?? [],
+      messages.flatMap((message) =>
+        message.interactionRecord ? [message.interactionRecord] : []
+      )
+    ),
+    ...(finalAnswer ? { finalAnswer } : {}),
+    ...(finalAnswerIndex === undefined ? {} : { finalAnswerIndex }),
+    anchorIndex: indices[0],
+    startedAt,
+    updatedAt,
+    ...(completedAt === undefined ? {} : { completedAt }),
+    durationMs,
+    completedSteps,
+    toolCount,
+    ...(currentNode ? { currentNodeId: currentNode.nodeId } : {}),
+    failed: status === "failed",
+    requiresAttention
+  };
+}
+
+function buildProcessNodes(
+  messages: readonly ChatMessage[],
+  explicitNodes: readonly Readonly<EchoInkTurnProcessNode>[],
+  copy: ConversationCopy
+): Readonly<EchoInkTurnProcessNode>[] {
+  const nodes: EchoInkTurnProcessNode[] = explicitNodes.map((node) => ({ ...node }));
+  const nodeIds = new Set(nodes.map((node) => node.nodeId));
+  const representedMessageIds = new Set(nodes.flatMap((node) =>
+    node.sourceMessageId ? [node.sourceMessageId] : []
+  ));
+  const representedToolActivityIds = new Set<string>();
+  for (const node of explicitNodes) {
+    if (node.toolCallId) {
+      representedToolActivityIds.add(reasoningToolActivityId(node.toolCallId));
+    }
+  }
+  for (const message of messages) {
+    const toolCallId = toolCallIdForMessage(message);
+    if (toolCallId) representedToolActivityIds.add(reasoningToolActivityId(toolCallId));
+  }
+
+  for (const message of messages) {
+    if (message.reasoningSummary && !representedMessageIds.has(message.id)) {
+      for (const activity of message.reasoningSummary.activities) {
+        if (
+          activity.kind === "tool"
+          && representedToolActivityIds.has(activity.id)
+        ) continue;
+        const node = nodeForReasoningActivity(message, activity, copy);
+        if (!nodeIds.has(node.nodeId)) {
+          nodes.push(node);
+          nodeIds.add(node.nodeId);
+        }
+      }
+      if (!message.reasoningSummary.activities.length) {
+        const node = nodeForMessage(message, copy);
+        if (node && !nodeIds.has(node.nodeId)) {
+          nodes.push(node);
+          nodeIds.add(node.nodeId);
+        }
+      }
+    } else if (!representedMessageIds.has(message.id)) {
+      const node = nodeForMessage(message, copy);
+      if (node && !nodeIds.has(node.nodeId)) {
+        nodes.push(node);
+        nodeIds.add(node.nodeId);
+      }
+    }
+
+    for (const node of knowledgeNodesForMessage(message, copy)) {
+      if (!nodeIds.has(node.nodeId)) {
+        nodes.push(node);
+        nodeIds.add(node.nodeId);
+      }
+    }
+  }
+
+  const explicitTurn = latestExplicitTurn(messages);
+  if (explicitTurn?.providerReasoning) {
+    const reasoning = explicitTurn.providerReasoning;
+    const nodeId = `provider-reasoning:${reasoning.reasoningId}`;
+    if (!nodeIds.has(nodeId)) {
+      nodes.push({
+        nodeId,
+        kind: "reasoning",
+        status: providerReasoningNodeStatus(reasoning.status),
+        title: copy.process.reasoningTitle,
+        summary: reasoning.status === "running"
+          ? copy.process.providerReasoningRunning
+          : reasoning.durationMs === undefined
+            ? copy.process.providerReasoningEnded
+            : copy.process.providerReasoningDuration(formatAgentTurnDurationValue(reasoning.durationMs)),
+        startedAt: reasoning.startedAt,
+        updatedAt: reasoning.updatedAt,
+        ...(reasoning.completedAt === undefined ? {} : { completedAt: reasoning.completedAt })
+      });
+      nodeIds.add(nodeId);
+    }
+  }
+
+  for (const record of explicitTurn?.interactionRecords ?? []) {
+    const nodeId = `interaction:${record.interactionId}`;
+    if (nodeIds.has(nodeId)) continue;
+    nodes.push({
+      nodeId,
+      kind: "interaction",
+      status: record.outcome === "failed"
+        ? "failed"
+        : record.outcome === "cancelled" || record.outcome === "denied" || record.outcome === "expired"
+          ? "cancelled"
+          : "completed",
+      title: record.kind === "question"
+        ? copy.process.questionAnswered
+        : copy.process.interactionOutcome(record.outcome),
+      summary: record.summary,
+      startedAt: record.updatedAt,
+      updatedAt: record.updatedAt,
+      completedAt: record.updatedAt,
+      interactionId: record.interactionId
+    });
+    nodeIds.add(nodeId);
+  }
+
+  return nodes
+    .map((node, index) => ({ node, index }))
+    .sort((left, right) =>
+      left.node.startedAt - right.node.startedAt
+      || left.node.updatedAt - right.node.updatedAt
+      || left.index - right.index
+    )
+    .map(({ node }) => Object.freeze({ ...node }));
+}
+
+function nodeForMessage(
+  message: ChatMessage,
+  copy: ConversationCopy
+): EchoInkTurnProcessNode | null {
+  const kind = nodeKindForMessage(message);
+  if (!kind) return null;
+  const toolCallId = toolCallIdForMessage(message);
+  const status = processNodeStatus(message.status);
+  const updatedAt = finiteTimestamp(message.completedAt) ?? finiteTimestamp(message.createdAt) ?? 0;
+  return {
+    nodeId: message.interactionRecord
+      ? `interaction:${message.interactionRecord.interactionId}`
+      : `message:${message.id}`,
+    kind,
+    status,
+    title: processNodeTitle(message, kind, copy),
+    ...(message.details?.trim() ? { summary: message.details.trim() } : {}),
+    startedAt: finiteTimestamp(message.createdAt) ?? updatedAt,
+    updatedAt,
+    ...(status === "running" || status === "waiting" ? {} : { completedAt: updatedAt }),
+    sourceMessageId: message.id,
+    ...(toolCallId ? { toolCallId } : {}),
+    ...(message.taskPlan?.planId ? { taskPlanId: message.taskPlan.planId } : {}),
+    ...(message.interactionRecord
+      ? { interactionId: message.interactionRecord.interactionId }
+      : {})
+  };
+}
+
+function knowledgeNodesForMessage(
+  message: ChatMessage,
+  copy: ConversationCopy
+): EchoInkTurnProcessNode[] {
+  const usage = knowledgeUsageMessageData(message);
+  const nodes: EchoInkTurnProcessNode[] = [];
+  const sourceKeys = new Set<string>();
+  for (const citation of message.citations?.citations ?? []) {
+    sourceKeys.add(`vault:${citation.path}`);
+  }
+  for (const reference of usage.references) {
+    sourceKeys.add(`vault:${reference.vaultRelativePath}`);
+  }
+  for (const source of usage.personalMemorySources) {
+    sourceKeys.add(`memory:${source.id}`);
+  }
+  const sourceCount = sourceKeys.size;
+  if (sourceCount > 0 || message.citations || usage.askSourceAttribution) {
+    nodes.push({
+      nodeId: `sources:${message.id}`,
+      kind: "retrieval",
+      status: processNodeStatus(message.status),
+      title: copy.process.sourcesTitle,
+      summary: sourceCount > 0
+        ? copy.process.verifiableSources(sourceCount)
+        : copy.process.noDisplayableSources,
+      startedAt: finiteTimestamp(message.createdAt) ?? 0,
+      updatedAt: finiteTimestamp(message.completedAt) ?? finiteTimestamp(message.createdAt) ?? 0,
+      sourceMessageId: message.id
+    });
+  }
+  if (usage.producedPaths.length) {
+    nodes.push({
+      nodeId: `artifacts:${message.id}`,
+      kind: "artifact",
+      status: processNodeStatus(message.status),
+      title: copy.process.artifactsTitle,
+      summary: copy.process.fileCount(usage.producedPaths.length),
+      startedAt: finiteTimestamp(message.createdAt) ?? 0,
+      updatedAt: finiteTimestamp(message.completedAt) ?? finiteTimestamp(message.createdAt) ?? 0,
+      sourceMessageId: message.id
+    });
+  }
+  return nodes;
+}
+
+function nodeForReasoningActivity(
+  message: ChatMessage,
+  activity: Readonly<EchoInkReasoningActivity>,
+  copy: ConversationCopy
+): EchoInkTurnProcessNode {
+  const kind = reasoningActivityNodeKind(activity.kind);
+  const summary = reasoningActivitySummary(activity, copy);
+  return {
+    nodeId: `process-activity:${message.id}:${activity.id}`,
+    kind,
+    status: reasoningActivityNodeStatus(activity.status),
+    title: reasoningActivityTitle(activity, copy),
+    ...(summary ? { summary } : {}),
+    startedAt: activity.startedAt,
+    updatedAt: activity.updatedAt,
+    ...(activity.status === "active" ? {} : { completedAt: activity.updatedAt }),
+    sourceMessageId: message.id
+  };
+}
+
+function nodeKindForMessage(message: ChatMessage): EchoInkTurnProcessNodeKind | null {
+  if (message.interactionRecord || message.itemType === "interactionRecord") return "interaction";
+  if (message.taskPlan || message.itemType === "taskPlan" || message.itemType === "plan") return "task";
+  if (message.itemType === "fileChange") return "diff";
+  if (message.itemType === "knowledgeBase") return "artifact";
+  if (message.processKind === "search" || message.processKind === "view") return "retrieval";
+  if (
+    message.role === "tool"
+    || message.itemType === "commandExecution"
+    || message.itemType === "mcpToolCall"
+    || message.itemType === "dynamicToolCall"
+    || message.itemType === "collabAgentToolCall"
+  ) return "tool";
+  if (message.itemType === "thinking" || message.itemType === "reasoning" || message.itemType === "contextCompaction") {
+    return "process";
+  }
+  return null;
+}
+
+function processNodeTitle(
+  message: ChatMessage,
+  kind: EchoInkTurnProcessNodeKind,
+  copy: ConversationCopy
+): string {
+  if (message.taskPlan) return message.taskPlan.title;
+  if (message.reasoningSummary) return copy.message.thinking;
+  if (message.interactionRecord) {
+    return message.interactionRecord.kind === "question"
+      ? copy.process.questionAnswered
+      : copy.process.interactionOutcome(message.interactionRecord.outcome);
+  }
+  return copy.process.fallbackTitle(kind);
+}
+
+function mergeInteractionRecords(
+  left: readonly Readonly<EchoInkTurnInteractionRecord>[],
+  right: readonly Readonly<EchoInkTurnInteractionRecord>[]
+): readonly Readonly<EchoInkTurnInteractionRecord>[] {
+  const records = new Map<string, Readonly<EchoInkTurnInteractionRecord>>();
+  for (const record of [...left, ...right]) {
+    const previous = records.get(record.interactionId);
+    if (!previous || previous.updatedAt <= record.updatedAt) {
+      records.set(record.interactionId, record);
+    }
+  }
+  return Object.freeze([...records.values()].sort((a, b) =>
+    a.updatedAt - b.updatedAt
+  ));
+}
+
+function statusForMessages(
+  messages: readonly ChatMessage[],
+  finalAnswer: ChatMessage | undefined
+): EchoInkAssistantTurnStatus {
+  const statuses = messages
+    .filter((message) => !isSupersededEmptyAnswer(message, finalAnswer))
+    .map((message) => message.status ?? "");
+  if (statuses.some((status) => WAITING_USER_STATUSES.has(status))) return "waiting_for_user";
+  if (statuses.some((status) => ACTIVE_STATUSES.has(status))) return "running";
+  if (statuses.some((status) => FAILED_STATUSES.has(status))) return "failed";
+  if (statuses.some((status) => CANCELLED_STATUSES.has(status))) return "cancelled";
+  if (statuses.some((status) => INTERRUPTED_STATUSES.has(status))) return "interrupted";
+  if (finalAnswer || messages.some(isAgentTurnTerminalMessage)) return "completed";
+  return "preparing";
+}
+
+function isSupersededEmptyAnswer(
+  message: ChatMessage,
+  finalAnswer: ChatMessage | undefined
+): boolean {
+  if (!finalAnswer || message === finalAnswer || !isAgentAnswerMessage(message)) return false;
+  return ACTIVE_STATUSES.has(message.status ?? "")
+    && !(message.text || message.previewText || "").trim();
+}
+
+function processNodeStatus(status: string | undefined): EchoInkTurnProcessNodeStatus {
+  if (WAITING_USER_STATUSES.has(status ?? "")) return "waiting";
+  if (ACTIVE_STATUSES.has(status ?? "")) return "running";
+  if (FAILED_STATUSES.has(status ?? "")) return "failed";
+  if (CANCELLED_STATUSES.has(status ?? "") || INTERRUPTED_STATUSES.has(status ?? "")) return "cancelled";
+  if (status === "pending") return "waiting";
+  return "completed";
+}
+
+function providerReasoningNodeStatus(
+  status: EchoInkProviderReasoningSnapshot["status"]
+): EchoInkTurnProcessNodeStatus {
+  if (status === "running") return "running";
+  if (status === "failed") return "failed";
+  if (status === "cancelled" || status === "interrupted") return "cancelled";
+  return "completed";
+}
+
+function reasoningActivityNodeKind(
+  kind: EchoInkReasoningActivity["kind"]
+): EchoInkTurnProcessNodeKind {
+  if (kind === "knowledge" || kind === "memory") return "retrieval";
+  if (kind === "task") return "task";
+  if (kind === "tool") return "tool";
+  // Legacy provider lifecycle telemetry is Process, never public Reasoning.
+  return "process";
+}
+
+function reasoningActivityNodeStatus(
+  status: EchoInkReasoningActivity["status"]
+): EchoInkTurnProcessNodeStatus {
+  if (status === "active") return "running";
+  if (status === "failed") return "failed";
+  if (status === "cancelled" || status === "interrupted") return "cancelled";
+  return "completed";
+}
+
+function reasoningActivityTitle(
+  activity: Readonly<EchoInkReasoningActivity>,
+  copy: ConversationCopy
+): string {
+  return copy.process.activityTitle(activity.kind, activity.name);
+}
+
+function reasoningActivitySummary(
+  activity: Readonly<EchoInkReasoningActivity>,
+  copy: ConversationCopy
+): string {
+  const count = typeof activity.current === "number" && typeof activity.total === "number"
+    ? `${activity.current}/${activity.total}`
+    : typeof activity.completed === "number"
+      ? copy.process.activityCompleted(activity.completed)
+      : "";
+  const stage = activity.stage ? copy.process.activityStage(activity.stage) : "";
+  return [stage, count].filter(Boolean).join(" · ");
+}
+
+function countTools(
+  messages: readonly ChatMessage[],
+  nodes: readonly Readonly<EchoInkTurnProcessNode>[]
+): number {
+  const toolMessages = messages.filter(isToolMessage);
+  const messageIds = new Set(toolMessages.map((message) => message.id));
+  const toolIds = new Set(toolMessages.map((message) => {
+    const toolCallId = toolCallIdForMessage(message);
+    return toolCallId ? `tool:${toolCallId}` : `message:${message.id}`;
+  }));
+  for (const node of nodes) {
+    if (node.kind !== "tool" && node.kind !== "diff") continue;
+    if (node.sourceMessageId && messageIds.has(node.sourceMessageId)) continue;
+    toolIds.add(node.toolCallId ? `tool:${node.toolCallId}` : `node:${node.nodeId}`);
+  }
+  return toolIds.size;
+}
+
+function toolCallIdForMessage(message: ChatMessage): string | undefined {
+  if (!isToolMessage(message)) return undefined;
+  return piToolCallIdFromProjectedMessageId(message.id);
+}
+
+function reasoningToolActivityId(toolCallId: string): string {
+  return stableHashedIdentity("reasoning-tool", toolCallId);
+}
+
+function isToolMessage(message: ChatMessage): boolean {
+  return message.role === "tool"
+    || message.itemType === "commandExecution"
+    || message.itemType === "fileChange"
+    || message.itemType === "mcpToolCall"
+    || message.itemType === "dynamicToolCall"
+    || message.itemType === "collabAgentToolCall";
+}
+
+function latestExplicitTurn(messages: readonly ChatMessage[]) {
+  return messages
+    .flatMap((message) => message.assistantTurn ? [message.assistantTurn] : [])
+    .sort((left, right) => right.updatedAt - left.updatedAt)[0];
+}
+
+function explicitFinalAnswerIndex(
+  messages: readonly ChatMessage[],
+  indices: readonly number[],
+  messageId: string | undefined
+): number | undefined {
+  if (!messageId) return undefined;
+  return indices.find((index) => messages[index].id === messageId);
+}
+
+function implicitFinalAnswerIndex(
+  messages: readonly ChatMessage[],
+  indices: readonly number[]
+): number | undefined {
+  const answerIndices = indices.filter((index) => isAgentAnswerMessage(messages[index]));
+  const meaningful = answerIndices.slice().reverse().find((index) => {
+    const message = messages[index];
+    return Boolean((message.text || message.previewText || "").trim())
+      || !ACTIVE_STATUSES.has(message.status ?? "");
+  });
+  return meaningful ?? answerIndices[answerIndices.length - 1];
+}
+
+function isAssistantTurnMember(message: ChatMessage): boolean {
+  if (message.role === "user") return false;
+  return Boolean(agentTurnKey(message));
 }
 
 function agentTurnKey(message: ChatMessage): string {
@@ -181,15 +752,44 @@ function lastMatchingAnswerIndex(messages: ChatMessage[], key: string): number {
   return -1;
 }
 
-function hasForeignTurnBetween(messages: ChatMessage[], startIndex: number, endIndex: number, key: string): boolean {
+function hasForeignTurnBetween(
+  messages: ChatMessage[],
+  startIndex: number,
+  endIndex: number,
+  key: string
+): boolean {
   for (let index = startIndex; index <= endIndex; index += 1) {
     const message = messages[index];
+    if (message.role === "user") return true;
     const candidate = agentTurnKey(message);
-    if (candidate && candidate !== key && (message.role === "user" || isAgentTurnTerminalMessage(message) || isAgentProcessItemType(message.itemType))) return true;
+    if (candidate && candidate !== key && isAssistantTurnMember(message)) return true;
+    if (!candidate && message.role === "assistant" && isAgentTurnTerminalMessage(message)) return true;
   }
   return false;
 }
 
-function isFiniteTimestamp(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+function formatAgentTurnDurationValue(durationMs: number): string {
+  const totalSeconds = Math.max(1, Math.round(Math.max(0, durationMs) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h ${String(minutes).padStart(2, "0")}m ${String(seconds).padStart(2, "0")}s`;
+  if (minutes > 0) return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+  return `${seconds}s`;
+}
+
+function minimumTimestamp(values: readonly unknown[]): number {
+  const timestamps = values.map(finiteTimestamp).filter((value): value is number => value !== undefined);
+  return timestamps.length ? Math.min(...timestamps) : 0;
+}
+
+function maximumTimestamp(values: readonly unknown[], fallback: number): number {
+  const timestamps = values.map(finiteTimestamp).filter((value): value is number => value !== undefined);
+  return timestamps.length ? Math.max(...timestamps) : fallback;
+}
+
+function finiteTimestamp(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : undefined;
 }

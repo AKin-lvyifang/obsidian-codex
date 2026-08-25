@@ -1,4 +1,8 @@
-export type EchoInkAnimateIconName = "upload" | "send" | "mic";
+export type EchoInkAnimateIconName =
+  | "upload"
+  | "send-horizontal"
+  | "circle-stop"
+  | "mic";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -33,10 +37,18 @@ export function renderAnimateIcon(
       path("M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4", "echoink-animate-upload-tray")
     );
     svg.append(group);
-  } else if (name === "send") {
+  } else if (name === "send-horizontal") {
     svg.append(
-      path("M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z"),
-      path("m21.854 2.147-10.94 10.939")
+      path(
+        "M3.714 3.048a.498.498 0 0 0-.683.627l2.843 7.627a2 2 0 0 1 0 1.396l-2.842 7.627a.498.498 0 0 0 .682.627l18-8.5a.5.5 0 0 0 0-.904z",
+        "echoink-animate-send-horizontal-shell"
+      ),
+      path("M6 12h16", "echoink-animate-send-horizontal-line")
+    );
+  } else if (name === "circle-stop") {
+    svg.append(
+      circle("12", "12", "10", "echoink-animate-circle-stop-ring"),
+      rect("9", "9", "6", "6", "1", "echoink-animate-circle-stop-symbol")
     );
   } else {
     svg.append(
@@ -57,9 +69,29 @@ function path(data: string, className?: string): SVGPathElement {
   return element;
 }
 
-function rect(x: string, y: string, width: string, height: string, rx: string): SVGRectElement {
+function circle(
+  cx: string,
+  cy: string,
+  r: string,
+  className?: string
+): SVGCircleElement {
+  const element = document.createElementNS(SVG_NS, "circle");
+  setAttributes(element, { cx, cy, r });
+  if (className) element.setAttribute("class", className);
+  return element;
+}
+
+function rect(
+  x: string,
+  y: string,
+  width: string,
+  height: string,
+  rx: string,
+  className?: string
+): SVGRectElement {
   const element = document.createElementNS(SVG_NS, "rect");
   setAttributes(element, { x, y, width, height, rx });
+  if (className) element.setAttribute("class", className);
   return element;
 }
 

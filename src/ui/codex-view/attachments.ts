@@ -4,6 +4,7 @@ import { extractClipboardImageFiles, saveClipboardImageAttachments } from "../..
 import type { StoredAttachment } from "../../settings/settings";
 import type { EchoInkResource } from "../../resources/types";
 import { renderComposerAttachments } from "./composer";
+import { createAttachmentResourceResolver } from "./attachment-resource";
 import { absoluteVaultPath, isImagePath } from "./workspace-utils";
 
 export interface CodexAttachmentHost {
@@ -19,7 +20,14 @@ export interface CodexAttachmentHost {
 
 export function renderAttachmentsView(host: CodexAttachmentHost): void {
   if (!host.attachmentsEl) return;
-  renderComposerAttachments(host.attachmentsEl, { selectedSkill: host.selectedSkill, attachments: host.attachments }, {
+  renderComposerAttachments(host.attachmentsEl, {
+    selectedSkill: host.selectedSkill,
+    attachments: host.attachments,
+    attachmentResolver: createAttachmentResourceResolver(
+      host.app,
+      host.plugin.getVaultPath()
+    )
+  }, {
     onRemoveSkill: () => {
       host.selectedSkill = null;
       host.renderAttachments();
@@ -41,7 +49,8 @@ export function attachActiveFile(host: CodexAttachmentHost): void {
   host.attachments.push({
     type: classifyLocalAttachmentType(file.path),
     name: file.name,
-    path: absoluteVaultPath(host.plugin.getVaultPath(), file.path)
+    path: absoluteVaultPath(host.plugin.getVaultPath(), file.path),
+    availability: "available"
   });
   host.renderAttachments();
 }
@@ -60,7 +69,8 @@ export function pickFiles(host: CodexAttachmentHost, imagesOnly: boolean): void 
         type: classifyLocalAttachmentType(filePath, file.type),
         name: file.name,
         path: filePath,
-        ...(file.type ? { mimeType: file.type } : {})
+        ...(file.type ? { mimeType: file.type } : {}),
+        availability: "available"
       });
     }
     host.renderAttachments();
@@ -102,7 +112,8 @@ export function handleDroppedFiles(host: CodexAttachmentHost, event: DragEvent):
       type: classifyLocalAttachmentType(filePath, file.type),
       name: file.name,
       path: filePath,
-      ...(file.type ? { mimeType: file.type } : {})
+      ...(file.type ? { mimeType: file.type } : {}),
+      availability: "available"
     });
   }
   host.renderAttachments();

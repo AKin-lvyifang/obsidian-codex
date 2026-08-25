@@ -1,40 +1,59 @@
-import type { ChatMessage, DiffSummary } from "../../settings/settings";
+import type { ChatMessage, DiffSummary, SettingsLanguage } from "../../settings/settings";
+import {
+  conversationCopy,
+  type ConversationActionKind,
+  type ConversationActionStatus,
+  type ConversationCopy,
+  type ConversationToolAction
+} from "../../settings/i18n";
 import type { ProcessFileRef } from "../../types/app-server";
 
-export type ActionGroupKind =
-  | "read"
-  | "search"
-  | "command"
-  | "edit"
-  | "tool"
-  | "agent"
-  | "plan"
-  | "verify"
-  | "system";
+export type ActionGroupKind = ConversationActionKind;
 
-export type ActionStatus =
-  | "running"
-  | "waiting_approval"
-  | "approved"
-  | "verifying"
-  | "completed"
-  | "failed"
-  | "denied"
-  | "uncertain"
-  | "blocked"
-  | "canceled"
-  | "unconfirmed"
-  | "interrupted"
-  | "recovery-pending"
-  | "recovery-blocked";
+export type ActionStatus = ConversationActionStatus;
+
+export interface ActionSearchResultViewModel {
+  path?: string;
+  title?: string;
+  excerpt?: string;
+}
+
+export interface ActionParameterViewModel {
+  label: string;
+  value: string;
+}
+
+export interface ActionUserDetailsViewModel {
+  action: ConversationToolAction;
+  targetPath?: string;
+  sourcePath?: string;
+  destinationPath?: string;
+  preview?: string;
+  query?: string;
+  scopePath?: string;
+  resultCount?: number;
+  results?: ActionSearchResultViewModel[];
+  command?: string;
+  stdout?: string;
+  stderr?: string;
+  result?: string;
+  error?: string;
+  deleteOutcome?: "recoverable" | "completed";
+  parameters?: ActionParameterViewModel[];
+}
 
 export interface ActionItemViewModel {
   id: string;
   kind: ActionGroupKind;
+  toolId?: string;
+  toolAction?: ConversationToolAction;
   title: string;
+  target?: string;
   detail?: string;
+  userDetails?: ActionUserDetailsViewModel;
   status: ActionStatus;
   createdAt: number;
+  durationMs?: number;
   file?: ProcessFileRef;
   files?: ProcessFileRef[];
   diff?: {
@@ -73,17 +92,16 @@ export interface ActionTimelineViewModel {
   groups: ActionGroupViewModel[];
 }
 
-const COUNT_LABELS: Record<ActionGroupKind, string> = {
-  read: "读取",
-  search: "搜索",
-  command: "命令",
-  edit: "编辑",
-  tool: "工具",
-  agent: "智能体",
-  plan: "计划",
-  verify: "验证",
-  system: "系统"
-};
+const TOOL_ACTION_BY_ID: Readonly<Record<string, ConversationToolAction>> = Object.freeze({
+  vault_search: "search",
+  note_read: "read",
+  note_create: "create",
+  note_update: "edit",
+  metadata_update: "edit",
+  note_move: "move",
+  note_delete: "delete",
+  bash: "command"
+});
 
 export function isActionTimelineItem(message: Pick<ChatMessage, "itemType" | "role">): boolean {
   if (message.itemType === "knowledgeBase") return false;
@@ -99,8 +117,12 @@ export function isActionTimelineItem(message: Pick<ChatMessage, "itemType" | "ro
   );
 }
 
-export function buildActionTimeline(messages: ChatMessage[]): ActionTimelineViewModel {
-  const items = messages.filter(isActionTimelineItem).map(toActionItem);
+export function buildActionTimeline(
+  messages: ChatMessage[],
+  language: SettingsLanguage = "zh-CN"
+): ActionTimelineViewModel {
+  const copy = conversationCopy(language);
+  const items = messages.filter(isActionTimelineItem).map((message) => toActionItem(message, copy));
   const groups: ActionGroupViewModel[] = [];
   for (const item of items) {
     const previous = groups[groups.length - 1];
@@ -108,14 +130,14 @@ export function buildActionTimeline(messages: ChatMessage[]): ActionTimelineView
       previous.items.push(item);
       previous.count = previous.items.length;
       previous.status = statusForItems(previous.items);
-      previous.title = titleForGroup(previous.kind, previous.items);
+      previous.title = titleForGroup(previous.kind, previous.items, copy);
       continue;
     }
     groups.push({
       id: actionGroupId(item),
       runId: item.source.runId ?? "",
       kind: item.kind,
-      title: titleForGroup(item.kind, [item]),
+      title: titleForGroup(item.kind, [item], copy),
       status: item.status,
       count: 1,
       items: [item],
@@ -125,37 +147,50 @@ export function buildActionTimeline(messages: ChatMessage[]): ActionTimelineView
   applyDefaultExpanded(groups);
   const runId = items.find((item) => item.source.runId)?.source.runId ?? "";
   const runStatus = statusForItems(items);
-  const countLabelsValue = countLabels(items);
+  const countLabelsValue = countLabels(items, copy);
   return {
     stateId: actionTimelineStateId(items),
     runId,
     runStatus,
-    summaryTitle: actionSummaryTitle(items.length, runStatus),
+    summaryTitle: copy.action.summary(items.length, runStatus),
     summaryDetail: countLabelsValue.join(" · "),
-    activeLabel: activeLabelForItems(items, runStatus),
+    activeLabel: activeLabelForItems(items, runStatus, copy),
     totalCount: items.length,
     countLabels: countLabelsValue,
     groups
   };
 }
 
-function toActionItem(message: ChatMessage): ActionItemViewModel {
-  const kind = actionKindForMessage(message);
-  const commandSummary = kind === "command" ? commandSummaryForMessage(message) : "";
+function toActionItem(message: ChatMessage, copy: ConversationCopy): ActionItemViewModel {
+  const toolId = toolIdForMessage(message);
+  const toolAction = toolActionForMessage(message, toolId);
+  const kind = actionKindForMessage(message, toolAction);
+  const userDetails = toolAction
+    ? buildActionUserDetails(message, toolAction)
+    : undefined;
+  const commandSummary = kind === "command"
+    ? userDetails?.command || commandSummaryForMessage(message)
+    : "";
   const diff = diffForMessage(message.diffSummary);
+  const target = actionTargetForMessage(message, toolId, toolAction, userDetails, commandSummary);
   return {
     id: message.id,
     kind,
-    title: actionTitleForMessage(message, kind, commandSummary),
+    ...(toolId ? { toolId } : {}),
+    ...(toolAction ? { toolAction } : {}),
+    title: actionTitleForMessage(message, kind, target, copy),
+    ...(target ? { target } : {}),
     detail: message.details || undefined,
+    ...(userDetails ? { userDetails } : {}),
     status: normalizeStatus(message.status),
     createdAt: message.createdAt,
+    durationMs: reliableDurationMs(message),
     file: primaryFileForMessage(message),
     files: message.files,
     diff,
     command: kind === "command"
       ? {
-        summary: commandSummary || message.details || message.title || "命令",
+        summary: commandSummary || message.details || message.title || copy.action.commandFallback,
         rawRef: message.rawRef
       }
       : undefined,
@@ -164,7 +199,347 @@ function toActionItem(message: ChatMessage): ActionItemViewModel {
   };
 }
 
-function actionKindForMessage(message: ChatMessage): ActionGroupKind {
+function toolIdForMessage(message: ChatMessage): string | undefined {
+  if (
+    message.role !== "tool"
+    && message.itemType !== "commandExecution"
+    && message.itemType !== "fileChange"
+    && message.itemType !== "mcpToolCall"
+    && message.itemType !== "dynamicToolCall"
+    && message.itemType !== "collabAgentToolCall"
+  ) return undefined;
+  let candidate = message.title?.trim() ?? "";
+  for (const prefix of ["使用工具：", "使用工具:", "调用工具：", "调用工具:", "Use tool:", "Called tool:"]) {
+    if (!candidate.startsWith(prefix)) continue;
+    candidate = candidate.slice(prefix.length).trim();
+    break;
+  }
+  if (!/^[a-z0-9][a-z0-9._:/-]*$/iu.test(candidate)) return undefined;
+  return candidate.toLowerCase();
+}
+
+function toolActionForMessage(
+  message: ChatMessage,
+  toolId: string | undefined
+): ConversationToolAction | undefined {
+  if (toolId) return TOOL_ACTION_BY_ID[toolId] ?? "call";
+  if (message.itemType === "commandExecution") return "command";
+  if (message.itemType === "fileChange") return "edit";
+  if (
+    message.role === "tool"
+    || message.itemType === "mcpToolCall"
+    || message.itemType === "dynamicToolCall"
+  ) {
+    if (message.processKind === "search") return "search";
+    if (message.processKind === "view") return "read";
+    return "call";
+  }
+  return undefined;
+}
+
+function buildActionUserDetails(
+  message: ChatMessage,
+  action: ConversationToolAction
+): ActionUserDetailsViewModel {
+  const input = parseDisplayPayload(message.processInput);
+  const output = parseDisplayPayload(message.processOutput);
+  const approvalTarget = parseDisplayPayload(message.approval?.target);
+  const inputRecord = plainRecord(input);
+  const outputRecord = plainRecord(output);
+  const approvalRecord = plainRecord(approvalTarget);
+  const filePath = firstNonEmpty([
+    stringField(inputRecord, "relativePath", "path"),
+    stringField(approvalRecord, "relativePath", "path", "targetPath"),
+    stringField(outputRecord, "targetPath", "sourcePath", "relativePath", "path"),
+    message.diffSummary?.files[0]?.path,
+    message.files?.[0]?.path
+  ]);
+  const error = actionError(message, output);
+
+  if (action === "search") {
+    const results = searchResults(outputRecord);
+    const query = firstNonEmpty([
+      stringField(inputRecord, "query"),
+      stringField(outputRecord, "query")
+    ]);
+    const scopePath = firstNonEmpty([
+      stringField(inputRecord, "scopePath"),
+      stringField(outputRecord, "scopePath")
+    ]);
+    return {
+      action,
+      ...(query ? { query } : {}),
+      ...(scopePath ? { scopePath } : {}),
+      ...(Array.isArray(outputRecord?.items) ? { resultCount: results.length } : {}),
+      ...(results.length ? { results } : {}),
+      ...(error ? { error } : {})
+    };
+  }
+
+  if (action === "move") {
+    const sourcePath = firstNonEmpty([
+      stringField(inputRecord, "sourcePath", "relativePath", "path"),
+      stringField(outputRecord, "sourcePath"),
+      message.diffSummary?.files[0]?.previousPath
+    ]);
+    const destinationPath = firstNonEmpty([
+      stringField(inputRecord, "targetPath"),
+      stringField(outputRecord, "targetPath"),
+      message.diffSummary?.files[0]?.path
+    ]);
+    return {
+      action,
+      ...(sourcePath ? { sourcePath } : {}),
+      ...(destinationPath ? { destinationPath } : {}),
+      ...(error ? { error } : {})
+    };
+  }
+
+  if (action === "delete") {
+    const sourcePath = firstNonEmpty([
+      stringField(inputRecord, "relativePath", "sourcePath", "path"),
+      stringField(outputRecord, "sourcePath", "relativePath", "path"),
+      message.diffSummary?.files[0]?.previousPath,
+      message.diffSummary?.files[0]?.path,
+      message.files?.[0]?.path
+    ]);
+    return {
+      action,
+      ...(sourcePath ? { sourcePath, targetPath: sourcePath } : {}),
+      ...(deleteOutcome(outputRecord) ? { deleteOutcome: deleteOutcome(outputRecord)! } : {}),
+      ...(error ? { error } : {})
+    };
+  }
+
+  if (action === "command") {
+    const command = firstNonEmpty([
+      stringField(inputRecord, "command", "cmd", "script"),
+      typeof input === "string" ? input : undefined
+    ]);
+    const stdout = firstNonEmpty([
+      stringField(outputRecord, "stdout", "output", "text"),
+      !outputRecord && typeof output === "string" && !error ? output : undefined
+    ]);
+    const stderr = firstNonEmpty([
+      stringField(outputRecord, "stderr"),
+      stringField(plainRecord(outputRecord?.error), "stderr")
+    ]);
+    return {
+      action,
+      ...(command ? { command } : {}),
+      ...(stdout ? { stdout } : {}),
+      ...(stderr ? { stderr } : {}),
+      ...(error ? { error } : {})
+    };
+  }
+
+  if (action === "create" || action === "edit") {
+    const content = stringField(inputRecord, "content", "text");
+    const metadataPreview = action === "edit"
+      ? readableMetadataPreview(inputRecord?.patch)
+      : undefined;
+    return {
+      action,
+      ...(filePath ? { targetPath: filePath } : {}),
+      ...(content ? { preview: content } : metadataPreview ? { preview: metadataPreview } : {}),
+      ...(error ? { error } : {})
+    };
+  }
+
+  if (action === "read") {
+    return {
+      action,
+      ...(filePath ? { targetPath: filePath } : {}),
+      ...(error ? { error } : {})
+    };
+  }
+
+  const result = readableResult(output, outputRecord, error);
+  const parameters = readableParameters(inputRecord);
+  return {
+    action,
+    ...(filePath ? { targetPath: filePath } : {}),
+    ...(parameters.length ? { parameters } : {}),
+    ...(result ? { result } : {}),
+    ...(error ? { error } : {})
+  };
+}
+
+function actionTargetForMessage(
+  message: ChatMessage,
+  toolId: string | undefined,
+  action: ConversationToolAction | undefined,
+  details: ActionUserDetailsViewModel | undefined,
+  commandSummary: string
+): string {
+  if (action === "command") return details?.command || commandSummary;
+  if (action === "move") return details?.destinationPath || details?.sourcePath || "";
+  if (action === "delete") return details?.sourcePath || "";
+  if (action === "search") return details?.query || toolId || "";
+  if (action === "call" && toolId) return toolId;
+  if (details?.targetPath) return details.targetPath;
+  if (message.diffSummary?.files[0]?.path) return message.diffSummary.files[0].path;
+  if (message.files?.[0]) {
+    const file = message.files[0];
+    return file.name || file.displayPath || file.path;
+  }
+  if (action && toolId) return toolId;
+  return "";
+}
+
+function parseDisplayPayload(value: string | undefined): unknown {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    return trimmed;
+  }
+}
+
+function plainRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function stringField(
+  record: Record<string, unknown> | undefined,
+  ...keys: string[]
+): string | undefined {
+  if (!record) return undefined;
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+function firstNonEmpty(values: Array<string | undefined>): string {
+  return values.find((value) => Boolean(value?.trim()))?.trim() ?? "";
+}
+
+function searchResults(
+  record: Record<string, unknown> | undefined
+): ActionSearchResultViewModel[] {
+  if (!Array.isArray(record?.items)) return [];
+  return record.items.flatMap((candidate) => {
+    const item = plainRecord(candidate);
+    if (!item) return [];
+    const path = stringField(item, "relativePath", "path");
+    const title = stringField(item, "title", "name");
+    const excerpt = stringField(item, "excerpt", "summary", "text");
+    if (!path && !title && !excerpt) return [];
+    return [{
+      ...(path ? { path } : {}),
+      ...(title ? { title } : {}),
+      ...(excerpt ? { excerpt } : {})
+    }];
+  });
+}
+
+function actionError(message: ChatMessage, output: unknown): string | undefined {
+  if (message.status !== "failed" && message.status !== "error") return undefined;
+  const outputRecord = plainRecord(output);
+  const errorValue = outputRecord?.error;
+  const errorRecord = plainRecord(errorValue);
+  return firstNonEmpty([
+    typeof errorValue === "string" ? errorValue : undefined,
+    stringField(errorRecord, "message", "reason", "code"),
+    stringField(outputRecord, "message", "reason"),
+    typeof output === "string" ? output : undefined,
+    message.text,
+    message.details
+  ]) || undefined;
+}
+
+function deleteOutcome(
+  output: Record<string, unknown> | undefined
+): "recoverable" | "completed" | undefined {
+  if (!output) return undefined;
+  const readback = plainRecord(output.readback);
+  const trash = plainRecord(readback?.trash);
+  if (trash?.kind === "obsidian_recoverable") return "recoverable";
+  if (output.status === "completed") return "completed";
+  return undefined;
+}
+
+function readableMetadataPreview(value: unknown): string | undefined {
+  const lines: string[] = [];
+  collectReadableEntries(value, "", lines);
+  return lines.length ? lines.slice(0, 12).join("\n") : undefined;
+}
+
+function collectReadableEntries(value: unknown, prefix: string, lines: string[]): void {
+  if (lines.length >= 12) return;
+  const record = plainRecord(value);
+  if (record) {
+    for (const [key, nested] of Object.entries(record)) {
+      collectReadableEntries(nested, prefix ? `${prefix}.${key}` : key, lines);
+      if (lines.length >= 12) break;
+    }
+    return;
+  }
+  const formatted = readableScalar(value);
+  if (prefix && formatted) lines.push(`${prefix}: ${formatted}`);
+}
+
+function readableParameters(
+  record: Record<string, unknown> | undefined
+): ActionParameterViewModel[] {
+  if (!record) return [];
+  const hidden = new Set([
+    "content",
+    "expectedVersion",
+    "operationIdentity",
+    "readbackVerified",
+    "authorizationId",
+    "productRunId",
+    "piSessionId",
+    "toolCallId"
+  ]);
+  return Object.entries(record).flatMap(([label, value]) => {
+    if (hidden.has(label)) return [];
+    const readable = readableScalar(value);
+    return readable ? [{ label, value: readable }] : [];
+  }).slice(0, 6);
+}
+
+function readableScalar(value: unknown): string | undefined {
+  if (typeof value === "string") return value.trim() || undefined;
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
+    return String(value);
+  }
+  if (Array.isArray(value) && value.every((item) =>
+    typeof item === "string" || typeof item === "number" || typeof item === "boolean"
+  )) return value.map(String).join(", ");
+  return undefined;
+}
+
+function readableResult(
+  output: unknown,
+  record: Record<string, unknown> | undefined,
+  error: string | undefined
+): string | undefined {
+  if (error) return undefined;
+  if (typeof output === "string") return output.trim() || undefined;
+  return stringField(record, "summary", "message", "text", "output", "result");
+}
+
+function actionKindForMessage(
+  message: ChatMessage,
+  toolAction?: ConversationToolAction
+): ActionGroupKind {
+  if (toolAction === "search") return "search";
+  if (toolAction === "read") return "read";
+  if (toolAction === "command") return "command";
+  if (
+    toolAction === "create"
+    || toolAction === "edit"
+    || toolAction === "move"
+    || toolAction === "delete"
+  ) return "edit";
+  if (toolAction === "call") return "tool";
   if (message.itemType === "contextCompaction") return "system";
   if (message.itemType === "plan" || message.processKind === "plan") return "plan";
   if (message.itemType === "fileChange" || message.processKind === "edit") return "edit";
@@ -176,28 +551,20 @@ function actionKindForMessage(message: ChatMessage): ActionGroupKind {
   return "system";
 }
 
-function actionTitleForMessage(message: ChatMessage, kind: ActionGroupKind, commandSummary: string): string {
-  if (kind === "command" && commandSummary) return `已运行 ${commandSummary}`;
-  if (kind === "edit" && message.diffSummary?.files.length === 1) return `已编辑 ${message.diffSummary.files[0].path}`;
-  if (kind === "read" && message.files?.[0]) return `已读取 ${message.files[0].name}`;
-  if (kind === "search") return message.details || message.title || "已搜索";
-  if (kind === "agent") return message.status === "failed" || message.status === "error" ? "创建智能体失败" : message.title || "智能体动作";
-  return message.title || fallbackActionTitle(kind);
-}
-
-function fallbackActionTitle(kind: ActionGroupKind): string {
-  const labels: Record<ActionGroupKind, string> = {
-    read: "已读取文件",
-    search: "已搜索",
-    command: "已运行命令",
-    edit: "已编辑文件",
-    tool: "已调用工具",
-    agent: "智能体动作",
-    plan: "更新计划",
-    verify: "运行验证",
-    system: "系统动作"
-  };
-  return labels[kind];
+function actionTitleForMessage(
+  message: ChatMessage,
+  kind: ActionGroupKind,
+  target: string,
+  copy: ConversationCopy
+): string {
+  if (target) return target;
+  if (kind === "tool") return message.title || copy.action.fallbackTitle(kind);
+  if (kind === "agent") {
+    return message.status === "failed" || message.status === "error"
+      ? copy.action.agentFailed
+      : message.title || copy.action.agentFallback;
+  }
+  return message.title || copy.action.fallbackTitle(kind);
 }
 
 function canAppendToGroup(group: ActionGroupViewModel, item: ActionItemViewModel): boolean {
@@ -278,24 +645,11 @@ function actionTimelineStateId(items: ActionItemViewModel[]): string {
   return `run:${first?.id ?? "empty"}`;
 }
 
-function actionSummaryTitle(count: number, status: ActionStatus = "completed"): string {
-  if (status === "running") return `正在处理 ${count} 个动作`;
-  if (status === "waiting_approval") return `${count} 个动作等待确认`;
-  if (status === "approved") return `${count} 个动作已批准`;
-  if (status === "verifying") return `${count} 个动作正在验证`;
-  if (status === "recovery-pending") return `${count} 个动作等待恢复`;
-  if (status === "recovery-blocked") return `${count} 个动作恢复受阻`;
-  if (status === "failed") return `${count} 个动作失败`;
-  if (status === "denied") return `${count} 个动作已拒绝`;
-  if (status === "uncertain") return `${count} 个动作结果不确定`;
-  if (status === "blocked") return `${count} 个动作等待确认`;
-  if (status === "unconfirmed") return `${count} 个动作状态未回传`;
-  if (status === "interrupted") return `${count} 个动作已中断`;
-  if (status === "canceled") return `${count} 个动作已取消`;
-  return count === 1 ? "已处理 1 个动作" : `已处理 ${count} 个动作`;
-}
-
-function activeLabelForItems(items: ActionItemViewModel[], status: ActionStatus): string {
+function activeLabelForItems(
+  items: ActionItemViewModel[],
+  status: ActionStatus,
+  copy: ConversationCopy
+): string {
   const active = items.slice().reverse().find((item) =>
     item.status === "running"
     || item.status === "waiting_approval"
@@ -310,7 +664,7 @@ function activeLabelForItems(items: ActionItemViewModel[], status: ActionStatus)
   if (!active) return "";
   if (status === "failed") {
     const failed = items.slice().reverse().find((item) => item.status === "failed") ?? active;
-    return liveLabelForItem(failed, "failed");
+    return liveLabelForItem(failed, "failed", copy);
   }
   if (
     status === "running"
@@ -320,47 +674,34 @@ function activeLabelForItems(items: ActionItemViewModel[], status: ActionStatus)
     || status === "denied"
     || status === "uncertain"
     || status === "blocked"
-  ) return liveLabelForItem(active, status);
-  if (status === "recovery-pending") return "等待恢复上次维护过程";
-  if (status === "recovery-blocked") return "上次维护恢复受阻";
-  if (status === "unconfirmed") return "工具状态未回传";
-  if (status === "interrupted") return "过程已中断";
-  if (status === "canceled") return "过程已取消";
-  return actionSummaryTitle(items.length, status);
+  ) return liveLabelForItem(active, status, copy);
+  if (status === "recovery-pending") return copy.action.recoveryPending;
+  if (status === "recovery-blocked") return copy.action.recoveryBlocked;
+  if (status === "unconfirmed") return copy.action.statusUnconfirmed;
+  if (status === "interrupted") return copy.action.processInterrupted;
+  if (status === "canceled") return copy.action.processCancelled;
+  return copy.action.summary(items.length, status);
 }
 
-function liveLabelForItem(item: ActionItemViewModel, status: ActionStatus): string {
+function liveLabelForItem(
+  item: ActionItemViewModel,
+  status: ActionStatus,
+  copy: ConversationCopy
+): string {
   const target = actionTarget(item);
-  const suffix = target ? ` ${target}` : "";
-  if (status === "failed") {
-    if (item.kind === "command") return `命令失败${suffix}`;
-    if (item.kind === "edit") return `文件改动失败${suffix}`;
-    if (item.kind === "agent") return `智能体动作失败${suffix}`;
-    return `动作失败${suffix}`;
-  }
-  if (status === "waiting_approval") return `等待确认${suffix}`;
-  if (status === "approved") return `已批准，等待执行${suffix}`;
-  if (status === "verifying") return `正在核对结果${suffix}`;
-  if (status === "denied") return `已拒绝${suffix}`;
-  if (status === "uncertain") return `结果不确定${suffix}`;
-  if (status === "blocked") return `等待确认${suffix}`;
-  if (item.kind === "read") return `正在读取${suffix}`;
-  if (item.kind === "search") return `正在检索${suffix}`;
-  if (item.kind === "command") return `正在运行${suffix}`;
-  if (item.kind === "edit") return `正在整理文件改动${suffix}`;
-  if (item.kind === "tool") return `正在调用工具${suffix}`;
-  if (item.kind === "agent") return `正在等待智能体${suffix}`;
-  if (item.kind === "plan") return "正在更新计划";
-  if (item.kind === "verify") return `正在验证${suffix}`;
-  return `正在处理${suffix}`;
+  return copy.action.active(item.kind, status, target);
 }
 
 function actionTarget(item: ActionItemViewModel): string {
+  if (item.target) return trimActionTarget(item.target);
   if (item.kind === "command" && item.command?.summary) return trimActionTarget(item.command.summary);
   if (item.kind === "edit" && item.source.diffSummary?.files.length) return trimActionTarget(item.source.diffSummary.files[0].path);
   if (item.file) return trimActionTarget(item.file.name || item.file.displayPath || item.file.path);
   if (item.detail) return trimActionTarget(item.detail);
-  if (item.title) return trimActionTarget(item.title.replace(/^已运行\s+/, "").replace(/^已读取\s+/, ""));
+  if (item.title) {
+    return trimActionTarget(item.title
+      .replace(/^(?:已运行|已读取|Ran|Read)\s+/u, ""));
+  }
   return "";
 }
 
@@ -369,35 +710,29 @@ function trimActionTarget(value: string): string {
   return normalized.length > 64 ? `${normalized.slice(0, 63)}…` : normalized;
 }
 
-function countLabels(items: ActionItemViewModel[]): string[] {
+function countLabels(items: ActionItemViewModel[], copy: ConversationCopy): string[] {
   const counts = new Map<ActionGroupKind, number>();
   for (const item of items) counts.set(item.kind, (counts.get(item.kind) ?? 0) + 1);
-  return (Object.keys(COUNT_LABELS) as ActionGroupKind[])
+  const kinds: ActionGroupKind[] = ["read", "search", "command", "edit", "tool", "agent", "plan", "verify", "system"];
+  return kinds
     .filter((kind) => counts.has(kind))
-    .map((kind) => `${COUNT_LABELS[kind]} ${counts.get(kind)}`);
+    .map((kind) => copy.action.countLabel(kind, counts.get(kind) ?? 0));
 }
 
-function titleForGroup(kind: ActionGroupKind, items: ActionItemViewModel[]): string {
+function titleForGroup(
+  kind: ActionGroupKind,
+  items: ActionItemViewModel[],
+  copy: ConversationCopy
+): string {
   const count = items.length;
   const status = statusForItems(items);
-  const label = COUNT_LABELS[kind];
-  if (status === "unconfirmed") return count === 1 ? `${label}状态未回传` : `${label}状态未回传（${count}）`;
-  if (status === "interrupted" || status === "canceled") return count === 1 ? `${label}已中断` : `${label}已中断（${count}）`;
-  if (kind === "read") {
-    const fileCount = uniqueFileCount(items);
-    return `已读取 ${fileCount || count} 个文件`;
-  }
-  if (kind === "search") return `搜索了 ${count} 次`;
-  if (kind === "command") return count > 1 ? "运行了多个命令" : "已运行命令";
-  if (kind === "edit") {
-    const fileCount = uniqueFileCount(items);
-    return `已编辑 ${fileCount || count} 个文件`;
-  }
-  if (kind === "tool") return `调用了 ${count} 个工具`;
-  if (kind === "agent") return items.some((item) => item.status === "failed") ? `创建失败 ${count} 个智能体` : `处理了 ${count} 个智能体动作`;
-  if (kind === "plan") return count === 1 ? "更新了计划" : `更新了 ${count} 次计划`;
-  if (kind === "verify") return `运行了 ${count} 个验证`;
-  return count === 1 ? "系统动作" : `${count} 个系统动作`;
+  return copy.action.groupTitle(
+    kind,
+    status,
+    count,
+    uniqueFileCount(items),
+    items.some((item) => item.status === "failed")
+  );
 }
 
 function uniqueFileCount(items: ActionItemViewModel[]): number {
@@ -423,8 +758,21 @@ function primaryFileForMessage(message: ChatMessage): ProcessFileRef | undefined
 function commandSummaryForMessage(message: ChatMessage): string {
   const text = message.details || message.text || "";
   const firstLine = text.split(/\r?\n/)[0]?.trim() ?? "";
-  const withoutPrefix = firstLine.replace(/^已运行\s+/, "").replace(/^\$\s*/, "");
+  const withoutPrefix = firstLine.replace(/^(?:已运行|Ran)\s+/u, "").replace(/^\$\s*/, "");
   return withoutPrefix.length > 96 ? `${withoutPrefix.slice(0, 95)}…` : withoutPrefix;
+}
+
+function reliableDurationMs(message: Pick<ChatMessage, "createdAt" | "completedAt">): number | undefined {
+  const startedAt = message.createdAt;
+  const completedAt = message.completedAt;
+  if (
+    !Number.isFinite(startedAt)
+    || startedAt <= 0
+    || typeof completedAt !== "number"
+    || !Number.isFinite(completedAt)
+    || completedAt < startedAt
+  ) return undefined;
+  return completedAt - startedAt;
 }
 
 function actionGroupId(item: ActionItemViewModel): string {
