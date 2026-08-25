@@ -61,6 +61,12 @@ export interface StoredPiImageAttachmentMetadata {
   readonly availability?: "available" | "unavailable";
 }
 
+/** Display-only metadata for a user-selected whole-note mention. */
+export interface NoteMentionReference {
+  readonly vaultRelativePath: string;
+  readonly fileName: string;
+}
+
 export type StoredPiImageAttachmentsByEntry = Readonly<
   Record<string, readonly Readonly<StoredPiImageAttachmentMetadata>[]>
 >;
@@ -169,6 +175,8 @@ export interface ChatMessage {
   askSourceAttribution?: true;
   /** Display-only primary Memory ids and titles; never Memory bodies or prompts. */
   personalMemorySources?: readonly PersonalMemorySourceReference[];
+  /** Display-only note mention metadata; note bodies remain in Pi Session. */
+  noteMentions?: readonly NoteMentionReference[];
   knowledgeBaseUi?: KnowledgeBaseMessageUiPayload;
   attachments?: StoredAttachment[];
   files?: ProcessFileRef[];

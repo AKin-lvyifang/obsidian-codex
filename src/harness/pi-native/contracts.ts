@@ -329,6 +329,8 @@ export interface PiChatSubmitRequest {
   submittedAt: number;
   /** Ordered Pi-ready image content paired with local-only display metadata. */
   images?: readonly Readonly<PiChatPreparedImage>[];
+  /** Ordered whole-note snapshots frozen for this exact submitted turn. */
+  noteMentions?: readonly Readonly<PiChatNoteMention>[];
   /** The composer mode captured for this exact queued turn. */
   mode?: PiChatMode;
   /** Exact per-turn selection to map to Pi's Provider thinking level. */
@@ -339,6 +341,12 @@ export interface PiChatSubmitRequest {
   /** A durable queued draft explicitly selected by the user for resubmission. */
   draftId?: string;
   maintenanceScope?: PiKnowledgeMaintenanceScope;
+}
+
+export interface PiChatNoteMention {
+  readonly vaultRelativePath: string;
+  readonly fileName: string;
+  readonly content: string;
 }
 
 export interface PiChatPreparedImage {

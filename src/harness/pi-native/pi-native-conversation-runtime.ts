@@ -49,6 +49,7 @@ import type {
   PiChatRunHandle,
   PiChatRuntimeEvent,
   PiChatRuntimeEventListener,
+  PiChatNoteMention,
   PiChatSubmitRequest,
   PiChatPreparedImage,
   PiConversationCatalogEntry,
@@ -71,6 +72,7 @@ import type {
   PiTaskPlanTransitionResult
 } from "./contracts";
 import { PI_IMAGE_INPUT_UNSUPPORTED_MESSAGE } from "./contracts";
+import { normalizePiChatNoteMentions } from "./pi-note-mentions";
 import type { PersonalMemorySourceReference } from "../../settings/settings";
 import { latestPiContextLedger } from "./pi-context-budget";
 import {
@@ -169,6 +171,7 @@ export interface PiNativeAgentSessionFactoryInput {
   }>;
   currentKnowledgeTurnContext(): Readonly<PiNativeKnowledgeTurnContext> | null;
   currentMemoryTurnContext?(): Readonly<PiNativeMemoryTurnContext> | null;
+  currentNoteMentionTurnContext?(): Readonly<PiNativeNoteMentionTurnContext> | null;
   currentTaskPlanTurnContext(): Readonly<PiNativeTaskPlanTurnContext> | null;
   reportInteractionRequested?(
     interaction: Readonly<EchoInkTurnInteraction>
@@ -199,6 +202,10 @@ export interface PiNativeMemoryTurnContext {
   readonly projectId?: string;
   readonly query: string;
   readonly recentConversation?: readonly string[];
+}
+
+export interface PiNativeNoteMentionTurnContext {
+  readonly noteMentions: readonly Readonly<PiChatNoteMention>[];
 }
 
 export function knowledgeWorkflowAllowsPersonalMemory(
@@ -418,6 +425,7 @@ interface ActiveProductRun {
   projectId?: string;
   mode: PiChatMode;
   memoryMode: PiConversationMemoryMode;
+  noteMentions: readonly Readonly<PiChatNoteMention>[];
   memoryRecall?: PiMemoryRecallObservation;
   providerStartedAt?: number;
   firstAssistantTextSeen: boolean;
@@ -1040,6 +1048,7 @@ export class PiNativeConversationRuntime {
     this.assertConversationNotRecovering(request.conversationId);
     assertValidSkillBinding(request);
     const promptImages = normalizePiChatPreparedImages(request.images);
+    const noteMentions = normalizePiChatNoteMentions(request.noteMentions);
     const mode = normalizePiChatMode(request.mode);
     let catalog = await this.catalog.get(request.conversationId);
     if (!catalog) {
@@ -1128,6 +1137,7 @@ export class PiNativeConversationRuntime {
       ...(projectId ? { projectId } : {}),
       mode,
       memoryMode,
+      noteMentions,
       firstAssistantTextSeen: false,
       providerReasoningId: stableId("provider-reasoning", productRunId),
       providerReasoningText: "",
@@ -2061,6 +2071,12 @@ export class PiNativeConversationRuntime {
             .filter(Boolean)
             .slice(-6))
         });
+      },
+      currentNoteMentionTurnContext: () => {
+        const noteMentions = holder.active?.currentRun?.noteMentions ?? [];
+        return noteMentions.length
+          ? Object.freeze({ noteMentions })
+          : null;
       },
       currentTaskPlanTurnContext: () => {
         const active = holder.active;

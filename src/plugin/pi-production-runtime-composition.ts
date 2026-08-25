@@ -47,8 +47,10 @@ import {
   type PiNativeAgentSessionFactoryResult,
   type PiNativeKnowledgeTurnContext,
   type PiNativeMemoryTurnContext,
+  type PiNativeNoteMentionTurnContext,
   type PiNativeTaskPlanTurnContext
 } from "../harness/pi-native/pi-native-conversation-runtime";
+import { buildPiNoteMentionContextMessage } from "../harness/pi-native/pi-note-mentions";
 import type {
   PiKnowledgeMaintenanceToolPort,
   PiKnowledgeReference,
@@ -763,6 +765,7 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
   vaultSecurity: InlineExtension;
   currentTurn(): Readonly<PiNativeKnowledgeTurnContext> | null;
   currentMemoryTurn?(): Readonly<PiNativeMemoryTurnContext> | null;
+  currentNoteMentionTurn?(): Readonly<PiNativeNoteMentionTurnContext> | null;
   currentTaskPlanTurn?(): Readonly<PiNativeTaskPlanTurnContext> | null;
   personalMemory?: Pick<PersonalMemoryRepository, "loadFixedContext"> & Readonly<{
     prepareTurnContext?(input: Readonly<{
@@ -811,6 +814,12 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
     hidden: true,
     factory: async (pi) => {
       await vaultFactory(pi);
+      pi.on("before_agent_start", async () => {
+        const turn = input.currentNoteMentionTurn?.() ?? null;
+        if (!turn) return undefined;
+        const message = buildPiNoteMentionContextMessage(turn.noteMentions);
+        return message ? { message } : undefined;
+      });
       // Pi persists before_agent_start messages. Stage request-only context
       // here, then deliver it through the non-persistent context event below.
       let transientTurnContext: AgentMessage | null = null;
@@ -1549,6 +1558,8 @@ async function createProductionAgentSession(input: {
     vaultSecurity: security.inlineExtension,
     currentTurn: () => input.input.currentKnowledgeTurnContext(),
     currentMemoryTurn: () => input.input.currentMemoryTurnContext?.() ?? null,
+    currentNoteMentionTurn: () =>
+      input.input.currentNoteMentionTurnContext?.() ?? null,
     currentTaskPlanTurn: () => input.input.currentTaskPlanTurnContext(),
     personalMemory: {
       loadFixedContext: (request) => input.personalMemory.loadFixedContext(request),

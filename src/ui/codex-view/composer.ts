@@ -24,6 +24,12 @@ import {
   markAIElementsAttachmentItem,
   markAIElementsAttachments
 } from "./smooth-chat-ui";
+import {
+  handleComposerNoteMentionKeyDown,
+  reconcileComposerNoteMentionMenuAtCursor,
+  type NoteMentionCatalogEntry,
+  type NoteMentionSelection
+} from "./note-mentions";
 
 let knowledgeCommandMenuId = 0;
 
@@ -35,6 +41,7 @@ export interface ComposerShellRefs {
   promptEnhanceReviewEl: HTMLElement;
   skillMenuEl: HTMLElement;
   knowledgeCommandMenuEl: HTMLElement;
+  noteMentionMenuEl: HTMLElement;
   resourcePanelEl: HTMLElement;
   toolbarEl: HTMLElement;
 }
@@ -82,6 +89,7 @@ export interface ComposerResourcePanelState {
   resources: EchoInkResource[];
   resourceSettings: Pick<EchoInkResourceSettings, "mcpConnections">;
   language: "zh-CN" | "en";
+  canAttachActiveFile: boolean;
 }
 
 export interface ComposerResourcePanelCallbacks {
@@ -136,12 +144,14 @@ export interface TurnQueueCallbacks {
 
 export interface ComposerAttachmentsState {
   selectedSkill: EchoInkResource | null;
+  noteMentions: readonly Readonly<NoteMentionSelection>[];
   attachments: StoredAttachment[];
   attachmentResolver: EchoInkAttachmentResourceResolver;
 }
 
 export interface ComposerAttachmentsCallbacks {
   onRemoveSkill: () => void;
+  onRemoveNoteMention: (vaultRelativePath: string) => void;
   onRemoveAttachment: (path: string) => void;
 }
 
@@ -181,10 +191,25 @@ export function renderComposerShell(rootEl: HTMLElement, callbacks: ComposerShel
       "aria-hidden": "true"
     }
   });
+  const noteMentionMenuId = `${commandMenuId}-note-mentions`;
+  const noteMentionMenuEl = inputWrap.createDiv({
+    cls: "codex-composer-resource-panel codex-note-mention-menu",
+    attr: {
+      id: noteMentionMenuId,
+      role: "listbox",
+      "aria-label": "提及笔记",
+      "aria-hidden": "true"
+    }
+  });
   const toolbarEl = inputWrap.createDiv({ cls: "codex-toolbar" });
   inputEl.addEventListener("input", callbacks.onInputChanged);
+  inputEl.addEventListener("selectionchange", () => {
+    reconcileComposerNoteMentionMenuAtCursor(inputEl);
+  });
   inputEl.addEventListener("paste", callbacks.onPasteFiles);
   inputEl.addEventListener("keydown", (event) => {
+    if (event.isComposing || event.keyCode === 229) return;
+    if (handleComposerNoteMentionKeyDown(event, inputEl)) return;
     if (handleKnowledgeCommandMenuKeyDown(event, inputEl, knowledgeCommandMenuEl)) return;
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
@@ -210,9 +235,67 @@ export function renderComposerShell(rootEl: HTMLElement, callbacks: ComposerShel
     promptEnhanceReviewEl,
     skillMenuEl,
     knowledgeCommandMenuEl,
+    noteMentionMenuEl,
     resourcePanelEl,
     toolbarEl
   };
+}
+
+export function renderComposerNoteMentionMenu(
+  container: HTMLElement,
+  input: HTMLTextAreaElement,
+  state: Readonly<{
+    open: boolean;
+    results: readonly Readonly<NoteMentionCatalogEntry>[];
+    activeIndex: number;
+    loading?: boolean;
+  }>,
+  callbacks: Readonly<{
+    onSelect: (entry: Readonly<NoteMentionCatalogEntry>) => void;
+  }>
+): void {
+  container.empty();
+  container.toggleClass("is-visible", state.open);
+  container.setAttribute("aria-hidden", String(!state.open));
+  if (!state.open) return;
+  input.setAttribute("aria-expanded", "true");
+  input.setAttribute("aria-controls", container.id);
+  if (state.loading) {
+    input.removeAttribute("aria-activedescendant");
+    container.createDiv({ cls: "codex-note-mention-empty", text: "正在读取笔记…" });
+    return;
+  }
+  if (!state.results.length) {
+    input.removeAttribute("aria-activedescendant");
+    container.createDiv({ cls: "codex-note-mention-empty", text: "没有匹配的笔记" });
+    return;
+  }
+  for (const [index, entry] of state.results.entries()) {
+    const optionId = `${container.id}-option-${index}`;
+    const row = container.createEl("button", {
+      cls: `codex-composer-resource-row codex-note-mention-option${index === state.activeIndex ? " is-active" : ""}`,
+      attr: {
+        id: optionId,
+        type: "button",
+        role: "option",
+        tabindex: "-1",
+        "aria-selected": String(index === state.activeIndex),
+        title: entry.fileName
+      }
+    });
+    const icon = row.createSpan({
+      cls: "codex-composer-resource-icon",
+      attr: { "aria-hidden": "true" }
+    });
+    setIcon(icon, "file-text");
+    row.createSpan({ cls: "codex-composer-resource-name", text: entry.fileName });
+    row.onpointerdown = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      callbacks.onSelect(entry);
+    };
+    if (index === state.activeIndex) input.setAttribute("aria-activedescendant", optionId);
+  }
 }
 
 export function renderPromptEnhanceReview(container: HTMLElement, callbacks: { onRestore: () => void }): void {
@@ -369,7 +452,16 @@ export function renderComposerResourcePanel(
 
   const addGroup = createResourcePanelGroup(container, "添加");
   createResourcePanelRow(addGroup, "paperclip", "文件和文件夹", "", () => callbacks.onPickFiles(false));
-  createResourcePanelRow(addGroup, "file-text", "添加当前笔记", "", callbacks.onAttachActiveFile);
+  createResourcePanelRow(
+    addGroup,
+    "file-text",
+    "添加当前笔记",
+    state.canAttachActiveFile ? "" : "没有当前显示的 Markdown 笔记",
+    callbacks.onAttachActiveFile,
+    false,
+    "",
+    !state.canAttachActiveFile
+  );
   createResourcePanelRow(
     addGroup,
     "lightbulb",
@@ -426,7 +518,9 @@ export function renderComposerResourcePanel(
       return;
     }
     if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
-    const rows = Array.from(container.querySelectorAll<HTMLButtonElement>(".codex-composer-resource-row"));
+    const rows = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(".codex-composer-resource-row")
+    ).filter((row) => !row.disabled);
     if (!rows.length) return;
     event.preventDefault();
     const current = rows.indexOf(container.ownerDocument.activeElement as HTMLButtonElement);
@@ -454,12 +548,14 @@ function createResourcePanelRow(
   description: string,
   onActivate: () => void,
   active = false,
-  extraClass = ""
+  extraClass = "",
+  disabled = false
 ): HTMLButtonElement {
   const row = container.createEl("button", {
     cls: `codex-composer-resource-row${active ? " is-active" : ""}${extraClass ? ` ${extraClass}` : ""}`,
     attr: { type: "button", role: "menuitem" }
   });
+  row.disabled = disabled;
   const icon = row.createSpan({ cls: "codex-composer-resource-icon", attr: { "aria-hidden": "true" } });
   setIcon(icon, iconName);
   row.createSpan({ cls: "codex-composer-resource-name", text: label });
@@ -808,7 +904,10 @@ function piDraftSourceLabel(
 
 export function renderComposerAttachments(container: HTMLElement, state: ComposerAttachmentsState, callbacks: ComposerAttachmentsCallbacks): void {
   container.empty();
-  container.toggleClass("is-empty", !state.selectedSkill && state.attachments.length === 0);
+  container.toggleClass(
+    "is-empty",
+    !state.selectedSkill && state.noteMentions.length === 0 && state.attachments.length === 0
+  );
   if (state.selectedSkill) {
     const chip = container.createDiv({ cls: "codex-skill-token" });
     const icon = chip.createSpan({ cls: "codex-skill-token-icon" });
@@ -817,6 +916,34 @@ export function renderComposerAttachments(container: HTMLElement, state: Compose
     const remove = chip.createEl("button", { attr: { type: "button", "aria-label": `移除 Skill：${state.selectedSkill.name}`, title: "移除 Skill" } });
     setIcon(remove, "x");
     remove.onclick = callbacks.onRemoveSkill;
+  }
+  if (state.noteMentions.length) {
+    const mentions = container.createDiv({
+      cls: "codex-note-mention-chips",
+      attr: { role: "list", "aria-label": "待发送笔记提及" }
+    });
+    for (const mention of state.noteMentions) {
+      const chip = mentions.createDiv({
+        cls: "codex-note-mention-chip",
+        attr: { role: "listitem" }
+      });
+      const icon = chip.createSpan({
+        cls: "codex-note-mention-chip-icon",
+        attr: { "aria-hidden": "true" }
+      });
+      setIcon(icon, "file-text");
+      chip.createSpan({ cls: "codex-note-mention-chip-name", text: mention.fileName });
+      const remove = chip.createEl("button", {
+        cls: "codex-note-mention-chip-remove",
+        attr: {
+          type: "button",
+          "aria-label": `移除笔记：${mention.fileName}`,
+          title: `移除 ${mention.fileName}`
+        }
+      });
+      setIcon(remove, "x");
+      remove.onclick = () => callbacks.onRemoveNoteMention(mention.vaultRelativePath);
+    }
   }
   if (!state.attachments.length) return;
   const list = container.createDiv({ cls: "codex-ai-elements-attachments-list" });
@@ -1094,7 +1221,8 @@ function composerActionButtonView(action: ReturnType<typeof composerPrimaryActio
 }
 
 function queuedTurnPreview(item: QueuedTurnItem): string {
-  const text = item.text.trim() || (item.attachments.length ? "(附件)" : "");
+  const text = item.text.trim()
+    || (item.noteMentions?.length ? "(笔记提及)" : item.attachments.length ? "(附件)" : "");
   return text.length > 80 ? `${text.slice(0, 80)}...` : text;
 }
 
@@ -1106,5 +1234,6 @@ function queuedTurnMeta(item: QueuedTurnItem): string {
   ];
   if (item.skill) parts.push(`Skill ${item.skill.name}`);
   if (item.attachments.length) parts.push(`${item.attachments.length} 个附件`);
+  if (item.noteMentions?.length) parts.push(`${item.noteMentions.length} 篇笔记`);
   return parts.join(" · ");
 }

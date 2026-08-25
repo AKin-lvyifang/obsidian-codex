@@ -30,6 +30,7 @@ import {
   createReasoningSummary,
   updateReasoningActivity
 } from "../../harness/pi-native/pi-reasoning-summary";
+import { buildPiNoteMentionContextMessage } from "../../harness/pi-native/pi-note-mentions";
 
 export async function runPiChatUiProjectorTests(): Promise<void> {
   assertReasoningSummariesProjectStableAndPrivate();
@@ -38,6 +39,7 @@ export async function runPiChatUiProjectorTests(): Promise<void> {
   assertAskSourceAttributionDecorationsAreTruthfulAndIsolated();
   assertDurableBranchRebuildsExistingUiCardsAndHidesReasoning();
   assertImageUserEntriesProjectWithoutPayloadDuplication();
+  assertHiddenNoteMentionContextProjectsOntoItsUserMessage();
   assertLiveEventsMergeUntilTheProductSettlementBoundary();
   assertKnowledgeProgressAndToolPayloadsStayPrivate();
   assertKnowledgeMaintenanceResultCardIsLiveDurableAndStrict();
@@ -48,6 +50,43 @@ export async function runPiChatUiProjectorTests(): Promise<void> {
   assertPhaseTwoWriteTerminalStatesRemainDistinct();
   assertSessionRunAndBranchScopesDoNotCross();
   assertInterruptedReadbackNeverPretendsTheRunCompleted();
+}
+
+function assertHiddenNoteMentionContextProjectsOntoItsUserMessage(): void {
+  const projector = new PiChatUiProjector();
+  const hidden = buildPiNoteMentionContextMessage([{
+    vaultRelativePath: "projects/项目复盘.md",
+    fileName: "项目复盘.md",
+    content: "PRIVATE_WHOLE_NOTE_BODY"
+  }])!;
+  const projected = projector.projectSessionBranch({
+    piSessionId: "session-note-mentions",
+    activeLeafId: "assistant-note-mentions",
+    entries: [
+      messageEntry("user-note-mentions", null, 1, {
+        role: "user",
+        content: "请总结"
+      }),
+      messageEntry("context-note-mentions", "user-note-mentions", 2, hidden),
+      messageEntry("assistant-note-mentions", "context-note-mentions", 3, {
+        role: "assistant",
+        content: "公开回答"
+      })
+    ],
+    runState: "completed",
+    productRunId: "run-note-mentions",
+    now: 4
+  });
+  const user = projected.messages.find((message) => message.role === "user");
+  assert.deepEqual(user?.noteMentions, [{
+    vaultRelativePath: "projects/项目复盘.md",
+    fileName: "项目复盘.md"
+  }]);
+  assert.equal(projected.messages.some((message) =>
+    message.text.includes("PRIVATE_WHOLE_NOTE_BODY")
+  ), false, "hidden whole-note context never becomes a visible transcript message");
+  assert.equal(user?.askSourceAttribution, undefined,
+    "user note mentions are not projected as Knowledge attribution");
 }
 
 function assertReasoningSummariesProjectStableAndPrivate(): void {

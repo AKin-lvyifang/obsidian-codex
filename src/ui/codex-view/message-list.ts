@@ -807,6 +807,12 @@ export class CodexMessageListRenderer {
         });
       }
     }
+    if (message.noteMentions?.length) {
+      this.renderUserNoteMentionChips(
+        bodyHost.createDiv({ cls: "codex-message-note-mentions" }),
+        message.noteMentions
+      );
+    }
     if (message.attachments?.length) {
       this.renderUserAttachmentChips(
         bodyHost.createDiv({ cls: "codex-message-attachments" }),
@@ -2489,6 +2495,53 @@ export class CodexMessageListRenderer {
         void this.openAttachment(attachment, resource.resourceUri);
       };
     }
+  }
+
+  private renderUserNoteMentionChips(
+    container: HTMLElement,
+    noteMentions: NonNullable<ChatMessage["noteMentions"]>
+  ): void {
+    container.addClass("codex-note-mention-chips");
+    container.setAttribute("role", "list");
+    container.setAttribute("aria-label", "消息中的笔记提及");
+    for (const mention of noteMentions) {
+      const chip = container.createEl("button", {
+        cls: "codex-note-mention-chip codex-message-note-mention-chip",
+        attr: {
+          type: "button",
+          role: "listitem",
+          title: `打开 ${mention.fileName}`,
+          "aria-label": `打开笔记：${mention.fileName}`
+        }
+      });
+      const icon = chip.createSpan({
+        cls: "codex-note-mention-chip-icon",
+        attr: { "aria-hidden": "true" }
+      });
+      setIcon(icon, "file-text");
+      chip.createSpan({
+        cls: "codex-note-mention-chip-name",
+        text: mention.fileName
+      });
+      chip.onclick = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        void this.openMentionedNote(mention.vaultRelativePath, mention.fileName);
+      };
+    }
+  }
+
+  private async openMentionedNote(
+    vaultRelativePath: string,
+    fileName: string
+  ): Promise<void> {
+    const env = this.requireEnv();
+    const file = env.app.vault.getAbstractFileByPath(normalizePath(vaultRelativePath));
+    if (!(file instanceof TFile)) {
+      new Notice(`找不到笔记：${fileName}`);
+      return;
+    }
+    await env.app.workspace.getLeaf("tab").openFile(file, { active: true });
   }
 
   private async openAttachment(

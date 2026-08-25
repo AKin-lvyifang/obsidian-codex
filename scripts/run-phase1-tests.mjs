@@ -25,6 +25,7 @@ await esbuild.build({
       'import { runMessageListIdentityTests } from "./src/tests/message-list-identity";',
       'import { runSmoothConversationUiTests } from "./src/tests/smooth-conversation-ui";',
       'import { runComposerActionTests } from "./src/tests/composer-actions";',
+      'import { runNoteMentionTests } from "./src/tests/note-mentions";',
       "await runPiNativeFileStoreTests();",
       "await runPiSessionDurabilityTests();",
       "await runPiNativeConversationRuntimeTests();",
@@ -37,6 +38,7 @@ await esbuild.build({
       "await runMessageListIdentityTests();",
       "await runSmoothConversationUiTests();",
       "await runComposerActionTests();",
+      "await runNoteMentionTests();",
       'console.log("Current Pi Conversation acceptance: PASS");'
     ].join("\n"),
     resolveDir: rootDir,

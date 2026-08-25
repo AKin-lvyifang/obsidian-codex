@@ -4,6 +4,7 @@ import {
 } from "../../core/mapping";
 import { buildDiffSummary } from "../../core/diff-summary";
 import type { ChatMessage, StoredAttachment } from "../../settings/settings";
+import { noteMentionReferencesFromPiContext } from "./pi-note-mentions";
 import type { KnowledgeReference } from "../../knowledge-base/types";
 import type { KnowledgeBaseMaintainReportPayload } from "../../knowledge-base/maintain-report-card";
 import {
@@ -662,6 +663,16 @@ export class PiChatUiProjector {
       });
       return;
     }
+    if (entry.type === "custom_message") {
+      const noteMentions = noteMentionReferencesFromPiContext(
+        entry.customType,
+        entry.details
+      );
+      if (noteMentions.length) {
+        attachNoteMentionsToLatestUserMessage(messages, noteMentions);
+        return;
+      }
+    }
     if (entry.type === "custom_message" && entry.display !== false) {
       const text = textFromContent(entry.content);
       if (!text) return;
@@ -843,6 +854,16 @@ export class PiChatUiProjector {
         vaultPath: context.vaultPath
       }));
       return;
+    }
+    if (role === "custom") {
+      const noteMentions = noteMentionReferencesFromPiContext(
+        message.customType,
+        message.details
+      );
+      if (noteMentions.length) {
+        attachNoteMentionsToLatestUserMessage(messages, noteMentions);
+        return;
+      }
     }
     if (role === "custom" && message.display !== false) {
       const text = textFromContent(message.content);
@@ -2665,6 +2686,9 @@ function cloneProjectedMessage(message: Readonly<ChatMessage>): ChatMessage {
     ...(message.images
       ? { images: message.images.map((image) => ({ ...image })) }
       : {}),
+    ...(message.noteMentions
+      ? { noteMentions: message.noteMentions.map((mention) => ({ ...mention })) }
+      : {}),
     ...(message.personalMemorySources
       ? {
           personalMemorySources: message.personalMemorySources.map(
@@ -2697,6 +2721,18 @@ function cloneProjectedMessage(message: Readonly<ChatMessage>): ChatMessage {
       ? { interactionRecord: Object.freeze({ ...message.interactionRecord }) }
       : {})
   };
+}
+
+function attachNoteMentionsToLatestUserMessage(
+  messages: ChatMessage[],
+  noteMentions: NonNullable<ChatMessage["noteMentions"]>
+): void {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role !== "user") continue;
+    message.noteMentions = noteMentions.map((mention) => ({ ...mention }));
+    return;
+  }
 }
 
 function addProvisional(view: PiChatUiViewModel, id: string): void {
