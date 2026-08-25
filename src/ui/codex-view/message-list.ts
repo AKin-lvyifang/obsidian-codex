@@ -40,6 +40,9 @@ import {
   type PiApprovalPreviewChangeProjection
 } from "../../harness/pi-native/pi-chat-ui-projector";
 import {
+  attachmentPathIdentity,
+  attachmentPresentationIcon,
+  attachmentPresentationKind,
   createAttachmentResourceResolver,
   type EchoInkAttachmentResourceResolver
 } from "./attachment-resource";
@@ -807,46 +810,16 @@ export class CodexMessageListRenderer {
         });
       }
     }
-    if (message.attachments?.length) {
-      this.renderUserAttachmentChips(
+    const messageAttachments = mergeMessageAttachments(
+      message.attachments,
+      message.images
+    );
+    if (messageAttachments.length) {
+      this.renderMessageAttachments(
         bodyHost.createDiv({ cls: "codex-message-attachments" }),
-        message.attachments,
+        messageAttachments,
         createAttachmentResourceResolver(env.app, env.vaultPath)
       );
-    }
-    if (message.images?.length) {
-      const images = bodyHost.createDiv({ cls: "codex-message-images" });
-      markAIElementsAttachments(images, "grid", "消息图片");
-      const attachmentResolver = createAttachmentResourceResolver(
-        env.app,
-        env.vaultPath
-      );
-      for (const [index, image] of message.images.entries()) {
-        const resource = attachmentResolver.resolve(image, index);
-        const item = images.createDiv({ cls: "codex-message-image-item" });
-        markAIElementsAttachmentItem(item, "image");
-        if (resource.availability === "unavailable" || !resource.resourceUri) {
-          renderUnavailablePiImage(item, resource.displayName);
-          continue;
-        }
-        const preview = item.createEl("button", {
-          cls: "codex-message-image-preview",
-          attr: {
-            type: "button",
-            title: `打开 ${resource.displayName}`,
-            "aria-label": `打开图片：${resource.displayName}`
-          }
-        });
-        const img = preview.createEl("img", { attr: { alt: "", draggable: "false" } });
-        img.src = resource.resourceUri;
-        img.onload = () => env.onScheduleMeasure();
-        img.onerror = () => {
-          preview.remove();
-          renderUnavailablePiImage(item, resource.displayName);
-          env.onScheduleMeasure();
-        };
-        preview.onclick = () => openImageOverlay(resource.resourceUri!);
-      }
     }
     const content = bodyHost.createDiv({ cls: "codex-message-content" });
     content.dataset.messageContent = "true";
@@ -2448,42 +2421,67 @@ export class CodexMessageListRenderer {
     this.render({ ...env, options: { ...env.options, preserveScroll: true } });
   }
 
-  private renderUserAttachmentChips(
+  private renderMessageAttachments(
     container: HTMLElement,
     attachments: readonly Readonly<StoredAttachment>[],
     attachmentResolver: EchoInkAttachmentResourceResolver
   ): void {
-    markAIElementsAttachments(container, "inline", "消息附件");
-    for (const [index, attachment] of attachments.entries()) {
-      const resource = attachmentResolver.resolve(attachment, index);
+    markAIElementsAttachments(container, "grid", "消息附件");
+    let imageIndex = 0;
+    for (const attachment of attachments) {
+      const resource = attachmentResolver.resolve(
+        attachment,
+        attachment.type === "image" ? imageIndex++ : 0
+      );
       const item = container.createDiv({ cls: "codex-message-attachment-item" });
       markAIElementsAttachmentItem(
         item,
         attachment.type === "image" ? "image" : "document"
       );
-      if (attachment.type === "image" && resource.availability === "unavailable") {
-        renderUnavailablePiImage(item, resource.displayName);
+      if (attachment.type === "image") {
+        if (resource.availability === "unavailable" || !resource.resourceUri) {
+          renderUnavailablePiImage(item, resource.displayName);
+          continue;
+        }
+        const preview = item.createEl("button", {
+          cls: "codex-message-attachment-preview",
+          attr: {
+            type: "button",
+            title: `打开 ${resource.displayName}`,
+            "aria-label": `打开图片：${resource.displayName}`
+          }
+        });
+        const img = preview.createEl("img", { attr: { alt: "", draggable: "false" } });
+        img.src = resource.resourceUri;
+        img.onload = () => this.requireEnv().onScheduleMeasure();
+        img.onerror = () => {
+          preview.remove();
+          renderUnavailablePiImage(item, resource.displayName);
+          this.requireEnv().onScheduleMeasure();
+        };
+        preview.onclick = (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          void this.openAttachment(attachment, resource.resourceUri);
+        };
         continue;
       }
-      const chip = item.createEl("button", {
-        cls: `codex-message-attachment-chip codex-message-attachment-${attachment.type}`,
+      const kind = attachmentPresentationKind(attachment);
+      const tile = item.createEl("button", {
+        cls: "codex-message-attachment-tile codex-message-attachment-file-tile",
         attr: {
           type: "button",
-          title: `打开 ${resource.displayName}`,
-          "aria-label": `打开附件 ${resource.displayName}`
+          title: resource.displayName,
+          "aria-label": `打开附件：${resource.displayName}`,
+          "data-attachment-kind": kind
         }
       });
-      const icon = chip.createSpan({
+      const icon = tile.createSpan({
         cls: "codex-message-attachment-icon",
         attr: { "aria-hidden": "true" }
       });
-      setIcon(icon, attachment.type === "image" ? "image" : "file-text");
-      chip.createSpan({
-        cls: "codex-message-attachment-name",
-        text: resource.displayName,
-        attr: { title: resource.displayName }
-      });
-      chip.onclick = (event) => {
+      setIcon(icon, attachmentPresentationIcon(attachment));
+      tile.onclick = (event) => {
         event.preventDefault();
         event.stopPropagation();
         void this.openAttachment(attachment, resource.resourceUri);
@@ -3468,25 +3466,37 @@ function isAttentionProcessStatus(status: string | undefined): boolean {
     || status === "uncertain";
 }
 
+function mergeMessageAttachments(
+  attachments: readonly Readonly<StoredAttachment>[] | undefined,
+  images: readonly Readonly<StoredAttachment>[] | undefined
+): readonly Readonly<StoredAttachment>[] {
+  const merged: Readonly<StoredAttachment>[] = [];
+  const seenPaths = new Set<string>();
+  for (const attachment of [...(attachments ?? []), ...(images ?? [])]) {
+    const pathIdentity = attachmentPathIdentity(attachment);
+    if (pathIdentity) {
+      if (seenPaths.has(pathIdentity)) continue;
+      seenPaths.add(pathIdentity);
+    }
+    merged.push(attachment);
+  }
+  return merged;
+}
+
 function renderUnavailablePiImage(
   container: HTMLElement,
   displayName: string
 ): HTMLElement {
   const unavailable = container.createDiv({
-    cls: "codex-message-attachment-chip codex-message-attachment-image is-disabled",
+    cls: "codex-message-attachment-tile codex-message-attachment-unavailable is-disabled",
     attr: {
       role: "status",
-      title: "图片附件不可在本地打开",
+      title: `${displayName} · 图片附件不可在本地打开`,
       "aria-label": `${displayName}：图片附件不可在本地打开`
     }
   });
   const icon = unavailable.createSpan({ cls: "codex-message-attachment-icon" });
   setIcon(icon, "image-off");
-  unavailable.createSpan({
-    cls: "codex-message-attachment-name",
-    text: `${displayName} · 图片附件不可在本地打开`,
-    attr: { title: displayName }
-  });
   return unavailable;
 }
 

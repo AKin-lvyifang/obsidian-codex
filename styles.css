@@ -2424,57 +2424,10 @@ body.theme-light .codex-code-wrapper pre {
   background: var(--background-secondary);
 }
 
-.codex-message-images {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(96px, 120px));
-  justify-content: end;
-  gap: var(--echoink-conversation-space-2);
-  max-width: 100%;
-  margin-bottom: var(--echoink-conversation-space-2);
-}
-
 .codex-embedded-image img {
   border: 1px solid var(--background-modifier-border);
   border-radius: var(--echoink-conversation-radius-sm);
   cursor: zoom-in;
-}
-
-.codex-message-image-item {
-  min-width: 0;
-}
-
-.codex-message-image-preview {
-  display: block;
-  width: 120px;
-  height: 120px;
-  max-width: 100%;
-  padding: 0;
-  overflow: hidden;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: var(--echoink-conversation-radius-md);
-  background: var(--codex-soft-bg);
-  box-shadow: none;
-  cursor: zoom-in;
-}
-
-.codex-message-image-preview img {
-  display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.codex-message-image-preview:hover {
-  border-color: color-mix(
-    in srgb,
-    var(--echoink-conversation-focus) 46%,
-    var(--background-modifier-border)
-  );
-}
-
-.codex-message-image-preview:focus-visible {
-  outline: 2px solid var(--echoink-conversation-focus);
-  outline-offset: 2px;
 }
 
 .codex-embedded-image img {
@@ -2484,46 +2437,73 @@ body.theme-light .codex-code-wrapper pre {
 
 .codex-message-attachments {
   display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
+  flex-wrap: nowrap;
+  justify-content: flex-start;
+  justify-content: safe flex-end;
   gap: var(--echoink-conversation-space-2);
+  max-width: 100%;
   margin-bottom: var(--echoink-conversation-space-2);
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  padding: 3px;
 }
 
 .codex-message-attachment-item {
   display: inline-flex;
-  min-width: 0;
+  flex: 0 0 auto;
 }
 
-.codex-message-attachment-chip {
+.codex-message-attachment-tile {
   display: inline-flex;
   align-items: center;
-  gap: var(--echoink-conversation-space-2);
-  max-width: 220px;
-  min-height: 28px;
-  padding: 3px var(--echoink-conversation-space-2);
+  justify-content: center;
+  box-sizing: border-box;
+  width: 84px;
+  height: 84px;
+  flex: 0 0 84px;
+  padding: 0;
   border: 1px solid var(--background-modifier-border);
   border-radius: var(--echoink-conversation-radius-md);
   color: var(--text-muted);
-  background: transparent;
+  background: var(--codex-soft-bg);
   font-family: inherit;
-  font-size: var(--echoink-conversation-font-caption);
-  font-weight: 400;
-  line-height: var(--echoink-conversation-line-caption);
-  cursor: pointer;
+  box-shadow: none;
 }
 
-.codex-message-attachment-chip:hover {
+.codex-message-attachment-preview {
+  overflow: hidden;
+  cursor: zoom-in;
+}
+
+.codex-message-attachment-preview img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.codex-message-attachment-preview:hover,
+.codex-message-attachment-file-tile:hover {
+  border-color: color-mix(
+    in srgb,
+    var(--echoink-conversation-focus) 46%,
+    var(--background-modifier-border)
+  );
   color: var(--text-normal);
   background: var(--background-modifier-hover);
 }
 
-.codex-message-attachment-chip:focus-visible {
+.codex-message-attachment-preview:focus-visible,
+.codex-message-attachment-file-tile:focus-visible {
   outline: 2px solid var(--echoink-conversation-focus);
   outline-offset: 2px;
 }
 
-.codex-message-attachment-chip.is-disabled {
+.codex-message-attachment-file-tile {
+  cursor: pointer;
+}
+
+.codex-message-attachment-unavailable {
   cursor: default;
 }
 
@@ -2533,15 +2513,8 @@ body.theme-light .codex-code-wrapper pre {
 }
 
 .codex-message-attachment-icon svg {
-  width: 14px;
-  height: 14px;
-}
-
-.codex-message-attachment-name {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  width: 24px;
+  height: 24px;
 }
 
 .codex-input-wrap {
@@ -2572,31 +2545,29 @@ body.theme-light .codex-code-wrapper pre {
 
 .codex-ai-elements-attachments-list {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: flex-start;
   gap: var(--echoink-conversation-space-2);
   min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  padding: 7px 3px 3px;
 }
 
-.codex-attachment-chip {
+.codex-attachment-file-tile {
+  position: relative;
   display: inline-flex;
   align-items: center;
-  gap: var(--echoink-conversation-space-2);
-  max-width: 220px;
-  padding: 3px 6px 3px 8px;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 84px;
+  height: 84px;
+  flex: 0 0 84px;
+  padding: 0;
   border: 1px solid var(--background-modifier-border);
   border-radius: var(--echoink-conversation-radius-lg);
   background: var(--codex-soft-bg);
-  font-size: var(--echoink-conversation-font-caption);
-  font-weight: 400;
-  line-height: var(--echoink-conversation-line-caption);
-}
-
-.codex-attachment-name {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .codex-attachment-file-icon,
@@ -2608,24 +2579,29 @@ body.theme-light .codex-code-wrapper pre {
 }
 
 .codex-attachment-file-icon {
-  width: 16px;
-  height: 16px;
+  width: 24px;
+  height: 24px;
   color: var(--text-muted);
 }
 
 .codex-attachment-file-icon svg {
-  width: 14px;
-  height: 14px;
+  width: 24px;
+  height: 24px;
 }
 
 .codex-attachment-file-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  z-index: 2;
   width: 28px;
   height: 28px;
   padding: 0;
-  border: 0;
-  border-radius: 50%;
+  border: 1px solid color-mix(in srgb, var(--background-modifier-border) 74%, transparent);
+  border-radius: var(--echoink-conversation-radius-lg);
   color: var(--text-muted);
-  background: transparent;
+  background: var(--background-primary);
+  box-shadow: 0 2px 7px rgba(0, 0, 0, 0.18);
   cursor: pointer;
 }
 
@@ -2750,7 +2726,9 @@ body.theme-light .codex-code-wrapper pre {
 }
 
 @media (max-width: 560px) {
-  .codex-attachment-thumbnail {
+  .codex-attachment-thumbnail,
+  .codex-attachment-file-tile,
+  .codex-message-attachment-tile {
     width: 72px;
     height: 72px;
     flex-basis: 72px;

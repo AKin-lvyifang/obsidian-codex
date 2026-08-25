@@ -19,7 +19,11 @@ import { composerPrimaryActionForState, composerStateForRuntimeState } from "../
 import { handleKnowledgeCommandMenuKeyDown } from "../knowledge-command-menu";
 import type { QueuedTurnItem } from "../turn-queue";
 import { renderAnimateIcon } from "../animate-icon";
-import type { EchoInkAttachmentResourceResolver } from "./attachment-resource";
+import {
+  attachmentPresentationIcon,
+  attachmentPresentationKind,
+  type EchoInkAttachmentResourceResolver
+} from "./attachment-resource";
 import {
   markAIElementsAttachmentItem,
   markAIElementsAttachments
@@ -873,18 +877,22 @@ export function renderComposerAttachments(container: HTMLElement, state: Compose
       remove.onclick = () => callbacks.onRemoveAttachment(item.path);
       continue;
     }
-    const chip = list.createDiv({
-      cls: "codex-attachment-chip codex-attachment-file-chip",
-      attr: { title: displayName }
+    const kind = attachmentPresentationKind(item);
+    const tile = list.createDiv({
+      cls: "codex-attachment-file-tile",
+      attr: {
+        title: displayName,
+        "aria-label": `文件：${displayName}`,
+        "data-attachment-kind": kind
+      }
     });
-    markAIElementsAttachmentItem(chip, "document");
-    const icon = chip.createSpan({
+    markAIElementsAttachmentItem(tile, "document");
+    const icon = tile.createSpan({
       cls: "codex-attachment-file-icon",
       attr: { "aria-hidden": "true" }
     });
-    setIcon(icon, "file-text");
-    chip.createSpan({ cls: "codex-attachment-name", text: displayName });
-    const remove = chip.createEl("button", {
+    setIcon(icon, attachmentPresentationIcon(item));
+    const remove = tile.createEl("button", {
       cls: "codex-attachment-file-remove",
       attr: {
         type: "button",

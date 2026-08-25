@@ -1147,9 +1147,11 @@ export async function runSmoothConversationUiTests(): Promise<void> {
   const previousDocument = (globalThis as unknown as { document?: unknown }).document;
   const previousHTMLElement = (globalThis as unknown as { HTMLElement?: unknown }).HTMLElement;
   const previousWindow = (globalThis as unknown as { window?: unknown }).window;
+  const imageOverlayBody = new FakeElement("body");
   Object.defineProperty(globalThis, "document", {
     configurable: true,
     value: {
+      body: imageOverlayBody,
       createElementNS: (_namespace: string, tag: string) => new FakeElement(tag)
     }
   });
@@ -1206,6 +1208,18 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       id: "user-images",
       role: "user",
       text: "请比较两张图",
+      attachments: [{
+        type: "image",
+        name: "clipboard-1720000000000-0.png",
+        path: "images/cover #1.png",
+        mimeType: "image/png",
+        availability: "unavailable"
+      }, {
+        type: "file",
+        name: "meeting.mp4",
+        path: "videos/meeting.mp4",
+        mimeType: "video/mp4"
+      }],
       images: [{
         type: "image",
         name: "clipboard-1720000000000-0.png",
@@ -1225,7 +1239,10 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     assert.equal(imageAttachmentList.attributes.get("data-ai-elements-pattern"), "attachments");
     assert.equal(imageAttachmentList.attributes.get("data-attachment-variant"), "grid");
     assert.equal(imageAttachmentList.attributes.get("role"), "list");
-    const imagePreview = imageAttachments.findByClass("codex-message-image-preview")!;
+    assert.equal(imageAttachments.findAllByClass("codex-message-attachments").length, 1);
+    assert.equal(imageAttachments.findByClass("codex-message-images"), null);
+    assert.equal(imageAttachments.findAllByClass("codex-message-attachment-item").length, 3);
+    const imagePreview = imageAttachments.findByClass("codex-message-attachment-preview")!;
     assert.equal(imagePreview.tag, "button");
     assert.equal(imagePreview.attributes.get("aria-label"), "打开图片：粘贴图片 1.png");
     assert.equal(
@@ -1233,10 +1250,20 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       "app://echoink-vault/images/cover%20%231.png",
       "message Attachments use the current Obsidian resource URI"
     );
-    assert.match(
-      renderedText(imageAttachments),
-      /粘贴图片 2\.png · 图片附件不可在本地打开/u,
-      "missing images keep an explicit durable fallback"
+    clickElement(imagePreview);
+    const imageOverlay = imageOverlayBody.findByClass("codex-image-overlay")!;
+    assert.equal(imageOverlay.findAllByTag("img")[0]?.src, "app://echoink-vault/images/cover%20%231.png");
+    const videoTile = imageAttachments.findByClass("codex-message-attachment-file-tile")!;
+    assert.equal(videoTile.attributes.get("title"), "meeting.mp4");
+    assert.equal(videoTile.attributes.get("aria-label"), "打开附件：meeting.mp4");
+    assert.equal(videoTile.attributes.get("data-attachment-kind"), "video");
+    assert.ok(videoTile.findByClass("codex-message-attachment-icon"));
+    const unavailableImages = imageAttachments.findAllByClass("codex-message-attachment-unavailable");
+    assert.equal(unavailableImages.length, 1, "duplicate or missing images render one unavailable state");
+    assert.equal(unavailableImages[0]?.attributes.get("role"), "status");
+    assert.equal(
+      unavailableImages[0]?.attributes.get("aria-label"),
+      "粘贴图片 2.png：图片附件不可在本地打开"
     );
     assert.doesNotMatch(renderedText(imageAttachments), /clipboard-/u);
 
