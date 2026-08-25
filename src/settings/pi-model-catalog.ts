@@ -18,6 +18,9 @@ import {
   OPENAI_CODEX_MODELS
 } from "@earendil-works/pi-ai/providers/openai-codex.models";
 import {
+  QWEN_TOKEN_PLAN_CN_MODELS
+} from "@earendil-works/pi-ai/providers/qwen-token-plan-cn.models";
+import {
   ZAI_CODING_CN_MODELS
 } from "@earendil-works/pi-ai/providers/zai-coding-cn.models";
 
@@ -26,6 +29,7 @@ const ECHOINK_PI_MODEL_CATALOGS = Object.freeze({
   "zai-coding-cn": ZAI_CODING_CN_MODELS,
   "moonshotai-cn": MOONSHOTAI_CN_MODELS,
   "minimax-cn": MINIMAX_CN_MODELS,
+  "qwen-token-plan-cn": QWEN_TOKEN_PLAN_CN_MODELS,
   deepseek: DEEPSEEK_MODELS,
   // Compatibility-only Provider identities remain readable for old settings.
   openai: OPENAI_MODELS,

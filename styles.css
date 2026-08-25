@@ -5676,6 +5676,11 @@ button.echoink-settings-navigation-row:focus-visible {
   font-weight: 600;
 }
 
+.codex-provider-model-choice-enabled > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .codex-provider-model-choice-default {
   flex: 0 0 auto;
   color: var(--text-muted);
@@ -5698,12 +5703,13 @@ button.echoink-settings-navigation-row:focus-visible {
 }
 
 .codex-provider-model-capabilities.is-unknown {
-  color: var(--text-warning, var(--text-muted));
+  color: var(--text-muted);
 }
 
 .codex-provider-model-advanced {
   padding-top: 6px;
   border-top: 1px solid var(--background-modifier-border);
+  container-type: inline-size;
 }
 
 .codex-provider-model-advanced > summary {
@@ -5714,7 +5720,33 @@ button.echoink-settings-navigation-row:focus-visible {
 }
 
 .codex-provider-model-advanced[open] > summary {
-  margin-bottom: 10px;
+  margin-bottom: 12px;
+}
+
+.codex-provider-model-advanced-group {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.codex-provider-model-advanced-group + .codex-provider-model-advanced-group {
+  margin-top: 24px;
+}
+
+.codex-provider-model-advanced-heading {
+  color: var(--text-normal);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.codex-provider-model-advanced-description {
+  max-width: 68ch;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: break-word;
+  text-wrap: pretty;
 }
 
 .codex-provider-manual-model {
@@ -5769,19 +5801,6 @@ button.echoink-settings-navigation-row:focus-visible {
   outline-offset: 2px;
 }
 
-.codex-provider-custom-advanced {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding-top: 4px;
-}
-
-.codex-provider-custom-heading {
-  color: var(--text-normal);
-  font-size: 14px;
-  font-weight: 600;
-}
-
 .codex-provider-custom-toggles {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -5796,6 +5815,11 @@ button.echoink-settings-navigation-row:focus-visible {
   color: var(--text-normal);
   font-size: 14px;
   cursor: pointer;
+}
+
+.codex-provider-custom-toggle > span {
+  min-width: 0;
+  overflow-wrap: break-word;
 }
 
 .codex-provider-custom-toggle input {
@@ -5815,6 +5839,28 @@ button.echoink-settings-navigation-row:focus-visible {
   flex-direction: column;
   gap: 8px;
   min-width: 0;
+}
+
+.codex-provider-context-field > label {
+  color: var(--text-normal);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+  overflow-wrap: break-word;
+}
+
+.codex-provider-context-field-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: break-word;
+}
+
+@container (max-width: 520px) {
+  .codex-provider-model-advanced .codex-provider-custom-toggles,
+  .codex-provider-model-advanced .codex-provider-context-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .codex-provider-context-shortcuts {
@@ -5890,10 +5936,6 @@ button.echoink-settings-navigation-row:focus-visible {
     min-height: 44px;
   }
 
-  .codex-provider-custom-toggles,
-  .codex-provider-context-grid {
-    grid-template-columns: 1fr;
-  }
 }
 .codex-api-provider-textarea {
   min-height: 58px;

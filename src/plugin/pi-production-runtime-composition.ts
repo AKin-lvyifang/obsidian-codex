@@ -1538,7 +1538,7 @@ async function createProductionAgentSession(input: {
     config: controlledConfig,
     controlledStream,
     model,
-    maxTokens: contextBudget.maxOutputReserve,
+    maxTokens: configured.requestMaxOutputTokens,
     supportsToolCalling: configured.toolCalling,
     currentExecutionContext: () => input.input.currentExecutionContext(),
     observeRequest: ({ execution, context }) => {
@@ -1938,7 +1938,8 @@ function sameResolvedProvider(
     && left.reasoning === right.reasoning
     && left.contextWindow === right.contextWindow
     && left.modelMaxTokens === right.modelMaxTokens
-    && left.maxOutputTokens === right.maxOutputTokens;
+    && left.maxOutputTokens === right.maxOutputTokens
+    && left.requestMaxOutputTokens === right.requestMaxOutputTokens;
 }
 
 export async function createParallelPiChatStoreBindingAuthority(
@@ -2032,6 +2033,7 @@ function resolveProvider(
   contextWindow: number;
   modelMaxTokens: number;
   maxOutputTokens: number;
+  requestMaxOutputTokens?: number;
 } {
   const active = getActiveApiProviderModel(settings);
   if (!active || settings.providerMode !== "custom-api") {
@@ -2141,7 +2143,11 @@ function resolveProvider(
     reasoning: model.reasoning,
     contextWindow: model.contextWindow,
     modelMaxTokens: model.modelMaxTokens,
-    maxOutputTokens: model.maxOutputTokens
+    maxOutputTokens: model.maxOutputTokens,
+    ...(provider.apiProtocol === "anthropic-messages"
+      || model.limitsOverride?.maxOutputTokens !== undefined
+      ? { requestMaxOutputTokens: model.maxOutputTokens }
+      : {})
   };
 }
 

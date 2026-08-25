@@ -589,9 +589,12 @@ export function currentComposerProviderBrand(host: CodexComposerHost): ProviderB
     case "kimi":
     case "minimax":
     case "deepseek":
+    case "qwen":
     case "ollama":
     case "custom":
       return providerId;
+    case "qwen-token-plan":
+      return "qwen";
     default:
       return "custom";
   }

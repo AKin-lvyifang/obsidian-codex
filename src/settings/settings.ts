@@ -332,6 +332,12 @@ export type ApiProviderModelMetadataSource =
   | "unknown"
   | "manual";
 
+export interface ApiProviderModelLimitsOverride {
+  contextWindow?: number;
+  modelMaxTokens?: number;
+  maxOutputTokens?: number;
+}
+
 export interface ApiProviderModelConfig {
   id: string;
   displayName: string;
@@ -343,6 +349,8 @@ export interface ApiProviderModelConfig {
   modelMaxTokens: number;
   /** EchoInk's actual per-request output ceiling. */
   maxOutputTokens: number;
+  /** User-entered limits only. Missing fields inherit effective metadata. */
+  limitsOverride?: ApiProviderModelLimitsOverride;
   metadataSource: ApiProviderModelMetadataSource;
 }
 
@@ -404,7 +412,7 @@ export const DEFAULT_REVIEW_OUTPUT_DIR = "outputs";
 
 export const DEFAULT_SETTINGS: CodexForObsidianSettings = {
   productGeneration: "pi-agent-product-v1",
-  settingsVersion: 51,
+  settingsVersion: 52,
   settingsLanguage: "zh-CN",
   settingsTab: "providers",
   proxyEnabled: false,
@@ -508,7 +516,10 @@ export function normalizeSettingsData(input: unknown): { settings: CodexForObsid
     providerMode: normalizeProviderMode(data?.providerMode),
     autoOpenHome: data?.autoOpenHome === true,
     activeApiProviderId: typeof data?.activeApiProviderId === "string" ? data.activeApiProviderId.trim() : "",
-    apiProviders: normalizeApiProviders(data?.apiProviders),
+    apiProviders: normalizeApiProviders(
+      data?.apiProviders,
+      previousVersion < 52
+    ),
     customWelcomeEnabled: data?.customWelcomeEnabled === true,
     customWelcomeTitle: normalizeWelcomeLine(
       data?.customWelcomeTitle,
@@ -799,6 +810,39 @@ export function createApiProviderModelConfig(
     maxOutputTokens: 8_192,
     metadataSource: "unknown"
   };
+}
+
+export function applyApiProviderModelLimitsOverride(
+  model: ApiProviderModelConfig,
+  providerId: ApiProviderId,
+  runtimeProviderId: string,
+  value: unknown
+): void {
+  const limitsOverride = normalizeApiProviderModelLimitsOverride(value);
+  const baseline = createApiProviderModelConfig(
+    providerId,
+    model.id,
+    runtimeProviderId
+  );
+  const contextWindow = limitsOverride.contextWindow
+    ?? baseline.contextWindow;
+  const modelMaxTokens = limitsOverride.modelMaxTokens
+    ?? baseline.modelMaxTokens;
+  const requestedMaxOutputTokens = limitsOverride.maxOutputTokens
+    ?? baseline.maxOutputTokens;
+  model.contextWindow = contextWindow;
+  model.modelMaxTokens = modelMaxTokens;
+  model.maxOutputTokens = Math.min(
+    requestedMaxOutputTokens,
+    contextWindow,
+    modelMaxTokens,
+    1_000_000
+  );
+  if (Object.keys(limitsOverride).length > 0) {
+    model.limitsOverride = limitsOverride;
+  } else {
+    delete model.limitsOverride;
+  }
 }
 
 export function applyApiProviderModelPreset(
@@ -1116,6 +1160,7 @@ export function isValidApiProviderModelConfig(
     || typeof model.toolCalling !== "boolean"
     || typeof model.reasoning !== "boolean"
     || !["preset", "catalog", "unknown", "manual"].includes(String(model.metadataSource))
+    || !isValidApiProviderModelLimitsOverride(model.limitsOverride)
   ) return false;
   const contextWindow = model.contextWindow;
   const modelMaxTokens = model.modelMaxTokens;
@@ -1133,6 +1178,22 @@ export function isValidApiProviderModelConfig(
       Number(modelMaxTokens),
       1_000_000
     );
+}
+
+function isValidApiProviderModelLimitsOverride(value: unknown): boolean {
+  if (value === undefined) return true;
+  const record = settingsRecord(value);
+  if (!record) return false;
+  const allowed = new Set([
+    "contextWindow",
+    "modelMaxTokens",
+    "maxOutputTokens"
+  ]);
+  if (Object.keys(record).some((key) => !allowed.has(key))) return false;
+  const normalized = normalizeApiProviderModelLimitsOverride(record);
+  return Object.keys(record).every((key) =>
+    normalized[key as keyof ApiProviderModelLimitsOverride] === record[key]
+  );
 }
 
 export function removeApiProvider(settings: Pick<CodexForObsidianSettings, "providerMode" | "activeApiProviderId" | "apiProviders">, providerId: string): boolean {
@@ -1989,6 +2050,31 @@ function normalizePositiveInteger(value: unknown, fallback: number, min: number,
   return Math.max(min, Math.min(max, Math.round(number)));
 }
 
+function normalizeApiProviderModelLimitsOverride(
+  value: unknown
+): ApiProviderModelLimitsOverride {
+  const record = settingsRecord(value);
+  if (!record) return {};
+  const limitsOverride: ApiProviderModelLimitsOverride = {};
+  for (const [key, min, max] of [
+    ["contextWindow", 1_024, 2_000_000],
+    ["modelMaxTokens", 1, 1_000_000],
+    ["maxOutputTokens", 1, 1_000_000]
+  ] as const) {
+    if (!Object.hasOwn(record, key)) continue;
+    const number = typeof record[key] === "number"
+      ? record[key]
+      : Number(record[key]);
+    if (
+      !Number.isSafeInteger(number)
+      || number < min
+      || number > max
+    ) continue;
+    limitsOverride[key] = number;
+  }
+  return limitsOverride;
+}
+
 function normalizeNonNegativeNumber(value: unknown): number {
   const number = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(number) || number < 0) return 0;
@@ -2026,7 +2112,10 @@ function normalizeApiProviderSelection(settings: Pick<
   settings.defaultModel = first?.defaultModelId ?? "";
 }
 
-function normalizeApiProviders(value: unknown): ApiProviderConfig[] {
+function normalizeApiProviders(
+  value: unknown,
+  migrateLegacyLimits: boolean
+): ApiProviderConfig[] {
   if (!Array.isArray(value)) {
     return [createDefaultApiProvider()];
   }
@@ -2051,14 +2140,14 @@ function normalizeApiProviders(value: unknown): ApiProviderConfig[] {
         ? preset.runtimeProviderId
         : providerId === "openai"
           || providerId === "anthropic"
-          || providerId === "qwen"
           ? providerId
           : preset.runtimeProviderId
     );
     const modelSelection = normalizeApiProviderModels(
       record,
       providerId,
-      runtimeProviderId
+      runtimeProviderId,
+      migrateLegacyLimits
     );
     return {
       id,
@@ -2067,7 +2156,6 @@ function normalizeApiProviders(value: unknown): ApiProviderConfig[] {
       apiProtocol: providerId === "custom"
         || providerId === "openai"
         || providerId === "anthropic"
-        || providerId === "qwen"
         ? normalizeApiProviderProtocol(record.apiProtocol, providerId)
         : preset.apiProtocol,
       authMode: apiProviderAuthMode(providerId),
@@ -2088,7 +2176,8 @@ function normalizeApiProviders(value: unknown): ApiProviderConfig[] {
 function normalizeApiProviderModels(
   provider: Record<string, unknown>,
   providerId: ApiProviderId,
-  runtimeProviderId: string
+  runtimeProviderId: string,
+  migrateLegacyLimits: boolean
 ): Readonly<{
   models: ApiProviderModelConfig[];
   defaultModelId: string;
@@ -2107,7 +2196,8 @@ function normalizeApiProviderModels(
     ? explicitRecords.map((record) => normalizeStoredApiProviderModel(
       record,
       providerId,
-      runtimeProviderId
+      runtimeProviderId,
+      migrateLegacyLimits
     ))
     : legacyModelId
       ? [normalizeLegacyApiProviderModel(
@@ -2149,21 +2239,34 @@ function normalizeApiProviderModels(
 function normalizeStoredApiProviderModel(
   record: Record<string, unknown>,
   providerId: ApiProviderId,
-  runtimeProviderId: string
+  runtimeProviderId: string,
+  migrateLegacyLimits: boolean
 ): ApiProviderModelConfig {
   const id = String(record.id).trim();
-  if (record.metadataSource === "manual") {
-    return normalizeManualApiProviderModel(record, providerId, id);
+  const normalized = record.metadataSource === "manual"
+    ? normalizeManualApiProviderModel(
+      record,
+      providerId,
+      runtimeProviderId,
+      id,
+      migrateLegacyLimits
+    )
+    : createApiProviderModelConfig(providerId, id, runtimeProviderId);
+  if (normalized.metadataSource === "unknown") {
+    normalized.displayName = normalizeText(record.displayName, id);
   }
-  const normalized = createApiProviderModelConfig(
-    providerId,
-    id,
-    runtimeProviderId
-  );
-  if (normalized.metadataSource !== "unknown") return normalized;
-  const unknown = normalized;
-  unknown.displayName = normalizeText(record.displayName, id);
-  return unknown;
+  if (
+    record.metadataSource !== "manual"
+    && Object.hasOwn(record, "limitsOverride")
+  ) {
+    applyApiProviderModelLimitsOverride(
+      normalized,
+      providerId,
+      runtimeProviderId,
+      record.limitsOverride
+    );
+  }
+  return normalized;
 }
 
 function normalizeLegacyApiProviderModel(
@@ -2189,20 +2292,71 @@ function normalizeLegacyApiProviderModel(
     "maxOutputTokens"
   ].some((key) => Object.hasOwn(provider, key));
   return hasLegacyMetadata
-    ? normalizeManualApiProviderModel(provider, providerId, modelId)
+    ? normalizeManualApiProviderModel(
+      provider,
+      providerId,
+      runtimeProviderId,
+      modelId,
+      true
+    )
     : known;
 }
 
 function normalizeManualApiProviderModel(
   record: Record<string, unknown>,
   providerId: ApiProviderId,
-  modelId: string
+  runtimeProviderId: string,
+  modelId: string,
+  migrateLegacyLimits: boolean
 ): ApiProviderModelConfig {
   const preset = getApiProviderModelPreset(providerId, modelId);
+  const baseline = createApiProviderModelConfig(
+    providerId,
+    modelId,
+    runtimeProviderId
+  );
   const input = normalizeApiProviderModelInput(
     record.input,
     record.imageInput === true
   );
+  const normalized: ApiProviderModelConfig = {
+    id: modelId,
+    displayName: normalizeText(
+      record.displayName,
+      preset?.displayName ?? modelId
+    ),
+    input,
+    toolCalling: typeof record.toolCalling === "boolean"
+      ? record.toolCalling
+      : preset?.toolCalling ?? false,
+    reasoning: typeof record.reasoning === "boolean"
+      ? record.reasoning
+      : preset?.reasoning ?? false,
+    contextWindow: baseline.contextWindow,
+    modelMaxTokens: baseline.modelMaxTokens,
+    maxOutputTokens: baseline.maxOutputTokens,
+    metadataSource: "manual"
+  };
+  const limitsOverride = Object.hasOwn(record, "limitsOverride")
+    ? record.limitsOverride
+    : migrateLegacyLimits
+      ? normalizeLegacyApiProviderModelLimits(record, providerId, modelId)
+      : undefined;
+  applyApiProviderModelLimitsOverride(
+    normalized,
+    providerId,
+    runtimeProviderId,
+    limitsOverride
+  );
+  return normalized;
+}
+
+function normalizeLegacyApiProviderModelLimits(
+  record: Record<string, unknown>,
+  providerId: ApiProviderId,
+  modelId: string
+): ApiProviderModelLimitsOverride {
+  const preset = getApiProviderModelPreset(providerId, modelId);
   const contextWindow = normalizePositiveInteger(
     record.contextWindow,
     preset?.contextWindow ?? 64_000,
@@ -2220,37 +2374,24 @@ function normalizeManualApiProviderModel(
     1,
     1_000_000
   );
-  const maxOutputTokens = apiProviderMaxOutputReserve(
-    providerId,
-    modelId,
-    normalizePositiveInteger(
-      record.maxOutputTokens,
-      preset?.maxOutputTokens ?? Math.min(modelMaxTokens, 8_192),
-      1,
-      Math.min(contextWindow, modelMaxTokens, 1_000_000)
-    )
+  const maxOutputTokens = Math.min(
+    apiProviderMaxOutputReserve(
+      providerId,
+      modelId,
+      normalizePositiveInteger(
+        record.maxOutputTokens,
+        preset?.maxOutputTokens ?? Math.min(modelMaxTokens, 8_192),
+        1,
+        Math.min(contextWindow, modelMaxTokens, 1_000_000)
+      )
+    ),
+    contextWindow,
+    modelMaxTokens
   );
   return {
-    id: modelId,
-    displayName: normalizeText(
-      record.displayName,
-      preset?.displayName ?? modelId
-    ),
-    input,
-    toolCalling: typeof record.toolCalling === "boolean"
-      ? record.toolCalling
-      : preset?.toolCalling ?? false,
-    reasoning: typeof record.reasoning === "boolean"
-      ? record.reasoning
-      : preset?.reasoning ?? false,
     contextWindow,
     modelMaxTokens,
-    maxOutputTokens: Math.min(
-      maxOutputTokens,
-      contextWindow,
-      modelMaxTokens
-    ),
-    metadataSource: "manual"
+    maxOutputTokens
   };
 }
 

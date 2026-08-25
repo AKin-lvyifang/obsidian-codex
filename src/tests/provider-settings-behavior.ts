@@ -6,12 +6,17 @@ import type {
   ProviderStreams,
   StreamOptions
 } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import {
   MOONSHOTAI_CN_MODELS
 } from "@earendil-works/pi-ai/providers/moonshotai-cn.models";
 import {
+  QWEN_TOKEN_PLAN_CN_MODELS
+} from "@earendil-works/pi-ai/providers/qwen-token-plan-cn.models";
+import {
   activateApiProvider,
   activateApiProviderModel,
+  applyApiProviderModelLimitsOverride,
   applyApiProviderModelPreset,
   createApiProviderConfig,
   createApiProviderModelConfig,
@@ -23,18 +28,26 @@ import {
   type ApiProviderModelConfig
 } from "../settings/settings";
 import CodexForObsidianPlugin from "../main";
-import { API_PROVIDER_PRESETS, apiProviderRequestUrl } from "../settings/provider-presets";
+import {
+  API_PROVIDER_PRESETS,
+  apiProviderRequestUrl,
+  normalizeApiProviderProtocol
+} from "../settings/provider-presets";
 import { providerTooltipBaseUrl } from "../settings/provider-tooltip";
-import type {
-  PiProviderConfigurationDraft,
-  PiProviderConnectionTestResult,
-  PiProviderModelListResult
+import {
+  createObsidianProviderFetch,
+  PiProviderConfigurationService,
+  providerModelFetchForUrl,
+  requestProviderModels,
+  type PiProviderConfigurationDraft,
+  type PiProviderConnectionTestResult,
+  type PiProviderFetch,
+  type PiProviderModelListResult
 } from "../plugin/pi-provider-configuration-service";
-import { PiProviderConfigurationService } from "../plugin/pi-provider-configuration-service";
 import {
   createOpenAICodexSseAdapter,
+  PiProviderProtocolDispatcher,
   PiProviderProtocolTransport,
-  type PiProviderProtocolDispatcher
 } from "../harness/pi/pi-provider-protocol-adapter";
 import {
   createPiProviderModelDefinition
@@ -44,6 +57,8 @@ import {
   providerPreflightApiKeyReady
 } from "../settings/provider-preflight";
 import { ProviderModelModal } from "../settings/provider-model-modal";
+import { providerBrandSvg } from "../settings/provider-brand-icons";
+import { resolveEchoInkPiCatalogModel } from "../settings/pi-model-catalog";
 import { settingsCopy } from "../settings/i18n";
 import { CodexSettingTab } from "../settings/settings-tab";
 import { McpServerModal } from "../settings/mcp-server-modal";
@@ -72,6 +87,7 @@ import {
   ProductActivityGate
 } from "../plugin/api-provider-activation-service";
 import { CodexView } from "../ui/codex-view";
+import { currentComposerProviderBrand } from "../ui/codex-view/composer-controller";
 import { runEditorTranslationServiceTests } from "./editor-translation-service";
 import { runEditorTranslationSelectionTests } from "./editor-translation-selection";
 import {
@@ -145,7 +161,7 @@ import {
 } from "../plugin/openai-codex-oauth-service";
 
 export async function runProviderSettingsBehaviorTests(): Promise<void> {
-  assertSettingsV51MigrationContract();
+  assertSettingsV52MigrationContract();
   assertOnboardingTruthContract();
   assertFiveStepOnboardingEntrypoints();
   assertCodexHeaderIdentityContract();
@@ -167,7 +183,12 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   runEditorTranslationSelectionTests();
   await assertProviderTextGenerationCompletionContract();
   assertPresetRequestMappings();
+  assertQwenProviderContract();
+  await assertProviderModelDiscoveryRequestContract();
+  assertCustomProtocolContract();
   assertOpenAICodexSseAdapterContract();
+  await assertProviderRequestLimitDispatchContract();
+  await assertProtocolPayloadLimitContract();
   await assertProviderAuthResolutionFailureContract();
   assertProviderTooltipBehavior();
   assertSavedModelLifecycle();
@@ -182,9 +203,12 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   await assertSkillToggleNotCommittedRestoresAuthoritativeUi();
   await assertResourceScanErrorsClearAcrossTabs();
   assertProviderBadgeReflowCssContract();
+  assertProviderAdvancedSettingsCssContract();
   await assertSavedBindingPreflightLifecycle();
   await assertProviderPickerGroupingAndFiltering();
   await assertOpenAICodexModalLifecycle();
+  await assertFreshCustomModelDiscoveryLifecycle();
+  await assertProviderLimitOverrideRoundTrip();
   await assertProviderModelModalPreflightLifecycle();
   await assertProviderApiKeyEditLifecycle();
   await assertProviderModalModelAccessibleNameIncludesValue();
@@ -1507,6 +1531,35 @@ function assertProviderBadgeReflowCssContract(): void {
   assert.match(narrowSettingsRule, /\.echoink-settings-navigation-value\s*\{[^}]*min-width:\s*0;[^}]*max-width:\s*100%;[^}]*white-space:\s*normal;[^}]*overflow-wrap:\s*anywhere;/u);
 }
 
+function assertProviderAdvancedSettingsCssContract(): void {
+  const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+  assert.match(
+    css,
+    /\.codex-provider-model-advanced\s*\{[^}]*container-type:\s*inline-size;/su
+  );
+  assert.match(
+    css,
+    /\.codex-provider-model-advanced-group \+ \.codex-provider-model-advanced-group\s*\{[^}]*margin-top:\s*24px;/su
+  );
+  assert.match(
+    css,
+    /@container \(max-width:\s*520px\)[\s\S]*?\.codex-provider-model-advanced \.codex-provider-custom-toggles,[\s\S]*?\.codex-provider-model-advanced \.codex-provider-context-grid\s*\{[^}]*grid-template-columns:\s*1fr;/u
+  );
+  assert.match(
+    css,
+    /\.codex-provider-model-choice-enabled > span\s*\{[^}]*overflow-wrap:\s*anywhere;/su
+  );
+  assert.match(
+    css,
+    /\.codex-provider-model-advanced-description\s*\{[^}]*line-height:\s*1\.5;[^}]*overflow-wrap:\s*break-word;/su
+  );
+  const unknownRule = css.match(
+    /\.codex-provider-model-capabilities\.is-unknown\s*\{([^}]*)\}/u
+  )?.[1] ?? "";
+  assert.match(unknownRule, /color:\s*var\(--text-muted\)/u);
+  assert.doesNotMatch(unknownRule, /text-warning/u);
+}
+
 function assertProviderBadgeDefaultThemeContrast(): void {
   const renderedThemeColors = {
     light: {
@@ -2231,7 +2284,7 @@ async function assertProviderModalModelAccessibleNameIncludesValue(): Promise<vo
   modal.close();
 }
 
-function assertSettingsV51MigrationContract(): void {
+function assertSettingsV52MigrationContract(): void {
   const failures: Error[] = [];
   const check = (label: string, assertion: () => void): void => {
     try {
@@ -2242,7 +2295,7 @@ function assertSettingsV51MigrationContract(): void {
   };
 
   check("fresh install does not select a Provider without a usable API Key", () => {
-    assert.equal(DEFAULT_SETTINGS.settingsVersion, 51);
+    assert.equal(DEFAULT_SETTINGS.settingsVersion, 52);
     assert.equal(DEFAULT_SETTINGS.activeApiProviderId, "");
     assert.equal(DEFAULT_SETTINGS.memory.useLongTermMemory, true);
     assert.equal(
@@ -2298,6 +2351,11 @@ function assertSettingsV51MigrationContract(): void {
       contextWindow: 96_000,
       modelMaxTokens: 12_000,
       maxOutputTokens: 12_000,
+      limitsOverride: {
+        contextWindow: 96_000,
+        modelMaxTokens: 12_000,
+        maxOutputTokens: 12_000
+      },
       metadataSource: "manual"
     });
     for (const retired of [
@@ -2331,12 +2389,150 @@ function assertSettingsV51MigrationContract(): void {
     assert.equal(normalized.defaultModel, "model-selected");
   });
 
+  check("v51 protocol migration preserves compatibility identities safely", () => {
+    const provider = (
+      id: string,
+      providerId: "custom" | "anthropic" | "openai",
+      apiProtocol: string
+    ) => ({
+      id,
+      providerId,
+      runtimeProviderId: providerId,
+      apiProtocol,
+      authMode: "api-key",
+      name: providerId,
+      baseUrl: providerId === "anthropic"
+        ? "https://api.anthropic.com"
+        : providerId === "openai"
+          ? "https://api.openai.com/v1"
+          : "https://custom.example/v1",
+      models: [],
+      defaultModelId: "",
+      apiKey: "fixture-key"
+    });
+    const migrated = normalizeSettingsData({
+      ...structuredClone(DEFAULT_SETTINGS),
+      settingsVersion: 51,
+      apiProviders: [
+        provider("legacy-custom-codex", "custom", "openai-codex-responses"),
+        provider("legacy-anthropic", "anthropic", "openai-completions"),
+        provider("legacy-openai-responses", "openai", "openai-responses"),
+        provider("legacy-openai-codex", "openai", "openai-codex-responses")
+      ]
+    }).settings.apiProviders;
+    assert.deepEqual(
+      migrated.map((entry) => [entry.providerId, entry.apiProtocol]),
+      [
+        ["custom", "openai-completions"],
+        ["anthropic", "anthropic-messages"],
+        ["openai", "openai-responses"],
+        ["openai", "openai-completions"]
+      ]
+    );
+  });
+
+  check("v51 manual limits migrate with legacy clamping and remain idempotent", () => {
+    const general = createApiProviderConfig("custom", "legacy-general-limits");
+    general.baseUrl = "https://legacy-general.example/v1";
+    general.models = [{
+      ...createApiProviderModelConfig("custom", "legacy-general-model"),
+      contextWindow: 96_000,
+      modelMaxTokens: 12_000,
+      maxOutputTokens: 12_000,
+      metadataSource: "manual"
+    }];
+    general.defaultModelId = "legacy-general-model";
+
+    const kimi = createApiProviderConfig("kimi", "legacy-kimi-limits");
+    kimi.models = [{
+      ...createApiProviderModelConfig(
+        "kimi",
+        "kimi-k2.7-code",
+        kimi.runtimeProviderId
+      ),
+      contextWindow: 262_144,
+      modelMaxTokens: 200_000,
+      maxOutputTokens: 200_000,
+      metadataSource: "manual"
+    }];
+    kimi.defaultModelId = "kimi-k2.7-code";
+
+    const once = normalizeSettingsData({
+      ...structuredClone(DEFAULT_SETTINGS),
+      settingsVersion: 51,
+      apiProviders: [general, kimi]
+    }).settings;
+    assert.deepEqual(once.apiProviders[0]?.models[0]?.limitsOverride, {
+      contextWindow: 96_000,
+      modelMaxTokens: 12_000,
+      maxOutputTokens: 12_000
+    });
+    assert.deepEqual(once.apiProviders[1]?.models[0]?.limitsOverride, {
+      contextWindow: 262_144,
+      modelMaxTokens: 200_000,
+      maxOutputTokens: 65_536
+    });
+    assert.equal(once.apiProviders[1]?.models[0]?.maxOutputTokens, 65_536);
+
+    const twice = normalizeSettingsData(structuredClone(once)).settings;
+    assert.deepEqual(twice.apiProviders, once.apiProviders);
+  });
+
   check("unknown model metadata starts text-only without inherited capabilities", () => {
     const unknown = createApiProviderModelConfig("custom", "undocumented-model");
     assert.deepEqual(unknown.input, ["text"]);
     assert.equal(unknown.toolCalling, false);
     assert.equal(unknown.reasoning, false);
     assert.equal(unknown.metadataSource, "unknown");
+  });
+
+  check("v52 keeps empty per-field limits inherited instead of persisting overrides", () => {
+    const provider = createApiProviderConfig("deepseek", "limits-v52");
+    const model = primaryProviderModel(provider);
+    const baseline = structuredClone(model);
+    model.toolCalling = !model.toolCalling;
+    model.metadataSource = "manual";
+    const reopened = normalizeSettingsData({
+      ...structuredClone(DEFAULT_SETTINGS),
+      settingsVersion: 52,
+      apiProviders: [provider]
+    }).settings.apiProviders[0]?.models[0];
+    assert.ok(reopened);
+    assert.equal(Object.hasOwn(reopened, "limitsOverride"), false);
+    assert.equal(reopened.contextWindow, baseline.contextWindow);
+    assert.equal(reopened.modelMaxTokens, baseline.modelMaxTokens);
+    assert.equal(reopened.maxOutputTokens, baseline.maxOutputTokens);
+    assert.equal(reopened.toolCalling, model.toolCalling);
+  });
+
+  check("per-field limits override only the entered values and clear independently", () => {
+    const provider = createApiProviderConfig("deepseek", "partial-limits-v52");
+    const model = primaryProviderModel(provider);
+    const baseline = structuredClone(model);
+    applyApiProviderModelLimitsOverride(
+      model,
+      "deepseek",
+      provider.runtimeProviderId,
+      { contextWindow: 120_000 }
+    );
+    assert.deepEqual(model.limitsOverride, { contextWindow: 120_000 });
+    assert.equal(model.contextWindow, 120_000);
+    assert.equal(model.modelMaxTokens, baseline.modelMaxTokens);
+    assert.equal(
+      model.maxOutputTokens,
+      Math.min(120_000, baseline.maxOutputTokens)
+    );
+
+    applyApiProviderModelLimitsOverride(
+      model,
+      "deepseek",
+      provider.runtimeProviderId,
+      {}
+    );
+    assert.equal(Object.hasOwn(model, "limitsOverride"), false);
+    assert.equal(model.contextWindow, baseline.contextWindow);
+    assert.equal(model.modelMaxTokens, baseline.modelMaxTokens);
+    assert.equal(model.maxOutputTokens, baseline.maxOutputTokens);
   });
 
   check("discovered IDs use exact runtime Provider metadata from the Pi catalog", () => {
@@ -2686,7 +2882,7 @@ function assertSettingsV51MigrationContract(): void {
   });
 
   if (failures.length > 0) {
-    throw new AggregateError(failures, "Settings v50 migration contract failed");
+    throw new AggregateError(failures, "Settings v52 migration contract failed");
   }
 }
 
@@ -4790,6 +4986,263 @@ function assertPresetRequestMappings(): void {
   }
 }
 
+function assertQwenProviderContract(): void {
+  const qwen = API_PROVIDER_PRESETS.find((preset) => preset.id === "qwen");
+  const tokenPlan = API_PROVIDER_PRESETS.find(
+    (preset) => preset.id === "qwen-token-plan"
+  );
+  assert.ok(qwen && tokenPlan);
+  assert.deepEqual({
+    group: qwen.group,
+    runtimeProviderId: qwen.runtimeProviderId,
+    baseUrl: qwen.baseUrl,
+    apiProtocol: qwen.apiProtocol
+  }, {
+    group: "provider",
+    runtimeProviderId: "qwen",
+    baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    apiProtocol: "openai-completions"
+  });
+  assert.deepEqual({
+    group: tokenPlan.group,
+    runtimeProviderId: tokenPlan.runtimeProviderId,
+    baseUrl: tokenPlan.baseUrl,
+    apiProtocol: tokenPlan.apiProtocol
+  }, {
+    group: "token-plan",
+    runtimeProviderId: "qwen-token-plan-cn",
+    baseUrl: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+    apiProtocol: "openai-completions"
+  });
+
+  const qwenSvg = providerBrandSvg("qwen");
+  assert.equal(providerBrandSvg("qwen-token-plan"), qwenSvg);
+  assert.match(qwenSvg, /<linearGradient\b/u);
+  assert.ok(new Set(
+    Array.from(qwenSvg.matchAll(/stop-color="(#[0-9A-F]{6})"/giu))
+      .map((match) => match[1])
+  ).size >= 2);
+
+  const [catalogModelId] = Object.keys(QWEN_TOKEN_PLAN_CN_MODELS);
+  assert.ok(catalogModelId);
+  assert.equal(
+    resolveEchoInkPiCatalogModel("qwen-token-plan-cn", catalogModelId),
+    QWEN_TOKEN_PLAN_CN_MODELS[catalogModelId]
+  );
+  assert.equal(resolveEchoInkPiCatalogModel("qwen", catalogModelId), null);
+
+  const settings = structuredClone(DEFAULT_SETTINGS);
+  const configured = createApiProviderConfig(
+    "qwen-token-plan",
+    "composer-qwen-token-plan"
+  );
+  settings.apiProviders = [configured];
+  settings.activeApiProviderId = configured.id;
+  assert.equal(currentComposerProviderBrand({
+    plugin: { settings }
+  } as never), "qwen");
+}
+
+async function assertProviderModelDiscoveryRequestContract(): Promise<void> {
+  const draft = providerModelDiscoveryDraft("openai-completions");
+  const fakeKey = "fixture-model-discovery-key";
+  let requestedUrl = "";
+  let requestedInit: RequestInit | undefined;
+  const available = await requestProviderModels({
+    draft,
+    apiKey: fakeKey,
+    fetchImpl: async (url, init) => {
+      requestedUrl = url;
+      requestedInit = init;
+      return {
+        status: 200,
+        json: async () => ({ data: [{ id: "model-a" }, { id: "model-b" }] })
+      };
+    }
+  });
+  assert.deepEqual(available, {
+    status: "available",
+    models: ["model-a", "model-b"]
+  });
+  assert.equal(requestedUrl, "https://current.example/v1/models");
+  assert.equal(requestedInit?.method, "GET");
+  assert.deepEqual(requestedInit?.headers, {
+    authorization: `Bearer ${fakeKey}`
+  });
+  assert.equal(requestedInit?.redirect, "error");
+
+  const statuses: Array<{
+    status: number;
+    expected: PiProviderModelListResult["status"];
+  }> = [
+    { status: 401, expected: "api_key_error" },
+    { status: 404, expected: "unsupported" },
+    { status: 429, expected: "rate_or_service_error" },
+    { status: 503, expected: "rate_or_service_error" }
+  ];
+  for (const entry of statuses) {
+    const result = await requestProviderModels({
+      draft,
+      apiKey: fakeKey,
+      fetchImpl: async () => ({
+        status: entry.status,
+        json: async () => ({ data: [] })
+      })
+    });
+    assert.equal(result.status, entry.expected);
+    assert.equal(JSON.stringify(result).includes(fakeKey), false);
+  }
+  const network = await requestProviderModels({
+    draft,
+    apiKey: fakeKey,
+    fetchImpl: async () => {
+      throw new Error("fixture-network-failure");
+    }
+  });
+  assert.equal(network.status, "network_error");
+  const malformed = await requestProviderModels({
+    draft,
+    apiKey: fakeKey,
+    fetchImpl: async () => ({
+      status: 200,
+      json: async () => ({ models: ["wrong-shape"] })
+    })
+  });
+  assert.equal(malformed.status, "response_format_error");
+  assert.equal(JSON.stringify([network, malformed]).includes(fakeKey), false);
+
+  const anthropicDraft = providerModelDiscoveryDraft("anthropic-messages");
+  let anthropicRequest: { url: string; init: RequestInit } | undefined;
+  await requestProviderModels({
+    draft: anthropicDraft,
+    apiKey: fakeKey,
+    fetchImpl: async (url, init) => {
+      anthropicRequest = { url, init };
+      return { status: 200, json: async () => ({ data: [] }) };
+    }
+  });
+  assert.equal(anthropicRequest?.url, "https://current.example/v1/models");
+  assert.deepEqual(anthropicRequest?.init.headers, {
+    "x-api-key": fakeKey,
+    "anthropic-version": "2023-06-01"
+  });
+
+  let obsidianRequest: Record<string, unknown> | undefined;
+  const cloudFetch = createObsidianProviderFetch(async (input) => {
+    obsidianRequest = structuredClone(input) as unknown as Record<string, unknown>;
+    return {
+      status: 200,
+      json: { data: [{ id: "obsidian-model" }] }
+    } as never;
+  });
+  const cloudResponse = await cloudFetch(
+    "https://cloud.example/v1/models",
+    {
+      method: "GET",
+      headers: { authorization: `Bearer ${fakeKey}` }
+    }
+  );
+  assert.equal(cloudResponse.status, 200);
+  assert.deepEqual(await cloudResponse.json(), {
+    data: [{ id: "obsidian-model" }]
+  });
+  assert.deepEqual(obsidianRequest, {
+    url: "https://cloud.example/v1/models",
+    method: "GET",
+    headers: { authorization: `Bearer ${fakeKey}` },
+    throw: false
+  });
+
+  const localFetch: PiProviderFetch = async () => ({
+    status: 200,
+    json: async () => ({ data: [] })
+  });
+  assert.equal(
+    providerModelFetchForUrl("https://cloud.example/v1", cloudFetch, localFetch),
+    cloudFetch
+  );
+  assert.equal(
+    providerModelFetchForUrl("http://127.0.0.1:11434/v1", cloudFetch, localFetch),
+    localFetch
+  );
+}
+
+function providerModelDiscoveryDraft(
+  apiProtocol: "openai-completions" | "anthropic-messages"
+): PiProviderConfigurationDraft {
+  return {
+    providerSettingsId: "model-discovery-provider",
+    providerId: "custom",
+    runtimeProviderId: "custom",
+    apiProtocol,
+    authMode: "api-key",
+    baseUrl: "https://current.example/v1/",
+    modelId: "",
+    apiKey: "",
+    toolCalling: false,
+    imageInput: false,
+    reasoning: false,
+    contextWindow: 64_000,
+    modelMaxTokens: 8_192,
+    maxOutputTokens: 8_192
+  };
+}
+
+function assertCustomProtocolContract(): void {
+  for (const protocol of [
+    "openai-completions",
+    "openai-responses",
+    "anthropic-messages"
+  ] as const) {
+    assert.equal(normalizeApiProviderProtocol(protocol, "custom"), protocol);
+  }
+  assert.equal(
+    normalizeApiProviderProtocol("openai-codex-responses", "custom"),
+    "openai-completions"
+  );
+  assert.equal(
+    normalizeApiProviderProtocol("anthropic-messages", "deepseek"),
+    "openai-completions"
+  );
+
+  const provider = createApiProviderConfig("custom", "custom-protocol-fixture");
+  provider.baseUrl = "https://api.example.com/v1";
+  provider.apiProtocol = "openai-responses";
+  const modal = new ProviderModelModal({
+    app: new App(),
+    draft: provider,
+    editing: false,
+    language: "en",
+    copy: settingsCopy("en"),
+    preflight: {
+      listModels: async () => ({ status: "available", models: [] }),
+      testConnection: async () => ({ status: "ok" })
+    },
+    save: async () => ({ saved: true })
+  });
+  modal.open();
+
+  const labels = Array.from(
+    modal.contentEl.querySelectorAll<HTMLElement>("[data-provider-field-label]")
+  ).map((element) => element.textContent ?? "");
+  assert.ok(labels.indexOf("Endpoint URL") < labels.indexOf("API protocol"));
+  assert.ok(labels.indexOf("API protocol") < labels.indexOf("API Key"));
+  assert.ok(labels.indexOf("API Key") < labels.indexOf("Enabled models"));
+  assert.doesNotMatch(modal.contentEl.textContent, /Custom protocol/u);
+
+  const select = modal.contentEl.querySelector<HTMLSelectElement>(
+    '[data-modal-focus-key="protocol"]'
+  );
+  assert.ok(select);
+  assert.equal(select.value, "openai-responses");
+  assert.deepEqual(
+    Array.from(select.querySelectorAll<HTMLOptionElement>("option"))
+      .map((option) => option.value),
+    ["openai-completions", "openai-responses", "anthropic-messages"]
+  );
+  modal.close();
+}
+
 function assertOpenAICodexSseAdapterContract(): void {
   const captured: StreamOptions[] = [];
   const upstream: ProviderStreams = {
@@ -4813,6 +5266,136 @@ function assertOpenAICodexSseAdapterContract(): void {
     captured.map((options) => options.transport),
     ["sse", "sse"]
   );
+}
+
+async function assertProviderRequestLimitDispatchContract(): Promise<void> {
+  const calls: string[] = [];
+  const adapter: ProviderStreams = {
+    stream: () => {
+      calls.push("stream");
+      const output = createAssistantMessageEventStream();
+      output.end();
+      return output;
+    },
+    streamSimple: () => {
+      calls.push("streamSimple");
+      const output = createAssistantMessageEventStream();
+      output.end();
+      return output;
+    }
+  };
+  const dispatcher = new PiProviderProtocolDispatcher({
+    "openai-completions": adapter,
+    "openai-responses": adapter,
+    "anthropic-messages": adapter
+  });
+  const transport = new PiProviderProtocolTransport({
+    authorityId: "request-limit-dispatch-authority",
+    storeSetId: "request-limit-dispatch-store",
+    resolveAuthToken: async () => "fixture-key",
+    dispatcher
+  });
+  const dispatch = async (
+    apiProtocol: "openai-completions" | "openai-responses" | "anthropic-messages",
+    maxTokens?: number
+  ): Promise<void> => {
+    const model = createPiProviderModelDefinition({
+      providerId: "custom",
+      apiProtocol,
+      baseUrl: "https://fixture.example/v1",
+      modelRef: "fixture/model",
+      contextWindow: 64_000,
+      maxOutputTokens: 8_192
+    });
+    await transport.stream({
+      runId: "request-limit-dispatch-run",
+      conversationId: "request-limit-dispatch-conversation",
+      turnId: "request-limit-dispatch-turn",
+      correlationId: "request-limit-dispatch-correlation",
+      provider: {
+        providerId: "custom",
+        apiProtocol,
+        authMode: "api-key",
+        baseUrl: "https://fixture.example/v1",
+        modelRef: "fixture/model"
+      },
+      model,
+      context: { messages: [], tools: [] },
+      options: {
+        ...(maxTokens === undefined ? {} : { maxTokens }),
+        temperature: 0,
+        cacheRetention: "none",
+        maxRetries: 0,
+        timeoutMs: 1_000
+      }
+    });
+  };
+
+  await dispatch("openai-completions");
+  await dispatch("openai-responses");
+  await dispatch("openai-completions", 2_048);
+  await dispatch("anthropic-messages", 8_192);
+  assert.deepEqual(
+    calls,
+    ["stream", "stream", "streamSimple", "streamSimple"]
+  );
+}
+
+async function assertProtocolPayloadLimitContract(): Promise<void> {
+  const dispatcher = new PiProviderProtocolDispatcher();
+  const capture = async (
+    apiProtocol: "openai-completions" | "openai-responses" | "anthropic-messages",
+    maxTokens?: number
+  ): Promise<Record<string, unknown>> => {
+    const model = createPiProviderModelDefinition({
+      providerId: "custom",
+      apiProtocol,
+      baseUrl: "http://127.0.0.1:1/v1",
+      modelRef: "payload-fixture-model",
+      contextWindow: 64_000,
+      maxOutputTokens: 8_192
+    });
+    let payload: Record<string, unknown> | undefined;
+    const onPayload = (value: unknown): never => {
+      payload = structuredClone(value) as Record<string, unknown>;
+      throw new Error("fixture_payload_captured");
+    };
+    const stream = maxTokens === undefined
+      ? dispatcher.stream({
+        model,
+        context: { messages: [], tools: [] },
+        apiKey: "fixture-payload-key",
+        options: {
+          temperature: 0,
+          maxRetries: 0,
+          timeoutMs: 1_000,
+          onPayload
+        }
+      })
+      : dispatcher.streamSimple({
+        model,
+        context: { messages: [], tools: [] },
+        apiKey: "fixture-payload-key",
+        options: {
+          temperature: 0,
+          maxTokens,
+          maxRetries: 0,
+          timeoutMs: 1_000,
+          onPayload
+        }
+      });
+    await stream.result();
+    assert.ok(payload);
+    return payload;
+  };
+
+  const chat = await capture("openai-completions");
+  assert.equal(Object.hasOwn(chat, "max_tokens"), false);
+  assert.equal(Object.hasOwn(chat, "max_completion_tokens"), false);
+  const responses = await capture("openai-responses");
+  assert.equal(Object.hasOwn(responses, "max_output_tokens"), false);
+  const anthropic = await capture("anthropic-messages", 8_192);
+  assert.equal(anthropic.max_tokens, 8_192);
 }
 
 async function assertProviderAuthResolutionFailureContract(): Promise<void> {
@@ -5066,7 +5649,10 @@ async function assertProviderPickerGroupingAndFiltering(): Promise<void> {
       "option:kimi",
       "option:minimax",
       "option:deepseek",
+      "option:qwen",
       "option:ollama",
+      "group:Token Plan",
+      "option:qwen-token-plan",
       "group:其他",
       "option:custom"
     ]
@@ -5085,23 +5671,29 @@ async function assertProviderPickerGroupingAndFiltering(): Promise<void> {
     "kimi",
     "minimax",
     "deepseek",
+    "qwen",
     "ollama",
+    "qwen-token-plan",
     "custom"
   ]);
   assert.equal(optionIds.includes("grok"), false);
   assert.doesNotMatch(options.textContent, /Grok/iu);
   const oauthPreset = API_PROVIDER_PRESETS.find((preset) => preset.id === "openai-codex");
-  assert.equal(oauthPreset?.authMode, "oauth");
+  const tokenPlanPreset = API_PROVIDER_PRESETS.find(
+    (preset) => preset.id === "qwen-token-plan"
+  );
+  assert.equal(oauthPreset?.group, "account");
+  assert.equal(tokenPlanPreset?.group, "token-plan");
   assert.ok(oauthPreset?.baseUrl,
-    "OAuth grouping has priority even when the preset defines a baseUrl");
+    "explicit grouping remains stable when a preset also defines a baseUrl");
 
   const selected = options.querySelector<ProviderModalTestElement>(
     '[data-provider-id="deepseek"]'
   );
-  const ollama = options.querySelector<ProviderModalTestElement>(
-    '[data-provider-id="ollama"]'
+  const qwen = options.querySelector<ProviderModalTestElement>(
+    '[data-provider-id="qwen"]'
   );
-  assert.ok(selected && ollama);
+  assert.ok(selected && qwen);
   assert.equal(selected.hasClass("is-selected"), true);
   assert.equal(selected.getAttribute("aria-selected"), "true");
   trigger.fireEvent("keydown", { key: "ArrowDown" });
@@ -5109,7 +5701,7 @@ async function assertProviderPickerGroupingAndFiltering(): Promise<void> {
   assert.equal(providerModalTestDocument.activeElement, selected,
     "opening by keyboard focuses the selected Provider across groups");
   options.fireEvent("keydown", { key: "ArrowDown", target: selected });
-  assert.equal(providerModalTestDocument.activeElement, ollama,
+  assert.equal(providerModalTestDocument.activeElement, qwen,
     "keyboard navigation skips headings and follows visible Provider order");
 
   const headings = options.querySelectorAll<ProviderModalTestElement>(
@@ -5118,12 +5710,14 @@ async function assertProviderPickerGroupingAndFiltering(): Promise<void> {
   assert.deepEqual(headings.map((heading) => heading.textContent), [
     "登录账户",
     "供应商",
+    "Token Plan",
     "其他"
   ]);
   search.value = "codex";
   search.fireEvent("input");
   assert.deepEqual(headings.map((heading) => heading.hasClass("is-hidden")), [
     false,
+    true,
     true,
     true
   ]);
@@ -5138,12 +5732,14 @@ async function assertProviderPickerGroupingAndFiltering(): Promise<void> {
   assert.deepEqual(headings.map((heading) => heading.hasClass("is-hidden")), [
     true,
     false,
+    true,
     true
   ]);
   assert.deepEqual(visibleOptionIds(), ["deepseek"]);
   search.value = "custom";
   search.fireEvent("input");
   assert.deepEqual(headings.map((heading) => heading.hasClass("is-hidden")), [
+    true,
     true,
     true,
     false
@@ -5154,12 +5750,14 @@ async function assertProviderPickerGroupingAndFiltering(): Promise<void> {
   assert.deepEqual(headings.map((heading) => heading.hasClass("is-hidden")), [
     true,
     true,
+    true,
     true
   ]);
   assert.deepEqual(visibleOptionIds(), []);
   search.value = "";
   search.fireEvent("input");
   assert.deepEqual(headings.map((heading) => heading.hasClass("is-hidden")), [
+    false,
     false,
     false,
     false
@@ -5188,7 +5786,7 @@ async function assertProviderPickerGroupingAndFiltering(): Promise<void> {
     englishModal.contentEl.querySelectorAll<ProviderModalTestElement>(
       ".codex-provider-combobox-group"
     ).map((heading) => heading.textContent),
-    ["Account sign-in", "Providers", "Other"]
+    ["Account sign-in", "Providers", "Token plans", "Other"]
   );
   englishModal.close();
   await flushProviderModalTasks();
@@ -5298,6 +5896,153 @@ async function assertOpenAICodexModalLifecycle(): Promise<void> {
   modal.close();
 }
 
+async function assertFreshCustomModelDiscoveryLifecycle(): Promise<void> {
+  installProviderModalDomFixture();
+  const provider = createApiProviderConfig("custom", "fresh-custom-discovery");
+  const calls: PiProviderConfigurationDraft[] = [];
+  const modal = new ProviderModelModal({
+    app: new App(),
+    draft: provider,
+    editing: false,
+    language: "en",
+    copy: settingsCopy("en"),
+    preflight: {
+      listModels: async (draft) => {
+        calls.push(structuredClone(draft));
+        return { status: "available", models: ["current-custom-model"] };
+      },
+      testConnection: async () => ({ status: "available" })
+    },
+    save: async () => ({ saved: true })
+  });
+  modal.open();
+  const endpoint = providerModalElementByFocusKey(modal, "endpoint");
+  const apiKey = providerModalElementByFocusKey(modal, "apiKey");
+  const discover = providerModalElementByFocusKey(modal, "model-discover");
+  assert.ok(endpoint && apiKey && discover);
+  assert.equal(discover.disabled, true);
+  assert.equal(calls.length, 0);
+
+  endpoint.value = "https://current-custom.example/v1";
+  endpoint.oninput?.(new Event("input"));
+  assert.equal(discover.disabled, true);
+  apiKey.value = "fixture-current-custom-key";
+  apiKey.oninput?.(new Event("input"));
+  assert.equal(discover.disabled, false);
+  assert.equal(calls.length, 0, "typing must not request a model list");
+
+  endpoint.value = "";
+  endpoint.oninput?.(new Event("input"));
+  assert.equal(discover.disabled, true);
+  endpoint.value = "https://current-custom.example/v1";
+  endpoint.oninput?.(new Event("input"));
+  assert.equal(discover.disabled, false);
+  apiKey.value = "";
+  apiKey.oninput?.(new Event("input"));
+  assert.equal(discover.disabled, true);
+  apiKey.value = "fixture-current-custom-key";
+  apiKey.oninput?.(new Event("input"));
+  assert.equal(discover.disabled, false);
+  assert.equal(calls.length, 0);
+
+  discover.click();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.baseUrl, "https://current-custom.example/v1");
+  assert.equal(calls[0]?.apiKey, "fixture-current-custom-key");
+  assert.ok(providerModalElementByFocusKey(modal, "manual-model"));
+  await flushProviderModalTasks();
+  modal.close();
+}
+
+async function assertProviderLimitOverrideRoundTrip(): Promise<void> {
+  installProviderModalDomFixture();
+  const provider = createApiProviderConfig("deepseek", "limit-round-trip");
+  provider.apiKey = "fixture-limit-round-trip-key";
+  const modelId = primaryProviderModel(provider).id;
+  let savedDraft: ApiProviderConfig | undefined;
+  const openModal = (
+    draft: ApiProviderConfig,
+    save: (next: ApiProviderConfig) => void
+  ): ProviderModelModal => {
+    const modal = new ProviderModelModal({
+      app: new App(),
+      draft,
+      editing: true,
+      language: "en",
+      copy: settingsCopy("en"),
+      preflight: {
+        listModels: async () => ({ status: "available", models: [] }),
+        testConnection: async () => ({ status: "available" })
+      },
+      save: async (next) => {
+        save(structuredClone(next));
+        return { saved: true };
+      }
+    });
+    modal.open();
+    return modal;
+  };
+
+  const first = openModal(provider, (next) => {
+    savedDraft = next;
+  });
+  for (const [key, value] of [
+    ["contextWindow", "120000"],
+    ["modelMaxTokens", "16000"],
+    ["maxOutputTokens", "12000"]
+  ] as const) {
+    const input = providerModalElementByFocusKey(
+      first,
+      `model:${modelId}:${key}`
+    );
+    assert.ok(input);
+    input.value = value;
+    input.oninput?.(new Event("input"));
+  }
+  providerModalElementByFocusKey(first, "save")?.click();
+  await flushProviderModalTasks();
+  assert.ok(savedDraft);
+  assert.deepEqual(primaryProviderModel(savedDraft).limitsOverride, {
+    contextWindow: 120_000,
+    modelMaxTokens: 16_000,
+    maxOutputTokens: 12_000
+  });
+
+  let clearedDraft: ApiProviderConfig | undefined;
+  const reopened = openModal(savedDraft, (next) => {
+    clearedDraft = next;
+  });
+  for (const [key, value] of [
+    ["contextWindow", "120000"],
+    ["modelMaxTokens", "16000"],
+    ["maxOutputTokens", "12000"]
+  ] as const) {
+    const input = providerModalElementByFocusKey(
+      reopened,
+      `model:${modelId}:${key}`
+    );
+    assert.ok(input);
+    assert.equal(input.value, value);
+    input.value = "";
+    input.oninput?.(new Event("input"));
+  }
+  providerModalElementByFocusKey(reopened, "save")?.click();
+  await flushProviderModalTasks();
+  assert.ok(clearedDraft);
+  const cleared = primaryProviderModel(clearedDraft);
+  const baseline = createApiProviderModelConfig("deepseek", modelId);
+  assert.equal(Object.hasOwn(cleared, "limitsOverride"), false);
+  assert.deepEqual({
+    contextWindow: cleared.contextWindow,
+    modelMaxTokens: cleared.modelMaxTokens,
+    maxOutputTokens: cleared.maxOutputTokens
+  }, {
+    contextWindow: baseline.contextWindow,
+    modelMaxTokens: baseline.modelMaxTokens,
+    maxOutputTokens: baseline.maxOutputTokens
+  });
+}
+
 async function assertProviderModelModalPreflightLifecycle(): Promise<void> {
   installProviderModalDomFixture();
   const copy = settingsCopy("en");
@@ -5338,6 +6083,34 @@ async function assertProviderModelModalPreflightLifecycle(): Promise<void> {
   modal.open();
   assert.equal(calls.length, 0, "opening the modal must not request models");
   assertProviderModalStatus(modal, "idle");
+  assert.deepEqual(
+    Array.from(modal.contentEl.querySelectorAll<HTMLElement>(
+      ".codex-provider-model-advanced-heading"
+    )).map((heading) => heading.textContent),
+    ["Model capabilities", "Context and output"]
+  );
+  assert.match(
+    modal.contentEl.textContent,
+    /Per-request max output/u
+  );
+  assert.doesNotMatch(
+    modal.contentEl.textContent,
+    /Actual max output/u
+  );
+  const primaryModelId = primaryProviderModel(provider).id;
+  for (const key of [
+    "contextWindow",
+    "modelMaxTokens",
+    "maxOutputTokens"
+  ] as const) {
+    const input = providerModalElementByFocusKey(
+      modal,
+      `model:${primaryModelId}:${key}`
+    );
+    assert.ok(input);
+    assert.equal(input.value, "");
+    assert.match(input.getAttribute("placeholder") ?? "", /^\d+$/u);
+  }
   const apiKey = providerModalElementByFocusKey(modal, "apiKey");
   assert.ok(apiKey);
   apiKey.value = "replacement-api-key";

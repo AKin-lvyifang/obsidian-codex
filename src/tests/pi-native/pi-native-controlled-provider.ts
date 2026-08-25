@@ -14,6 +14,7 @@ import {
 } from "../../harness/pi-native/pi-native-controlled-provider";
 import {
   createPiProviderModelDefinition,
+  type ControlledPiStreamInput,
   type PiProviderRuntimeConfig
 } from "../../harness/pi/production-pi-model-resolver";
 
@@ -21,10 +22,74 @@ export async function runPiNativeControlledProviderTests(): Promise<void> {
   assertCatalogModelMetadataFailsClosed();
   assertCurrentModelImageCapabilityIsCanonical();
   assertConfiguredModelCapabilitiesAndCatalogImageTruthMerge();
+  await assertProtocolRequestLimitProjection();
   await assertExecutableAgentToolsProjectToProviderMetadata();
   await assertImageContentSurvivesControlledProviderProjection();
   await assertThrownOverflowRemainsVisibleToAgentSession();
   await assertUnknownProviderFailuresRemainSanitized();
+}
+
+async function assertProtocolRequestLimitProjection(): Promise<void> {
+  const capture = async (
+    apiProtocol: PiProviderRuntimeConfig["apiProtocol"],
+    configuredMaxTokens?: number,
+    requestedMaxTokens?: number
+  ): Promise<ControlledPiStreamInput["options"]> => {
+    const config: PiProviderRuntimeConfig = {
+      ...providerConfig(),
+      apiProtocol
+    };
+    const model = createPiProviderModelDefinition({
+      providerId: config.providerId,
+      apiProtocol,
+      baseUrl: config.baseUrl,
+      modelRef: config.modelRef,
+      maxOutputTokens: 8_192
+    });
+    let captured: ControlledPiStreamInput["options"] | undefined;
+    const provider = createPiNativeControlledProvider({
+      config: { read: async () => structuredClone(config) },
+      controlledStream: {
+        authorityId: "request-limit-authority",
+        storeSetId: "request-limit-store",
+        stream: (input) => {
+          captured = input.options;
+          throw new Error("fixture_transport_stop");
+        }
+      },
+      model,
+      ...(configuredMaxTokens === undefined
+        ? {}
+        : { maxTokens: configuredMaxTokens }),
+      currentExecutionContext: () => ({
+        runId: "request-limit-run",
+        conversationId: "request-limit-conversation",
+        turnId: "request-limit-turn",
+        correlationId: "request-limit-correlation"
+      })
+    });
+    await provider.stream(
+      model,
+      emptyContext(),
+      requestedMaxTokens === undefined ? {} : { maxTokens: requestedMaxTokens }
+    ).result();
+    assert.ok(captured);
+    return captured;
+  };
+
+  for (const protocol of [
+    "openai-completions",
+    "openai-responses"
+  ] as const) {
+    const inherited = await capture(protocol);
+    assert.equal(Object.hasOwn(inherited, "maxTokens"), false);
+    const internallyRequested = await capture(protocol, undefined, 1_024);
+    assert.equal(internallyRequested.maxTokens, 1_024);
+  }
+  const overridden = await capture("openai-completions", 2_048, 1_024);
+  assert.equal(overridden.maxTokens, 1_024);
+  const anthropic = await capture("anthropic-messages");
+  assert.equal(anthropic.maxTokens, 8_192);
 }
 
 function assertCurrentModelImageCapabilityIsCanonical(): void {
