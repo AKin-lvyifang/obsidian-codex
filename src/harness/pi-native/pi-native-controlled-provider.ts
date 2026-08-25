@@ -109,7 +109,6 @@ export function createPiNativeModelFromConfiguration(input: {
   });
   return withResolvedPiModelImageCapability(deepFreeze({
     ...structuredClone(catalogModel),
-    reasoning: input.configured.reasoning,
     contextWindow: input.configured.contextWindow,
     maxTokens: input.configured.maxOutputTokens
   }), input.configured.imageInput);

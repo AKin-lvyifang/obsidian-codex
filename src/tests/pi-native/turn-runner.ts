@@ -19,6 +19,7 @@ import {
   type StoredSession
 } from "../../settings/settings";
 import {
+  createQueuedTurnFromComposer,
   enqueueComposerDraft,
   piChatMemoryModeForGlobalSetting,
   startChatTurn,
@@ -50,6 +51,7 @@ import {
   projectPiImageAttachments
 } from "../../ui/codex-view/pi-conversation-support";
 import { piProjectedEntryMessageId } from "../../harness/pi-native/pi-chat-ui-projector";
+import { openTestNoticeMessages } from "../obsidian-shim";
 
 const PNG_1X1 = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
@@ -120,9 +122,11 @@ async function queuedTurnsKeepExactProviderModelAndRetainUnavailableHead(): Prom
     skill: null,
     turnOptions: {
       providerSettingsId,
+      runtimeProviderId: providerSettingsId === first.id
+        ? first.runtimeProviderId
+        : second.runtimeProviderId,
       model,
-      reasoning: "high",
-      serviceTier: "fast",
+      reasoning: "none",
       permission: "workspace-write",
       mode: "agent",
       mcpEnabled: false
@@ -130,6 +134,28 @@ async function queuedTurnsKeepExactProviderModelAndRetainUnavailableHead(): Prom
     kind: "chat",
     createdAt: 1
   });
+
+  openTestNoticeMessages.length = 0;
+  const invalidComposerItem = await createQueuedTurnFromComposer({
+    plugin: { settings },
+    inputEl: { value: "invalid reasoning" },
+    attachments: [],
+    selectedSkill: null,
+    ensureSession: () => ({ ...session, bodyAuthority: undefined }),
+    ensureChatWorkspaceSelected: async () => true,
+    currentTurnOptions: () => ({
+      providerSettingsId: first.id,
+      runtimeProviderId: first.runtimeProviderId,
+      model: "model-a",
+      reasoning: "high",
+      permission: "workspace-write",
+      mode: "agent",
+      mcpEnabled: false
+    })
+  } as any, { allowLocalKnowledgeCommands: false });
+  assert.equal(invalidComposerItem, null);
+  assert.match(openTestNoticeMessages.at(-1) ?? "", /本轮没有入队/u);
+
   queue.enqueue(queued("turn-a", first.id, "model-a"));
   queue.enqueue(queued("turn-b", second.id, "model-b"));
   const activations: string[] = [];
@@ -215,6 +241,69 @@ async function queuedTurnsKeepExactProviderModelAndRetainUnavailableHead(): Prom
     `${second.id}:model-b`
   ]);
   assert.equal(queue.hasQueuedItems(session.id), false);
+
+  const frozenSource = queued("turn-frozen", first.id, "model-a");
+  queue.enqueue(frozenSource);
+  frozenSource.turnOptions.runtimeProviderId = "mutated-runtime";
+  frozenSource.turnOptions.model = "mutated-model";
+  frozenSource.turnOptions.reasoning = "high";
+  assert.deepEqual(
+    queue.itemsForSession(session.id).map((item) => ({
+      runtimeProviderId: item.turnOptions.runtimeProviderId,
+      model: item.turnOptions.model,
+      reasoning: item.turnOptions.reasoning
+    })),
+    [{
+      runtimeProviderId: first.runtimeProviderId,
+      model: "model-a",
+      reasoning: "none"
+    }]
+  );
+  await startNextQueuedTurn(view, session.id);
+  assert.equal(queue.hasQueuedItems(session.id), false);
+
+  const frozenRuntimeProviderId = first.runtimeProviderId;
+  queue.enqueue(queued("turn-runtime-drift", first.id, "model-a"));
+  first.runtimeProviderId = "changed-runtime";
+  openTestNoticeMessages.length = 0;
+  await startNextQueuedTurn(view, session.id);
+  assert.equal(queue.isSessionQueuePaused(session.id), true);
+  assert.deepEqual(
+    queue.itemsForSession(session.id).map((item) => item.id),
+    ["turn-runtime-drift"]
+  );
+  assert.match(
+    openTestNoticeMessages.at(-1) ?? "",
+    /队首已保留并暂停/u
+  );
+  first.runtimeProviderId = frozenRuntimeProviderId;
+  queue.resumeSessionQueue(session.id);
+  await startNextQueuedTurn(view, session.id);
+  assert.equal(queue.hasQueuedItems(session.id), false);
+
+  const invalidReasoning = queued(
+    "turn-reasoning-invalid",
+    second.id,
+    "model-b"
+  );
+  invalidReasoning.turnOptions.reasoning = "high";
+  queue.enqueue(invalidReasoning);
+  openTestNoticeMessages.length = 0;
+  await startNextQueuedTurn(view, session.id);
+  assert.equal(queue.isSessionQueuePaused(session.id), true);
+  assert.deepEqual(
+    queue.itemsForSession(session.id).map((item) => ({
+      id: item.id,
+      reasoning: item.turnOptions.reasoning
+    })),
+    [{ id: "turn-reasoning-invalid", reasoning: "high" }]
+  );
+  assert.match(
+    openTestNoticeMessages.at(-1) ?? "",
+    /思考强度.*队首已保留并暂停/u
+  );
+  assert.equal(sends.length, 6, "invalid queue snapshots never reach Pi");
+  queue.clearSessionQueue(session.id);
   console.log("PASS conversation-ui: Queue switches exact combinations and retains an unavailable head");
 }
 
@@ -777,9 +866,9 @@ async function maintainScopeIsResolvedBeforeProviderSubmit(): Promise<void> {
     skill: null,
     turnOptions: {
       providerSettingsId: "fixture-provider",
+      runtimeProviderId: "fixture-provider",
       model: "",
       reasoning: "high",
-      serviceTier: "fast",
       permission: "workspace-write",
       mode: "agent",
       mcpEnabled: false
@@ -1048,9 +1137,9 @@ async function disabledOrStaleSkillCannotStartTurn(): Promise<void> {
     skill: selectedSkill,
     turnOptions: {
       providerSettingsId: "fixture-provider",
+      runtimeProviderId: "fixture-provider",
       model: "",
       reasoning: "high",
-      serviceTier: "fast",
       permission: "read-only",
       mode: "agent",
       mcpEnabled: false
@@ -1141,9 +1230,9 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
     },
     turnOptions: {
       providerSettingsId: "fixture-provider",
+      runtimeProviderId: "fixture-provider",
       model: "",
       reasoning: "high",
-      serviceTier: "fast",
       permission: "read-only",
       mode: "agent",
       mcpEnabled: false
@@ -1442,9 +1531,9 @@ Promise<void> {
     skill: null,
     turnOptions: {
       providerSettingsId: "fixture-provider",
+      runtimeProviderId: "fixture-provider",
       model: "",
       reasoning: "high",
-      serviceTier: "fast",
       permission: "read-only",
       mode: "agent",
       mcpEnabled: false
@@ -1639,9 +1728,9 @@ function queuedImageTurn(sessionId: string, imagePath: string): QueuedTurnItem {
     skill: null,
     turnOptions: {
       providerSettingsId: "queue-image-provider",
+      runtimeProviderId: "echoink-custom",
       model: "queue-image-model",
-      reasoning: "high",
-      serviceTier: "fast",
+      reasoning: "none",
       permission: "read-only",
       mode: "agent",
       mcpEnabled: false

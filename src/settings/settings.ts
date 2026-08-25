@@ -1,4 +1,4 @@
-import type { CodexModel, CodexPluginInfo, CodexSkill, McpServerStatus, PermissionMode, ProcessEventKind, ProcessFileRef, ReasoningEffort, ServiceTierChoice, TokenUsage, UiMode } from "../types/app-server";
+import type { CodexModel, CodexPluginInfo, CodexSkill, McpServerStatus, PermissionMode, ProcessEventKind, ProcessFileRef, ReasoningEffort, TokenUsage, UiMode } from "../types/app-server";
 import type { OAuthCredential } from "@earendil-works/pi-ai";
 import {
   apiProviderAuthMode,
@@ -37,7 +37,10 @@ import {
   type EchoInkReasoningSummarySnapshot
 } from "../types/reasoning-summary";
 import type { EchoInkConversationSessionShell } from "./current-conversation";
-import { resolveEchoInkPiCatalogModel } from "./pi-model-catalog";
+import {
+  normalizeEchoInkReasoningEffort,
+  resolveEchoInkPiCatalogModel
+} from "./pi-model-catalog";
 import type {
   EchoInkAssistantTurnSnapshot,
   EchoInkTurnInteractionRecord
@@ -338,12 +341,48 @@ export interface ApiProviderModelConfig {
   input: ApiProviderModelInput[];
   toolCalling: boolean;
   reasoning: boolean;
+  /** User preference scoped to this exact Provider model record. */
+  reasoningEffort?: ReasoningEffort;
   contextWindow: number;
   /** Provider-published model output ceiling. */
   modelMaxTokens: number;
   /** EchoInk's actual per-request output ceiling. */
   maxOutputTokens: number;
   metadataSource: ApiProviderModelMetadataSource;
+}
+
+const INVALID_STORED_REASONING_EFFORT_MODELS = new WeakSet<
+  ApiProviderModelConfig
+>();
+const EXPLICIT_VALID_STORED_REASONING_EFFORT_MODELS = new WeakSet<
+  ApiProviderModelConfig
+>();
+const INVALID_STORED_REASONING_EFFORT_IDENTITIES = new Set<string>();
+
+/**
+ * Tracks an invalid persisted value without admitting that value into settings.
+ * The signal lives only for the normalized in-memory model object so Composer can
+ * distinguish a missing preference from one that needs a visible correction.
+ */
+export function apiProviderModelHadInvalidStoredReasoningEffort(
+  providerSettingsId: string,
+  model: ApiProviderModelConfig
+): boolean {
+  return INVALID_STORED_REASONING_EFFORT_MODELS.has(model)
+    || INVALID_STORED_REASONING_EFFORT_IDENTITIES.has(
+      invalidStoredReasoningEffortIdentity(providerSettingsId, model.id)
+    );
+}
+
+export function clearApiProviderModelInvalidStoredReasoningEffort(
+  providerSettingsId: string,
+  model: ApiProviderModelConfig
+): void {
+  INVALID_STORED_REASONING_EFFORT_MODELS.delete(model);
+  EXPLICIT_VALID_STORED_REASONING_EFFORT_MODELS.delete(model);
+  INVALID_STORED_REASONING_EFFORT_IDENTITIES.delete(
+    invalidStoredReasoningEffortIdentity(providerSettingsId, model.id)
+  );
 }
 
 export interface WorkspaceResourceToggles {
@@ -378,8 +417,6 @@ export interface CodexForObsidianSettings {
   apiProviders: ApiProviderConfig[];
   openAICodexCredential: OAuthCredential | null;
   defaultModel: string;
-  defaultReasoning: ReasoningEffort;
-  defaultServiceTier: ServiceTierChoice;
   defaultPermission: PermissionMode;
   defaultMode: UiMode;
   autoOpen: boolean;
@@ -404,7 +441,7 @@ export const DEFAULT_REVIEW_OUTPUT_DIR = "outputs";
 
 export const DEFAULT_SETTINGS: CodexForObsidianSettings = {
   productGeneration: "pi-agent-product-v1",
-  settingsVersion: 51,
+  settingsVersion: 52,
   settingsLanguage: "zh-CN",
   settingsTab: "providers",
   proxyEnabled: false,
@@ -416,8 +453,6 @@ export const DEFAULT_SETTINGS: CodexForObsidianSettings = {
   apiProviders: [createDefaultApiProvider()],
   openAICodexCredential: null,
   defaultModel: "",
-  defaultReasoning: "high",
-  defaultServiceTier: "fast",
   defaultPermission: "workspace-write",
   defaultMode: "agent",
   autoOpen: false,
@@ -552,8 +587,6 @@ export function normalizeSettingsData(input: unknown): { settings: CodexForObsid
 
   if (previousVersion < 1) {
     if (!data?.defaultModel) settings.defaultModel = DEFAULT_SETTINGS.defaultModel;
-    if (data?.defaultReasoning === "high") settings.defaultReasoning = DEFAULT_SETTINGS.defaultReasoning;
-    if (data?.defaultServiceTier === "standard") settings.defaultServiceTier = DEFAULT_SETTINGS.defaultServiceTier;
     settings.proxyEnabled = data?.proxyEnabled !== false;
     settings.proxyUrl = settings.proxyEndpoint || settings.proxyCredentialRef
       ? ""
@@ -562,21 +595,9 @@ export function normalizeSettingsData(input: unknown): { settings: CodexForObsid
         : DEFAULT_SETTINGS.proxyUrl;
   }
 
-  if (previousVersion < 3) {
-    if (settings.defaultReasoning === "high" || settings.defaultReasoning === "xhigh") {
-      settings.defaultReasoning = DEFAULT_SETTINGS.defaultReasoning;
-    }
-    if (settings.defaultServiceTier === "standard") {
-      settings.defaultServiceTier = DEFAULT_SETTINGS.defaultServiceTier;
-    }
-  }
-
   if (previousVersion < 4) {
     if (!settings.defaultModel || settings.defaultModel === "gpt-5.4" || settings.defaultModel === "gpt-5.4-mini") {
       settings.defaultModel = DEFAULT_SETTINGS.defaultModel;
-    }
-    if (!settings.defaultReasoning || settings.defaultReasoning === "low") {
-      settings.defaultReasoning = DEFAULT_SETTINGS.defaultReasoning;
     }
   }
 
@@ -587,6 +608,7 @@ export function normalizeSettingsData(input: unknown): { settings: CodexForObsid
   if (settings.proxyEndpoint || settings.proxyCredentialRef) {
     settings.proxyUrl = "";
   }
+  migrateLegacyReasoningPreference(settings, data);
   normalizeApiProviderSelection(settings);
   settings.settingsVersion = DEFAULT_SETTINGS.settingsVersion;
   const languageChanged = data?.settingsLanguage !== normalizedLanguage;
@@ -814,7 +836,15 @@ export function applyApiProviderModelPreset(
   if (!modelPreset) return false;
   const model = createApiProviderModelConfig(providerId, modelPreset.id);
   const index = provider.models.findIndex((entry) => entry.id === model.id);
-  if (index >= 0) provider.models[index] = model;
+  if (index >= 0) {
+    const previous = provider.models[index];
+    const previousEffort = previous?.reasoningEffort;
+    if (previousEffort) model.reasoningEffort = previousEffort;
+    if (previous) {
+      clearApiProviderModelInvalidStoredReasoningEffort(provider.id, previous);
+    }
+    provider.models[index] = model;
+  }
   else provider.models.push(model);
   provider.defaultModelId = model.id;
   return true;
@@ -1115,6 +1145,10 @@ export function isValidApiProviderModelConfig(
     || model.input.some((entry) => entry !== "text" && entry !== "image")
     || typeof model.toolCalling !== "boolean"
     || typeof model.reasoning !== "boolean"
+    || (
+      model.reasoningEffort !== undefined
+      && !normalizeEchoInkReasoningEffort(model.reasoningEffort)
+    )
     || !["preset", "catalog", "unknown", "manual"].includes(String(model.metadataSource))
   ) return false;
   const contextWindow = model.contextWindow;
@@ -1138,6 +1172,10 @@ export function isValidApiProviderModelConfig(
 export function removeApiProvider(settings: Pick<CodexForObsidianSettings, "providerMode" | "activeApiProviderId" | "apiProviders">, providerId: string): boolean {
   const index = settings.apiProviders.findIndex((provider) => provider.id === providerId);
   if (index < 0) return false;
+  const removed = settings.apiProviders[index];
+  for (const model of removed?.models ?? []) {
+    clearApiProviderModelInvalidStoredReasoningEffort(providerId, model);
+  }
   const wasActive = settings.activeApiProviderId === providerId;
   settings.apiProviders.splice(index, 1);
   if (wasActive) {
@@ -1298,14 +1336,6 @@ function legacyResourceDecisions(
       typeof scope[resourceId] === "boolean" ? [scope[resourceId]] : []);
     return [resourceId, !values.includes(false) && values.includes(true)];
   });
-}
-
-function normalizeReasoningEffort(value: unknown, fallback: ReasoningEffort): ReasoningEffort {
-  return value === "low" || value === "medium" || value === "high" || value === "xhigh" ? value : fallback;
-}
-
-function normalizeServiceTierChoice(value: unknown, fallback: ServiceTierChoice): ServiceTierChoice {
-  return value === "standard" || value === "fast" || value === "flex" ? value : fallback;
 }
 
 function normalizePermissionMode(value: unknown, fallback: PermissionMode): PermissionMode {
@@ -2060,6 +2090,7 @@ function normalizeApiProviders(value: unknown): ApiProviderConfig[] {
       providerId,
       runtimeProviderId
     );
+    rememberInvalidStoredReasoningEffortIdentities(id, modelSelection.models);
     return {
       id,
       providerId,
@@ -2083,6 +2114,30 @@ function normalizeApiProviders(value: unknown): ApiProviderConfig[] {
       ...(Object.keys(queryParams).length ? { queryParams } : {})
     };
   });
+}
+
+function migrateLegacyReasoningPreference(
+  settings: Pick<
+    CodexForObsidianSettings,
+    "apiProviders"
+  >,
+  data: Record<string, unknown>
+): void {
+  const effort = normalizeEchoInkReasoningEffort(data.defaultReasoning);
+  const providerSettingsId = typeof data.activeApiProviderId === "string"
+    ? data.activeApiProviderId.trim()
+    : "";
+  const modelId = typeof data.defaultModel === "string"
+    ? data.defaultModel.trim()
+    : "";
+  if (!effort || !providerSettingsId || !modelId) return;
+  const provider = settings.apiProviders.find(
+    (candidate) => candidate.id === providerSettingsId
+  );
+  const model = provider ? getApiProviderModel(provider, modelId) : null;
+  if (model && model.reasoningEffort === undefined) {
+    model.reasoningEffort = effort;
+  }
 }
 
 function normalizeApiProviderModels(
@@ -2153,17 +2208,22 @@ function normalizeStoredApiProviderModel(
 ): ApiProviderModelConfig {
   const id = String(record.id).trim();
   if (record.metadataSource === "manual") {
-    return normalizeManualApiProviderModel(record, providerId, id);
+    const normalized = normalizeManualApiProviderModel(record, providerId, id);
+    const catalogModel = resolveEchoInkPiCatalogModel(runtimeProviderId, id);
+    if (catalogModel) normalized.reasoning = catalogModel.reasoning;
+    return normalized;
   }
   const normalized = createApiProviderModelConfig(
     providerId,
     id,
     runtimeProviderId
   );
-  if (normalized.metadataSource !== "unknown") return normalized;
+  if (normalized.metadataSource !== "unknown") {
+    return withStoredReasoningEffort(normalized, record.reasoningEffort);
+  }
   const unknown = normalized;
   unknown.displayName = normalizeText(record.displayName, id);
-  return unknown;
+  return withStoredReasoningEffort(unknown, record.reasoningEffort);
 }
 
 function normalizeLegacyApiProviderModel(
@@ -2230,7 +2290,7 @@ function normalizeManualApiProviderModel(
       Math.min(contextWindow, modelMaxTokens, 1_000_000)
     )
   );
-  return {
+  return withStoredReasoningEffort({
     id: modelId,
     displayName: normalizeText(
       record.displayName,
@@ -2251,7 +2311,47 @@ function normalizeManualApiProviderModel(
       modelMaxTokens
     ),
     metadataSource: "manual"
-  };
+  }, record.reasoningEffort);
+}
+
+function withStoredReasoningEffort(
+  model: ApiProviderModelConfig,
+  value: unknown
+): ApiProviderModelConfig {
+  const effort = normalizeEchoInkReasoningEffort(value);
+  if (effort) {
+    model.reasoningEffort = effort;
+    INVALID_STORED_REASONING_EFFORT_MODELS.delete(model);
+    EXPLICIT_VALID_STORED_REASONING_EFFORT_MODELS.add(model);
+  } else if (value !== undefined) {
+    INVALID_STORED_REASONING_EFFORT_MODELS.add(model);
+    EXPLICIT_VALID_STORED_REASONING_EFFORT_MODELS.delete(model);
+  }
+  return model;
+}
+
+function rememberInvalidStoredReasoningEffortIdentities(
+  providerSettingsId: string,
+  models: readonly ApiProviderModelConfig[]
+): void {
+  for (const model of models) {
+    const identity = invalidStoredReasoningEffortIdentity(
+      providerSettingsId,
+      model.id
+    );
+    if (INVALID_STORED_REASONING_EFFORT_MODELS.has(model)) {
+      INVALID_STORED_REASONING_EFFORT_IDENTITIES.add(identity);
+    } else if (EXPLICIT_VALID_STORED_REASONING_EFFORT_MODELS.has(model)) {
+      INVALID_STORED_REASONING_EFFORT_IDENTITIES.delete(identity);
+    }
+  }
+}
+
+function invalidStoredReasoningEffortIdentity(
+  providerSettingsId: string,
+  modelId: string
+): string {
+  return JSON.stringify([providerSettingsId, modelId]);
 }
 
 function normalizeApiProviderModelInput(

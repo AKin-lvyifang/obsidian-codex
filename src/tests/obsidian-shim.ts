@@ -3,8 +3,12 @@ if (!testGlobal.window) {
   testGlobal.window = globalThis as unknown as Window;
 }
 
+export const openTestNoticeMessages: string[] = [];
+
 export class Notice {
-  constructor(public readonly message: string, public readonly timeout?: number) {}
+  constructor(public readonly message: string, public readonly timeout?: number) {
+    openTestNoticeMessages.push(message);
+  }
 }
 
 export class TFile {

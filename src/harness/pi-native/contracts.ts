@@ -331,8 +331,12 @@ export interface PiChatSubmitRequest {
   images?: readonly Readonly<PiChatPreparedImage>[];
   /** The composer mode captured for this exact queued turn. */
   mode?: PiChatMode;
+  /** Runtime Provider identity captured with this exact Composer turn. */
+  runtimeProviderId: string;
+  /** Model identity captured with this exact Composer turn. */
+  modelId: string;
   /** Exact per-turn selection to map to Pi's Provider thinking level. */
-  reasoning?: ReasoningEffort;
+  reasoning: ReasoningEffort;
   memoryMode?: PiConversationMemoryMode;
   skillPath?: string;
   skillName?: string;

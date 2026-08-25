@@ -1,7 +1,6 @@
-export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type PermissionMode = "read-only" | "workspace-write" | "danger-full-access";
 export type UiMode = "agent" | "plan";
-export type ServiceTierChoice = "standard" | "fast" | "flex";
 
 export interface CodexModel {
   id: string;

@@ -5,8 +5,6 @@ import { providerConnectionLabel } from "../settings/settings";
 import type { EchoInkResource } from "../resources/types";
 import type {
   PermissionMode,
-  ReasoningEffort,
-  ServiceTierChoice,
   TokenUsage,
   UiMode
 } from "../types/app-server";
@@ -197,8 +195,6 @@ export class CodexView extends ItemView {
   private attachments: StoredAttachment[] = [];
   private selectedProviderSettingsId = "";
   private selectedModel = "";
-  private selectedReasoning: ReasoningEffort;
-  private selectedServiceTier: ServiceTierChoice;
   private selectedPermission: PermissionMode;
   private selectedMode: UiMode;
   private skillsRequested = false;
@@ -222,8 +218,6 @@ export class CodexView extends ItemView {
     super(leaf);
     this.selectedProviderSettingsId = plugin.settings.activeApiProviderId;
     this.selectedModel = plugin.settings.defaultModel;
-    this.selectedReasoning = plugin.settings.defaultReasoning;
-    this.selectedServiceTier = plugin.settings.defaultServiceTier;
     this.selectedPermission = plugin.settings.defaultPermission;
     this.selectedMode = plugin.settings.defaultMode;
     this.activeRunKind = "";
@@ -387,8 +381,6 @@ export class CodexView extends ItemView {
   applySavedComposerDefaults(): void {
     this.selectedProviderSettingsId = this.plugin.settings.activeApiProviderId;
     this.selectedModel = this.plugin.settings.defaultModel;
-    this.selectedReasoning = this.plugin.settings.defaultReasoning;
-    this.selectedServiceTier = this.plugin.settings.defaultServiceTier;
     this.selectedPermission = this.plugin.settings.defaultPermission;
     this.selectedMode = this.plugin.settings.defaultMode;
     this.renderToolbar();

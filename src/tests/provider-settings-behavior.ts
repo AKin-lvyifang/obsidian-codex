@@ -2,16 +2,40 @@ import * as assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { App, TFile, openTestModals } from "obsidian";
 import type {
+  Api,
   AssistantMessage,
+  Context,
+  Model,
+  ModelThinkingLevel,
   ProviderStreams,
   StreamOptions
 } from "@earendil-works/pi-ai";
+import { streamSimple } from "@earendil-works/pi-ai/compat";
+import {
+  ANTHROPIC_MODELS
+} from "@earendil-works/pi-ai/providers/anthropic.models";
+import {
+  DEEPSEEK_MODELS
+} from "@earendil-works/pi-ai/providers/deepseek.models";
 import {
   MOONSHOTAI_CN_MODELS
 } from "@earendil-works/pi-ai/providers/moonshotai-cn.models";
 import {
+  OPENAI_CODEX_MODELS
+} from "@earendil-works/pi-ai/providers/openai-codex.models";
+import {
+  OPENAI_MODELS
+} from "@earendil-works/pi-ai/providers/openai.models";
+import {
+  QWEN_TOKEN_PLAN_MODELS
+} from "@earendil-works/pi-ai/providers/qwen-token-plan.models";
+import {
+  ZAI_CODING_CN_MODELS
+} from "@earendil-works/pi-ai/providers/zai-coding-cn.models";
+import {
   activateApiProvider,
   activateApiProviderModel,
+  apiProviderModelHadInvalidStoredReasoningEffort,
   applyApiProviderModelPreset,
   createApiProviderConfig,
   createApiProviderModelConfig,
@@ -24,6 +48,15 @@ import {
 } from "../settings/settings";
 import CodexForObsidianPlugin from "../main";
 import { API_PROVIDER_PRESETS, apiProviderRequestUrl } from "../settings/provider-presets";
+import {
+  resolveEchoInkPiReasoningCapabilities
+} from "../settings/pi-model-catalog";
+import {
+  resolveComposerReasoningState
+} from "../ui/composer-reasoning";
+import {
+  resolveKnowledgeMaintenanceSubmitSnapshot
+} from "../plugin/knowledge-surface-service";
 import { providerTooltipBaseUrl } from "../settings/provider-tooltip";
 import type {
   PiProviderConfigurationDraft,
@@ -145,7 +178,10 @@ import {
 } from "../plugin/openai-codex-oauth-service";
 
 export async function runProviderSettingsBehaviorTests(): Promise<void> {
-  assertSettingsV51MigrationContract();
+  assertSettingsV52MigrationContract();
+  assertPiReasoningCapabilityContract();
+  assertKnowledgeMaintenanceSubmitSnapshotContract();
+  await assertPiReasoningPayloadContract();
   assertOnboardingTruthContract();
   assertFiveStepOnboardingEntrypoints();
   assertCodexHeaderIdentityContract();
@@ -188,6 +224,7 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   await assertProviderModelModalPreflightLifecycle();
   await assertProviderApiKeyEditLifecycle();
   await assertProviderModalModelAccessibleNameIncludesValue();
+  assertProviderModelReasoningOverrideBoundary();
   await assertProviderModelModalCloseCancelsPendingPreflight();
   await assertMcpModalFieldAccessibility();
   await runHarnessV2PiObsidianSecretStorageTests();
@@ -2231,7 +2268,95 @@ async function assertProviderModalModelAccessibleNameIncludesValue(): Promise<vo
   modal.close();
 }
 
-function assertSettingsV51MigrationContract(): void {
+function assertProviderModelReasoningOverrideBoundary(): void {
+  installProviderModalDomFixture();
+  const catalogProvider = createApiProviderConfig(
+    "deepseek",
+    "catalog-reasoning-modal"
+  );
+  const catalogModel = primaryProviderModel(catalogProvider);
+  catalogModel.metadataSource = "manual";
+  catalogModel.reasoning = false;
+  const normalizedCatalogProvider = normalizeSettingsData({
+    ...structuredClone(DEFAULT_SETTINGS),
+    settingsVersion: 52,
+    apiProviders: [catalogProvider]
+  }).settings.apiProviders[0];
+  assert.ok(normalizedCatalogProvider);
+  const normalizedCatalogModel = primaryProviderModel(
+    normalizedCatalogProvider
+  );
+  assert.equal(normalizedCatalogModel.reasoning, true);
+
+  const preflight = {
+    listModels: async () => ({ status: "available" as const, models: [] }),
+    testConnection: async () => ({ status: "available" as const })
+  };
+  const catalogModal = new ProviderModelModal({
+    app: new App(),
+    draft: normalizedCatalogProvider,
+    editing: true,
+    language: "en",
+    copy: settingsCopy("en"),
+    preflight,
+    save: async () => ({ saved: true })
+  });
+  catalogModal.open();
+  assert.equal(
+    providerModalElementByFocusKey(
+      catalogModal,
+      `toggle:model:${normalizedCatalogModel.id}:reasoning`
+    ),
+    null,
+    "Pi catalog models must not expose a manual reasoning switch"
+  );
+  catalogModal.close();
+
+  const manualProvider = createApiProviderConfig(
+    "custom",
+    "manual-reasoning-modal"
+  );
+  const manualModel = createApiProviderModelConfig(
+    "custom",
+    "manual-reasoner",
+    manualProvider.runtimeProviderId
+  );
+  manualModel.metadataSource = "manual";
+  manualModel.reasoning = true;
+  manualProvider.models = [manualModel];
+  manualProvider.defaultModelId = manualModel.id;
+  const normalizedManualProvider = normalizeSettingsData({
+    ...structuredClone(DEFAULT_SETTINGS),
+    settingsVersion: 52,
+    apiProviders: [manualProvider]
+  }).settings.apiProviders[0];
+  assert.ok(normalizedManualProvider);
+  const normalizedManualModel = primaryProviderModel(
+    normalizedManualProvider
+  );
+  assert.equal(normalizedManualModel.metadataSource, "manual");
+  assert.equal(normalizedManualModel.reasoning, true);
+  const manualModal = new ProviderModelModal({
+    app: new App(),
+    draft: normalizedManualProvider,
+    editing: true,
+    language: "en",
+    copy: settingsCopy("en"),
+    preflight,
+    save: async () => ({ saved: true })
+  });
+  manualModal.open();
+  const manualReasoning = providerModalElementByFocusKey(
+    manualModal,
+    `toggle:model:${normalizedManualModel.id}:reasoning`
+  );
+  assert.ok(manualReasoning);
+  assert.equal(manualReasoning.checked, true);
+  assert.equal(manualReasoning.disabled, false);
+  manualModal.close();
+}
+
+function assertSettingsV52MigrationContract(): void {
   const failures: Error[] = [];
   const check = (label: string, assertion: () => void): void => {
     try {
@@ -2242,7 +2367,7 @@ function assertSettingsV51MigrationContract(): void {
   };
 
   check("fresh install does not select a Provider without a usable API Key", () => {
-    assert.equal(DEFAULT_SETTINGS.settingsVersion, 51);
+    assert.equal(DEFAULT_SETTINGS.settingsVersion, 52);
     assert.equal(DEFAULT_SETTINGS.activeApiProviderId, "");
     assert.equal(DEFAULT_SETTINGS.memory.useLongTermMemory, true);
     assert.equal(
@@ -2263,6 +2388,7 @@ function assertSettingsV51MigrationContract(): void {
     const normalized = normalizeSettingsData({
       ...structuredClone(DEFAULT_SETTINGS),
       settingsVersion: 50,
+      defaultReasoning: "high",
       activeApiProviderId: "legacy-custom",
       defaultModel: "legacy-model",
       apiProviders: [{
@@ -2295,6 +2421,7 @@ function assertSettingsV51MigrationContract(): void {
       input: ["text", "image"],
       toolCalling: true,
       reasoning: true,
+      reasoningEffort: "high",
       contextWindow: 96_000,
       modelMaxTokens: 12_000,
       maxOutputTokens: 12_000,
@@ -2322,6 +2449,7 @@ function assertSettingsV51MigrationContract(): void {
     const normalized = normalizeSettingsData({
       ...structuredClone(DEFAULT_SETTINGS),
       settingsVersion: 51,
+      defaultReasoning: "high",
       activeApiProviderId: provider.id,
       defaultModel: "model-selected",
       apiProviders: [provider]
@@ -2329,6 +2457,169 @@ function assertSettingsV51MigrationContract(): void {
     assert.equal(normalized.activeApiProviderId, provider.id);
     assert.equal(normalized.apiProviders[0]?.defaultModelId, "model-default");
     assert.equal(normalized.defaultModel, "model-selected");
+    assert.equal(Object.hasOwn(normalized, "defaultReasoning"), false);
+    assert.equal(
+      normalized.apiProviders[0]?.models.find(
+        (model) => model.id === "model-selected"
+      )?.reasoningEffort,
+      "high"
+    );
+    assert.equal(
+      normalized.apiProviders[0]?.models.find(
+        (model) => model.id === "model-default"
+      )?.reasoningEffort,
+      undefined
+    );
+  });
+
+  check("v52 round-trips every model-scoped reasoning preference", () => {
+    const efforts = [
+      "none",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+    ] as const;
+    for (const effort of efforts) {
+      const provider = createApiProviderConfig("deepseek", `roundtrip-${effort}`);
+      const model = primaryProviderModel(provider);
+      model.reasoningEffort = effort;
+      const reopened = normalizeSettingsData({
+        ...structuredClone(DEFAULT_SETTINGS),
+        settingsVersion: 52,
+        apiProviders: [provider]
+      }).settings.apiProviders[0]?.models[0];
+      assert.equal(reopened?.reasoningEffort, effort);
+    }
+  });
+
+  check("invalid stored reasoning preference is not admitted", () => {
+    const provider = createApiProviderConfig("deepseek", "invalid-effort");
+    const model = primaryProviderModel(provider) as ApiProviderModelConfig & {
+      reasoningEffort: string;
+    };
+    model.reasoningEffort = "turbo";
+    const normalized = normalizeSettingsData({
+      ...structuredClone(DEFAULT_SETTINGS),
+      settingsVersion: 52,
+      apiProviders: [provider]
+    }).settings;
+    const reopened = normalized.apiProviders[0]?.models[0];
+    assert.ok(reopened);
+    assert.equal(reopened?.reasoningEffort, undefined);
+    assert.equal(
+      apiProviderModelHadInvalidStoredReasoningEffort(provider.id, reopened),
+      true
+    );
+    assert.equal(
+      resolveComposerReasoningState(normalized, provider.id, reopened.id)?.status,
+      "invalid"
+    );
+    const cloned = structuredClone(normalized);
+    assert.equal(
+      resolveComposerReasoningState(cloned, provider.id, reopened.id)?.status,
+      "invalid",
+      "the invalid-value signal must survive Provider activation clones"
+    );
+    const serialized = JSON.stringify(normalized);
+    assert.doesNotMatch(serialized, /turbo/u);
+    assert.doesNotMatch(serialized, /invalidStoredReasoning/u);
+  });
+
+  check("missing stored reasoning preference remains distinct from invalid", () => {
+    const provider = createApiProviderConfig("deepseek", "missing-effort");
+    const normalized = normalizeSettingsData({
+      ...structuredClone(DEFAULT_SETTINGS),
+      settingsVersion: 52,
+      apiProviders: [provider]
+    }).settings;
+    const reopened = normalized.apiProviders[0]?.models[0];
+    assert.ok(reopened);
+    assert.equal(
+      apiProviderModelHadInvalidStoredReasoningEffort(provider.id, reopened),
+      false
+    );
+    assert.equal(
+      resolveComposerReasoningState(normalized, provider.id, reopened.id)?.status,
+      "missing"
+    );
+  });
+
+  check("only an explicit valid value clears an invalid identity signal", () => {
+    const provider = createApiProviderConfig("deepseek", "repaired-effort");
+    const model = primaryProviderModel(provider) as ApiProviderModelConfig & {
+      reasoningEffort: string;
+    };
+    model.reasoningEffort = "turbo";
+    const invalid = normalizeSettingsData({
+      ...structuredClone(DEFAULT_SETTINGS),
+      settingsVersion: 52,
+      apiProviders: [provider]
+    }).settings;
+    const invalidModel = invalid.apiProviders[0]?.models[0];
+    assert.ok(invalidModel);
+    assert.equal(
+      apiProviderModelHadInvalidStoredReasoningEffort(provider.id, invalidModel),
+      true
+    );
+
+    const normalizedAgain = normalizeSettingsData(invalid).settings;
+    const normalizedAgainModel = normalizedAgain.apiProviders[0]?.models[0];
+    assert.ok(normalizedAgainModel);
+    assert.equal(normalizedAgainModel.reasoningEffort, undefined);
+    assert.equal(
+      apiProviderModelHadInvalidStoredReasoningEffort(
+        provider.id,
+        normalizedAgainModel
+      ),
+      true
+    );
+    assert.equal(
+      resolveComposerReasoningState(
+        normalizedAgain,
+        provider.id,
+        normalizedAgainModel.id
+      )?.status,
+      "invalid"
+    );
+
+    normalizedAgainModel.reasoningEffort = "max";
+    const repaired = normalizeSettingsData(normalizedAgain).settings;
+    const repairedModel = repaired.apiProviders[0]?.models[0];
+    assert.ok(repairedModel);
+    assert.equal(repairedModel.reasoningEffort, "max");
+    assert.equal(
+      apiProviderModelHadInvalidStoredReasoningEffort(provider.id, repairedModel),
+      false
+    );
+    assert.equal(
+      resolveComposerReasoningState(
+        repaired,
+        provider.id,
+        repairedModel.id
+      )?.status,
+      "valid"
+    );
+
+  });
+
+  check("catalog reasoning truth overrides a stored manual flag", () => {
+    const provider = createApiProviderConfig("deepseek", "catalog-reasoning");
+    const model = primaryProviderModel(provider);
+    assert.equal(model.reasoning, true);
+    model.metadataSource = "manual";
+    model.reasoning = false;
+    const normalized = normalizeSettingsData({
+      ...structuredClone(DEFAULT_SETTINGS),
+      settingsVersion: 52,
+      apiProviders: [provider]
+    }).settings;
+    const reopened = normalized.apiProviders[0]?.models[0];
+    assert.ok(reopened);
+    assert.equal(reopened.metadataSource, "manual");
+    assert.equal(reopened.reasoning, true);
   });
 
   check("unknown model metadata starts text-only without inherited capabilities", () => {
@@ -2688,6 +2979,338 @@ function assertSettingsV51MigrationContract(): void {
   if (failures.length > 0) {
     throw new AggregateError(failures, "Settings v50 migration contract failed");
   }
+}
+
+function assertPiReasoningCapabilityContract(): void {
+  const efforts = (
+    runtimeProviderId: string,
+    modelId: string,
+    manual = false
+  ) => resolveEchoInkPiReasoningCapabilities(
+    runtimeProviderId,
+    modelId,
+    manual
+  ).options.map((option) => option.effort);
+
+  const deepSeek = resolveEchoInkPiReasoningCapabilities(
+    "deepseek",
+    "deepseek-v4-flash"
+  );
+  assert.deepEqual(deepSeek.options.map((option) => option.effort), [
+    "none",
+    "high",
+    "max"
+  ]);
+  assert.equal(deepSeek.defaultEffort, "high");
+
+  for (const providerId of ["qwen-token-plan", "qwen-token-plan-cn"]) {
+    const qwen = resolveEchoInkPiReasoningCapabilities(
+      providerId,
+      "qwen3.8-max-preview"
+    );
+    assert.deepEqual(qwen.options.map((option) => option.effort), [
+      "none",
+      "medium"
+    ]);
+    assert.equal(qwen.defaultEffort, "medium");
+  }
+
+  const glm = resolveEchoInkPiReasoningCapabilities(
+    "zai-coding-cn",
+    "glm-5.2"
+  );
+  assert.deepEqual(glm.options.map((option) => option.effort), [
+    "none",
+    "high",
+    "max"
+  ]);
+  assert.equal(glm.defaultEffort, "high");
+
+  for (const modelId of ["claude-sonnet-4-6", "claude-opus-4-6"]) {
+    const claude = resolveEchoInkPiReasoningCapabilities(
+      "anthropic",
+      modelId
+    );
+    assert.deepEqual(claude.options.map((option) => option.effort), [
+      "none",
+      "low",
+      "medium",
+      "high",
+      "max"
+    ]);
+    assert.equal(claude.defaultEffort, "medium");
+  }
+
+  assert.deepEqual(efforts("openai", "gpt-5.6-sol"), [
+    "none",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+  ]);
+  assert.deepEqual(efforts("openai-codex", "gpt-5.6-sol"), [
+    "none",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+  ]);
+  assert.deepEqual(efforts("openai", "gpt-4"), []);
+  assert.deepEqual(efforts("unknown-runtime", "gpt-5.6-sol"), []);
+  assert.deepEqual(efforts("unknown-runtime", "manual-reasoner", true), [
+    "none",
+    "medium"
+  ]);
+}
+
+function assertKnowledgeMaintenanceSubmitSnapshotContract(): void {
+  const settings = structuredClone(DEFAULT_SETTINGS);
+  const provider = createApiProviderConfig("deepseek", "maintain-snapshot");
+  provider.apiKey = "fixture-key";
+  settings.apiProviders = [provider];
+  settings.activeApiProviderId = provider.id;
+  settings.defaultModel = provider.defaultModelId;
+  const model = primaryProviderModel(provider);
+
+  assert.deepEqual(resolveKnowledgeMaintenanceSubmitSnapshot(settings), {
+    runtimeProviderId: provider.runtimeProviderId,
+    modelId: model.id,
+    reasoning: "high"
+  });
+
+  model.reasoningEffort = "max";
+  assert.equal(
+    resolveKnowledgeMaintenanceSubmitSnapshot(settings).reasoning,
+    "max"
+  );
+
+  model.reasoningEffort = "low";
+  assert.throws(
+    () => resolveKnowledgeMaintenanceSubmitSnapshot(settings),
+    /思考强度已不可用/u
+  );
+
+  const invalidProvider = createApiProviderConfig(
+    "deepseek",
+    "maintain-invalid-normalized"
+  );
+  invalidProvider.apiKey = "fixture-key";
+  const invalidModel = primaryProviderModel(
+    invalidProvider
+  ) as ApiProviderModelConfig & { reasoningEffort: string };
+  invalidModel.reasoningEffort = "turbo";
+  const invalidSettings = normalizeSettingsData({
+    ...structuredClone(DEFAULT_SETTINGS),
+    settingsVersion: 52,
+    activeApiProviderId: invalidProvider.id,
+    defaultModel: invalidProvider.defaultModelId,
+    apiProviders: [invalidProvider]
+  }).settings;
+  const normalizedInvalidModel = invalidSettings.apiProviders[0]?.models[0];
+  assert.ok(normalizedInvalidModel);
+  assert.equal(normalizedInvalidModel.reasoningEffort, undefined);
+  assert.equal(
+    apiProviderModelHadInvalidStoredReasoningEffort(
+      invalidProvider.id,
+      normalizedInvalidModel
+    ),
+    true
+  );
+  assert.throws(
+    () => resolveKnowledgeMaintenanceSubmitSnapshot(invalidSettings),
+    /非法思考强度/u
+  );
+
+  const nonReasoning = createApiProviderConfig("custom", "maintain-none");
+  nonReasoning.runtimeProviderId = "openai";
+  nonReasoning.baseUrl = "https://fixture.invalid/v1";
+  nonReasoning.apiKey = "fixture-key";
+  nonReasoning.models = [createApiProviderModelConfig(
+    "custom",
+    "gpt-4",
+    nonReasoning.runtimeProviderId
+  )];
+  nonReasoning.defaultModelId = nonReasoning.models[0]?.id ?? "";
+  settings.apiProviders = [nonReasoning];
+  settings.activeApiProviderId = nonReasoning.id;
+  settings.defaultModel = nonReasoning.defaultModelId;
+  assert.equal(
+    resolveKnowledgeMaintenanceSubmitSnapshot(settings).reasoning,
+    "none"
+  );
+}
+
+async function assertPiReasoningPayloadContract(): Promise<void> {
+  const originalFetch = globalThis.fetch;
+  let networkAttempts = 0;
+  globalThis.fetch = async () => {
+    networkAttempts += 1;
+    throw new Error("pi_payload_test_network_forbidden");
+  };
+  try {
+    const deepSeek = DEEPSEEK_MODELS["deepseek-v4-flash"];
+    assert.ok(deepSeek);
+    const deepSeekOff = await capturePiPayload(deepSeek, "off");
+    const deepSeekHigh = await capturePiPayload(deepSeek, "high");
+    const deepSeekMax = await capturePiPayload(deepSeek, "max");
+    assert.deepEqual(deepSeekOff.thinking, { type: "disabled" });
+    assert.equal(Object.hasOwn(deepSeekOff, "reasoning_effort"), false);
+    assert.deepEqual(deepSeekHigh.thinking, { type: "enabled" });
+    assert.equal(deepSeekHigh.reasoning_effort, "high");
+    assert.deepEqual(deepSeekMax.thinking, { type: "enabled" });
+    assert.equal(deepSeekMax.reasoning_effort, "max");
+
+    const qwen = QWEN_TOKEN_PLAN_MODELS["qwen3.8-max-preview"];
+    assert.ok(qwen);
+    const qwenOff = await capturePiPayload(qwen, "off");
+    const qwenOn = await capturePiPayload(qwen, "medium");
+    assert.equal(qwenOff.enable_thinking, false);
+    assert.equal(qwenOn.enable_thinking, true);
+    for (const payload of [qwenOff, qwenOn]) {
+      assert.equal(Object.hasOwn(payload, "thinking"), false);
+      assert.equal(Object.hasOwn(payload, "reasoning"), false);
+      assert.equal(Object.hasOwn(payload, "reasoning_effort"), false);
+    }
+
+    const gpt = OPENAI_MODELS["gpt-5.6-sol"];
+    assert.ok(gpt);
+    const openAiEfforts = [
+      ["low", "low"],
+      ["medium", "medium"],
+      ["high", "high"],
+      ["xhigh", "xhigh"],
+      ["max", "max"]
+    ] as const;
+    const gptOff = await capturePiPayload(gpt, "off");
+    assert.equal(payloadReasoningEffort(gptOff), "none");
+    for (const [level, expectedEffort] of openAiEfforts) {
+      const payload = await capturePiPayload(gpt, level);
+      assert.equal(payloadReasoningEffort(payload), expectedEffort);
+    }
+
+    const codexCapabilities = resolveEchoInkPiReasoningCapabilities(
+      "openai-codex",
+      "gpt-5.6-sol"
+    );
+    assert.equal(
+      codexCapabilities.options.some((option) => option.effort === "minimal"),
+      false
+    );
+    assert.equal(
+      new Set(codexCapabilities.options.map((option) => option.wireValueKey)).size,
+      codexCapabilities.options.length
+    );
+
+    const codex = OPENAI_CODEX_MODELS["gpt-5.6-sol"];
+    assert.ok(codex);
+    const codexOff = await capturePiPayload(codex, "off");
+    assert.equal(Object.hasOwn(codexOff, "reasoning"), false);
+    for (const [level, expectedEffort] of [
+      ["minimal", "low"],
+      ["low", "low"],
+      ["medium", "medium"],
+      ["high", "high"],
+      ["xhigh", "xhigh"],
+      ["max", "max"]
+    ] as const) {
+      assert.equal(
+        payloadReasoningEffort(await capturePiPayload(codex, level)),
+        expectedEffort
+      );
+    }
+
+    const glm = ZAI_CODING_CN_MODELS["glm-5.2"];
+    assert.ok(glm);
+    const glmOff = await capturePiPayload(glm, "off");
+    assert.deepEqual(glmOff.thinking, { type: "disabled" });
+    assert.equal(Object.hasOwn(glmOff, "reasoning_effort"), false);
+    for (const level of ["low", "medium", "high"] as const) {
+      const payload = await capturePiPayload(glm, level);
+      assert.deepEqual(payload.thinking, {
+        type: "enabled",
+        clear_thinking: false
+      });
+      assert.equal(payload.reasoning_effort, "high");
+    }
+    const glmMax = await capturePiPayload(glm, "max");
+    assert.equal(glmMax.reasoning_effort, "max");
+
+    for (const modelId of [
+      "claude-sonnet-4-6",
+      "claude-opus-4-6"
+    ] as const) {
+      const claude = ANTHROPIC_MODELS[modelId];
+      assert.ok(claude);
+      const off = await capturePiPayload(claude, "off");
+      assert.deepEqual(off.thinking, { type: "disabled" });
+      assert.equal(Object.hasOwn(off, "output_config"), false);
+      for (const [level, expectedEffort] of [
+        ["minimal", "low"],
+        ["low", "low"],
+        ["medium", "medium"],
+        ["high", "high"],
+        ["max", "max"]
+      ] as const) {
+        const payload = await capturePiPayload(claude, level);
+        assert.deepEqual(payload.thinking, {
+          type: "adaptive",
+          display: "summarized"
+        });
+        assert.deepEqual(payload.output_config, { effort: expectedEffort });
+      }
+    }
+    assert.equal(networkAttempts, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+async function capturePiPayload(
+  model: Model<Api>,
+  reasoning: ModelThinkingLevel
+): Promise<Record<string, unknown>> {
+  const context: Context = {
+    messages: [{
+      role: "user",
+      content: "EchoInk payload fixture",
+      timestamp: 1
+    }]
+  };
+  let payload: unknown;
+  const options: StreamOptions = {
+    apiKey: model.api === "openai-codex-responses"
+      ? fixtureOpenAICodexJwt()
+      : "fixture-not-a-real-key",
+    ...(reasoning === "off" ? {} : { reasoning }),
+    onPayload(value) {
+      payload = structuredClone(value);
+      throw new Error("echoink_payload_captured_before_network");
+    }
+  };
+  const stream = streamSimple(model, context, options);
+  await stream.result();
+  assert.ok(payload && typeof payload === "object" && !Array.isArray(payload));
+  return payload as Record<string, unknown>;
+}
+
+function payloadReasoningEffort(payload: Record<string, unknown>): unknown {
+  const reasoning = payload.reasoning;
+  assert.ok(reasoning && typeof reasoning === "object");
+  return (reasoning as Record<string, unknown>).effort;
+}
+
+function fixtureOpenAICodexJwt(): string {
+  const encode = (value: unknown) => Buffer.from(
+    JSON.stringify(value),
+    "utf8"
+  ).toString("base64url");
+  return `${encode({ alg: "none", typ: "JWT" })}.${encode({
+    "https://api.openai.com/auth": {
+      chatgpt_account_id: "fixture-account"
+    }
+  })}.fixture-signature`;
 }
 
 function assertOnboardingTruthContract(): void {
@@ -3164,6 +3787,7 @@ async function assertRetiredSettingsRewritePersistence(): Promise<void> {
   let persisted: unknown = {
     ...structuredClone(DEFAULT_SETTINGS),
     settingsVersion: 48,
+    defaultReasoning: "xhigh",
     mcpEnabled: true,
     agents: { hermes: { apiKey: "sentinel-not-a-real-key" } },
     knowledgeBase: {
@@ -3200,6 +3824,7 @@ async function assertRetiredSettingsRewritePersistence(): Promise<void> {
   assert.equal(Object.hasOwn(data.resources.catalog[0], "scopes"), false);
   assert.equal(data.resources.catalog[0].enabled, false);
   assert.equal(Object.hasOwn(data, "mcpEnabled"), false);
+  assert.equal(Object.hasOwn(data, "defaultReasoning"), false);
 }
 
 async function assertMcpPanelUsesTurnResourceTruth(): Promise<void> {
@@ -3211,9 +3836,8 @@ async function assertMcpPanelUsesTurnResourceTruth(): Promise<void> {
       app: new App(),
       plugin: { settings },
       running: false,
+      selectedProviderSettingsId: "",
       selectedModel: "",
-      selectedReasoning: settings.defaultReasoning,
-      selectedServiceTier: settings.defaultServiceTier,
       selectedPermission: settings.defaultPermission,
       selectedMode: settings.defaultMode,
       ensureSession: () => settings.sessions[0],
@@ -4907,6 +5531,14 @@ function assertSavedModelLifecycle(): void {
     [primaryModelId, alternate]
   );
   assert.equal(primary.defaultModelId, alternate);
+  const alternateModel = primary.models.find((model) => model.id === alternate);
+  assert.ok(alternateModel);
+  alternateModel.reasoningEffort = "max";
+  assert.equal(applyApiProviderModelPreset(primary, alternate), true);
+  assert.equal(
+    primary.models.find((model) => model.id === alternate)?.reasoningEffort,
+    "max"
+  );
   assert.equal(removeApiProvider(settings, primary.id), true);
   assert.equal(settings.activeApiProviderId, fallback.id);
   assert.equal(removeApiProvider(settings, fallback.id), true);

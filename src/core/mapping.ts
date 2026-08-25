@@ -7,7 +7,6 @@ import type {
   ProcessFileRef,
   ReasoningEffort,
   SandboxPolicy,
-  ServiceTierChoice,
   TokenUsage,
   UiMode,
   UserInput
@@ -26,11 +25,6 @@ export function stableHashedIdentity(namespace: string, ...parts: string[]): str
     .update([namespace, ...parts].join("\0"), "utf8")
     .digest("hex")
     .slice(0, 32)}`;
-}
-
-export function normalizeServiceTier(value: ServiceTierChoice): "fast" | "flex" | null {
-  if (value === "fast" || value === "flex") return value;
-  return null;
 }
 
 export function buildSandboxPolicy(mode: PermissionMode, vaultPath: string, writableRootsOverride?: string[]): SandboxPolicy {

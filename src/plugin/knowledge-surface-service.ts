@@ -8,13 +8,23 @@ import {
   buildKnowledgeBaseDashboardSnapshot,
   type KnowledgeBaseDashboardSnapshot
 } from "../knowledge-base/dashboard";
-import type { StoredAttachment } from "../settings/settings";
+import type {
+  CodexForObsidianSettings,
+  StoredAttachment
+} from "../settings/settings";
 import {
   apiProviderHasUsableCredential,
+  apiProviderModelHadInvalidStoredReasoningEffort,
   getActiveApiProviderModel,
   newId,
   validateApiProvider
 } from "../settings/settings";
+import {
+  isEchoInkPiReasoningEffortSupported,
+  normalizeEchoInkReasoningEffort,
+  resolveEchoInkPiReasoningCapabilities
+} from "../settings/pi-model-catalog";
+import type { ReasoningEffort } from "../types/app-server";
 import {
   KnowledgeBaseInitializer,
   knowledgeInitializationParentFolder,
@@ -33,6 +43,58 @@ export type KnowledgeMaintenanceSurfaceStatus = Readonly<{
   state: "ready";
   message: "";
 }>;
+
+export function resolveKnowledgeMaintenanceSubmitSnapshot(
+  settings: Pick<
+    CodexForObsidianSettings,
+    | "activeApiProviderId"
+    | "apiProviders"
+    | "defaultModel"
+    | "openAICodexCredential"
+  >
+): Readonly<{
+  runtimeProviderId: string;
+  modelId: string;
+  reasoning: ReasoningEffort;
+}> {
+  const active = getActiveApiProviderModel(settings);
+  if (
+    !active
+    || !apiProviderHasUsableCredential(
+      active.provider,
+      settings.openAICodexCredential
+    )
+    || validateApiProvider(active.provider).length > 0
+  ) {
+    throw new Error("知识初始化无法冻结当前 Provider/模型，请先检查 Provider 设置。");
+  }
+  if (apiProviderModelHadInvalidStoredReasoningEffort(
+    active.provider.id,
+    active.model
+  )) {
+    throw new Error("知识初始化发现非法思考强度，请先在 Composer 完成回落。");
+  }
+  const capabilities = resolveEchoInkPiReasoningCapabilities(
+    active.provider.runtimeProviderId,
+    active.model.id,
+    active.model.metadataSource === "manual" && active.model.reasoning
+  );
+  const stored = normalizeEchoInkReasoningEffort(
+    active.model.reasoningEffort
+  );
+  if (active.model.reasoningEffort !== undefined && !stored) {
+    throw new Error("知识初始化发现非法思考强度，请先在 Composer 完成回落。");
+  }
+  const reasoning = stored ?? capabilities.defaultEffort ?? "none";
+  if (!isEchoInkPiReasoningEffortSupported(capabilities, reasoning)) {
+    throw new Error("知识初始化发现当前思考强度已不可用，请先在 Composer 完成回落。");
+  }
+  return Object.freeze({
+    runtimeProviderId: active.provider.runtimeProviderId,
+    modelId: active.model.id,
+    reasoning
+  });
+}
 
 /** Current Knowledge dashboard and capture surfaces. Pi owns agent execution. */
 export class EchoInkKnowledgeSurfaceService {
@@ -331,10 +393,14 @@ function createKnowledgeInitializationHost(
       return conversationId;
     },
     async runMaintenanceBatch(input) {
+      const modelSnapshot = resolveKnowledgeMaintenanceSubmitSnapshot(
+        plugin.settings
+      );
       const handle = await plugin.submitPiChat({
         conversationId: input.conversationId,
         text: "/maintain",
         submittedAt: Date.now(),
+        ...modelSnapshot,
         maintenanceScope: {
           mode: "batch",
           sourcePaths: Object.freeze([...input.sourcePaths])
