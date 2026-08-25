@@ -759,12 +759,6 @@ function parsePiKnowledgeReference(value: unknown): PiKnowledgeReference | null 
   });
 }
 
-function currentPersonalMemoryLearningEnabled(
-  value: boolean | (() => boolean) | undefined
-): boolean {
-  return typeof value === "function" ? value() : value !== false;
-}
-
 export function createPiKnowledgeInlineExtension(input: Readonly<{
   vaultSecurity: InlineExtension;
   currentTurn(): Readonly<PiNativeKnowledgeTurnContext> | null;
@@ -802,7 +796,6 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
     sources: readonly Readonly<PersonalMemorySourceReference>[];
   }>): void | Promise<void>;
   personalMemoryAvailable?: boolean;
-  personalMemoryLearningEnabled?: boolean | (() => boolean);
   contextLedger?: Pick<
     PiContextLedgerRecorder,
     | "captureBeforeAgentStart"
@@ -942,11 +935,7 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
             ? "not_applicable"
             : input.personalMemoryAvailable === false
               ? "recall_only"
-              : currentPersonalMemoryLearningEnabled(
-                  input.personalMemoryLearningEnabled
-                ) === false
-                ? "read_only"
-                : "read_write";
+              : "read_write";
           input.contextLedger?.capturePersonalMemoryAccess({
             mode: memoryTurn.memoryMode,
             effectiveMode,
@@ -1104,7 +1093,7 @@ function primaryPersonalMemorySources(fixed: Readonly<{
 function buildPersonalMemoryContextMessage(fixed: Readonly<{
   revision: number;
   agent: string;
-  user: string;
+  user: string | null;
   memory: string | null;
   recall?: PersonalMemoryPreparedTurnContext["recall"];
   injectionKeys: readonly string[];
@@ -1131,9 +1120,13 @@ function buildPersonalMemoryContextMessage(fixed: Readonly<{
       "<echoink_agent_profile trust=\"user-configured-identity\">",
       fixed.agent,
       "</echoink_agent_profile>",
-      "<echoink_user_profile trust=\"system-generated-user-profile\">",
-      fixed.user,
-      "</echoink_user_profile>",
+      ...(fixed.user === null
+        ? []
+        : [
+            "<echoink_user_profile trust=\"system-generated-user-profile\">",
+            fixed.user,
+            "</echoink_user_profile>"
+          ]),
       ...(fixed.memory === null
         ? []
         : [
@@ -1439,8 +1432,7 @@ async function createProductionAgentSession(input: {
         piSessionId: execution.piSessionId,
         productRunId: execution.productRunId,
         userEntryId: execution.userEntryId,
-        memoryMode: memoryTurn.memoryMode,
-        learningEnabled: input.plugin.settings.memory.enabled
+        memoryMode: memoryTurn.memoryMode
       });
     },
     currentUserEntry: {
@@ -1452,18 +1444,7 @@ async function createProductionAgentSession(input: {
         });
       }
     },
-    writeAuthorization: createProductionPersonalMemoryWriteAuthorization(),
-    forgetConfirmation: {
-      async confirm(request) {
-        if (request.signal?.aborted) return false;
-        return window.confirm([
-          "EchoInk 将可恢复地忘记这条长期 Memory。",
-          `记录：${request.targetId}`,
-          `原因：${request.reason}`,
-          "确认继续吗？"
-        ].join("\n"));
-      }
-    }
+    writeAuthorization: createProductionPersonalMemoryWriteAuthorization()
   });
   const knowledgeReadSecurity = new PiKnowledgeReadToolSecurity({
     currentRunIdentity: () => input.input.currentToolExecutionContext(),
@@ -1582,7 +1563,6 @@ async function createProductionAgentSession(input: {
     onAskPersonalMemorySourcesInjected: (snapshot) =>
       input.input.reportAskPersonalMemorySources?.(snapshot),
     personalMemoryAvailable: configured.toolCalling,
-    personalMemoryLearningEnabled: () => input.plugin.settings.memory.enabled,
     contextLedger
   });
   const resourceLoader = await createControlledVaultResourceLoader({
@@ -1783,22 +1763,12 @@ function createProductionPersonalMemoryWriteAuthorization(): PersonalMemoryWrite
         input.currentUserEntry.entryId !== input.runtime.userEntryId
         || !input.currentUserEntry.text.includes(input.evidenceQuote)
       ) return null;
-      if (
-        input.proposedContentOrigin !== "user_statement"
-        && input.proposedContentOrigin !== "confirmed_change"
-      ) return null;
-      if (
-        input.proposedContentOrigin === "confirmed_change"
-        && input.proposedBasis !== "explicit"
-      ) return null;
-      if (
-        input.operation === "profile_update"
-        && input.proposedBasis !== "explicit"
-      ) return null;
       return Object.freeze({
-        basis: input.proposedBasis,
-        contentOrigin: input.proposedContentOrigin,
-        explicitlyAuthorized: false
+        basis: "explicit" as const,
+        contentOrigin: input.operation === "create"
+          ? "user_statement" as const
+          : "confirmed_change" as const,
+        explicitlyAuthorized: input.operation === "forget"
       });
     }
   });

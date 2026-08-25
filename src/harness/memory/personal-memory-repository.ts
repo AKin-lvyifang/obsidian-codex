@@ -51,13 +51,27 @@ import {
   applyDreamProfileUpdate,
   emptyUserProfileState,
   profileSlotDefinition,
+  rebindProfileSource,
+  reconcileProfileSources,
   USER_PROFILE_ITEM_HARD_MAX_CHARS,
   USER_PROFILE_LEGACY_READ_MAX_CHARS,
   USER_PROFILE_WRITE_HARD_MAX_CHARS,
   userProfileStateJson,
   UserProfileStateStore
 } from "./user-profile-state";
-import { renderUserMarkdown } from "./cognitive-projection";
+import { AgentIdentityStateStore } from "./agent-identity-state";
+import {
+  inspectPersonalityFile,
+  personalityStateJson,
+  reconcilePersonalitySources,
+  PersonalityStateStore
+} from "./personality-state";
+import {
+  renderAgentMarkdown,
+  renderBaseAgentMarkdown,
+  renderUserMarkdown
+} from "./cognitive-projection";
+import { normalizeTextForDedupe } from "./cognitive-file-utils";
 
 const MAX_PROFILE_CHARS = USER_PROFILE_LEGACY_READ_MAX_CHARS;
 const MAX_OVERVIEW_CHARS = 20_000;
@@ -219,7 +233,7 @@ export interface PersonalMemoryTurnSnapshot {
   readonly revision: number;
   readonly scanned: number;
   readonly agent: string;
-  readonly user: string;
+  readonly user: string | null;
   readonly memory: string | null;
   readonly injectionKeys: readonly string[];
   readonly search: Readonly<PersonalMemoryTurnSearchResult> | null;
@@ -259,6 +273,12 @@ interface TransactionChange {
   readonly content?: string;
 }
 
+interface ProjectionReconciliation {
+  readonly changes: readonly TransactionChange[];
+  readonly agentHash?: string;
+  readonly userHash?: string;
+}
+
 interface TransactionPlanEntry {
   readonly relativePath: string;
   readonly existed: boolean;
@@ -279,7 +299,6 @@ export class PersonalMemoryAccessError extends Error {
     readonly code:
       | "vault_mismatch"
       | "no_memory"
-      | "learning_disabled"
       | "invalid_request"
       | "not_found"
       | "revision_conflict"
@@ -582,7 +601,7 @@ export class PersonalMemoryRepository {
   }>): Promise<Readonly<{
     revision: number;
     agent: string;
-    user: string;
+    user: string | null;
     memory: string | null;
     injectionKeys: readonly string[];
   }>> {
@@ -742,7 +761,7 @@ export class PersonalMemoryRepository {
     request: PersonalMemoryWriteRequest,
     runtime: Readonly<PersonalMemoryRuntimeContext>
   ): Promise<Readonly<PersonalMemoryWriteResult>> {
-    this.assertRuntime(runtime, true);
+    this.assertRuntime(runtime);
     await this.initialize();
     return await this.withMutation(async () => {
       await this.assertManagedTreeSafe();
@@ -750,6 +769,8 @@ export class PersonalMemoryRepository {
       if (request.operation === "supersede"
         || request.operation === "close"
         || request.operation === "forget") {
+        await this.reconcilePrimaryTargetsBeforeMutation([request.targetId]);
+      } else if (request.operation === "profile_update" && request.targetId) {
         await this.reconcilePrimaryTargetsBeforeMutation([request.targetId]);
       }
       const manifest = await this.readManifest();
@@ -816,7 +837,7 @@ export class PersonalMemoryRepository {
     runtime: Readonly<PersonalMemoryRuntimeContext>,
     options: Readonly<{ maxResultChars?: number }> = {}
   ): Promise<Readonly<PersonalMemorySearchResult>> {
-    this.assertRuntime(runtime, false);
+    this.assertRuntime(runtime);
     await this.initialize();
     return await this.withMutation(async () => {
       const manifest = await this.readManifest();
@@ -1089,38 +1110,21 @@ export class PersonalMemoryRepository {
   private async loadIdentityOnlyContext(): Promise<Readonly<{
     revision: number;
     agent: string;
-    user: string;
+    user: null;
     memory: null;
     injectionKeys: readonly string[];
   }>> {
-    return await this.withMutation(async () => {
-      await mkdir(this.vaultPath, { recursive: true });
-      for (const directory of [
-        this.layout.root,
-        path.join(this.layout.root, "agents"),
-        path.dirname(this.layout.agent),
-        this.layout.sharedUser
-      ]) {
-        await this.assertNotSymlink(directory);
-        await mkdir(directory, { recursive: true });
-      }
-      for (const file of [this.layout.agent, this.layout.user]) {
-        await this.assertNotSymlink(file);
-      }
-      await writeIfMissing(this.layout.agent, defaultAgentProfile());
-      await writeIfMissing(this.layout.user, defaultUserProfile());
-      await this.assertIdentityPathsSafe();
-      const [agent, user] = await Promise.all([
-        readBounded(this.layout.agent, MAX_PROFILE_CHARS, "AGENT.md"),
-        readBounded(this.layout.user, USER_PROFILE_WRITE_HARD_MAX_CHARS, "USER.md")
-      ]);
-      return Object.freeze({
-        revision: 0,
-        agent,
-        user,
-        memory: null,
-        injectionKeys: Object.freeze(["echoink.agent", "echoink.user"])
-      });
+    await this.assertBaseIdentityStatePathsSafe();
+    const [personality, identity] = await Promise.all([
+      new PersonalityStateStore(this.layout.root).read(),
+      new AgentIdentityStateStore(this.layout.root).read()
+    ]);
+    return Object.freeze({
+      revision: 0,
+      agent: renderBaseAgentMarkdown(personality, identity),
+      user: null,
+      memory: null,
+      injectionKeys: Object.freeze(["echoink.agent"])
     });
   }
 
@@ -1548,6 +1552,138 @@ export class PersonalMemoryRepository {
     return Object.freeze({ files: result.changedFiles, records: result.records });
   }
 
+  /**
+   * 一级 Memory 生命周期变化与 USER.md / AGENT.md 受控投影同事务对账。
+   * 这里只撤销已失效来源；新增来源仍由 profile_update 或后续 Dream 提炼，
+   * 避免在 Repository 中引入第二套语义分类器。
+   */
+  private async reconcileControlledProjectionSources(
+    records: readonly PersonalMemoryRecord[],
+    now: number,
+    options: Readonly<{
+      includeUser?: boolean;
+      replacement?: Readonly<{
+        previousMemoryId: string;
+        replacementMemoryId: string;
+        previousMemoryRevision: number;
+        replacementText: string;
+      }>;
+    }> = {}
+  ): Promise<ProjectionReconciliation> {
+    const validMemoryIds = new Set(records
+      .filter((record) => record.status === "current")
+      .map((record) => record.id));
+    const fixed = await this.currentFixedContext();
+    const changes: TransactionChange[] = [];
+    let agentHash: string | undefined;
+    let userHash: string | undefined;
+
+    const personalityInspection = await inspectPersonalityFile(this.layout.personalityState);
+    if (personalityInspection.kind === "invalid") {
+      throw new PersonalMemoryAccessError(
+        "revision_conflict",
+        `personality_state_invalid:${personalityInspection.reason}`
+      );
+    }
+    if (
+      personalityInspection.kind === "v1"
+      || personalityInspection.kind === "v2_recoverable"
+    ) {
+      throw new PersonalMemoryAccessError(
+        "revision_conflict",
+        "personality_state_requires_cognitive_recovery"
+      );
+    }
+    if (personalityInspection.kind === "v2") {
+      const nextPersonality = reconcilePersonalitySources(
+        personalityInspection.state,
+        validMemoryIds,
+        now
+      );
+      if (nextPersonality !== personalityInspection.state) {
+        changes.push({
+          relativePath: path.relative(this.layout.root, this.layout.personalityState),
+          content: personalityStateJson(nextPersonality)
+        });
+        const identity = await new AgentIdentityStateStore(this.layout.root).read();
+        const projectedAgent = renderAgentMarkdown(nextPersonality, identity);
+        if (projectedAgent !== fixed.agent) {
+          agentHash = contentHash(projectedAgent);
+          changes.push({
+            relativePath: path.relative(this.layout.root, this.layout.agent),
+            content: projectedAgent
+          });
+        }
+      }
+    }
+
+    const profileStore = new UserProfileStateStore(this.layout.root);
+    const previousProfile = options.includeUser === false
+      ? null
+      : await profileStore.read();
+    if (previousProfile) {
+      if (
+        previousProfile.lastProjectedUserHash
+        && previousProfile.lastProjectedUserHash !== contentHash(fixed.user)
+      ) {
+        throw new PersonalMemoryAccessError(
+          "revision_conflict",
+          "USER.md projection conflict: disk content differs from profile state"
+        );
+      }
+      const rebindsExplicitProfile = Boolean(options.replacement)
+        && previousProfile.items.some((item) =>
+          item.status === "current"
+          && item.basis !== "observed_memory"
+          && item.sourceMemoryIds.includes(options.replacement!.previousMemoryId)
+        );
+      const replacementText = rebindsExplicitProfile
+        ? cleanRequired(
+            options.replacement!.replacementText,
+            "replacement USER profile text",
+            USER_PROFILE_ITEM_HARD_MAX_CHARS
+          )
+        : options.replacement?.replacementText ?? "";
+      const profileBase = options.replacement
+        ? rebindProfileSource(previousProfile, {
+            previousMemoryId: options.replacement.previousMemoryId,
+            replacementMemoryId: options.replacement.replacementMemoryId,
+            previousMemoryRevision: options.replacement.previousMemoryRevision,
+            replacementText,
+            now
+          })
+        : previousProfile;
+      let nextProfile = reconcileProfileSources(profileBase, validMemoryIds, now);
+      if (nextProfile !== previousProfile) {
+        const projectedUser = normalizeUserProfileWrite(
+          renderUserMarkdown(nextProfile),
+          "USER.md projection"
+        );
+        nextProfile = Object.freeze({
+          ...nextProfile,
+          lastProjectedUserHash: contentHash(projectedUser)
+        });
+        changes.push({
+          relativePath: path.relative(this.layout.root, this.layout.userProfileState),
+          content: userProfileStateJson(nextProfile)
+        });
+        if (projectedUser !== fixed.user) {
+          userHash = contentHash(projectedUser);
+          changes.push({
+            relativePath: path.relative(this.layout.root, this.layout.user),
+            content: projectedUser
+          });
+        }
+      }
+    }
+
+    return Object.freeze({
+      changes: Object.freeze(changes),
+      ...(agentHash ? { agentHash } : {}),
+      ...(userHash ? { userHash } : {})
+    });
+  }
+
   private notifyMemoryCommitted(
     operation: "create" | "supersede" | "restore",
     recordId: string,
@@ -1565,7 +1701,7 @@ export class PersonalMemoryRepository {
     runtime: Readonly<PersonalMemoryRuntimeContext>,
     options: Readonly<{ includeHistorical?: boolean }> = {}
   ): Promise<Readonly<{ revision: number; record: PersonalMemoryRecord }>> {
-    this.assertRuntime(runtime, false);
+    this.assertRuntime(runtime);
     const safeId = assertSafeId(id);
     await this.initialize();
     const manifest = await this.readManifest();
@@ -1926,6 +2062,7 @@ export class PersonalMemoryRepository {
     const targetId = assertSafeId(request.targetId);
     const previous = records.find((record) => record.id === targetId && record.status === "current");
     if (!previous) throw new PersonalMemoryAccessError("not_found", `Current Memory ${targetId} does not exist`);
+    await this.assertFixedFilesMatchManifest(manifest);
     validateWriteContent(previous.kind, request.basis, request.contentOrigin, explicitlyAuthorized);
     const targetRevision = manifest.revision + 1;
     const superseded: PersonalMemoryRecord = Object.freeze({
@@ -1947,10 +2084,30 @@ export class PersonalMemoryRepository {
     next.updatedAt = this.now();
     next.records = allRecords.map(recordMetadata);
     const lifecycle = await this.applySecondaryLifecycle("supersede", previous.id);
+    const projection = await this.reconcileControlledProjectionSources(
+      allRecords,
+      this.now(),
+      {
+        replacement: {
+          previousMemoryId: previous.id,
+          replacementMemoryId: replacement.id,
+          previousMemoryRevision: previous.revision,
+          replacementText: replacement.content
+        }
+      }
+    );
+    if (projection.agentHash || projection.userHash) {
+      next.fixedFileHashes = {
+        ...manifest.fixedFileHashes!,
+        ...(projection.agentHash ? { agent: projection.agentHash } : {}),
+        ...(projection.userHash ? { user: projection.userHash } : {})
+      };
+    }
     const changes = await this.stateChanges(next, allRecords, [
       { relativePath: superseded.file, content: serializeRecord(superseded) },
       { relativePath: replacement.file, content: serializeRecord(replacement) },
-      ...lifecycle.files
+      ...lifecycle.files,
+      ...projection.changes
     ], {
       type: "superseded",
       revision: targetRevision,
@@ -1975,6 +2132,7 @@ export class PersonalMemoryRepository {
     const targetId = assertSafeId(request.targetId);
     const previous = records.find((record) => record.id === targetId && record.status === "current");
     if (!previous) throw new PersonalMemoryAccessError("not_found", `Current Memory ${targetId} does not exist`);
+    await this.assertFixedFilesMatchManifest(manifest);
     const targetRevision = manifest.revision + 1;
     const closed: PersonalMemoryRecord = Object.freeze({
       ...previous,
@@ -1988,7 +2146,22 @@ export class PersonalMemoryRepository {
     next.updatedAt = this.now();
     next.records = allRecords.map(recordMetadata);
     const lifecycle = await this.applySecondaryLifecycle("close", targetId);
-    const changes = await this.stateChanges(next, allRecords, [{ relativePath: closed.file, content: serializeRecord(closed) }, ...lifecycle.files], {
+    const projection = await this.reconcileControlledProjectionSources(
+      allRecords,
+      this.now()
+    );
+    if (projection.agentHash || projection.userHash) {
+      next.fixedFileHashes = {
+        ...manifest.fixedFileHashes!,
+        ...(projection.agentHash ? { agent: projection.agentHash } : {}),
+        ...(projection.userHash ? { user: projection.userHash } : {})
+      };
+    }
+    const changes = await this.stateChanges(next, allRecords, [
+      { relativePath: closed.file, content: serializeRecord(closed) },
+      ...lifecycle.files,
+      ...projection.changes
+    ], {
       type: "closed",
       revision: targetRevision,
       at: this.now(),
@@ -2042,22 +2215,91 @@ export class PersonalMemoryRepository {
         "USER.md projection conflict: disk content differs from the last managed projection"
       );
     }
+    const currentExplicit = previousProfile.items.find((item) =>
+      item.profileKey === slot.profileKey
+      && item.basis === "explicit_memory"
+      && item.status === "current"
+    );
+    const previousSource = currentExplicit?.sourceMemoryIds
+      .map((sourceId) => records.find((record) =>
+        record.id === sourceId && record.status === "current"
+      ))
+      .find((record): record is PersonalMemoryRecord => Boolean(record));
+    const requestedTarget = request.targetId
+      ? records.find((record) =>
+          record.id === assertSafeId(request.targetId) && record.status === "current"
+        )
+      : undefined;
+    if (request.targetId && !requestedTarget) {
+      throw new PersonalMemoryAccessError(
+        "not_found",
+        `Current Memory ${request.targetId} does not exist`
+      );
+    }
+    if (previousSource && requestedTarget && previousSource.id !== requestedTarget.id) {
+      throw new PersonalMemoryAccessError(
+        "invalid_request",
+        "profile_update target conflicts with the current source for this profileKey"
+      );
+    }
+    if (
+      currentExplicit
+      && previousSource
+      && normalizeTextForDedupe(currentExplicit.text) === normalizeTextForDedupe(text)
+      && normalizeTextForDedupe(previousSource.content) === normalizeTextForDedupe(text)
+    ) {
+      return Object.freeze({
+        revision: manifest.revision,
+        profile: "user" as const,
+        record: previousSource,
+        status: "idempotent" as const
+      });
+    }
+    const exactGenericSource = records.find((record) =>
+      record.status === "current"
+      && record.kind === "fact"
+      && record.basis === "explicit"
+      && normalizeTextForDedupe(record.content) === normalizeTextForDedupe(text)
+    );
+    const target = previousSource ?? requestedTarget ?? exactGenericSource;
     const targetRevision = manifest.revision + 1;
-    const record = this.newRecord({
-      kind: "fact",
-      title: `用户画像：${slot.labelZh}`,
-      content: text,
-      recallWhen: `需要了解用户的${slot.labelZh}时`,
-      basis: "explicit",
-      contentOrigin: origin,
-      targetRevision,
-      source: runtimeSource(runtime),
-      reason: "profile_update"
-    });
-    if (manifest.records.some((item) => item.id === record.id)) {
+    const reusesExisting = Boolean(target)
+      && normalizeTextForDedupe(target!.content) === normalizeTextForDedupe(text);
+    const record = reusesExisting
+      ? target!
+      : this.newRecord({
+          kind: "fact",
+          title: `用户画像：${slot.labelZh}`,
+          content: text,
+          recallWhen: `需要了解用户的${slot.labelZh}时`,
+          basis: "explicit",
+          contentOrigin: origin,
+          targetRevision,
+          source: runtimeSource(runtime),
+          reason: "profile_update",
+          ...(target ? { supersedes: target.id } : {})
+        });
+    if (!reusesExisting && manifest.records.some((item) => item.id === record.id)) {
       throw new PersonalMemoryAccessError("revision_conflict", `Memory id ${record.id} already exists`);
     }
-    let nextProfile = applyDreamProfileUpdate(previousProfile, {
+    const supersededSource = target && target.id !== record.id
+      ? Object.freeze({
+          ...target,
+          status: "superseded" as const,
+          reason: "profile_update",
+          revision: targetRevision
+        })
+      : null;
+    const profileBase = supersededSource
+      ? rebindProfileSource(previousProfile, {
+          previousMemoryId: supersededSource.id,
+          replacementMemoryId: record.id,
+          previousMemoryRevision: target!.revision,
+          replacementText: text,
+          now
+        })
+      : previousProfile;
+    let nextProfile = applyDreamProfileUpdate(profileBase, {
       items: [{
         section: slot.section,
         profileKey: slot.profileKey,
@@ -2065,7 +2307,7 @@ export class PersonalMemoryRepository {
         basis: "explicit_memory",
         sourceMemoryId: record.id
       }],
-      processedSources: [{ memoryId: record.id, memoryRevision: targetRevision }],
+      processedSources: [{ memoryId: record.id, memoryRevision: record.revision }],
       now,
       legacyUserMigration: "done"
     });
@@ -2080,14 +2322,46 @@ export class PersonalMemoryRepository {
     const next = cloneManifest(manifest);
     next.revision = targetRevision;
     next.updatedAt = now;
-    next.records.push(recordMetadata(record));
+    const allRecords = records
+      .map((candidate) => candidate.id === supersededSource?.id ? supersededSource : candidate)
+      .concat(reusesExisting ? [] : [record]);
+    next.records = allRecords.map(recordMetadata);
+    const lifecycle = supersededSource
+      ? await this.applySecondaryLifecycle("supersede", supersededSource.id)
+      : Object.freeze({
+          files: Object.freeze([]),
+          records: Object.freeze([...this.secondaryCache])
+        });
+    const projection = await this.reconcileControlledProjectionSources(
+      allRecords,
+      now,
+      {
+        includeUser: false,
+        ...(supersededSource
+          ? {
+              replacement: {
+                previousMemoryId: supersededSource.id,
+                replacementMemoryId: record.id,
+                previousMemoryRevision: target!.revision,
+                replacementText: text
+              }
+            }
+          : {})
+      }
+    );
     next.fixedFileHashes = {
-      agent: manifest.fixedFileHashes!.agent,
+      agent: projection.agentHash ?? manifest.fixedFileHashes!.agent,
       user: contentHash(projectedUser)
     };
-    const allRecords = [...records, record];
     const changes = await this.stateChanges(next, allRecords, [
-      { relativePath: record.file, content: serializeRecord(record) },
+      ...(supersededSource
+        ? [{ relativePath: supersededSource.file, content: serializeRecord(supersededSource) }]
+        : []),
+      ...(!reusesExisting
+        ? [{ relativePath: record.file, content: serializeRecord(record) }]
+        : []),
+      ...lifecycle.files,
+      ...projection.changes,
       {
         relativePath: path.relative(this.layout.root, this.layout.userProfileState),
         content: userProfileStateJson(nextProfile)
@@ -2102,11 +2376,19 @@ export class PersonalMemoryRepository {
       at: now,
       profile: "user",
       recordId: record.id,
+      ...(target ? { targetId: target.id } : {}),
       source: runtimeSource(runtime),
       ...runtimeAuditLink(runtime)
-    });
+    }, lifecycle.records);
     await this.runTransaction("profile-update", manifest.revision, targetRevision, changes);
-    this.notifyMemoryCommitted("create", record.id, targetRevision);
+    this.commitSecondaryCache(lifecycle.records);
+    if (!reusesExisting) {
+      this.notifyMemoryCommitted(
+        supersededSource ? "supersede" : "create",
+        record.id,
+        targetRevision
+      );
+    }
     return Object.freeze({ revision: targetRevision, profile: "user", record });
   }
 
@@ -2140,6 +2422,7 @@ export class PersonalMemoryRepository {
     const targetId = assertSafeId(recordId);
     const target = records.find((record) => record.id === targetId);
     if (!target) throw new PersonalMemoryAccessError("not_found", `Memory ${targetId} does not exist`);
+    await this.assertFixedFilesMatchManifest(manifest);
     const targetRevision = manifest.revision + 1;
     const backupFile = path.posix.join(
       "shared-user", ".runtime", "backups", "forgets",
@@ -2158,10 +2441,22 @@ export class PersonalMemoryRepository {
     });
     const remaining = records.filter((record) => record.id !== targetId);
     const lifecycle = await this.applySecondaryLifecycle("forget", targetId);
+    const projection = await this.reconcileControlledProjectionSources(
+      remaining,
+      this.now()
+    );
+    if (projection.agentHash || projection.userHash) {
+      next.fixedFileHashes = {
+        ...manifest.fixedFileHashes!,
+        ...(projection.agentHash ? { agent: projection.agentHash } : {}),
+        ...(projection.userHash ? { user: projection.userHash } : {})
+      };
+    }
     const changes = await this.stateChanges(next, remaining, [
       { relativePath: backupFile, content: serializeRecord(target) },
       { relativePath: target.file },
-      ...lifecycle.files
+      ...lifecycle.files,
+      ...projection.changes
     ], {
       type: "forgotten",
       revision: targetRevision,
@@ -2769,6 +3064,47 @@ export class PersonalMemoryRepository {
     }
   }
 
+  /**
+   * no_memory 只读取 Agent 身份和人格模板状态；缺失路径保持缺失，不能为了
+   * 构造上下文初始化 Memory 树或写入 AGENT.md / USER.md。
+   */
+  private async assertBaseIdentityStatePathsSafe(): Promise<void> {
+    const vaultStat = await lstat(this.vaultPath);
+    if (vaultStat.isSymbolicLink()) {
+      throw new PersonalMemoryAccessError("unsafe_path", "Active Vault root must not be a symlink");
+    }
+    const vaultRealPath = await realpath(this.vaultPath);
+    for (const target of [
+      this.layout.root,
+      path.join(this.layout.root, "agents"),
+      path.dirname(this.layout.agent),
+      this.layout.personalityState,
+      this.layout.agentIdentity
+    ]) {
+      let stat;
+      try {
+        stat = await lstat(target);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw error;
+      }
+      if (stat.isSymbolicLink()) {
+        throw new PersonalMemoryAccessError(
+          "unsafe_path",
+          `Managed Agent identity path must not be a symlink: ${target}`
+        );
+      }
+      const targetRealPath = await realpath(target);
+      const relative = path.relative(vaultRealPath, targetRealPath);
+      if (relative.startsWith("..") || path.isAbsolute(relative)) {
+        throw new PersonalMemoryAccessError(
+          "unsafe_path",
+          "Managed Agent identity realpath escapes the active Vault"
+        );
+      }
+    }
+  }
+
   private async assertManagedTreeSafe(): Promise<void> {
     const vaultStat = await lstat(this.vaultPath);
     if (vaultStat.isSymbolicLink()) {
@@ -3152,7 +3488,7 @@ export class PersonalMemoryRepository {
     }
   }
 
-  private assertRuntime(runtime: Readonly<PersonalMemoryRuntimeContext>, writing: boolean): void {
+  private assertRuntime(runtime: Readonly<PersonalMemoryRuntimeContext>): void {
     if (runtime.vaultId !== this.vaultId) {
       throw new PersonalMemoryAccessError("vault_mismatch", "Memory access is bound to another Vault");
     }
@@ -3164,9 +3500,6 @@ export class PersonalMemoryRepository {
     })) cleanRequired(value, name, 512);
     if (runtime.memoryMode === "no_memory") {
       throw new PersonalMemoryAccessError("no_memory", "Historical Memory is disabled for this Conversation");
-    }
-    if (writing && !runtime.learningEnabled) {
-      throw new PersonalMemoryAccessError("learning_disabled", "Long-term Memory learning is read-only");
     }
   }
 

@@ -2,8 +2,8 @@
  * dream-engine.ts — one dreaming round (做梦 PRD §5 + 最新决定).
  *
  * Flow:
- *  1. Gates live in the scheduler (dreamEnabled + memory.enabled +
- *     useLongTermMemory + runsPerDay). Here we only detect Provider absence.
+ *  1. Gates live in the scheduler (dreamEnabled + useLongTermMemory +
+ *     runsPerDay). Here we only detect Provider absence.
  *  2. 来源对账: USER items / learnedRequirements / observed traits /
  *     candidates / processedSources are reconciled against still-current
  *     primary memories BEFORE any LLM work.

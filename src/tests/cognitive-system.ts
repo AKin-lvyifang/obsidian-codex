@@ -583,7 +583,16 @@ async function scenarioSourceReconciliation(): Promise<void> {
   await withPersonalMemoryFixture(async (fixture) => {
     const system = await createSystem(fixture, () => scriptedDreamLlm((memory) => {
       if (memory.title.includes("简短")) {
-        return { ...EMPTY_DREAM_OUTPUT, agentRequirements: ["回复保持简短"] };
+        return {
+          ...EMPTY_DREAM_OUTPUT,
+          personalitySignals: [{
+            dimension: "creativity",
+            direction: "increase",
+            strength: 0.6,
+            evidence: "用户希望回复友好"
+          }],
+          agentRequirements: ["回复保持简短"]
+        };
       }
       if (memory.title.includes("咖啡")) {
         return { ...EMPTY_DREAM_OUTPUT, userProfileItems: [{ section: "preference", profileKey: "preference.interests", text: "用户喜欢手冲咖啡" }] };
@@ -609,21 +618,87 @@ async function scenarioSourceReconciliation(): Promise<void> {
     let user = await readFile(fixture.repository.layout.user, "utf8");
     assert.match(agent, /回复保持简短/);
     assert.match(user, /用户喜欢手冲咖啡/);
+    let state = await system.readPersonalityState();
+    assert.ok(state.candidates.some((candidate) =>
+      candidate.sourceMemoryId === requirementMemory.id
+    ), "fixture must contain a candidate derived from the superseded Memory");
 
-    // User corrects/forgets BOTH source memories.
-    await fixture.repository.forgetFromUserControl(requirementMemory.id, "不再准确");
-    await fixture.repository.forgetFromUserControl(profileMemory.id, "不再准确");
-
-    // Next dream reconciles: stale requirement + profile item must retire and
-    // the projections must be re-rendered in the same round.
-    const run = await system.forceDreamRun();
-    assert.ok(run);
+    // Generic supersede keeps the controlled projection continuously attached
+    // by moving its source to the replacement Memory in the same transaction.
+    // Generic forget remains the operation that revokes the projection.
+    const beforeCorrection = await fixture.repository.inspect();
+    const requirementReplacement = await fixture.repository.supersedeFromUserCorrection({
+      targetId: requirementMemory.id,
+      title: "回复不再强制简短",
+      content: "用户要求详略服从当前任务。",
+      recallWhen: "组织回复长度时",
+      reason: "用户修正长期要求",
+      expectedRevision: beforeCorrection.revision
+    });
     agent = await readFile(fixture.repository.layout.agent, "utf8");
-    user = await readFile(fixture.repository.layout.user, "utf8");
-    assert.ok(!agent.includes("回复保持简短"), "stale requirement must leave AGENT.md");
-    assert.ok(!user.includes("用户喜欢手冲咖啡"), "stale profile item must leave USER.md");
+    assert.doesNotMatch(agent, /回复保持简短/u,
+      "generic supersede must immediately remove the old AGENT requirement text");
+    assert.doesNotMatch(agent, /用户要求详略服从当前任务/u,
+      "generic supersede must not turn replacement Memory text into an AGENT requirement");
+    state = await system.readPersonalityState();
+    assert.ok(!state.learnedRequirements.some((requirement) =>
+      requirement.status === "current"
+      && (
+        requirement.sourceMemoryIds.includes(requirementMemory.id)
+        || requirement.sourceMemoryIds.includes(requirementReplacement.record.id)
+      )
+    ), "replacement waits for Dream instead of inheriting the old learned requirement");
+    assert.ok(!state.candidates.some((candidate) =>
+      candidate.sourceMemoryId === requirementMemory.id
+      || candidate.sourceMemoryId === requirementReplacement.record.id
+    ), "replacement waits for Dream instead of inheriting the old personality candidate");
+    assert.ok(!state.processedSources.some((source) =>
+      source.memoryId === requirementMemory.id
+      || source.memoryId === requirementReplacement.record.id
+    ), "replacement remains unprocessed until a later Dream succeeds");
 
-    const state = await system.readPersonalityState();
+    const beforeRequirementForget = await fixture.repository.inspect();
+    await fixture.repository.forgetFromUserControl(
+      requirementReplacement.record.id,
+      "用户要求忘掉这项长期要求",
+      beforeRequirementForget.revision
+    );
+    agent = await readFile(fixture.repository.layout.agent, "utf8");
+    assert.doesNotMatch(agent, /回复保持简短/u,
+      "generic forget revokes the rebound AGENT projection");
+
+    const beforeProfileCorrection = await fixture.repository.inspect();
+    const profileReplacement = await fixture.repository.supersedeFromUserCorrection({
+      targetId: profileMemory.id,
+      title: "喜欢手冲咖啡和茶",
+      content: "用户喜欢手冲咖啡，也开始喝茶。",
+      recallWhen: "聊到饮品偏好时",
+      reason: "用户修正长期兴趣",
+      expectedRevision: beforeProfileCorrection.revision
+    });
+    user = await readFile(fixture.repository.layout.user, "utf8");
+    assert.match(user, /用户喜欢手冲咖啡，也开始喝茶/u,
+      "generic supersede synchronizes explicit USER projection text");
+    const profileState = parseUserProfileState(
+      await readJson(fixture.repository.layout.userProfileState) as Record<string, unknown>
+    );
+    const reboundProfile = profileState?.items.find((item) =>
+      item.status === "current" && item.profileKey === "preference.interests"
+    );
+    assert.deepEqual(reboundProfile?.sourceMemoryIds, [profileReplacement.record.id]);
+    assert.ok(!reboundProfile?.sourceMemoryIds.includes(profileMemory.id));
+
+    const beforeProfileForget = await fixture.repository.inspect();
+    await fixture.repository.forgetFromUserControl(
+      profileReplacement.record.id,
+      "用户要求忘掉这项长期兴趣",
+      beforeProfileForget.revision
+    );
+    user = await readFile(fixture.repository.layout.user, "utf8");
+    assert.doesNotMatch(user, /用户喜欢手冲咖啡，也开始喝茶/u,
+      "generic forget revokes the rebound USER projection");
+
+    state = await system.readPersonalityState();
     assert.ok(state.learnedRequirements
       .filter((requirement) => requirement.status === "current")
       .every((requirement) => !requirement.text.includes("简短")));
@@ -672,11 +747,26 @@ async function scenarioObservedTraitFallback(): Promise<void> {
     const evolvedScores = currentPersonalityScores(evolved);
     assert.ok(evolvedScores.sharpness < 0.50);
 
-    // All evidence forgotten → observed must fall back to explicit baseline.
-    for (const record of sources) {
-      await fixture.repository.forgetFromUserControl(record.id, "测试");
+    const beforeUpdate = await fixture.repository.inspect();
+    const replacement = await fixture.repository.supersedeFromUserCorrection({
+      targetId: sources[0].id,
+      title: "表达风格改为按任务判断",
+      content: "用户说明表达方式应服从当前任务，不再沿用旧观察。",
+      recallWhen: "决定表达风格时",
+      reason: "用户修正旧观察",
+      expectedRevision: beforeUpdate.revision
+    });
+    const afterUpdate = await system.readPersonalityState();
+    assert.ok(!afterUpdate.observed.sharpness?.sourceMemoryIds.includes(sources[0].id),
+      "generic supersede removes the old observed-trait source");
+    assert.ok(!afterUpdate.observed.sharpness?.sourceMemoryIds.includes(replacement.record.id),
+      "replacement Memory does not inherit the old observed-trait source before Dream");
+
+    // All remaining evidence forgotten → observed must fall back to explicit baseline.
+    for (const record of sources.slice(1)) {
+      const beforeForget = await fixture.repository.inspect();
+      await fixture.repository.forgetFromUserControl(record.id, "测试", beforeForget.revision);
     }
-    await system.forceDreamRun();
     const fallen = await system.readPersonalityState();
     assert.equal(fallen.observed.sharpness, null);
     assert.equal(currentPersonalityScores(fallen).sharpness, 0.50);
@@ -2433,7 +2523,17 @@ async function scenarioMalformedUserProfileStateFailsClosed(): Promise<void> {
 
 async function scenarioUserProjectionCasAndProfileUpdate(): Promise<void> {
   await withPersonalMemoryFixture(async (fixture) => {
-    const system = await createSystem(fixture, () => scriptedDreamLlm(() => EMPTY_DREAM_OUTPUT));
+    const system = await createSystem(fixture, () => scriptedDreamLlm((memory) => ({
+      ...EMPTY_DREAM_OUTPUT,
+      agentRequirements: memory.content.includes("用户明确偏好中文")
+        ? ["回复默认使用中文"]
+        : memory.content.includes("用户明确偏好英文")
+          ? ["回复默认使用英文"]
+          : []
+    })));
+    await system.selectPersonalityTemplate("advisor", {
+      initialIdentity: { displayName: "小问", avatar: { kind: "default" } }
+    });
     const manifest = await readJson(fixture.repository.layout.manifest) as { revision: number };
     const updated = await fixture.repository.write({
       operation: "profile_update",
@@ -2453,6 +2553,35 @@ async function scenarioUserProjectionCasAndProfileUpdate(): Promise<void> {
     user = await readFile(fixture.repository.layout.user, "utf8");
     assert.ok(user.includes("用户明确偏好中文"),
       "approved profile_update truth survives a successful Dream");
+    let agent = await readFile(fixture.repository.layout.agent, "utf8");
+    assert.match(agent, /回复默认使用中文/u);
+
+    const beforeReplacement = await fixture.repository.inspect();
+    const replacement = await fixture.repository.write({
+      operation: "profile_update",
+      profileKey: "preference.language",
+      text: "用户明确偏好英文",
+      basis: "explicit",
+      contentOrigin: "confirmed_change",
+      expectedRevision: beforeReplacement.revision
+    }, fixture.runtime());
+    assert.equal(replacement.record?.supersedes, updated.record?.id);
+    user = await readFile(fixture.repository.layout.user, "utf8");
+    agent = await readFile(fixture.repository.layout.agent, "utf8");
+    assert.match(user, /用户明确偏好英文/u);
+    assert.doesNotMatch(user, /用户明确偏好中文/u);
+    assert.doesNotMatch(agent, /回复默认使用中文/u,
+      "profile replacement immediately withdraws the old learned requirement");
+    assert.doesNotMatch(agent, /用户明确偏好英文/u,
+      "profile Memory text is not itself an AGENT requirement");
+    assert.doesNotMatch(agent, /回复默认使用英文/u,
+      "replacement waits for Dream before a new learned requirement appears");
+
+    await system.settleDreamEnqueue();
+    const afterReplacementDream = await system.forceDreamRun();
+    assert.equal(afterReplacementDream?.committed, true);
+    agent = await readFile(fixture.repository.layout.agent, "utf8");
+    assert.match(agent, /回复默认使用英文/u);
 
     await createMemory(fixture, {
       title: "外部编辑后的做梦来源",

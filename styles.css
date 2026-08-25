@@ -8399,6 +8399,18 @@ button.echoink-settings-navigation-row:focus-visible {
   flex-direction: column;
 }
 
+.codex-knowledge-settings .codex-kb-settings-dashboard {
+  max-height: none;
+  margin: 0;
+  padding: 12px;
+}
+
+.codex-knowledge-settings .codex-kb-settings-dashboard .codex-kb-dashboard-details {
+  max-height: none;
+  overflow: visible;
+  padding-right: 0;
+}
+
 .codex-kb-dashboard.health-healthy {
   border-color: color-mix(in srgb, var(--color-green) 28%, var(--background-modifier-border));
 }

@@ -226,7 +226,6 @@ export interface EchoInkWelcomeCopy {
 }
 
 export interface EchoInkMemorySettings {
-  enabled: boolean;
   useLongTermMemory: boolean;
   /** Dream scheduler: offline memory consolidation (anchor expansion + personality signal extraction). */
   dreamEnabled: boolean;
@@ -435,7 +434,6 @@ export const DEFAULT_SETTINGS: CodexForObsidianSettings = {
     tutorialStep: "sidebar"
   },
   memory: {
-    enabled: true,
     useLongTermMemory: true,
     dreamEnabled: false,
     dreamRunsPerDay: 3,
@@ -1348,7 +1346,6 @@ function normalizeMemorySettings(input: unknown): EchoInkMemorySettings {
     ? Math.max(1000, Math.min(200000, value.dreamTokenBudget))
     : 50000;
   return {
-    enabled: value?.enabled !== false,
     useLongTermMemory: value?.useLongTermMemory !== false,
     dreamEnabled: value?.dreamEnabled === true,
     dreamRunsPerDay: runsPerDay,
