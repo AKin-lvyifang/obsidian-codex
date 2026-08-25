@@ -3,7 +3,8 @@ import {
   conversationCopy,
   type ConversationActionKind,
   type ConversationActionStatus,
-  type ConversationCopy
+  type ConversationCopy,
+  type ConversationToolAction
 } from "../../settings/i18n";
 import type { ProcessFileRef } from "../../types/app-server";
 
@@ -11,11 +12,45 @@ export type ActionGroupKind = ConversationActionKind;
 
 export type ActionStatus = ConversationActionStatus;
 
+export interface ActionSearchResultViewModel {
+  path?: string;
+  title?: string;
+  excerpt?: string;
+}
+
+export interface ActionParameterViewModel {
+  label: string;
+  value: string;
+}
+
+export interface ActionUserDetailsViewModel {
+  action: ConversationToolAction;
+  targetPath?: string;
+  sourcePath?: string;
+  destinationPath?: string;
+  preview?: string;
+  query?: string;
+  scopePath?: string;
+  resultCount?: number;
+  results?: ActionSearchResultViewModel[];
+  command?: string;
+  stdout?: string;
+  stderr?: string;
+  result?: string;
+  error?: string;
+  deleteOutcome?: "recoverable" | "completed";
+  parameters?: ActionParameterViewModel[];
+}
+
 export interface ActionItemViewModel {
   id: string;
   kind: ActionGroupKind;
+  toolId?: string;
+  toolAction?: ConversationToolAction;
   title: string;
+  target?: string;
   detail?: string;
+  userDetails?: ActionUserDetailsViewModel;
   status: ActionStatus;
   createdAt: number;
   durationMs?: number;
@@ -56,6 +91,17 @@ export interface ActionTimelineViewModel {
   countLabels: string[];
   groups: ActionGroupViewModel[];
 }
+
+const TOOL_ACTION_BY_ID: Readonly<Record<string, ConversationToolAction>> = Object.freeze({
+  vault_search: "search",
+  note_read: "read",
+  note_create: "create",
+  note_update: "edit",
+  metadata_update: "edit",
+  note_move: "move",
+  note_delete: "delete",
+  bash: "command"
+});
 
 export function isActionTimelineItem(message: Pick<ChatMessage, "itemType" | "role">): boolean {
   if (message.itemType === "knowledgeBase") return false;
@@ -116,14 +162,26 @@ export function buildActionTimeline(
 }
 
 function toActionItem(message: ChatMessage, copy: ConversationCopy): ActionItemViewModel {
-  const kind = actionKindForMessage(message);
-  const commandSummary = kind === "command" ? commandSummaryForMessage(message) : "";
+  const toolId = toolIdForMessage(message);
+  const toolAction = toolActionForMessage(message, toolId);
+  const kind = actionKindForMessage(message, toolAction);
+  const userDetails = toolAction
+    ? buildActionUserDetails(message, toolAction)
+    : undefined;
+  const commandSummary = kind === "command"
+    ? userDetails?.command || commandSummaryForMessage(message)
+    : "";
   const diff = diffForMessage(message.diffSummary);
+  const target = actionTargetForMessage(message, toolId, toolAction, userDetails, commandSummary);
   return {
     id: message.id,
     kind,
-    title: actionTitleForMessage(message, kind, commandSummary, copy),
+    ...(toolId ? { toolId } : {}),
+    ...(toolAction ? { toolAction } : {}),
+    title: actionTitleForMessage(message, kind, target, copy),
+    ...(target ? { target } : {}),
     detail: message.details || undefined,
+    ...(userDetails ? { userDetails } : {}),
     status: normalizeStatus(message.status),
     createdAt: message.createdAt,
     durationMs: reliableDurationMs(message),
@@ -141,7 +199,347 @@ function toActionItem(message: ChatMessage, copy: ConversationCopy): ActionItemV
   };
 }
 
-function actionKindForMessage(message: ChatMessage): ActionGroupKind {
+function toolIdForMessage(message: ChatMessage): string | undefined {
+  if (
+    message.role !== "tool"
+    && message.itemType !== "commandExecution"
+    && message.itemType !== "fileChange"
+    && message.itemType !== "mcpToolCall"
+    && message.itemType !== "dynamicToolCall"
+    && message.itemType !== "collabAgentToolCall"
+  ) return undefined;
+  let candidate = message.title?.trim() ?? "";
+  for (const prefix of ["使用工具：", "使用工具:", "调用工具：", "调用工具:", "Use tool:", "Called tool:"]) {
+    if (!candidate.startsWith(prefix)) continue;
+    candidate = candidate.slice(prefix.length).trim();
+    break;
+  }
+  if (!/^[a-z0-9][a-z0-9._:/-]*$/iu.test(candidate)) return undefined;
+  return candidate.toLowerCase();
+}
+
+function toolActionForMessage(
+  message: ChatMessage,
+  toolId: string | undefined
+): ConversationToolAction | undefined {
+  if (toolId) return TOOL_ACTION_BY_ID[toolId] ?? "call";
+  if (message.itemType === "commandExecution") return "command";
+  if (message.itemType === "fileChange") return "edit";
+  if (
+    message.role === "tool"
+    || message.itemType === "mcpToolCall"
+    || message.itemType === "dynamicToolCall"
+  ) {
+    if (message.processKind === "search") return "search";
+    if (message.processKind === "view") return "read";
+    return "call";
+  }
+  return undefined;
+}
+
+function buildActionUserDetails(
+  message: ChatMessage,
+  action: ConversationToolAction
+): ActionUserDetailsViewModel {
+  const input = parseDisplayPayload(message.processInput);
+  const output = parseDisplayPayload(message.processOutput);
+  const approvalTarget = parseDisplayPayload(message.approval?.target);
+  const inputRecord = plainRecord(input);
+  const outputRecord = plainRecord(output);
+  const approvalRecord = plainRecord(approvalTarget);
+  const filePath = firstNonEmpty([
+    stringField(inputRecord, "relativePath", "path"),
+    stringField(approvalRecord, "relativePath", "path", "targetPath"),
+    stringField(outputRecord, "targetPath", "sourcePath", "relativePath", "path"),
+    message.diffSummary?.files[0]?.path,
+    message.files?.[0]?.path
+  ]);
+  const error = actionError(message, output);
+
+  if (action === "search") {
+    const results = searchResults(outputRecord);
+    const query = firstNonEmpty([
+      stringField(inputRecord, "query"),
+      stringField(outputRecord, "query")
+    ]);
+    const scopePath = firstNonEmpty([
+      stringField(inputRecord, "scopePath"),
+      stringField(outputRecord, "scopePath")
+    ]);
+    return {
+      action,
+      ...(query ? { query } : {}),
+      ...(scopePath ? { scopePath } : {}),
+      ...(Array.isArray(outputRecord?.items) ? { resultCount: results.length } : {}),
+      ...(results.length ? { results } : {}),
+      ...(error ? { error } : {})
+    };
+  }
+
+  if (action === "move") {
+    const sourcePath = firstNonEmpty([
+      stringField(inputRecord, "sourcePath", "relativePath", "path"),
+      stringField(outputRecord, "sourcePath"),
+      message.diffSummary?.files[0]?.previousPath
+    ]);
+    const destinationPath = firstNonEmpty([
+      stringField(inputRecord, "targetPath"),
+      stringField(outputRecord, "targetPath"),
+      message.diffSummary?.files[0]?.path
+    ]);
+    return {
+      action,
+      ...(sourcePath ? { sourcePath } : {}),
+      ...(destinationPath ? { destinationPath } : {}),
+      ...(error ? { error } : {})
+    };
+  }
+
+  if (action === "delete") {
+    const sourcePath = firstNonEmpty([
+      stringField(inputRecord, "relativePath", "sourcePath", "path"),
+      stringField(outputRecord, "sourcePath", "relativePath", "path"),
+      message.diffSummary?.files[0]?.previousPath,
+      message.diffSummary?.files[0]?.path,
+      message.files?.[0]?.path
+    ]);
+    return {
+      action,
+      ...(sourcePath ? { sourcePath, targetPath: sourcePath } : {}),
+      ...(deleteOutcome(outputRecord) ? { deleteOutcome: deleteOutcome(outputRecord)! } : {}),
+      ...(error ? { error } : {})
+    };
+  }
+
+  if (action === "command") {
+    const command = firstNonEmpty([
+      stringField(inputRecord, "command", "cmd", "script"),
+      typeof input === "string" ? input : undefined
+    ]);
+    const stdout = firstNonEmpty([
+      stringField(outputRecord, "stdout", "output", "text"),
+      !outputRecord && typeof output === "string" && !error ? output : undefined
+    ]);
+    const stderr = firstNonEmpty([
+      stringField(outputRecord, "stderr"),
+      stringField(plainRecord(outputRecord?.error), "stderr")
+    ]);
+    return {
+      action,
+      ...(command ? { command } : {}),
+      ...(stdout ? { stdout } : {}),
+      ...(stderr ? { stderr } : {}),
+      ...(error ? { error } : {})
+    };
+  }
+
+  if (action === "create" || action === "edit") {
+    const content = stringField(inputRecord, "content", "text");
+    const metadataPreview = action === "edit"
+      ? readableMetadataPreview(inputRecord?.patch)
+      : undefined;
+    return {
+      action,
+      ...(filePath ? { targetPath: filePath } : {}),
+      ...(content ? { preview: content } : metadataPreview ? { preview: metadataPreview } : {}),
+      ...(error ? { error } : {})
+    };
+  }
+
+  if (action === "read") {
+    return {
+      action,
+      ...(filePath ? { targetPath: filePath } : {}),
+      ...(error ? { error } : {})
+    };
+  }
+
+  const result = readableResult(output, outputRecord, error);
+  const parameters = readableParameters(inputRecord);
+  return {
+    action,
+    ...(filePath ? { targetPath: filePath } : {}),
+    ...(parameters.length ? { parameters } : {}),
+    ...(result ? { result } : {}),
+    ...(error ? { error } : {})
+  };
+}
+
+function actionTargetForMessage(
+  message: ChatMessage,
+  toolId: string | undefined,
+  action: ConversationToolAction | undefined,
+  details: ActionUserDetailsViewModel | undefined,
+  commandSummary: string
+): string {
+  if (action === "command") return details?.command || commandSummary;
+  if (action === "move") return details?.destinationPath || details?.sourcePath || "";
+  if (action === "delete") return details?.sourcePath || "";
+  if (action === "search") return details?.query || toolId || "";
+  if (action === "call" && toolId) return toolId;
+  if (details?.targetPath) return details.targetPath;
+  if (message.diffSummary?.files[0]?.path) return message.diffSummary.files[0].path;
+  if (message.files?.[0]) {
+    const file = message.files[0];
+    return file.name || file.displayPath || file.path;
+  }
+  if (action && toolId) return toolId;
+  return "";
+}
+
+function parseDisplayPayload(value: string | undefined): unknown {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    return trimmed;
+  }
+}
+
+function plainRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function stringField(
+  record: Record<string, unknown> | undefined,
+  ...keys: string[]
+): string | undefined {
+  if (!record) return undefined;
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+function firstNonEmpty(values: Array<string | undefined>): string {
+  return values.find((value) => Boolean(value?.trim()))?.trim() ?? "";
+}
+
+function searchResults(
+  record: Record<string, unknown> | undefined
+): ActionSearchResultViewModel[] {
+  if (!Array.isArray(record?.items)) return [];
+  return record.items.flatMap((candidate) => {
+    const item = plainRecord(candidate);
+    if (!item) return [];
+    const path = stringField(item, "relativePath", "path");
+    const title = stringField(item, "title", "name");
+    const excerpt = stringField(item, "excerpt", "summary", "text");
+    if (!path && !title && !excerpt) return [];
+    return [{
+      ...(path ? { path } : {}),
+      ...(title ? { title } : {}),
+      ...(excerpt ? { excerpt } : {})
+    }];
+  });
+}
+
+function actionError(message: ChatMessage, output: unknown): string | undefined {
+  if (message.status !== "failed" && message.status !== "error") return undefined;
+  const outputRecord = plainRecord(output);
+  const errorValue = outputRecord?.error;
+  const errorRecord = plainRecord(errorValue);
+  return firstNonEmpty([
+    typeof errorValue === "string" ? errorValue : undefined,
+    stringField(errorRecord, "message", "reason", "code"),
+    stringField(outputRecord, "message", "reason"),
+    typeof output === "string" ? output : undefined,
+    message.text,
+    message.details
+  ]) || undefined;
+}
+
+function deleteOutcome(
+  output: Record<string, unknown> | undefined
+): "recoverable" | "completed" | undefined {
+  if (!output) return undefined;
+  const readback = plainRecord(output.readback);
+  const trash = plainRecord(readback?.trash);
+  if (trash?.kind === "obsidian_recoverable") return "recoverable";
+  if (output.status === "completed") return "completed";
+  return undefined;
+}
+
+function readableMetadataPreview(value: unknown): string | undefined {
+  const lines: string[] = [];
+  collectReadableEntries(value, "", lines);
+  return lines.length ? lines.slice(0, 12).join("\n") : undefined;
+}
+
+function collectReadableEntries(value: unknown, prefix: string, lines: string[]): void {
+  if (lines.length >= 12) return;
+  const record = plainRecord(value);
+  if (record) {
+    for (const [key, nested] of Object.entries(record)) {
+      collectReadableEntries(nested, prefix ? `${prefix}.${key}` : key, lines);
+      if (lines.length >= 12) break;
+    }
+    return;
+  }
+  const formatted = readableScalar(value);
+  if (prefix && formatted) lines.push(`${prefix}: ${formatted}`);
+}
+
+function readableParameters(
+  record: Record<string, unknown> | undefined
+): ActionParameterViewModel[] {
+  if (!record) return [];
+  const hidden = new Set([
+    "content",
+    "expectedVersion",
+    "operationIdentity",
+    "readbackVerified",
+    "authorizationId",
+    "productRunId",
+    "piSessionId",
+    "toolCallId"
+  ]);
+  return Object.entries(record).flatMap(([label, value]) => {
+    if (hidden.has(label)) return [];
+    const readable = readableScalar(value);
+    return readable ? [{ label, value: readable }] : [];
+  }).slice(0, 6);
+}
+
+function readableScalar(value: unknown): string | undefined {
+  if (typeof value === "string") return value.trim() || undefined;
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
+    return String(value);
+  }
+  if (Array.isArray(value) && value.every((item) =>
+    typeof item === "string" || typeof item === "number" || typeof item === "boolean"
+  )) return value.map(String).join(", ");
+  return undefined;
+}
+
+function readableResult(
+  output: unknown,
+  record: Record<string, unknown> | undefined,
+  error: string | undefined
+): string | undefined {
+  if (error) return undefined;
+  if (typeof output === "string") return output.trim() || undefined;
+  return stringField(record, "summary", "message", "text", "output", "result");
+}
+
+function actionKindForMessage(
+  message: ChatMessage,
+  toolAction?: ConversationToolAction
+): ActionGroupKind {
+  if (toolAction === "search") return "search";
+  if (toolAction === "read") return "read";
+  if (toolAction === "command") return "command";
+  if (
+    toolAction === "create"
+    || toolAction === "edit"
+    || toolAction === "move"
+    || toolAction === "delete"
+  ) return "edit";
+  if (toolAction === "call") return "tool";
   if (message.itemType === "contextCompaction") return "system";
   if (message.itemType === "plan" || message.processKind === "plan") return "plan";
   if (message.itemType === "fileChange" || message.processKind === "edit") return "edit";
@@ -156,17 +554,10 @@ function actionKindForMessage(message: ChatMessage): ActionGroupKind {
 function actionTitleForMessage(
   message: ChatMessage,
   kind: ActionGroupKind,
-  commandSummary: string,
+  target: string,
   copy: ConversationCopy
 ): string {
-  if (kind === "command" && commandSummary) return copy.action.completedTitle(kind, commandSummary);
-  if (kind === "edit" && message.diffSummary?.files.length === 1) {
-    return copy.action.completedTitle(kind, message.diffSummary.files[0].path);
-  }
-  if (kind === "read" && message.files?.[0]) {
-    return copy.action.completedTitle(kind, message.files[0].name);
-  }
-  if (kind === "search") return message.details || message.title || copy.action.fallbackTitle(kind);
+  if (target) return target;
   if (kind === "tool") return message.title || copy.action.fallbackTitle(kind);
   if (kind === "agent") {
     return message.status === "failed" || message.status === "error"
@@ -302,6 +693,7 @@ function liveLabelForItem(
 }
 
 function actionTarget(item: ActionItemViewModel): string {
+  if (item.target) return trimActionTarget(item.target);
   if (item.kind === "command" && item.command?.summary) return trimActionTarget(item.command.summary);
   if (item.kind === "edit" && item.source.diffSummary?.files.length) return trimActionTarget(item.source.diffSummary.files[0].path);
   if (item.file) return trimActionTarget(item.file.name || item.file.displayPath || item.file.path);

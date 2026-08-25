@@ -1709,19 +1709,8 @@ export class CodexMessageListRenderer {
       cls: `codex-assistant-turn-action-ledger is-${timeline.runStatus}`,
       attr: {
         "data-action-count": String(timeline.totalCount),
-        "data-action-status": timeline.runStatus
-      }
-    });
-    const summaryText = timeline.summaryDetail || timeline.summaryTitle;
-    ledger.createDiv({
-      cls: "codex-assistant-turn-action-ledger-summary",
-      text: summaryText,
-      attr: {
-        role: "heading",
-        "aria-level": "4",
-        "aria-label": timeline.summaryDetail
-          ? `${timeline.summaryTitle}, ${timeline.summaryDetail}`
-          : timeline.summaryTitle
+        "data-action-status": timeline.runStatus,
+        "aria-label": this.copy().sections.tools
       }
     });
     for (const item of items) {
@@ -2122,7 +2111,7 @@ export class CodexMessageListRenderer {
     const renderBody = () => {
       if (body) return;
       body = details.createDiv({ cls: "codex-action-item-details-body", attr: { id: detailId } });
-      this.renderProcessBody(body, item.source);
+      this.renderActionItemDetails(body, item);
     };
     details.ontoggle = () => {
       rememberOpenState(this.openActionItemDetails, item.id, details.open);
@@ -2197,6 +2186,217 @@ export class CodexMessageListRenderer {
     const stats = container.createSpan({ cls: "codex-action-diff-stats" });
     if (typeof item.diff.added === "number") stats.createSpan({ cls: "codex-diff-stat codex-diff-stat-add", text: `+${item.diff.added}` });
     if (typeof item.diff.removed === "number") stats.createSpan({ cls: "codex-diff-stat codex-diff-stat-remove", text: `-${item.diff.removed}` });
+  }
+
+  private renderActionItemDetails(container: HTMLElement, item: ActionItemViewModel): void {
+    const details = item.userDetails;
+    if (!details) return;
+    if (details.action === "create" || details.action === "edit") {
+      if (details.targetPath) {
+        this.renderActionDetailValue(container, this.copy().details.target, details.targetPath, true);
+      }
+      if (details.preview) this.renderActionPreview(container, details.preview);
+      if (details.targetPath) this.renderActionFullNoteLink(container, item, details.targetPath);
+      this.renderActionDiff(container, item.source);
+      this.renderActionError(container, details.error);
+      return;
+    }
+    if (details.action === "search") {
+      if (details.query) this.renderActionDetailValue(container, this.copy().details.query, details.query);
+      if (details.scopePath) this.renderActionDetailValue(container, this.copy().details.scope, details.scopePath, true);
+      if (typeof details.resultCount === "number") {
+        container.createDiv({
+          cls: "codex-action-detail-result-count",
+          text: this.copy().details.searchMatches(details.resultCount)
+        });
+      }
+      if (details.results?.length) {
+        const list = container.createDiv({ cls: "codex-action-search-results" });
+        for (const result of details.results) {
+          const row = list.createDiv({ cls: "codex-action-search-result" });
+          const heading = row.createDiv({ cls: "codex-action-search-result-heading" });
+          const label = result.path || result.title || "";
+          if (result.path) {
+            const ref = findProcessFileRef(item.source.files ?? [], result.path)
+              ?? normalizeProcessFileRef(result.path, this.requireEnv().vaultPath);
+            if (this.actionFileExists(ref)) {
+              this.renderProcessFileTextLink(
+                heading,
+                ref,
+                label,
+                "codex-action-search-result-path",
+                true
+              );
+            } else {
+              heading.createSpan({ cls: "codex-action-search-result-path", text: label });
+            }
+          } else {
+            heading.createSpan({ cls: "codex-action-search-result-path", text: label });
+          }
+          if (result.title && result.title !== label) {
+            heading.createSpan({ cls: "codex-action-search-result-title", text: result.title });
+          }
+          if (result.excerpt) {
+            row.createDiv({ cls: "codex-action-search-result-excerpt", text: result.excerpt });
+          }
+        }
+      }
+      this.renderActionError(container, details.error);
+      return;
+    }
+    if (details.action === "move") {
+      if (details.sourcePath) {
+        this.renderActionDetailValue(container, this.copy().details.sourcePath, details.sourcePath, true);
+      }
+      if (details.destinationPath) {
+        this.renderActionDetailValue(container, this.copy().details.destinationPath, details.destinationPath, true);
+      }
+      this.renderActionError(container, details.error);
+      return;
+    }
+    if (details.action === "delete") {
+      if (details.sourcePath) {
+        this.renderActionDetailValue(container, this.copy().details.sourcePath, details.sourcePath, true);
+      }
+      if (details.deleteOutcome) {
+        container.createDiv({
+          cls: "codex-action-detail-outcome",
+          text: details.deleteOutcome === "recoverable"
+            ? this.copy().details.deletedRecoverably
+            : this.copy().details.deleted
+        });
+      }
+      this.renderActionError(container, details.error);
+      return;
+    }
+    if (details.action === "command") {
+      this.renderActionCommand(container, item);
+      return;
+    }
+    if (details.parameters?.length) {
+      const section = container.createDiv({ cls: "codex-action-parameters" });
+      section.createDiv({ cls: "codex-action-detail-label", text: this.copy().details.parameters });
+      for (const parameter of details.parameters) {
+        const row = section.createDiv({ cls: "codex-action-parameter" });
+        row.createSpan({ cls: "codex-action-parameter-name", text: parameter.label });
+        row.createSpan({ cls: "codex-action-parameter-value", text: parameter.value });
+      }
+    }
+    if (details.result) {
+      const section = container.createDiv({ cls: "codex-action-detail-section" });
+      section.createDiv({ cls: "codex-action-detail-label", text: this.copy().details.result });
+      section.createEl("pre", { cls: "codex-action-detail-result", text: details.result });
+    }
+    this.renderActionError(container, details.error);
+  }
+
+  private renderActionDetailValue(
+    container: HTMLElement,
+    label: string,
+    value: string,
+    path = false
+  ): void {
+    const row = container.createDiv({ cls: "codex-action-detail-row" });
+    row.createSpan({ cls: "codex-action-detail-label", text: label });
+    row.createSpan({
+      cls: path ? "codex-action-detail-value is-path" : "codex-action-detail-value",
+      text: value,
+      attr: { title: value }
+    });
+  }
+
+  private renderActionPreview(container: HTMLElement, text: string): void {
+    const section = container.createDiv({ cls: "codex-action-detail-section codex-action-preview" });
+    section.createDiv({ cls: "codex-action-detail-label", text: this.copy().details.preview });
+    const preview = actionContentPreview(text);
+    section.createEl("pre", {
+      cls: "codex-action-preview-content",
+      text: preview.text,
+      attr: { "data-preview-truncated": String(preview.truncated) }
+    });
+  }
+
+  private renderActionFullNoteLink(
+    container: HTMLElement,
+    item: ActionItemViewModel,
+    path: string
+  ): void {
+    const ref = findProcessFileRef(item.source.files ?? [], path)
+      ?? normalizeProcessFileRef(path, this.requireEnv().vaultPath);
+    if (!this.actionFileExists(ref)) return;
+    const link = container.createEl("span", {
+      cls: "codex-action-open-note",
+      text: this.copy().details.openFullNote,
+      attr: {
+        role: "button",
+        tabindex: "0",
+        title: ref.displayPath,
+        "aria-label": `${this.copy().details.openFullNote} ${ref.displayPath}`
+      }
+    });
+    link.onclick = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void this.openProcessFile(ref);
+    };
+    link.onkeydown = (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      event.stopPropagation();
+      void this.openProcessFile(ref);
+    };
+  }
+
+  private actionFileExists(file: ProcessFileRef): boolean {
+    if (!file.openable || file.kind !== "vault") return false;
+    return this.requireEnv().app.vault.getAbstractFileByPath(normalizePath(file.path)) instanceof TFile;
+  }
+
+  private renderActionDiff(container: HTMLElement, message: ChatMessage): void {
+    const approvalChange = piApprovalPreviewChangeProjection(message.approval?.preview);
+    if (this.renderApprovalPreviewDiff(container, message, approvalChange)) return;
+    if (!message.diffSummary) return;
+    const host = container.createDiv({ cls: "codex-action-detail-diff" });
+    const projected: ChatMessage = {
+      ...message,
+      itemType: "fileChange",
+      processInput: undefined,
+      processOutput: undefined,
+      processInputAvailability: undefined,
+      processOutputAvailability: undefined
+    };
+    this.renderFileChangeBody(host, projected, this.copy().details.noDiff);
+  }
+
+  private renderActionCommand(container: HTMLElement, item: ActionItemViewModel): void {
+    const details = item.userDetails;
+    if (!details) return;
+    if (
+      item.source.rawRef
+      && !details.command
+      && !details.stdout
+      && !details.stderr
+      && !details.error
+    ) {
+      this.renderCommandExecutionBody(container, item.source, this.copy().details.noContent);
+      return;
+    }
+    const transcript: string[] = [];
+    if (details.command) transcript.push(`$ ${details.command}`);
+    if (details.stdout) transcript.push(details.stdout);
+    if (details.stderr) transcript.push(details.stderr);
+    if (details.error && details.error !== details.stderr) transcript.push(details.error);
+    if (!transcript.length) return;
+    const shell = container.createDiv({ cls: "codex-shell-block codex-action-command" });
+    shell.createDiv({ cls: "codex-shell-label", text: this.copy().details.terminal });
+    shell.createEl("pre", { cls: "codex-shell-output", text: transcript.join("\n") });
+  }
+
+  private renderActionError(container: HTMLElement, error: string | undefined): void {
+    if (!error) return;
+    const section = container.createDiv({ cls: "codex-action-error" });
+    section.createDiv({ cls: "codex-action-detail-label", text: this.copy().details.errorReason });
+    section.createDiv({ cls: "codex-action-error-message", text: error });
   }
 
   private renderApprovalCard(container: HTMLElement, message: ChatMessage): void {
@@ -2661,8 +2861,16 @@ export class CodexMessageListRenderer {
     }
   }
 
-  private renderProcessFileTextLink(container: HTMLElement, file: ProcessFileRef, label: string, extraClass = ""): HTMLElement {
-    const displayLabel = file.kind === "vault" ? noteNameForPath(file.path || label) : label;
+  private renderProcessFileTextLink(
+    container: HTMLElement,
+    file: ProcessFileRef,
+    label: string,
+    extraClass = "",
+    preserveLabel = false
+  ): HTMLElement {
+    const displayLabel = !preserveLabel && file.kind === "vault"
+      ? noteNameForPath(file.path || label)
+      : label;
     if (!file.openable) {
       return container.createSpan({
         cls: `codex-process-file-text is-disabled ${extraClass}`.trim(),
@@ -3040,10 +3248,21 @@ function formatActionDuration(durationMs: number): string {
   return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
 }
 
+function actionContentPreview(text: string): Readonly<{ text: string; truncated: boolean }> {
+  const lines = text.replace(/\r\n?/gu, "\n").split("\n");
+  const visible = lines.slice(0, 6);
+  const truncated = lines.length > visible.length;
+  return Object.freeze({
+    text: truncated ? `${visible.join("\n")}\n…` : visible.join("\n"),
+    truncated
+  });
+}
+
 function actionItemTarget(
   item: ActionItemViewModel,
   language: SettingsLanguage = "zh-CN"
 ): string {
+  if (item.target) return item.target;
   if (item.kind === "command" && item.command?.summary) return item.command.summary;
   const prefix = actionVerb(item, language);
   const title = item.title.startsWith(prefix) ? item.title.slice(prefix.length).trim() : item.title;
@@ -3058,19 +3277,41 @@ function actionItemTarget(
 }
 
 function hasActionItemDetails(item: ActionItemViewModel): boolean {
-  if (item.source.processContentAvailability === "unavailable" || hasExplicitProcessChannels(item.source)) return true;
-  const hasToolPayload = Boolean(
-    item.source.rawRef
-    || item.source.text.trim()
-    || item.source.files?.length
-    || item.source.diffSummary?.files.length
-  );
-  return Boolean(
-    item.source.rawRef ||
-    item.kind === "command" ||
-    item.kind === "edit" ||
-    ((item.kind === "tool" || item.kind === "agent") && hasToolPayload)
-  );
+  const details = item.userDetails;
+  if (!details) return false;
+  if (details.error) return true;
+  if (details.action === "read") return false;
+  if (details.action === "search") {
+    return Boolean(
+      details.query
+      || details.scopePath
+      || typeof details.resultCount === "number"
+      || details.results?.length
+    );
+  }
+  if (details.action === "create" || details.action === "edit") {
+    return Boolean(
+      details.targetPath
+      || details.preview
+      || item.source.diffSummary
+      || piApprovalPreviewChangeProjection(item.source.approval?.preview)?.diff
+    );
+  }
+  if (details.action === "move") {
+    return Boolean(details.sourcePath || details.destinationPath);
+  }
+  if (details.action === "delete") {
+    return Boolean(details.sourcePath || details.deleteOutcome);
+  }
+  if (details.action === "command") {
+    return Boolean(
+      details.command
+      || details.stdout
+      || details.stderr
+      || item.source.rawRef
+    );
+  }
+  return Boolean(details.parameters?.length || details.result);
 }
 
 function hasExplicitProcessChannels(message: ChatMessage): boolean {
@@ -3091,6 +3332,13 @@ export function actionVerb(
   item: ActionItemViewModel,
   language: SettingsLanguage = "zh-CN"
 ): string {
+  if (item.toolAction) {
+    return conversationCopy(language).action.toolVerb(
+      item.toolAction,
+      item.status,
+      item.source.status === "expired"
+    );
+  }
   return conversationCopy(language).action.verb(
     item.kind,
     item.status,

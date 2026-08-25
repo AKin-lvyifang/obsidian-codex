@@ -936,6 +936,139 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     "a reversed timestamp pair is not displayed as duration"
   );
 
+  const semanticTool = (
+    id: string,
+    title: string,
+    processInput: string,
+    processOutput = "",
+    itemType = "dynamicToolCall",
+    processKind = "tool"
+  ): ChatMessage => ({
+    id,
+    role: "tool",
+    itemType,
+    processKind: processKind as ChatMessage["processKind"],
+    title,
+    text: processOutput,
+    processInput,
+    processOutput,
+    processInputAvailability: processInput ? "provided" : "empty",
+    processOutputAvailability: processOutput ? "provided" : "empty",
+    status: "completed",
+    runId: "run-semantic-tools",
+    turnId: "run-semantic-tools",
+    createdAt: 10_000,
+    completedAt: 10_100
+  });
+  const semanticMessages: ChatMessage[] = [
+    semanticTool(
+      "semantic-search",
+      "使用工具：vault_search",
+      JSON.stringify({ query: "EchoInk", scopePath: "projects" }),
+      JSON.stringify({
+        query: "EchoInk",
+        scopePath: "projects",
+        items: [{ relativePath: "projects/EchoInk.md", excerpt: "matched" }]
+      }),
+      "dynamicToolCall",
+      "view"
+    ),
+    semanticTool("semantic-read", "note_read", JSON.stringify({ relativePath: "Source.md" })),
+    semanticTool("semantic-create", "note_create", JSON.stringify({
+      relativePath: "Created.md",
+      content: "first line\nsecond line"
+    })),
+    semanticTool("semantic-update", "note_update", JSON.stringify({
+      relativePath: "Updated.md",
+      content: "updated body",
+      expectedVersion: "version"
+    })),
+    semanticTool("semantic-metadata", "metadata_update", JSON.stringify({
+      relativePath: "Metadata.md",
+      expectedVersion: "version",
+      patch: { set: { status: "done" } }
+    })),
+    semanticTool("semantic-move", "note_move", JSON.stringify({
+      sourcePath: "Old.md",
+      targetPath: "New.md",
+      expectedVersion: "version"
+    })),
+    semanticTool("semantic-delete", "note_delete", JSON.stringify({
+      relativePath: "Trash.md",
+      expectedVersion: "version"
+    }), JSON.stringify({
+      status: "completed",
+      sourcePath: "Trash.md",
+      readback: { trash: { kind: "obsidian_recoverable" } }
+    })),
+    semanticTool(
+      "semantic-command",
+      "bash",
+      JSON.stringify({ command: "npm run typecheck" }),
+      JSON.stringify({ stdout: "typecheck passed", stderr: "" }),
+      "commandExecution",
+      "command"
+    ),
+    semanticTool(
+      "semantic-unknown",
+      "third_party_create_everything",
+      JSON.stringify({ path: "Unknown.md" }),
+      JSON.stringify({ message: "done" }),
+      "dynamicToolCall",
+      "edit"
+    )
+  ];
+  const semanticTimeline = buildActionTimeline(semanticMessages);
+  const semanticItems = semanticTimeline.groups.flatMap((group) => group.items);
+  assert.deepEqual(
+    semanticItems.map((item) => item.toolAction),
+    ["search", "read", "create", "edit", "edit", "move", "delete", "command", "call"],
+    "Tool actions come from exact Tool IDs; an unknown name containing create stays a call"
+  );
+  assert.deepEqual(
+    semanticItems.map((item) => item.toolId),
+    [
+      "vault_search",
+      "note_read",
+      "note_create",
+      "note_update",
+      "metadata_update",
+      "note_move",
+      "note_delete",
+      "bash",
+      "third_party_create_everything"
+    ]
+  );
+  assert.deepEqual(semanticItems[0]?.userDetails, {
+    action: "search",
+    query: "EchoInk",
+    scopePath: "projects",
+    resultCount: 1,
+    results: [{ path: "projects/EchoInk.md", excerpt: "matched" }]
+  });
+  assert.deepEqual(semanticItems[2]?.userDetails, {
+    action: "create",
+    targetPath: "Created.md",
+    preview: "first line\nsecond line"
+  });
+  assert.deepEqual(semanticItems[5]?.userDetails, {
+    action: "move",
+    sourcePath: "Old.md",
+    destinationPath: "New.md"
+  });
+  assert.deepEqual(semanticItems[6]?.userDetails, {
+    action: "delete",
+    sourcePath: "Trash.md",
+    targetPath: "Trash.md",
+    deleteOutcome: "recoverable"
+  });
+  assert.deepEqual(semanticItems[7]?.userDetails, {
+    action: "command",
+    command: "npm run typecheck",
+    stdout: "typecheck passed"
+  });
+  assert.equal(semanticItems[8]?.kind, "tool");
+
   const approvalToolCallId = "approval-preview-Foo";
   const approvalMessageId = `pi:session-ledger:leaf:leaf-ledger:tool:${encodeURIComponent(approvalToolCallId)}`;
   const approvalDiff = [
@@ -2308,11 +2441,10 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     );
     assert.equal(unifiedLedgers.length, 2,
       "Task and Sources keep the two chronological Action ledger groups separated");
-    assert.deepEqual(
-      unifiedLedgers.map((ledger) =>
-        ledger.findByClass("codex-assistant-turn-action-ledger-summary")?.textContent
-      ),
-      ["调用 1", "编辑 1"]
+    assert.equal(
+      assistantTurnRoot.findAllByClass("codex-assistant-turn-action-ledger-summary").length,
+      0,
+      "per-ledger counts are omitted because the Turn summary owns Tool quantity"
     );
     const unifiedActions = assistantTurnRoot.findAllByClass("codex-action-item");
     assert.equal(unifiedActions.length, 2);
@@ -2345,8 +2477,6 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     assert.match(renderedText(providerReasoningDom), new RegExp(siblingCanaries.publicReasoning, "u"));
     const visibleTurnCanaries = [
       siblingCanaries.answer,
-      siblingCanaries.toolArgument,
-      siblingCanaries.toolResult,
       siblingCanaries.sourceData,
       siblingCanaries.diffContent,
       siblingCanaries.publicReasoning
@@ -2383,6 +2513,13 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       new RegExp(siblingCanaries.privateReasoning, "u"),
       "private reasoning canary is never rendered anywhere"
     );
+    for (const canary of [siblingCanaries.toolArgument, siblingCanaries.toolResult]) {
+      assert.doesNotMatch(
+        renderedText(assistantTurnRoot),
+        new RegExp(canary, "u"),
+        "ordinary Tool protocol input and output stay out of the user-facing Turn"
+      );
+    }
     assert.doesNotMatch(
       renderedText(assistantTurnRoot),
       new RegExp(siblingCanaries.approvalPayload, "u"),
@@ -2415,8 +2552,8 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     assert.equal(approvalTurnRoot.findAllByClass("codex-smooth-ai-approval-card").length, 0,
       "Approval preview remains inside its Tool Action instead of a sibling card");
     assert.equal(
-      approvalTurnRoot.findByClass("codex-assistant-turn-action-ledger-summary")?.textContent,
-      "调用 1"
+      approvalTurnRoot.findAllByClass("codex-assistant-turn-action-ledger-summary").length,
+      0
     );
     assert.deepEqual(
       approvalTurnRoot.findAllByClass("codex-diff-stat").map((stat) => stat.textContent),
@@ -2572,11 +2709,10 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       ): void;
     }).renderAssistantTurn(ledgerSurface, ledgerTurn!, false);
     const ledgerRoot = ledgerSurface.findByClass("codex-message-type-assistantTurn")!;
-    assert.deepEqual(
-      ledgerRoot.findAllByClass("codex-assistant-turn-action-ledger-summary")
-        .map((summary) => summary.textContent),
-      ["读取 1 · 编辑 1", "调用 1"],
-      "adjacent actions aggregate once while Task preserves the chronological break"
+    assert.equal(
+      ledgerRoot.findAllByClass("codex-assistant-turn-action-ledger-summary").length,
+      0,
+      "adjacent actions keep chronology without repeating per-ledger quantities"
     );
     const ledgerActions = ledgerRoot.findAllByClass("codex-action-item");
     assert.equal(ledgerActions.length, 3);
@@ -2608,6 +2744,190 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     failedAction.ontoggle?.({ isTrusted: false });
     assert.match(renderedText(failedAction), new RegExp(failedToolError, "u"),
       "the original backend error remains reachable after expansion");
+
+    const createDiff = [
+      "--- /dev/null",
+      "+++ b/outputs/Result.md",
+      "@@ -0,0 +1,7 @@",
+      "+line 1",
+      "+line 2",
+      "+line 3",
+      "+line 4",
+      "+line 5",
+      "+line 6",
+      "+line 7"
+    ].join("\n");
+    const semanticById = new Map(semanticMessages.map((message) => [message.id, message]));
+    const userFacingToolMessages: ChatMessage[] = [{
+      id: "semantic-ui-user",
+      role: "user",
+      text: "核对用户化工具详情",
+      runId: "run-semantic-tools",
+      turnId: "run-semantic-tools",
+      createdAt: 9_900
+    }, {
+      ...semanticById.get("semantic-search")!,
+      files: [{
+        name: "Alpha.md",
+        path: "projects/Alpha.md",
+        displayPath: "projects/Alpha.md",
+        kind: "vault",
+        openable: true
+      }]
+    }, {
+      ...semanticById.get("semantic-read")!,
+      processInput: JSON.stringify({ relativePath: "projects/Alpha.md" }),
+      processOutput: JSON.stringify({
+        snapshot: { relativePath: "projects/Alpha.md", content: "READ_PROTOCOL_BODY" }
+      }),
+      text: "READ_PROTOCOL_BODY",
+      files: [{
+        name: "Alpha.md",
+        path: "projects/Alpha.md",
+        displayPath: "projects/Alpha.md",
+        kind: "vault",
+        openable: true
+      }]
+    }, {
+      ...semanticById.get("semantic-create")!,
+      processInput: JSON.stringify({
+        relativePath: "outputs/Result.md",
+        content: ["line 1", "line 2", "line 3", "line 4", "line 5", "line 6", "line 7"].join("\n")
+      }),
+      processOutput: JSON.stringify({
+        operationIdentity: "PROTOCOL_OPERATION_IDENTITY",
+        readbackVerified: true,
+        status: "completed",
+        sourcePath: "outputs/Result.md"
+      }),
+      text: "PROTOCOL_OPERATION_IDENTITY",
+      files: [{
+        name: "Result.md",
+        path: "outputs/Result.md",
+        displayPath: "outputs/Result.md",
+        kind: "vault",
+        openable: true
+      }],
+      diffSummary: {
+        totalFiles: 1,
+        added: 7,
+        removed: 0,
+        files: [{ path: "outputs/Result.md", kind: "add", added: 7, removed: 0 }]
+      },
+      approval: {
+        status: "approved",
+        target: JSON.stringify({ relativePath: "outputs/Result.md" }),
+        preview: JSON.stringify({
+          operation: "note_create",
+          relativePath: "outputs/Result.md",
+          change: {
+            kind: "add",
+            relativePath: "outputs/Result.md",
+            added: 7,
+            removed: 0,
+            diff: createDiff
+          }
+        })
+      }
+    }, semanticById.get("semantic-move")!, semanticById.get("semantic-delete")!,
+    semanticById.get("semantic-command")!, semanticById.get("semantic-unknown")!, {
+      ...semanticTool(
+        "semantic-failure",
+        "third_party_tool",
+        JSON.stringify({ path: "Broken.md", operationIdentity: "HIDDEN_FAILURE_ID" }),
+        JSON.stringify({ error: { message: "明确失败原因" }, readbackVerified: false })
+      ),
+      status: "failed"
+    }, {
+      id: "semantic-ui-answer",
+      role: "assistant",
+      text: "工具详情已核对",
+      status: "completed",
+      runId: "run-semantic-tools",
+      turnId: "run-semantic-tools",
+      createdAt: 10_200,
+      completedAt: 10_300
+    }];
+    const userFacingProjection = buildAgentTurnProjection(userFacingToolMessages);
+    const userFacingTurn = userFacingProjection[1]?.kind === "assistantTurn"
+      ? userFacingProjection[1].turn
+      : null;
+    assert.ok(userFacingTurn);
+    const userFacingSurface = new FakeElement("div");
+    (ledgerRenderer as unknown as {
+      renderAssistantTurn(
+        container: unknown,
+        turn: NonNullable<typeof userFacingTurn>,
+        showAgentHeader: boolean
+      ): void;
+    }).renderAssistantTurn(userFacingSurface, userFacingTurn!, false);
+    const userFacingRoot = userFacingSurface.findByClass("codex-message-type-assistantTurn")!;
+    const userFacingActions = userFacingRoot.findAllByClass("codex-action-item");
+    const userFacingAction = (id: string) => userFacingActions.find((action) =>
+      action.dataset.messageId === id
+    )!;
+    const searchAction = userFacingAction("semantic-search");
+    const readOnlyAction = userFacingAction("semantic-read");
+    const createAction = userFacingAction("semantic-create");
+    const moveAction = userFacingAction("semantic-move");
+    const deleteAction = userFacingAction("semantic-delete");
+    const commandAction = userFacingAction("semantic-command");
+    const unknownAction = userFacingAction("semantic-unknown");
+    const semanticFailure = userFacingAction("semantic-failure");
+    assert.equal(readOnlyAction.hasClass("codex-action-item-expandable"), false,
+      "a successful read with no extra user value has no disclosure or Chevron");
+    assert.equal(readOnlyAction.findAllByClass("codex-action-item-caret").length, 0);
+    assert.equal(renderedText(semanticFailure).match(/失败/gu)?.length, 1,
+      "the collapsed failed Tool shows one failure state");
+    assert.doesNotMatch(renderedText(semanticFailure), /明确失败原因/u);
+    for (const action of [
+      searchAction,
+      createAction,
+      moveAction,
+      deleteAction,
+      commandAction,
+      unknownAction,
+      semanticFailure
+    ]) {
+      action.open = true;
+      action.ontoggle?.({ isTrusted: false });
+    }
+    assert.match(renderedText(searchAction), /查询EchoInk/u);
+    assert.match(renderedText(searchAction), /1 条结果/u);
+    assert.match(renderedText(searchAction), /projects\/EchoInk\.mdmatched/u);
+    assert.match(renderedText(createAction), /已创建/u);
+    assert.match(renderedText(createAction), /目标outputs\/Result\.md/u);
+    const createPreviewText = createAction.findByClass("codex-action-preview-content")?.textContent ?? "";
+    assert.match(createPreviewText, /line 1[\s\S]*line 6[\s\S]*…/u);
+    assert.doesNotMatch(createPreviewText, /line 7/u,
+      "the file body is a bounded preview with a real full-note exit");
+    assert.equal(createAction.findAllByClass("codex-action-open-note").length, 1);
+    assert.equal(createAction.findAllByClass("codex-smooth-ai-diff").length, 1,
+      "the direct file Diff appears once inside the ToolContent");
+    assert.match(renderedText(moveAction), /原路径Old\.md新路径New\.md/u);
+    assert.match(renderedText(deleteAction), /Trash\.md已移到 Obsidian 回收站，可恢复/u);
+    assert.match(renderedText(commandAction), /终端\$ npm run typecheck[\s\S]*typecheck passed/u);
+    assert.match(renderedText(unknownAction), /已调用[\s\S]*third_party_create_everything/u);
+    assert.match(renderedText(unknownAction), /参数摘要pathUnknown\.md结果done/u);
+    assert.match(renderedText(semanticFailure), /失败原因明确失败原因/u);
+    const userFacingText = renderedText(userFacingRoot);
+    for (const hiddenProtocol of [
+      "PROTOCOL_OPERATION_IDENTITY",
+      "HIDDEN_FAILURE_ID",
+      "readbackVerified",
+      "operationIdentity",
+      "READ_PROTOCOL_BODY",
+      "输入",
+      "输出",
+      "原始输出"
+    ]) {
+      assert.doesNotMatch(userFacingText, new RegExp(hiddenProtocol, "u"),
+        `${hiddenProtocol} stays out of ordinary ToolContent`);
+    }
+    createAction.findByClass("codex-action-open-note")?.onclick?.({
+      preventDefault: () => undefined,
+      stopPropagation: () => undefined
+    } as never);
 
     const sourcedToolProjection = buildAgentTurnProjection([{
       id: "sourced-tool-user",
@@ -2707,7 +3027,7 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       "English source chrome uses the Turn's single-source count"
     );
     assert.match(renderedText(englishRoot), /Public reasoning · 2s/u);
-    assert.match(renderedText(englishRoot), /Called/u);
+    assert.match(renderedText(englishRoot), /Searched/u);
     assert.equal(
       englishRoot.findAllByClass("codex-action-item")
         .find((action) => action.dataset.messageId === "tool-separated")
@@ -2717,15 +3037,14 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     );
     assert.doesNotMatch(renderedText(englishRoot), /使用工具/u,
       "English action chrome does not inherit the persisted Chinese Tool prefix");
-    assert.deepEqual(
-      englishRoot.findAllByClass("codex-assistant-turn-action-ledger-summary")
-        .map((summary) => summary.textContent),
-      ["Calls 1", "Edits 1"],
-      "English Tool ledgers use one English-only dynamic summary"
+    assert.equal(
+      englishRoot.findAllByClass("codex-assistant-turn-action-ledger-summary").length,
+      0,
+      "English Tool ledgers also omit repeated quantities"
     );
     assert.ok(
       englishRoot.findAllByClass("codex-action-item-head")
-        .some((head) => head.attributes.get("title") === "View tool details"),
+        .some((head) => head.attributes.get("title") === "View file changes"),
       "English action details expose English accessible chrome"
     );
     assert.ok(
@@ -2758,7 +3077,8 @@ export async function runSmoothConversationUiTests(): Promise<void> {
   assert.deepEqual(context.openedPaths, [
     "projects/Alpha.md",
     "outputs/Result.md",
-    "projects/Alpha.md"
+    "projects/Alpha.md",
+    "outputs/Result.md"
   ]);
 
   const styles = readFileSync("styles.css", "utf8");
@@ -2783,7 +3103,16 @@ export async function runSmoothConversationUiTests(): Promise<void> {
   assert.match(styles, /--echoink-conversation-radius-md:\s*var\(--radius-m, 8px\);/u);
   assert.match(styles, /\.codex-message-type-assistantTurn\s*\{[\s\S]*?border:\s*0;[\s\S]*?background:\s*transparent;/u);
   assert.match(styles, /\.codex-assistant-turn-spine::before\s*\{[\s\S]*?width:\s*1px;/u);
-  assert.match(styles, /\.codex-assistant-turn-node\.is-completed,[\s\S]*?opacity:\s*0\.66;/u);
+  assert.doesNotMatch(
+    styles,
+    /\.codex-assistant-turn-node\.is-completed,\s*\.codex-assistant-turn-node\.is-skipped\s*\{[^}]*opacity:/u,
+    "completed process nodes retain full text contrast instead of dimming the whole row"
+  );
+  assert.match(
+    styles,
+    /\.codex-assistant-turn-node\.is-completed \.codex-assistant-turn-node-marker\s*\{[^}]*--echoink-conversation-status-success/u,
+    "completed process nodes use a static state color"
+  );
   assert.match(styles, /@media \(prefers-reduced-motion:\s*no-preference\)[\s\S]*?\.codex-assistant-turn-node\.is-current[\s\S]*?codex-assistant-turn-current/u);
   assert.match(styles, /@media \(prefers-reduced-motion:\s*reduce\)[\s\S]*?\.codex-assistant-turn-node\.is-current[\s\S]*?animation:\s*none;/u);
   assert.match(styles, /\.codex-assistant-turn-section-secondary\s*\{[\s\S]*?font-weight:\s*400;/u);
@@ -2791,14 +3120,28 @@ export async function runSmoothConversationUiTests(): Promise<void> {
   assert.match(styles, /\.codex-assistant-turn-section-secondary\s*\{[\s\S]*?font-size:\s*var\(--echoink-conversation-font-label-secondary\);/u);
   assert.match(styles, /\.codex-assistant-turn-summary-copy\s*\{[\s\S]*?font-variant-numeric:\s*tabular-nums;[\s\S]*?text-wrap:\s*pretty;/u);
   assert.match(styles, /\.codex-assistant-turn-answer\s*\{[\s\S]*?max-width:\s*min\(72ch, 100%\);[\s\S]*?overflow-wrap:\s*anywhere;/u);
-  assert.match(styles, /\.codex-assistant-turn-action-ledger-summary\s*\{[\s\S]*?font-weight:\s*400;[\s\S]*?font-variant-numeric:\s*tabular-nums;[\s\S]*?text-wrap:\s*pretty;/u);
-  assert.match(styles, /\.codex-assistant-turn-action-node\.is-success\s*\{[\s\S]*?opacity:\s*0\.66;/u);
-  assert.match(styles, /\.codex-assistant-turn-action-ledger \.codex-action-item-main\s*\{[\s\S]*?flex-wrap:\s*wrap;[\s\S]*?font-size:\s*var\(--echoink-conversation-font-body\);[\s\S]*?line-height:\s*var\(--echoink-conversation-line-body\);/u);
+  assert.doesNotMatch(styles, /\.codex-assistant-turn-action-ledger-summary/u,
+    "the removed repeated Tool quantity has no leftover visual layer");
+  assert.doesNotMatch(
+    styles,
+    /\.codex-assistant-turn-action-node\.is-success(?:\[open\])?\s*\{[^}]*opacity:/u,
+    "completed Tool headers retain full row contrast"
+  );
+  assert.match(styles, /\.codex-assistant-turn-action-ledger \.codex-action-item-main\s*\{[\s\S]*?flex-wrap:\s*wrap;[\s\S]*?font-size:\s*var\(--echoink-conversation-font-status\);[\s\S]*?font-weight:\s*400;[\s\S]*?line-height:\s*var\(--echoink-conversation-line-status\);/u);
+  assert.match(styles, /\.codex-assistant-turn-action-ledger \.codex-action-item-prefix\s*\{[\s\S]*?font-weight:\s*400;/u);
   assert.match(styles, /\.codex-assistant-turn-action-ledger \.codex-action-item-duration,[\s\S]*?font-variant-numeric:\s*tabular-nums;/u);
   assert.match(styles, /\.codex-assistant-turn-action-ledger[\s\S]*?\.codex-process-file-text\.codex-action-item-file\s*\{[\s\S]*?overflow-wrap:\s*anywhere;[\s\S]*?text-overflow:\s*clip;[\s\S]*?white-space:\s*normal;/u);
   assert.match(styles, /\.codex-assistant-turn-action-node > \.codex-action-item-head:focus-visible\s*\{[\s\S]*?outline:\s*2px solid var\(--echoink-conversation-focus\);/u);
+  assert.match(styles, /\.codex-assistant-turn-action-node\.is-current \.codex-smooth-ai-tool-status\s*\{[\s\S]*?color:\s*var\(--echoink-conversation-status-running\);/u);
   assert.match(styles, /details\.codex-action-item\.codex-smooth-ai-tool-call:not\(\[open\]\)[\s\S]*?border:\s*0;/u);
   assert.match(styles, /details\.codex-action-item\.codex-smooth-ai-tool-call\[open\][\s\S]*?border:\s*1px solid var\(--background-modifier-border\);/u);
+  assert.match(styles, /\.codex-action-detail-row,[\s\S]*?grid-template-columns:\s*minmax\(72px, max-content\) minmax\(0, 1fr\);/u);
+  assert.match(styles, /\.codex-action-preview-content,[\s\S]*?border:\s*0;[\s\S]*?font-weight:\s*400;[\s\S]*?line-height:\s*var\(--echoink-conversation-line-body\);[\s\S]*?overflow-wrap:\s*anywhere;/u);
+  assert.match(styles, /\.codex-action-open-note:focus-visible,[\s\S]*?outline:\s*2px solid var\(--echoink-conversation-focus\);/u);
+  assert.match(styles, /\.codex-action-detail-result-count\s*\{[\s\S]*?font-variant-numeric:\s*tabular-nums;/u);
+  assert.match(styles, /\.codex-action-search-result-path,[\s\S]*?overflow-wrap:\s*anywhere;[\s\S]*?text-overflow:\s*clip;[\s\S]*?white-space:\s*normal;/u);
+  assert.match(styles, /\.codex-action-command\s*\{[\s\S]*?border:\s*0;[\s\S]*?border-radius:\s*var\(--echoink-conversation-radius-sm\);/u);
+  assert.match(styles, /\.codex-action-detail-diff \.codex-diff-overview-title,[\s\S]*?overflow-wrap:\s*anywhere;[\s\S]*?text-overflow:\s*clip;[\s\S]*?white-space:\s*normal;/u);
   assert.match(styles, /\.codex-assistant-turn-action-node\[open\] \.codex-smooth-ai-artifact,[\s\S]*?\.codex-assistant-turn-resource\[open\] \.codex-diff-files\s*\{[\s\S]*?border:\s*0;/u);
   assert.match(styles, /@media \(prefers-reduced-motion:\s*no-preference\)[\s\S]*?\.codex-assistant-turn-action-node\.is-current[\s\S]*?codex-smooth-tool-ring/u);
   assert.match(styles, /@media \(prefers-reduced-motion:\s*reduce\)[\s\S]*?\.codex-assistant-turn-action-node\.is-current[\s\S]*?animation:\s*none;/u);

@@ -548,6 +548,15 @@ export type ConversationActionKind =
   | "plan"
   | "verify"
   | "system";
+export type ConversationToolAction =
+  | "search"
+  | "read"
+  | "create"
+  | "edit"
+  | "move"
+  | "delete"
+  | "command"
+  | "call";
 export type ConversationActionStatus =
   | "running"
   | "waiting_approval"
@@ -626,6 +635,11 @@ export interface ConversationCopy {
       status: ConversationActionStatus,
       confirmationExpired: boolean
     ) => string;
+    toolVerb: (
+      action: ConversationToolAction,
+      status: ConversationActionStatus,
+      confirmationExpired: boolean
+    ) => string;
     moreFiles: (count: number) => string;
     itemTypeTitle: (itemType?: string) => string;
     statusLabel: (status: string) => string;
@@ -668,6 +682,20 @@ export interface ConversationCopy {
     rawOutput: string;
     lineCount: (count: number) => string;
     fullTextPreserved: string;
+    target: string;
+    preview: string;
+    openFullNote: string;
+    query: string;
+    scope: string;
+    searchMatches: (count: number) => string;
+    sourcePath: string;
+    destinationPath: string;
+    deletedRecoverably: string;
+    deleted: string;
+    result: string;
+    errorReason: string;
+    parameters: string;
+    terminal: string;
   }>;
   readonly approval: Readonly<{
     stateLabel: (state: string) => string;
@@ -750,6 +778,86 @@ const EN_ACTION_BASE_LABELS: Record<ConversationActionKind, string> = {
   verify: "Verification",
   system: "System action"
 };
+
+const ZH_TOOL_ACTION_LABELS: Readonly<Record<
+ConversationToolAction,
+Readonly<{ base: string; running: string; completed: string }>
+>> = Object.freeze({
+  search: { base: "搜索", running: "正在搜索", completed: "已搜索" },
+  read: { base: "读取", running: "正在读取", completed: "已读取" },
+  create: { base: "创建", running: "正在创建", completed: "已创建" },
+  edit: { base: "编辑", running: "正在编辑", completed: "已编辑" },
+  move: { base: "移动", running: "正在移动", completed: "已移动" },
+  delete: { base: "删除", running: "正在删除", completed: "已删除" },
+  command: { base: "运行", running: "正在运行", completed: "已运行" },
+  call: { base: "调用", running: "正在调用", completed: "已调用" }
+});
+
+const EN_TOOL_ACTION_LABELS: Readonly<Record<
+ConversationToolAction,
+Readonly<{ base: string; running: string; completed: string }>
+>> = Object.freeze({
+  search: { base: "Search", running: "Searching", completed: "Searched" },
+  read: { base: "Read", running: "Reading", completed: "Read" },
+  create: { base: "Create", running: "Creating", completed: "Created" },
+  edit: { base: "Edit", running: "Editing", completed: "Edited" },
+  move: { base: "Move", running: "Moving", completed: "Moved" },
+  delete: { base: "Delete", running: "Deleting", completed: "Deleted" },
+  command: { base: "Run", running: "Running", completed: "Ran" },
+  call: { base: "Call", running: "Calling", completed: "Called" }
+});
+
+function zhToolActionVerb(
+  action: ConversationToolAction,
+  status: ConversationActionStatus,
+  confirmationExpired: boolean
+): string {
+  const labels = ZH_TOOL_ACTION_LABELS[action];
+  if (confirmationExpired) return `${labels.base}确认已过期`;
+  const statusLabels: Partial<Record<ConversationActionStatus, string>> = {
+    unconfirmed: "状态未回传",
+    interrupted: "已中断",
+    canceled: "已取消",
+    waiting_approval: "等待确认",
+    approved: "已批准",
+    verifying: "验证中",
+    denied: "已拒绝",
+    uncertain: "结果不确定",
+    "recovery-pending": "等待恢复",
+    "recovery-blocked": "恢复受阻",
+    failed: "失败"
+  };
+  const suffix = statusLabels[status];
+  if (suffix) return `${labels.base}${suffix}`;
+  if (status === "running" || status === "blocked") return labels.running;
+  return labels.completed;
+}
+
+function enToolActionVerb(
+  action: ConversationToolAction,
+  status: ConversationActionStatus,
+  confirmationExpired: boolean
+): string {
+  const labels = EN_TOOL_ACTION_LABELS[action];
+  if (confirmationExpired) return `${labels.base} confirmation expired`;
+  const statusLabels: Partial<Record<ConversationActionStatus, string>> = {
+    unconfirmed: "status not reported",
+    interrupted: "interrupted",
+    canceled: "cancelled",
+    waiting_approval: "awaiting confirmation",
+    approved: "approved",
+    verifying: "verifying",
+    denied: "denied",
+    uncertain: "result uncertain",
+    "recovery-pending": "awaiting recovery",
+    "recovery-blocked": "recovery blocked",
+    failed: "failed"
+  };
+  const suffix = statusLabels[status];
+  if (suffix) return `${labels.base} ${suffix}`;
+  if (status === "running" || status === "blocked") return labels.running;
+  return labels.completed;
+}
 
 const ZH_CONVERSATION_COPY: ConversationCopy = {
   sections: {
@@ -990,6 +1098,7 @@ const ZH_CONVERSATION_COPY: ConversationCopy = {
         system: "已记录"
       } as Record<ConversationActionKind, string>)[kind];
     },
+    toolVerb: zhToolActionVerb,
     moreFiles: (count) => ` 等 ${count} 个文件`,
     itemTypeTitle: (itemType) => ({
       plan: "更新计划",
@@ -1056,7 +1165,21 @@ const ZH_CONVERSATION_COPY: ConversationCopy = {
     fullTextLoadFailed: (error) => `全文加载失败：${error}`,
     rawOutput: "原始输出",
     lineCount: (count) => `${count} 行`,
-    fullTextPreserved: "展开后已保留全文"
+    fullTextPreserved: "展开后已保留全文",
+    target: "目标",
+    preview: "预览",
+    openFullNote: "在 Obsidian 中查看全文",
+    query: "查询",
+    scope: "范围",
+    searchMatches: (count) => `${count} 条结果`,
+    sourcePath: "原路径",
+    destinationPath: "新路径",
+    deletedRecoverably: "已移到 Obsidian 回收站，可恢复",
+    deleted: "删除已完成",
+    result: "结果",
+    errorReason: "失败原因",
+    parameters: "参数摘要",
+    terminal: "终端"
   },
   approval: {
     stateLabel: (state) => state === "waiting_approval"
@@ -1360,6 +1483,7 @@ const EN_CONVERSATION_COPY: ConversationCopy = {
         system: "Recorded"
       } as Record<ConversationActionKind, string>)[kind];
     },
+    toolVerb: enToolActionVerb,
     moreFiles: (count) => ` and ${count - 1} more ${count === 2 ? "file" : "files"}`,
     itemTypeTitle: (itemType) => ({
       plan: "Update plan",
@@ -1426,7 +1550,21 @@ const EN_CONVERSATION_COPY: ConversationCopy = {
     fullTextLoadFailed: (error) => `Failed to load full text: ${error}`,
     rawOutput: "Raw output",
     lineCount: (count) => `${count} ${count === 1 ? "line" : "lines"}`,
-    fullTextPreserved: "Full text is available when expanded"
+    fullTextPreserved: "Full text is available when expanded",
+    target: "Target",
+    preview: "Preview",
+    openFullNote: "View full note in Obsidian",
+    query: "Query",
+    scope: "Scope",
+    searchMatches: (count) => `${count} ${count === 1 ? "result" : "results"}`,
+    sourcePath: "From",
+    destinationPath: "To",
+    deletedRecoverably: "Moved to Obsidian trash and can be recovered",
+    deleted: "Deletion completed",
+    result: "Result",
+    errorReason: "Reason",
+    parameters: "Parameters",
+    terminal: "Terminal"
   },
   approval: {
     stateLabel: (state) => state === "waiting_approval"
