@@ -69,6 +69,7 @@ export function renderViewShell(host: CodexViewShellHost): void {
     if (shouldCloseComposerMenusForClick(target, host.rootEl, [
       host.skillMenuEl,
       host.knowledgeCommandMenuEl,
+      host.inputEl?.parentElement?.querySelector<HTMLElement>(".codex-note-mention-menu"),
       host.resourcePanelEl,
       host.resourcePanelAnchorEl
     ])) host.closeComposerMenus();

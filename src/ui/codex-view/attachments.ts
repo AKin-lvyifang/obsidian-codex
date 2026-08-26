@@ -1,4 +1,4 @@
-import { Notice, type App } from "obsidian";
+import { Notice, type App, type TFile } from "obsidian";
 import type CodexForObsidianPlugin from "../../main";
 import { extractClipboardImageFiles, saveClipboardImageAttachments } from "../../core/clipboard-images";
 import type { StoredAttachment } from "../../settings/settings";
@@ -6,11 +6,17 @@ import type { EchoInkResource } from "../../resources/types";
 import { renderComposerAttachments } from "./composer";
 import { createAttachmentResourceResolver } from "./attachment-resource";
 import { absoluteVaultPath, isImagePath } from "./workspace-utils";
+import {
+  addComposerNoteMentionSelection,
+  composerNoteMentionSelections,
+  removeComposerNoteMentionSelection
+} from "./note-mentions";
 
 export interface CodexAttachmentHost {
   readonly app: App;
   readonly plugin: CodexForObsidianPlugin;
   attachmentsEl: HTMLElement;
+  inputEl: HTMLTextAreaElement;
   attachments: StoredAttachment[];
   selectedSkill: EchoInkResource | null;
   renderToolbar(): void;
@@ -22,6 +28,7 @@ export function renderAttachmentsView(host: CodexAttachmentHost): void {
   if (!host.attachmentsEl) return;
   renderComposerAttachments(host.attachmentsEl, {
     selectedSkill: host.selectedSkill,
+    noteMentions: composerNoteMentionSelections(host.inputEl),
     attachments: host.attachments,
     attachmentResolver: createAttachmentResourceResolver(
       host.app,
@@ -33,6 +40,11 @@ export function renderAttachmentsView(host: CodexAttachmentHost): void {
       host.renderAttachments();
       host.renderToolbar();
     },
+    onRemoveNoteMention: (vaultRelativePath) => {
+      removeComposerNoteMentionSelection(host.inputEl, vaultRelativePath);
+      host.renderAttachments();
+      host.renderToolbar();
+    },
     onRemoveAttachment: (attachmentPath) => {
       host.attachments = host.attachments.filter((attachment) => attachment.path !== attachmentPath);
       host.renderAttachments();
@@ -41,18 +53,32 @@ export function renderAttachmentsView(host: CodexAttachmentHost): void {
 }
 
 export function attachActiveFile(host: CodexAttachmentHost): void {
-  const file = host.app.workspace.getActiveFile();
+  const file = currentDisplayedMarkdownFile(host.app);
   if (!file) {
     new Notice("没有当前笔记");
     return;
   }
-  host.attachments.push({
-    type: classifyLocalAttachmentType(file.path),
-    name: file.name,
-    path: absoluteVaultPath(host.plugin.getVaultPath(), file.path),
-    availability: "available"
+  addComposerNoteMentionSelection(host.inputEl, {
+    vaultRelativePath: file.path,
+    fileName: file.name
   });
   host.renderAttachments();
+  host.renderToolbar();
+}
+
+export function currentDisplayedMarkdownFile(app: App): TFile | null {
+  const activeFile = app.workspace.getActiveFile();
+  if (!activeFile || !/\.md$/iu.test(activeFile.path)) return null;
+  const displayed = app.workspace.getLeavesOfType("markdown").some((leaf) => {
+    const view = leaf.view as typeof leaf.view & Readonly<{
+      file?: TFile | null;
+      containerEl?: HTMLElement;
+    }>;
+    if (view.file?.path !== activeFile.path) return false;
+    const container = view.containerEl as (HTMLElement & { isShown?: () => boolean }) | undefined;
+    return container?.isShown ? container.isShown() : Boolean(container?.isConnected);
+  });
+  return displayed ? activeFile : null;
 }
 
 export function pickFiles(host: CodexAttachmentHost, imagesOnly: boolean): void {

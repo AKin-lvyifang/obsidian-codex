@@ -24,10 +24,25 @@ import {
   labelFor,
   renderContextPanel,
   renderComposerResourcePanel,
+  renderComposerNoteMentionMenu,
   renderComposerToolbar,
   renderTurnQueue,
   shortModelLabel
 } from "./composer";
+import {
+  addComposerNoteMentionSelection,
+  buildVaultNoteMentionCatalog,
+  cachedComposerNoteMentionCatalog,
+  clearComposerNoteMentions,
+  closeComposerNoteMentionMenu,
+  composerNoteMentionMenuState,
+  composerNoteMentionSelections,
+  noteMentionQueryAtCursor,
+  removeNoteMentionQuery,
+  searchNoteMentionCatalog,
+  setComposerNoteMentionMenu
+} from "./note-mentions";
+import { currentDisplayedMarkdownFile } from "./attachments";
 import {
   openKnowledgeCommandMenu as showKnowledgeCommandMenu,
   openModelMenu as showModelMenu,
@@ -210,7 +225,8 @@ export function renderToolbar(host: CodexComposerHost): void {
         ? host.resourcePanelResources
         : host.currentEchoInkResourceCatalog(),
       resourceSettings: host.plugin.settings.resources,
-      language: host.plugin.settings.settingsLanguage
+      language: host.plugin.settings.settingsLanguage,
+      canAttachActiveFile: currentDisplayedMarkdownFile(host.app) !== null
     },
     {
       onDismiss: (restoreFocus) => closeResourcePanel(host, restoreFocus),
@@ -402,6 +418,7 @@ export async function recoverPiConversation(
 
 export function closeComposerMenus(host: CodexComposerHost): void {
   host.skillMenuEl?.removeClass("is-visible");
+  closeComposerNoteMentionMenu(host.inputEl);
   closeResourcePanel(host, false);
   closeContextPopover(host, false);
   if (host.inputEl && host.knowledgeCommandMenuEl) {
@@ -410,6 +427,7 @@ export function closeComposerMenus(host: CodexComposerHost): void {
 }
 
 export function openSkillMenu(host: CodexComposerHost, event: MouseEvent): void {
+  closeComposerNoteMentionMenu(host.inputEl);
   setKnowledgeCommandMenuOpen(host.inputEl, host.knowledgeCommandMenuEl, false);
   showSkillMenu(
     event,
@@ -430,6 +448,7 @@ export function openSkillMenu(host: CodexComposerHost, event: MouseEvent): void 
 export function openAddMenu(host: CodexComposerHost, event: MouseEvent): void {
   event.preventDefault();
   event.stopPropagation();
+  closeComposerNoteMentionMenu(host.inputEl);
   if (host.resourcePanelOpen) {
     closeResourcePanel(host, true);
     return;
@@ -458,6 +477,7 @@ function closeResourcePanel(host: CodexComposerHost, restoreFocus: boolean): voi
 }
 
 export function openKnowledgeCommandMenu(host: CodexComposerHost, event: MouseEvent): void {
+  closeComposerNoteMentionMenu(host.inputEl);
   showKnowledgeCommandMenu(event, (command) => fillKnowledgeBaseCommand(host, command));
 }
 
@@ -707,12 +727,82 @@ export function onInputChanged(host: CodexComposerHost): void {
     clearSelectedPiConversationDraft(host.plugin, session.id);
   }
   host.renderToolbar();
+  const noteQuery = noteMentionQueryAtCursor(
+    host.inputEl.value,
+    host.inputEl.selectionStart
+  );
+  if (noteQuery) {
+    setKnowledgeCommandMenuOpen(host.inputEl, host.knowledgeCommandMenuEl, false);
+    renderNoteMentionAutocomplete(host);
+    return;
+  }
+  closeComposerNoteMentionMenu(host.inputEl);
   const query = knowledgeCommandQueryForInput(host.inputEl.value);
   if (query === null) {
     setKnowledgeCommandMenuOpen(host.inputEl, host.knowledgeCommandMenuEl, false);
     return;
   }
   host.renderKnowledgeCommandMatches(query);
+}
+
+function renderNoteMentionAutocomplete(host: CodexComposerHost): void {
+  const query = noteMentionQueryAtCursor(
+    host.inputEl.value,
+    host.inputEl.selectionStart
+  );
+  if (!query) {
+    closeComposerNoteMentionMenu(host.inputEl);
+    return;
+  }
+  const menu = composerNoteMentionMenuElement(host.inputEl);
+  if (!menu) return;
+  const results = searchNoteMentionCatalog(
+    cachedComposerNoteMentionCatalog(
+      host.inputEl,
+      () => buildVaultNoteMentionCatalog(host.app)
+    ),
+    query.query
+  );
+  const select = (entry: typeof results[number]) => {
+    const currentQuery = noteMentionQueryAtCursor(
+      host.inputEl.value,
+      host.inputEl.selectionStart
+    );
+    if (!currentQuery) return;
+    addComposerNoteMentionSelection(host.inputEl, entry);
+    const next = removeNoteMentionQuery(host.inputEl.value, currentQuery);
+    host.inputEl.value = next.value;
+    host.inputEl.setSelectionRange(next.cursor, next.cursor);
+    closeComposerNoteMentionMenu(host.inputEl);
+    host.renderAttachments();
+    host.renderToolbar();
+    host.inputEl.focus();
+  };
+  const render = () => {
+    const state = composerNoteMentionMenuState(host.inputEl);
+    renderComposerNoteMentionMenu(menu, host.inputEl, state, { onSelect: select });
+  };
+  setComposerNoteMentionMenu(host.inputEl, {
+    results,
+    onSelect: select,
+    onRender: render,
+    onClose: () => hideComposerNoteMentionMenu(host.inputEl, menu)
+  });
+  render();
+}
+
+function composerNoteMentionMenuElement(input: HTMLTextAreaElement): HTMLElement | null {
+  return input.parentElement?.querySelector<HTMLElement>(".codex-note-mention-menu") ?? null;
+}
+
+function hideComposerNoteMentionMenu(input: HTMLTextAreaElement, menu: HTMLElement): void {
+  menu.empty();
+  menu.removeClass("is-visible");
+  menu.setAttribute("aria-hidden", "true");
+  input.setAttribute("aria-expanded", "false");
+  input.setAttribute("aria-controls", input.parentElement
+    ?.querySelector<HTMLElement>(".codex-knowledge-command-menu")?.id ?? "");
+  input.removeAttribute("aria-activedescendant");
 }
 
 export function renderSkillMatches(host: CodexComposerHost, query = "", loadedSkills?: EchoInkResource[]): void {
@@ -784,7 +874,12 @@ export function removeTrailingSlashQuery(value: string): string {
 }
 
 export function hasComposerDraft(host: CodexComposerHost): boolean {
-  return Boolean(host.inputEl?.value.trim() || host.attachments.length || host.selectedSkill);
+  return Boolean(
+    host.inputEl?.value.trim()
+    || host.attachments.length
+    || composerNoteMentionSelections(host.inputEl).length
+    || host.selectedSkill
+  );
 }
 
 export function clearComposerDraft(host: CodexComposerHost): void {
@@ -794,6 +889,7 @@ export function clearComposerDraft(host: CodexComposerHost): void {
   clearPromptEnhanceReview(host.promptEnhanceReviewEl);
   closeComposerMenus(host);
   host.attachments = [];
+  clearComposerNoteMentions(host.inputEl);
   host.selectedSkill = null;
 }
 

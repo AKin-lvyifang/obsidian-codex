@@ -1,6 +1,7 @@
 import type { TurnOptions } from "./turn-options";
 import type { EchoInkResource } from "../resources/types";
 import type { StoredAttachment } from "../settings/settings";
+import type { NoteMentionSnapshot } from "./codex-view/note-mentions";
 
 export type QueuedTurnKind = "chat";
 export type QueueSettlement = "continue" | "paused" | "idle";
@@ -10,6 +11,8 @@ export interface QueuedTurnItem {
   sessionId: string;
   text: string;
   attachments: StoredAttachment[];
+  /** Whole-note bodies frozen when the Composer draft is sent or queued. */
+  noteMentions?: readonly Readonly<NoteMentionSnapshot>[];
   skill: EchoInkResource | null;
   turnOptions: TurnOptions;
   kind: QueuedTurnKind;
@@ -187,6 +190,9 @@ function cloneQueuedTurnItem(item: QueuedTurnItem): QueuedTurnItem {
   return {
     ...item,
     attachments: item.attachments.map((attachment) => ({ ...attachment })),
+    ...(item.noteMentions
+      ? { noteMentions: item.noteMentions.map((mention) => ({ ...mention })) }
+      : {}),
     skill: item.skill ? { ...item.skill } : null,
     turnOptions: cloneTurnOptions(item.turnOptions)
   };

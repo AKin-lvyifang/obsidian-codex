@@ -10062,6 +10062,95 @@ body.theme-light .codex-container {
   display: block;
 }
 
+.codex-note-mention-menu button.codex-note-mention-option.is-active {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover) !important;
+}
+
+.codex-note-mention-empty {
+  padding: 8px;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.codex-composer-resource-panel button.codex-composer-resource-row:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.codex-note-mention-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.codex-note-mention-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 4px 5px 4px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 999px;
+  color: var(--text-normal);
+  background: var(--background-secondary);
+}
+
+.codex-note-mention-chip-icon,
+.codex-note-mention-chip-icon svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+}
+
+.codex-note-mention-chip-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+}
+
+.codex-note-mention-chip-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+}
+
+.codex-note-mention-chip-remove:hover,
+.codex-note-mention-chip-remove:focus-visible {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+
+.codex-message-note-mentions {
+  margin-bottom: 8px;
+}
+
+button.codex-message-note-mention-chip {
+  appearance: none;
+  padding: 5px 9px;
+  cursor: pointer;
+  font: inherit;
+}
+
+button.codex-message-note-mention-chip:hover,
+button.codex-message-note-mention-chip:focus-visible {
+  border-color: var(--interactive-accent);
+  background: var(--background-modifier-hover);
+}
+
 .codex-composer-resource-group + .codex-composer-resource-group {
   margin-top: 6px;
   padding-top: 5px;

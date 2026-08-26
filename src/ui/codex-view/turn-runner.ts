@@ -52,6 +52,10 @@ import {
   resolveEchoInkPiReasoningCapabilities
 } from "../../settings/pi-model-catalog";
 import type { TurnOptions } from "../turn-options";
+import {
+  composerNoteMentionSelections,
+  snapshotComposerNoteMentions
+} from "./note-mentions";
 
 const activeComposerTransfers = new WeakMap<
   CodexViewTurnContext,
@@ -115,6 +119,18 @@ export async function enqueueComposerDraft(view: CodexViewTurnContext): Promise<
       new Notice("普通 Pi Chat 只支持图片附件；其他文件请移除后再发送。");
       return;
     }
+    if (item.noteMentions?.length) {
+      if (hasMatchingQueuedComposerTransfer(view, item)) {
+        new Notice("这条笔记提及消息已在队列中，等待当前 Pi 任务结束后发送");
+        return;
+      }
+      item.clearComposerAfterPiAcceptance = true;
+      view.turnQueue.enqueue(item);
+      view.renderQueue();
+      view.renderToolbar();
+      new Notice("含笔记提及的消息已加入队列，将在当前 Pi 任务结束后发送");
+      return;
+    }
     if (item.attachments.length) {
       if (hasMatchingQueuedComposerTransfer(view, item)) {
         new Notice("这条图片消息已在队列中，等待当前 Pi 任务结束后发送");
@@ -166,7 +182,11 @@ export async function steerPiChatFromComposer(
   }
   const text = view.inputEl.value.trim();
   if (!text) return;
-  if (view.attachments.length || view.selectedSkill) {
+  if (
+    view.attachments.length
+    || composerNoteMentionSelections(view.inputEl).length
+    || view.selectedSkill
+  ) {
     new Notice("调整方向只支持文字；附件或 Skill 请留到下一轮发送。");
     return;
   }
@@ -360,10 +380,18 @@ export async function createQueuedTurnFromComposer(view: CodexViewTurnContext, o
   const text = view.inputEl.value.trim();
   const attachments = view.attachments.map((attachment) => ({ ...attachment }));
   const skill = view.selectedSkill ? { ...view.selectedSkill } : null;
-  if (!text && !attachments.length && !skill) return null;
+  const selectedNoteMentions = composerNoteMentionSelections(view.inputEl);
+  if (!text && !attachments.length && !selectedNoteMentions.length && !skill) return null;
   const workspaceReady = await view.ensureChatWorkspaceSelected(session);
   if (!workspaceReady) return null;
   session = view.ensureSession();
+  let noteMentions: Awaited<ReturnType<typeof snapshotComposerNoteMentions>>;
+  try {
+    noteMentions = await snapshotComposerNoteMentions(view.app, view.inputEl);
+  } catch (error) {
+    new Notice(error instanceof Error ? error.message : String(error));
+    return null;
+  }
   const piDraftId = session.bodyAuthority === "pi_session_only"
     ? selectedPiConversationDraftId(view.plugin, session.id)
     : undefined;
@@ -382,6 +410,7 @@ export async function createQueuedTurnFromComposer(view: CodexViewTurnContext, o
     sessionId: session.id,
     text,
     attachments,
+    noteMentions,
     skill,
     turnOptions,
     kind: "chat",
@@ -507,7 +536,8 @@ async function prepareTurnProviderModel(
 }
 
 export async function startChatTurn(view: CodexViewTurnContext, session: StoredSession, item: QueuedTurnItem, source: QueuedTurnSource): Promise<QueuedTurnOutcome> {
-  const submittedText = item.text.trim();
+  const submittedText = item.text.trim()
+    || (item.noteMentions?.length ? "请结合我提及的笔记继续。" : "");
   const knowledgeCommand = routeKnowledgeConversationCommand(submittedText);
   let maintenanceScope: Awaited<
     ReturnType<CodexViewTurnContext["plugin"]["prepareEchoInkKnowledgeMaintenanceScope"]>
@@ -598,7 +628,8 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
       ...(skillPath && skillName ? { skillPath, skillName } : {}),
       ...(item.piDraftId ? { draftId: item.piDraftId } : {}),
       ...(maintenanceScope ? { maintenanceScope } : {}),
-      ...(preparedImages.length ? { images: preparedImages } : {})
+      ...(preparedImages.length ? { images: preparedImages } : {}),
+      ...(item.noteMentions?.length ? { noteMentions: item.noteMentions } : {})
     });
     item.piUserEntryAccepted = true;
     if (preparedImages.length) {
@@ -624,6 +655,7 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
       handle,
       submittedText,
       preparedImages,
+      item.noteMentions ?? [],
       submittedAt
     );
     applyPiChatLiveProjection(view, session, liveProjection);
@@ -919,10 +951,11 @@ function piChatLiveProjectionFromSession(
   >,
   submittedText: string,
   preparedImages: readonly Readonly<PiChatPreparedImage>[],
+  noteMentions: readonly Readonly<NonNullable<QueuedTurnItem["noteMentions"]>[number]>[],
   submittedAt: number
 ): PiChatUiViewModel {
   const messages = clonePiChatMessages(session.messages);
-  if (preparedImages.length) {
+  if (preparedImages.length || noteMentions.length) {
     const acceptedUserMessage: ChatMessage = {
       id: piProjectedEntryMessageId(
         handle.piSessionId,
@@ -932,7 +965,17 @@ function piChatLiveProjectionFromSession(
       role: "user",
       itemType: "user",
       text: submittedText,
-      images: preparedImages.map(({ attachment }) => ({ ...attachment })),
+      ...(preparedImages.length
+        ? { images: preparedImages.map(({ attachment }) => ({ ...attachment })) }
+        : {}),
+      ...(noteMentions.length
+        ? {
+            noteMentions: noteMentions.map(({ vaultRelativePath, fileName }) => ({
+              vaultRelativePath,
+              fileName
+            }))
+          }
+        : {}),
       status: "completed",
       runId: handle.productRunId,
       turnId: handle.productRunId,
@@ -991,6 +1034,9 @@ function clonePiChatMessages(messages: readonly ChatMessage[]): ChatMessage[] {
       : {}),
     ...(message.images
       ? { images: message.images.map((attachment) => ({ ...attachment })) }
+      : {}),
+    ...(message.noteMentions
+      ? { noteMentions: message.noteMentions.map((mention) => ({ ...mention })) }
       : {}),
     ...(message.files
       ? { files: message.files.map((file) => ({ ...file })) }
@@ -1089,6 +1135,10 @@ function composerStillMatchesQueuedTurn(
   return view.plugin.settings.activeSessionId === item.sessionId
     && view.inputEl.value.trim() === item.text
     && attachmentListsMatch(view.attachments, item.attachments)
+    && noteMentionPathsMatch(
+      composerNoteMentionSelections(view.inputEl),
+      item.noteMentions ?? []
+    )
     && (view.selectedSkill?.id ?? null) === (item.skill?.id ?? null);
 }
 
@@ -1098,7 +1148,18 @@ function queuedTurnDraftsMatch(
 ): boolean {
   return left.text === right.text
     && attachmentListsMatch(left.attachments, right.attachments)
+    && noteMentionPathsMatch(left.noteMentions ?? [], right.noteMentions ?? [])
     && (left.skill?.id ?? null) === (right.skill?.id ?? null);
+}
+
+function noteMentionPathsMatch(
+  left: readonly Readonly<{ vaultRelativePath: string }>[],
+  right: readonly Readonly<{ vaultRelativePath: string }>[]
+): boolean {
+  return left.length === right.length
+    && left.every((mention, index) =>
+      mention.vaultRelativePath === right[index]?.vaultRelativePath
+    );
 }
 
 function attachmentListsMatch(

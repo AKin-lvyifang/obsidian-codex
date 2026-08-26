@@ -52,6 +52,7 @@ import {
 } from "../../ui/codex-view/pi-conversation-support";
 import { piProjectedEntryMessageId } from "../../harness/pi-native/pi-chat-ui-projector";
 import { openTestNoticeMessages } from "../obsidian-shim";
+import { addComposerNoteMentionSelection } from "../../ui/codex-view/note-mentions";
 
 const PNG_1X1 = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
@@ -69,6 +70,7 @@ export async function runPiNativeTurnRunnerTests(): Promise<void> {
   await messageActionContractsStayTruthful();
   await assistantImageDerivationCopiesMetadataWithoutInventingResend();
   await activeRunImagesUseTheNormalQueue();
+  await activeRunNoteMentionsUseTheNormalQueue();
   await queuedImageFailuresAreRetainedOnlyBeforePiAcceptance();
   await inFlightComposerImageTransferCannotDuplicate();
   await imageCapabilityPreflightPreservesCompletedTurn();
@@ -470,6 +472,47 @@ async function activeRunImagesUseTheNormalQueue(): Promise<void> {
     "an unchanged Composer snapshot must not be duplicated while waiting"
   );
   assert.equal(followUpCalls, 0);
+}
+
+async function activeRunNoteMentionsUseTheNormalQueue(): Promise<void> {
+  const session = piSessionShell("conversation-active-note-queue");
+  const queue = new RuntimeTurnQueue();
+  const item: QueuedTurnItem = {
+    ...queuedImageTurn(session.id, "/fixture/unused.png"),
+    id: "queued-note-mention",
+    text: "总结提及笔记",
+    attachments: [],
+    noteMentions: [{
+      vaultRelativePath: "projects/项目复盘.md",
+      fileName: "项目复盘.md",
+      content: "# 已冻结正文"
+    }]
+  };
+  let followUpCalls = 0;
+  const view: any = {
+    plugin: {
+      followUpPiConversation: async () => { followUpCalls += 1; }
+    },
+    running: true,
+    activeRunKind: "chat",
+    activeRunSessionId: session.id,
+    turnQueue: queue,
+    createQueuedTurnFromComposer: async () => item,
+    sessionById: () => session,
+    clearComposerDraft: () => undefined,
+    renderQueue: () => undefined,
+    renderToolbar: () => undefined
+  };
+
+  await enqueueComposerDraft(view);
+  assert.equal(followUpCalls, 0, "note mentions must not use text-only follow-up");
+  assert.equal(queue.itemsForSession(session.id).length, 1);
+  assert.deepEqual(queue.peekNext(session.id)?.noteMentions, item.noteMentions);
+  assert.equal(queue.peekNext(session.id)?.clearComposerAfterPiAcceptance, true);
+
+  await enqueueComposerDraft(view);
+  assert.equal(queue.itemsForSession(session.id).length, 1,
+    "the same frozen note mention draft is not queued twice");
 }
 
 async function queuedImageFailuresAreRetainedOnlyBeforePiAcceptance():
@@ -1208,7 +1251,7 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
   const item: QueuedTurnItem = {
     id: "queued-turn-runner",
     sessionId: session.id,
-    text: "",
+    text: "请总结提及笔记",
     attachments: [{
       type: "image",
       name: "memory-personality-v1.webp",
@@ -1217,6 +1260,11 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
         "src/knowledge-base/assets/guide/memory-personality-v1.webp"
       ),
       mimeType: "image/webp"
+    }],
+    noteMentions: [{
+      vaultRelativePath: "projects/项目复盘.md",
+      fileName: "项目复盘.md",
+      content: "PRIVATE_WHOLE_NOTE_BODY"
     }],
     skill: {
       id: "echoink-local:skill:review",
@@ -1339,6 +1387,7 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
     clearTurnWatchdog: () => undefined,
     clearActiveRun: () => { activeRunId = ""; }
   };
+  addComposerNoteMentionSelection(view.inputEl, item.noteMentions![0]!);
 
   let turnResolved = false;
   const turn = startChatTurn(view, session, item, "composer").then((outcome) => {
@@ -1355,6 +1404,7 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
   assert.equal(submittedRequest?.skillName, "review");
   assert.equal(submittedRequest?.memoryMode, "normal");
   assert.equal(submittedRequest?.images?.length, 1);
+  assert.deepEqual(submittedRequest?.noteMentions, item.noteMentions);
   assert.equal(projectionReads, 0);
   const liveUserMessage = session.messages.find((message) =>
     message.role === "user"
@@ -1367,6 +1417,12 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
     mimeType: "image/webp",
     availability: "available"
   }]);
+  assert.deepEqual(liveUserMessage?.noteMentions, [{
+    vaultRelativePath: "projects/项目复盘.md",
+    fileName: "项目复盘.md"
+  }]);
+  assert.equal(JSON.stringify(liveUserMessage).includes("PRIVATE_WHOLE_NOTE_BODY"), false,
+    "live ChatMessage keeps note metadata only");
   const submittedImagePayload = submittedRequest?.images?.[0]?.content.data;
   assert.ok(submittedImagePayload);
   assert.equal(
@@ -1960,7 +2016,7 @@ async function emit(
 }
 
 async function waitFor(predicate: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  for (let attempt = 0; attempt < 1_000; attempt += 1) {
     if (predicate()) return;
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
   }

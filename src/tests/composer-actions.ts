@@ -4,6 +4,8 @@ import { Platform, TFile, type App } from "obsidian";
 import { openTestNoticeMessages } from "./obsidian-shim";
 import {
   renderComposerAttachments,
+  renderComposerNoteMentionMenu,
+  renderComposerResourcePanel,
   renderComposerToolbar,
   type ComposerToolbarCallbacks,
   type ComposerToolbarState
@@ -13,6 +15,8 @@ import {
   attachmentPresentationKind,
   createAttachmentResourceResolver
 } from "../ui/codex-view/attachment-resource";
+import { buildNoteMentionCatalog } from "../ui/codex-view/note-mentions";
+import { currentDisplayedMarkdownFile } from "../ui/codex-view/attachments";
 import {
   composerModelMenuState,
   composerProviderModelOptions,
@@ -77,9 +81,39 @@ export async function runComposerActionTests(): Promise<void> {
 
     const attachmentContainer = new ComposerTestElement("div");
     const removedAttachments: string[] = [];
+    const removedNoteMentions: string[] = [];
     const vaultFile = Object.assign(Object.create(TFile.prototype), {
       path: "cover #1.png"
     }) as TFile;
+    const currentNote = Object.assign(Object.create(TFile.prototype), {
+      path: "projects/当前笔记.md",
+      name: "当前笔记.md"
+    }) as TFile;
+    const currentNoteApp = {
+      workspace: {
+        getActiveFile: () => currentNote,
+        getLeavesOfType: () => [{
+          view: {
+            file: currentNote,
+            containerEl: { isShown: () => true }
+          }
+        }]
+      }
+    } as unknown as App;
+    assert.equal(currentDisplayedMarkdownFile(currentNoteApp)?.path, currentNote.path);
+    const hiddenNoteApp = {
+      workspace: {
+        getActiveFile: () => currentNote,
+        getLeavesOfType: () => [{
+          view: {
+            file: currentNote,
+            containerEl: { isShown: () => false }
+          }
+        }]
+      }
+    } as unknown as App;
+    assert.equal(currentDisplayedMarkdownFile(hiddenNoteApp), null,
+      "a previously active Markdown note cannot be added after it stops displaying");
     const attachmentResolver = createAttachmentResourceResolver({
       vault: {
         getAbstractFileByPath: (path: string) => path === vaultFile.path ? vaultFile : null,
@@ -124,6 +158,7 @@ export async function runComposerActionTests(): Promise<void> {
       attachmentContainer as unknown as HTMLElement,
       {
         selectedSkill: null,
+        noteMentions: [{ vaultRelativePath: "projects/项目复盘.md", fileName: "项目复盘.md" }],
         attachments: [
           { type: "image", name: "cover #1.png", path: "/tmp/Echo Ink/cover #1.png" },
           { type: "file", name: "meeting.mp4", path: "/tmp/Echo Ink/meeting.mp4", mimeType: "video/mp4" },
@@ -133,9 +168,15 @@ export async function runComposerActionTests(): Promise<void> {
       },
       {
         onRemoveSkill: () => undefined,
+        onRemoveNoteMention: (path) => removedNoteMentions.push(path),
         onRemoveAttachment: (path) => removedAttachments.push(path)
       }
     );
+    const noteChip = attachmentContainer.querySelector(".codex-note-mention-chip")!;
+    assert.equal(noteChip.querySelector(".codex-note-mention-chip-name")?.textContent, "项目复盘.md");
+    assert.doesNotMatch(renderedComposerText(noteChip), /projects|全文|拼音/u);
+    noteChip.querySelector(".codex-note-mention-chip-remove")?.click();
+    assert.deepEqual(removedNoteMentions, ["projects/项目复盘.md"]);
     const thumbnail = attachmentContainer.querySelector(".codex-attachment-thumbnail")!;
     const image = thumbnail.querySelector("img")!;
     assert.equal(image.src, "app://echoink-vault/cover%20%231.png");
@@ -174,6 +215,65 @@ export async function runComposerActionTests(): Promise<void> {
       "/tmp/Echo Ink/cover #1.png",
       "/tmp/Echo Ink/meeting.mp4"
     ]);
+
+    const noteMenu = new ComposerTestElement("div") as ComposerTestElement & { id: string };
+    noteMenu.id = "note-mention-menu";
+    const noteInput = new ComposerTestElement("textarea");
+    let selectedMention = "";
+    const noteResults = buildNoteMentionCatalog([{
+      vaultRelativePath: "projects/项目复盘.md",
+      fileName: "项目复盘.md",
+      aliases: ["周会总结"]
+    }]);
+    renderComposerNoteMentionMenu(
+      noteMenu as unknown as HTMLElement,
+      noteInput as unknown as HTMLTextAreaElement,
+      { open: true, results: noteResults, activeIndex: 0 },
+      { onSelect: (entry) => { selectedMention = entry.vaultRelativePath; } }
+    );
+    assert.equal(noteMenu.getAttribute("role"), null);
+    assert.equal(noteMenu.querySelector(".codex-note-mention-option")?.getAttribute("role"), "option");
+    assert.equal(noteInput.getAttribute("aria-activedescendant"), "note-mention-menu-option-0");
+    assert.match(renderedComposerText(noteMenu), /项目复盘\.md/u);
+    assert.doesNotMatch(renderedComposerText(noteMenu), /projects|周会总结|全文|拼音/u,
+      "mention options expose the filename only");
+    let pointerPrevented = false;
+    (noteMenu.querySelector(".codex-note-mention-option") as unknown as {
+      onpointerdown(event: { preventDefault(): void; stopPropagation(): void }): void;
+    }).onpointerdown({
+      preventDefault: () => { pointerPrevented = true; },
+      stopPropagation: () => undefined
+    });
+    assert.equal(pointerPrevented, true, "mouse and touch pointer selection keeps textarea focus");
+    assert.equal(selectedMention, "projects/项目复盘.md");
+
+    const resourcePanel = new ComposerTestElement("div");
+    renderComposerResourcePanel(
+      resourcePanel as unknown as HTMLElement,
+      {
+        open: true,
+        selectedSkill: null,
+        selectedMode: "agent",
+        resources: [],
+        resourceSettings: { mcpConnections: {} },
+        language: "zh-CN",
+        canAttachActiveFile: false
+      },
+      {
+        onDismiss: () => undefined,
+        onPickFiles: () => undefined,
+        onAttachActiveFile: () => undefined,
+        onSelectPlanMode: () => undefined,
+        onSelectSkill: () => undefined,
+        onOpenMcpSettings: () => undefined
+      }
+    );
+    const resourceRows = resourcePanel.querySelectorAll(".codex-composer-resource-row");
+    assert.equal(resourceRows[1]?.disabled, true, "current note row is disabled without a displayed Markdown note");
+    resourceRows[0]?.focus();
+    resourcePanel.onkeydown?.(keyEvent("ArrowDown"));
+    assert.equal(testDocument.activeElement, resourceRows[2],
+      "resource panel ArrowDown skips the disabled current-note row");
 
     const missing = attachmentResolver.resolve({
       type: "image",
@@ -540,6 +640,7 @@ function renderAction(overrides: Partial<ComposerToolbarState> = {}) {
 }
 
 class ComposerTestDocument {
+  activeElement: ComposerTestElement | null = null;
   createElement(tagName: string): ComposerTestElement {
     return new ComposerTestElement(tagName);
   }
@@ -565,6 +666,7 @@ class ComposerTestElement {
   value = "";
   onclick: ((event?: unknown) => void) | null = null;
   onchange: (() => void) | null = null;
+  onkeydown: ((event: KeyboardEvent) => void) | null = null;
   private readonly attributes = new Map<string, string>();
 
   constructor(readonly tagName: string) {}
@@ -603,6 +705,7 @@ class ComposerTestElement {
   }
   getAttribute(name: string): string | null { return name === "class" ? this.className : this.attributes.get(name) ?? null; }
   removeAttribute(name: string): void { this.attributes.delete(name); }
+  get ownerDocument(): ComposerTestDocument { return globalThis.document as unknown as ComposerTestDocument; }
   querySelector(selector: string): ComposerTestElement | null { return this.querySelectorAll(selector)[0] ?? null; }
   querySelectorAll(selector: string): ComposerTestElement[] {
     const matches: ComposerTestElement[] = [];
@@ -624,4 +727,13 @@ class ComposerTestElement {
     return Boolean(tag || selector.includes("."));
   }
   click(): void { if (!this.disabled) this.onclick?.({}); }
+  focus(): void { if (!this.disabled) this.ownerDocument.activeElement = this; }
+}
+
+function keyEvent(key: string): KeyboardEvent {
+  return {
+    key,
+    preventDefault: () => undefined,
+    stopPropagation: () => undefined
+  } as unknown as KeyboardEvent;
 }

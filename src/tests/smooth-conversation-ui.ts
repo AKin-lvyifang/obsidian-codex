@@ -565,6 +565,29 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     settingsCopy("en").general.settingsLanguageDesc,
     "Controls the EchoInk interface language. Prompts, chats, and custom names are unchanged."
   );
+  const noteMentionContext = createTestContext();
+  const noteMentionRenderer = new CodexMessageListRenderer();
+  bindRenderer(noteMentionRenderer, noteMentionContext);
+  const noteMentionMessage = renderMessage(noteMentionRenderer, {
+    id: "user-note-mention",
+    role: "user",
+    itemType: "user",
+    text: "请总结",
+    noteMentions: [{
+      vaultRelativePath: "projects/Alpha.md",
+      fileName: "Alpha.md"
+    }],
+    createdAt: 1
+  }, { showAgentFooter: false, showAgentHeader: false });
+  const noteMentionChip = noteMentionMessage.findByClass("codex-message-note-mention-chip");
+  assert.ok(noteMentionChip);
+  assert.equal(renderedText(noteMentionChip!), "Alpha.md");
+  assert.doesNotMatch(renderedText(noteMentionChip!), /projects/u,
+    "historical note chips display the filename only");
+  clickElement(noteMentionChip!);
+  await Promise.resolve();
+  assert.deepEqual(noteMentionContext.openedPaths, ["projects/Alpha.md"],
+    "historical note chips open their Vault-relative note without a line target");
   const initialDisclosure = nextReasoningDisclosureState(undefined, "running");
   assert.deepEqual(initialDisclosure, {
     open: true,
