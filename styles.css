@@ -5253,6 +5253,13 @@ button.echoink-settings-navigation-row:focus-visible {
   line-height: 1.4;
 }
 
+.codex-provider-modal-description {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: break-word;
+}
+
 .codex-provider-doc-link {
   color: var(--text-accent);
   font-size: 14px;

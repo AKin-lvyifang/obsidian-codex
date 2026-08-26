@@ -1285,21 +1285,63 @@ async function assertProviderApiKeyPersistenceLifecycle(): Promise<void> {
     saveAndActivateProviderModel(
       draft: typeof editingProvider,
       apiKey: string,
-      connectionVerified?: boolean
+      connectionVerified?: boolean,
+      replacedProvider?: typeof editingProvider | null
     ): Promise<Readonly<{ saved: boolean; message?: string }>>;
   };
   assert.equal((await tab.saveAndActivateProviderModel(
     structuredClone(editingProvider),
-    ""
+    "",
+    false,
+    editingProvider
   )).saved, true);
   assert.equal(editingSettings.apiProviders[0]?.apiKey, "direct-provider-api-key");
+  const providerAfterFirstEdit = editingSettings.apiProviders[0]!;
   assert.equal((await tab.saveAndActivateProviderModel(
-    structuredClone(editingSettings.apiProviders[0]!),
-    "replacement-provider-api-key"
+    structuredClone(providerAfterFirstEdit),
+    "replacement-provider-api-key",
+    false,
+    providerAfterFirstEdit
   )).saved, true);
   assert.equal(
     editingSettings.apiProviders[0]?.apiKey,
     "replacement-provider-api-key"
+  );
+
+  const collidingAddition = structuredClone(editingSettings.apiProviders[0]!);
+  collidingAddition.name = "Backup account";
+  assert.equal((await tab.saveAndActivateProviderModel(
+    collidingAddition,
+    "second-provider-api-key",
+    false,
+    null
+  )).saved, true);
+  assert.equal(editingSettings.apiProviders.length, 2);
+  assert.equal(new Set(editingSettings.apiProviders.map(({ id }) => id)).size, 2);
+  assert.equal(
+    editingSettings.apiProviders[0]?.apiKey,
+    "replacement-provider-api-key",
+    "adding a same-preset Provider must not replace the existing API key"
+  );
+  assert.equal(editingSettings.apiProviders[1]?.apiKey, "second-provider-api-key");
+  assert.equal(editingSettings.apiProviders[1]?.name, "Backup account");
+
+  const addedProvider = editingSettings.apiProviders[1]!;
+  assert.equal((await tab.saveAndActivateProviderModel(
+    structuredClone(addedProvider),
+    "updated-second-provider-api-key",
+    false,
+    addedProvider
+  )).saved, true);
+  assert.equal(editingSettings.apiProviders.length, 2);
+  assert.equal(
+    editingSettings.apiProviders[0]?.apiKey,
+    "replacement-provider-api-key",
+    "editing the second same-preset Provider must not change the first"
+  );
+  assert.equal(
+    editingSettings.apiProviders[1]?.apiKey,
+    "updated-second-provider-api-key"
   );
 }
 
@@ -1703,6 +1745,7 @@ async function assertSettingsAccessibleNamesAndOverflow(): Promise<void> {
     "deepseek",
     "ui-contract-missing"
   );
+  missingCredential.name = "备用 DeepSeek";
   const credentialFree = createApiProviderConfig(
     "ollama",
     "ui-contract-no-key"
@@ -1912,6 +1955,7 @@ async function assertSettingsAccessibleNamesAndOverflow(): Promise<void> {
     ?.querySelector<ProviderModalTestElement>(".codex-provider-saved-provider")
     ?.textContentAssignments.at(-1);
   assert.equal(savedProviderName(provider.id), "深度求索");
+  assert.equal(savedProviderName(missingCredential.id), "备用 DeepSeek");
   assert.equal(savedProviderName(customProvider.id), customProvider.name);
   assert.equal(
     apiProviderConfiguredDisplayName(
@@ -1919,7 +1963,7 @@ async function assertSettingsAccessibleNamesAndOverflow(): Promise<void> {
       "旧名称 / Legacy name",
       "zh-CN"
     ),
-    "深度求索"
+    "旧名称 / Legacy name"
   );
   assert.equal(
     apiProviderConfiguredDisplayName(
@@ -1927,7 +1971,7 @@ async function assertSettingsAccessibleNamesAndOverflow(): Promise<void> {
       "旧名称 / Legacy name",
       "en"
     ),
-    "DeepSeek"
+    "旧名称 / Legacy name"
   );
   assert.equal(
     apiProviderConfiguredDisplayName(
@@ -1948,6 +1992,7 @@ async function assertSettingsAccessibleNamesAndOverflow(): Promise<void> {
   settings.settingsLanguage = "en";
   tab.display();
   assert.equal(savedProviderName(provider.id), "DeepSeek");
+  assert.equal(savedProviderName(missingCredential.id), "备用 DeepSeek");
   assert.equal(savedProviderName(customProvider.id), customProvider.name);
   settings.settingsLanguage = "zh-CN";
   tab.display();
@@ -2465,15 +2510,15 @@ function assertProviderModelReasoningOverrideBoundary(): void {
     `toggle:model:${normalizedCatalogModel.id}:reasoning`
   );
   assert.ok(catalogReasoning, "Pi catalog models expose the user reasoning preference");
-  assert.equal(catalogReasoning.checked, false);
+  assert.equal(catalogReasoning.checked, true);
   assert.equal(catalogReasoning.disabled, false);
-  catalogReasoning.checked = true;
+  catalogReasoning.checked = false;
   catalogReasoning.onchange?.(new Event("change"));
   const editedCatalogModel = primaryProviderModel(
     (catalogModal as unknown as { draft: ApiProviderConfig }).draft
   );
   assert.equal(editedCatalogModel.reasoning, true);
-  assert.equal(editedCatalogModel.reasoningEnabled, true);
+  assert.equal(editedCatalogModel.reasoningEnabled, false);
   catalogModal.close();
 
   const unsupportedProvider = createApiProviderConfig(
@@ -2507,7 +2552,7 @@ function assertProviderModelReasoningOverrideBoundary(): void {
   assert.equal(unsupportedReasoning.disabled, true);
   assert.match(
     unsupportedModal.contentEl.textContent,
-    /does not support reasoning mode/u
+    /does not support deep reasoning/u
   );
   unsupportedModal.close();
 
@@ -2704,14 +2749,14 @@ function assertSettingsV53MigrationContract(): void {
       normalized.apiProviders[0]?.models.find(
         (model) => model.id === "deepseek-v4-flash"
       )?.reasoningEnabled,
-      false
+      true
     );
   });
 
-  check("new models default to reasoning disabled", () => {
+  check("new reasoning models default to deep reasoning enabled", () => {
     const model = createApiProviderModelConfig("deepseek", "deepseek-v4-pro");
     assert.equal(model.reasoning, true);
-    assert.equal(model.reasoningEnabled, false);
+    assert.equal(model.reasoningEnabled, true);
     assert.equal(model.reasoningEffort, undefined);
   });
 
@@ -2797,6 +2842,25 @@ function assertSettingsV53MigrationContract(): void {
     assert.equal(enabled?.reasoningEffort, "high");
   });
 
+  check("v53 explicit disable is preserved for an unknown reasoning model", () => {
+    const provider = createApiProviderConfig("custom", "disabled-unknown-reasoning");
+    const model = createApiProviderModelConfig(
+      "custom",
+      "provider-newer-than-catalog",
+      provider.runtimeProviderId
+    );
+    model.reasoningEnabled = false;
+    provider.models = [model];
+    provider.defaultModelId = model.id;
+    const reopened = normalizeSettingsData({
+      ...structuredClone(DEFAULT_SETTINGS),
+      settingsVersion: 53,
+      apiProviders: [provider]
+    }).settings.apiProviders[0]?.models[0];
+    assert.equal(reopened?.reasoning, true);
+    assert.equal(reopened?.reasoningEnabled, false);
+  });
+
   check("invalid stored reasoning preference is not admitted", () => {
     const provider = createApiProviderConfig("deepseek", "invalid-effort");
     const model = primaryProviderModel(provider) as ApiProviderModelConfig & {
@@ -2846,7 +2910,7 @@ function assertSettingsV53MigrationContract(): void {
     );
     assert.equal(
       resolveComposerReasoningState(normalized, provider.id, reopened.id)?.status,
-      "disabled"
+      "missing"
     );
   });
 
@@ -3130,12 +3194,12 @@ function assertSettingsV53MigrationContract(): void {
     assert.deepEqual(twice.apiProviders, once.apiProviders);
   });
 
-  check("unknown model metadata starts text-only without inherited capabilities", () => {
+  check("unknown model metadata defaults to deep reasoning while other capabilities stay conservative", () => {
     const unknown = createApiProviderModelConfig("custom", "undocumented-model");
     assert.deepEqual(unknown.input, ["text"]);
     assert.equal(unknown.toolCalling, false);
-    assert.equal(unknown.reasoning, false);
-    assert.equal(unknown.reasoningEnabled, false);
+    assert.equal(unknown.reasoning, true);
+    assert.equal(unknown.reasoningEnabled, true);
     assert.equal(unknown.metadataSource, "unknown");
   });
 
@@ -3254,7 +3318,7 @@ function assertSettingsV53MigrationContract(): void {
         : ["text"],
       toolCalling: true,
       reasoning: catalog.reasoning,
-      reasoningEnabled: false,
+      reasoningEnabled: catalog.reasoning,
       contextWindow: catalog.contextWindow,
       modelMaxTokens: catalog.maxTokens,
       maxOutputTokens: 65_536,
@@ -3277,7 +3341,8 @@ function assertSettingsV53MigrationContract(): void {
     assert.equal(sameIdWrongProvider.metadataSource, "unknown");
     assert.deepEqual(sameIdWrongProvider.input, ["text"]);
     assert.equal(sameIdWrongProvider.toolCalling, false);
-    assert.equal(sameIdWrongProvider.reasoning, false);
+    assert.equal(sameIdWrongProvider.reasoning, true);
+    assert.equal(sameIdWrongProvider.reasoningEnabled, true);
   });
 
   check("v48 drops retired Provider references and requires API Key re-entry", () => {
@@ -3743,16 +3808,17 @@ function assertKnowledgeMaintenanceSubmitSnapshotContract(): void {
   assert.deepEqual(resolveKnowledgeMaintenanceSubmitSnapshot(settings), {
     runtimeProviderId: provider.runtimeProviderId,
     modelId: model.id,
+    reasoning: "high"
+  });
+
+  model.reasoningEnabled = false;
+  assert.deepEqual(resolveKnowledgeMaintenanceSubmitSnapshot(settings), {
+    runtimeProviderId: provider.runtimeProviderId,
+    modelId: model.id,
     reasoning: "none"
   });
 
   model.reasoningEnabled = true;
-  assert.deepEqual(resolveKnowledgeMaintenanceSubmitSnapshot(settings), {
-    runtimeProviderId: provider.runtimeProviderId,
-    modelId: model.id,
-    reasoning: "high"
-  });
-
   model.reasoningEffort = "max";
   assert.equal(
     resolveKnowledgeMaintenanceSubmitSnapshot(settings).reasoning,
@@ -7338,6 +7404,32 @@ async function assertProviderPickerGroupingAndFiltering(): Promise<void> {
     trigger.querySelector(".codex-provider-option-name")?.textContent,
     "深度求索"
   );
+  const configuredName = providerModalElementByFocusKey(modal, "name");
+  assert.ok(configuredName);
+  assert.equal(configuredName.value, "");
+  assert.equal(configuredName.getAttribute("maxlength"), "80");
+  assert.equal(configuredName.getAttribute("placeholder"), "留空则显示“深度求索”");
+  const configuredNameField = configuredName.closest<ProviderModalTestElement>(
+    ".codex-provider-modal-field"
+  );
+  const apiKeyField = providerModalElementByFocusKey(modal, "apiKey")
+    ?.closest<ProviderModalTestElement>(".codex-provider-modal-field");
+  const modalForm = modal.contentEl.querySelector<ProviderModalTestElement>(
+    ".codex-provider-modal-form"
+  );
+  assert.ok(configuredNameField && apiKeyField && modalForm);
+  assert.equal(
+    modalForm.children.indexOf(configuredNameField)
+      < modalForm.children.indexOf(apiKeyField),
+    true,
+    "the optional Provider name stays between Provider selection and API Key"
+  );
+  configuredName.value = "工作账号";
+  configuredName.fireEvent("input");
+  assert.equal(
+    (modal as unknown as { draft: ApiProviderConfig }).draft.name,
+    "工作账号"
+  );
   assert.deepEqual(
     options.children.map((child) => child.hasClass("codex-provider-combobox-group")
       ? `group:${child.textContent}`
@@ -7506,6 +7598,15 @@ async function assertProviderPickerGroupingAndFiltering(): Promise<void> {
     ".codex-provider-combobox-options"
   );
   assert.ok(englishTrigger && englishOptions);
+  const englishConfiguredName = providerModalElementByFocusKey(
+    englishModal,
+    "name"
+  );
+  assert.ok(englishConfiguredName);
+  assert.equal(
+    englishConfiguredName.getAttribute("placeholder"),
+    "Leave blank to show “DeepSeek”"
+  );
   assert.equal(
     englishTrigger.querySelector(".codex-provider-option-name")?.textContent,
     "DeepSeek"
@@ -7689,6 +7790,37 @@ async function assertFreshCustomModelDiscoveryLifecycle(): Promise<void> {
   assert.equal(calls[0]?.apiKey, "fixture-current-custom-key");
   assert.ok(providerModalElementByFocusKey(modal, "manual-model"));
   await flushProviderModalTasks();
+  const discoveredEnabled = providerModalElementByFocusKey(
+    modal,
+    "model-enabled:current-custom-model"
+  );
+  assert.ok(discoveredEnabled);
+  discoveredEnabled.checked = true;
+  discoveredEnabled.onchange?.(new Event("change"));
+  const discoveredReasoning = providerModalElementByFocusKey(
+    modal,
+    "toggle:model:current-custom-model:reasoning"
+  );
+  assert.ok(discoveredReasoning);
+  assert.equal(discoveredReasoning.checked, true);
+  assert.equal(discoveredReasoning.disabled, false);
+
+  const manualModel = providerModalElementByFocusKey(modal, "manual-model");
+  const addManualModel = providerModalElementByFocusKey(
+    modal,
+    "manual-model-add"
+  );
+  assert.ok(manualModel && addManualModel);
+  manualModel.value = "manual-unknown-model";
+  manualModel.oninput?.(new Event("input"));
+  addManualModel.click();
+  const manualReasoning = providerModalElementByFocusKey(
+    modal,
+    "toggle:model:manual-unknown-model:reasoning"
+  );
+  assert.ok(manualReasoning);
+  assert.equal(manualReasoning.checked, true);
+  assert.equal(manualReasoning.disabled, false);
   modal.close();
 }
 
@@ -7847,7 +7979,7 @@ async function assertProviderModelModalPreflightLifecycle(): Promise<void> {
   assert.equal(capabilityTags.length, 4);
   assert.deepEqual(
     capabilityTags.map((tag) => tag.textContent),
-    ["Built-in preset", "text only", "Tool calling", "Reasoning supported"]
+    ["Built-in preset", "text only", "Tool calling", "Deep reasoning supported"]
   );
   assert.doesNotMatch(
     primaryModelRow.querySelector(".codex-provider-model-capabilities")?.textContent ?? "",

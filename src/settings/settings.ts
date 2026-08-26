@@ -814,7 +814,7 @@ export function createApiProviderModelConfig(
       input: preset.imageInput ? ["text", "image"] : ["text"],
       toolCalling: preset.toolCalling,
       reasoning: preset.reasoning,
-      reasoningEnabled: false,
+      reasoningEnabled: preset.reasoning,
       contextWindow: preset.contextWindow,
       modelMaxTokens: preset.modelMaxTokens,
       maxOutputTokens: preset.maxOutputTokens,
@@ -833,7 +833,7 @@ export function createApiProviderModelConfig(
       // Model has no separate toolCalling field; input is not used to infer it.
       toolCalling: true,
       reasoning: catalogModel.reasoning,
-      reasoningEnabled: false,
+      reasoningEnabled: catalogModel.reasoning,
       contextWindow: catalogModel.contextWindow,
       modelMaxTokens: catalogModel.maxTokens,
       maxOutputTokens: Math.min(
@@ -853,8 +853,11 @@ export function createApiProviderModelConfig(
     displayName: id,
     input: ["text"],
     toolCalling: false,
-    reasoning: false,
-    reasoningEnabled: false,
+    // Provider discovery often returns models newer than the pinned Pi
+    // catalog. Product default assumes deep reasoning until the user turns it
+    // off; an explicit catalog/preset `false` above still wins.
+    reasoning: true,
+    reasoningEnabled: true,
     contextWindow: 64_000,
     modelMaxTokens: 8_192,
     maxOutputTokens: 8_192,

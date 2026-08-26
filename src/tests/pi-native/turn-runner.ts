@@ -89,12 +89,16 @@ async function queuedTurnsKeepExactProviderModelAndRetainUnavailableHead(): Prom
   first.baseUrl = "https://queue-first.example/v1";
   first.apiKey = "fixture-first-key";
   first.models = [createApiProviderModelConfig("custom", "model-a")];
+  first.models[0]!.reasoning = false;
+  first.models[0]!.reasoningEnabled = false;
   first.defaultModelId = "model-a";
   const second = createApiProviderConfig("custom", "queue-provider-second");
   second.name = "Queue Second";
   second.baseUrl = "https://queue-second.example/v1";
   second.apiKey = "fixture-second-key";
   second.models = [createApiProviderModelConfig("custom", "model-b")];
+  second.models[0]!.reasoning = false;
+  second.models[0]!.reasoningEnabled = false;
   second.defaultModelId = "model-b";
   settings.apiProviders = [first, second];
   settings.providerMode = "custom-api";

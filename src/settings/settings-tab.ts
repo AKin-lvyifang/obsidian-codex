@@ -54,6 +54,7 @@ import {
   getActiveApiProvider,
   getApiProviderModel,
   getDefaultApiProviderModel,
+  newId,
   normalizeReviewOutputDir,
   normalizeSettingsLanguage,
   validateApiProvider,
@@ -2947,6 +2948,15 @@ export class CodexSettingTab extends PluginSettingTab {
     replacedProvider: ApiProviderConfig | null = null
   ): Promise<ProviderModelSaveResult> {
     const draft = structuredClone(draftInput);
+    if (replacedProvider) {
+      draft.id = replacedProvider.id;
+    } else {
+      const usedIds = new Set(
+        this.plugin.settings.apiProviders.map((provider) => provider.id)
+      );
+      do draft.id = newId("provider");
+      while (usedIds.has(draft.id));
+    }
     const providerId = normalizeApiProviderId(
       draft.providerId,
       draft.baseUrl,
@@ -2957,7 +2967,6 @@ export class CodexSettingTab extends PluginSettingTab {
     if (providerId !== "custom") {
       draft.providerId = preset.id;
       draft.runtimeProviderId = preset.runtimeProviderId;
-      draft.name = preset.name;
       draft.baseUrl = preset.baseUrl;
       draft.apiProtocol = preset.apiProtocol;
       draft.authMode = preset.authMode;
@@ -2970,7 +2979,7 @@ export class CodexSettingTab extends PluginSettingTab {
     } catch {
       return { saved: false, message: this.copy.providers.saveFailed };
     }
-    draft.name = draft.name.trim();
+    draft.name = draft.name.trim().slice(0, 80) || preset.name;
     draft.runtimeProviderId = draft.runtimeProviderId.trim();
     const seenModelIds = new Set<string>();
     draft.models = draft.models.flatMap((model) => {
@@ -3015,14 +3024,20 @@ export class CodexSettingTab extends PluginSettingTab {
       return { saved: false, message: this.copy.common.enableFailed(errors) };
     }
 
-    void replacedProvider;
     try {
       await this.plugin.activateApiProviderSettings((settings) => {
-        const index = settings.apiProviders.findIndex(
-          (provider) => provider.id === draft.id
-        );
-        if (index >= 0) settings.apiProviders[index] = structuredClone(draft);
-        else settings.apiProviders.push(structuredClone(draft));
+        if (replacedProvider) {
+          const index = settings.apiProviders.findIndex(
+            (provider) => provider.id === replacedProvider.id
+          );
+          if (index < 0) throw new Error("Provider being edited no longer exists");
+          settings.apiProviders[index] = structuredClone(draft);
+        } else {
+          if (settings.apiProviders.some((provider) => provider.id === draft.id)) {
+            throw new Error("New Provider settings id already exists");
+          }
+          settings.apiProviders.push(structuredClone(draft));
+        }
         const candidate = settings.apiProviders.find(
           (provider) => provider.id === draft.id
         );

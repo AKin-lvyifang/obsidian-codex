@@ -29,6 +29,7 @@ import {
   API_PROVIDER_PRESETS,
   apiProviderApiKeyRequired,
   apiProviderConfiguredDisplayName,
+  apiProviderConfiguredNameOverride,
   apiProviderPresetDisplayName,
   getApiProviderModelPreset,
   getApiProviderPreset,
@@ -46,6 +47,7 @@ import {
 import { applyAmicroButton } from "./amicro-buttons";
 
 type ProviderFormField =
+  | "name"
   | "oauth"
   | "apiKey"
   | "endpoint"
@@ -247,6 +249,7 @@ export class ProviderModelModal extends Modal {
       this.saving || this.preflight.state.status === "loading"
     ));
     this.renderProviderPicker(form, providerId);
+    this.renderProviderNameField(form);
 
     if (providerId === "custom") {
       this.renderCustomForm(form);
@@ -536,6 +539,46 @@ export class ProviderModelModal extends Modal {
       void this.loadCodexAuthStatus();
     }
     this.restoreComboboxTriggerFocus(this.providerTriggerId);
+  }
+
+  private renderProviderNameField(container: HTMLElement): void {
+    const inputId = this.controlId("name");
+    const field = this.createField(
+      container,
+      this.label("自定义供应商名称", "Custom provider name"),
+      inputId
+    );
+    const descriptionId = `${inputId}-description`;
+    field.createDiv({
+      cls: "codex-provider-modal-description",
+      text: this.label(
+        "可选。用于区分同一供应商下的不同配置。",
+        "Optional. Use this to distinguish configurations from the same provider."
+      ),
+      attr: { id: descriptionId }
+    });
+    const input = field.createEl("input", {
+      cls: "codex-provider-modal-input",
+      attr: {
+        id: inputId,
+        type: "text",
+        maxlength: "80",
+        placeholder: this.label(
+          `留空则显示“${apiProviderPresetDisplayName(this.providerId, "zh-CN")}”`,
+          `Leave blank to show “${apiProviderPresetDisplayName(this.providerId, "en")}”`
+        ),
+        autocomplete: "off",
+        "aria-describedby": descriptionId,
+        "data-modal-focus-key": "name"
+      }
+    }) as HTMLInputElement;
+    input.value = apiProviderConfiguredNameOverride(
+      this.providerId,
+      this.draft.name
+    );
+    input.oninput = () => {
+      this.draft.name = input.value;
+    };
   }
 
   private renderApiKeyField(container: HTMLElement): void {
@@ -1072,7 +1115,7 @@ export class ProviderModelModal extends Modal {
     );
     this.renderToggle(
       toggles,
-      this.label("思考模式", "Reasoning mode"),
+      this.label("深度思考", "Deep reasoning"),
       `model:${model.id}:reasoning`,
       reasoningAlwaysEnabled || (
         reasoningSupported && model.reasoningEnabled === true
@@ -1092,13 +1135,13 @@ export class ProviderModelModal extends Modal {
         disabled: reasoningDisabled,
         description: knownCapability && !reasoningSupported
           ? this.label(
-            "此模型不支持思考模式。",
-            "This model does not support reasoning mode."
+            "此模型不支持深度思考。",
+            "This model does not support deep reasoning."
           )
           : reasoningAlwaysEnabled
             ? this.label(
-              "此模型的思考模式始终开启。",
-              "Reasoning mode is always enabled for this model."
+              "此模型的深度思考始终开启。",
+              "Deep reasoning is always enabled for this model."
             )
             : undefined
       }
@@ -1268,11 +1311,11 @@ export class ProviderModelModal extends Modal {
       || Boolean(getApiProviderModelPreset(this.providerId, model.id));
     const reasoning = knownCapability
       ? reasoningCapabilities.supported
-        ? this.label("支持思考", "Reasoning supported")
-        : this.label("不支持思考", "Reasoning unsupported")
+        ? this.label("支持深度思考", "Deep reasoning supported")
+        : this.label("不支持深度思考", "Deep reasoning unsupported")
       : model.reasoning
-        ? this.label("支持思考", "Reasoning supported")
-        : this.label("思考待确认", "Reasoning unverified");
+        ? this.label("支持深度思考", "Deep reasoning supported")
+        : this.label("深度思考待确认", "Deep reasoning unverified");
     return [
       source,
       input,

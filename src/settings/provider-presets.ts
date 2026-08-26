@@ -261,18 +261,23 @@ export function apiProviderConfiguredDisplayName(
   configuredName: string,
   language: "zh-CN" | "en"
 ): string {
+  const localized = apiProviderPresetDisplayName(providerId, language);
+  return apiProviderConfiguredNameOverride(providerId, configuredName)
+    || localized;
+}
+
+export function apiProviderConfiguredNameOverride(
+  providerId: ApiProviderId,
+  configuredName: string
+): string {
   const preset = getApiProviderPreset(providerId);
   const configured = configuredName.trim();
-  const localized = apiProviderPresetDisplayName(providerId, language);
-  if (preset.id !== "custom") return localized;
   const presetNames = new Set([
     preset.name,
     apiProviderPresetDisplayName(providerId, "zh-CN"),
     apiProviderPresetDisplayName(providerId, "en")
   ]);
-  return !configured || presetNames.has(configured)
-    ? localized
-    : configured;
+  return !configured || presetNames.has(configured) ? "" : configured;
 }
 
 export function getApiProviderModelPreset(

@@ -631,7 +631,7 @@ export function selectComposerReasoning(host: CodexComposerHost, reasoning: Reas
     || !state.enabledOptions.some((option) => option.effort === reasoning)
   ) {
     new Notice(state && !state.enabled
-      ? "请先在模型设置中开启思考模式"
+      ? "请先在模型设置中开启深度思考"
       : state && !state.adjustable
         ? "当前模型的思考强度由模型决定"
         : "当前模型不支持这个思考强度，请重新选择");
@@ -722,7 +722,7 @@ function showComposerReasoningFallbackNotice(
       )}`
     );
   } else {
-    new Notice(`${modelName} 已不支持可配置思考，原偏好已移除`);
+    new Notice(`${modelName} 已不支持可配置深度思考，原偏好已移除`);
   }
 }
 
@@ -759,8 +759,8 @@ function composerReasoningDisabledReason(
   state: Readonly<ComposerReasoningState> | null
 ): string {
   if (!state) return "请先选择可用模型";
-  if (!state.supported) return "当前模型不支持思考模式";
-  if (!state.enabled) return "请先在模型设置中开启思考模式";
+  if (!state.supported) return "当前模型不支持深度思考";
+  if (!state.enabled) return "请先在模型设置中开启深度思考";
   if (state.adjustable) return "";
   const option = state.enabledOptions.find(
     (candidate) => candidate.effort === state.effort

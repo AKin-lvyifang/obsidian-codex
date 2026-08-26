@@ -380,6 +380,7 @@ function assertAdaptiveComposerReasoning(): void {
     (model) => model.id === provider.defaultModelId
   );
   assert.ok(primary);
+  primary.reasoningEnabled = false;
   primary.reasoningEffort = "xhigh";
 
   let saveCount = 0;
@@ -402,7 +403,7 @@ function assertAdaptiveComposerReasoning(): void {
   assert.equal(disabledDeepSeek.selectedReasoning, "none");
   assert.equal(disabledDeepSeek.reasoningCurrentValue, "关闭");
   assert.equal(disabledDeepSeek.reasoningAdjustable, false);
-  assert.match(disabledDeepSeek.reasoningDisabledReason, /模型设置中开启思考模式/u);
+  assert.match(disabledDeepSeek.reasoningDisabledReason, /模型设置中开启深度思考/u);
   assert.deepEqual(disabledDeepSeek.reasoningOptions, []);
   assert.equal(primary.reasoningEffort, "xhigh", "disabled models retain their last strength");
   assert.equal(saveCount, 0);
@@ -549,6 +550,7 @@ function assertAdaptiveComposerReasoning(): void {
     "qwen3.8-max-preview",
     qwenProvider.runtimeProviderId
   );
+  qwenModel.reasoningEnabled = false;
   qwenProvider.models = [qwenModel];
   qwenProvider.defaultModelId = qwenModel.id;
   settings.apiProviders.push(qwenProvider);
@@ -558,7 +560,7 @@ function assertAdaptiveComposerReasoning(): void {
   assert.equal(qwenDisabled.selectedReasoning, "none");
   assert.equal(qwenDisabled.reasoningCurrentValue, "关闭");
   assert.deepEqual(qwenDisabled.reasoningOptions, []);
-  assert.match(qwenDisabled.reasoningDisabledReason, /模型设置中开启思考模式/u);
+  assert.match(qwenDisabled.reasoningDisabledReason, /模型设置中开启深度思考/u);
 
   qwenModel.reasoningEnabled = true;
   const qwen = composerModelMenuState(host);
@@ -623,7 +625,7 @@ function assertAdaptiveComposerReasoning(): void {
   assert.equal(nonReasoning.selectedReasoning, "none");
   assert.equal(nonReasoning.reasoningCurrentValue, "关闭");
   assert.equal(nonReasoning.reasoningAdjustable, false);
-  assert.match(nonReasoning.reasoningDisabledReason, /不支持思考模式/u);
+  assert.match(nonReasoning.reasoningDisabledReason, /不支持深度思考/u);
   assert.deepEqual(nonReasoning.reasoningOptions, []);
   assert.equal(nonReasoningModel.reasoningEffort, undefined);
 
@@ -692,20 +694,23 @@ async function assertExactComposerProviderModelSelection(): Promise<void> {
     tokenPlan.runtimeProviderId
   )];
   tokenPlan.defaultModelId = tokenPlan.models[0].id;
-  localizedSettings.apiProviders = [deepSeek, tokenPlan];
+  const namedTokenPlan = structuredClone(tokenPlan);
+  namedTokenPlan.id = "provider-token-plan-work";
+  namedTokenPlan.name = "工作 Token Plan";
+  localizedSettings.apiProviders = [deepSeek, tokenPlan, namedTokenPlan];
   const localizedHost: any = { plugin: { settings: localizedSettings } };
   assert.deepEqual(
     composerProviderModelOptions(localizedHost).map(
       (option) => option.providerName
     ),
-    ["深度求索", "通义千问 Token Plan"]
+    ["深度求索", "通义千问 Token Plan", "工作 Token Plan"]
   );
   localizedSettings.settingsLanguage = "en";
   assert.deepEqual(
     composerProviderModelOptions(localizedHost).map(
       (option) => option.providerName
     ),
-    ["DeepSeek", "Qwen Token Plan"]
+    ["DeepSeek", "Qwen Token Plan", "工作 Token Plan"]
   );
 
   const settings = structuredClone(DEFAULT_SETTINGS);
