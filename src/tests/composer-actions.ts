@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { TFile, type App } from "obsidian";
+import { Platform, TFile, type App } from "obsidian";
 import { openTestNoticeMessages } from "./obsidian-shim";
 import {
   renderComposerAttachments,
@@ -8,7 +8,11 @@ import {
   type ComposerToolbarCallbacks,
   type ComposerToolbarState
 } from "../ui/codex-view/composer";
-import { createAttachmentResourceResolver } from "../ui/codex-view/attachment-resource";
+import {
+  attachmentPresentationIcon,
+  attachmentPresentationKind,
+  createAttachmentResourceResolver
+} from "../ui/codex-view/attachment-resource";
 import {
   composerModelMenuState,
   composerProviderModelOptions,
@@ -82,13 +86,47 @@ export async function runComposerActionTests(): Promise<void> {
         getResourcePath: (file: TFile) => `app://echoink-vault/${encodeURIComponent(file.path)}`
       }
     } as unknown as App, "/tmp/Echo Ink");
+    const platform = Platform as { isDesktopApp: boolean };
+    const originalDesktopApp = platform.isDesktopApp;
+    platform.isDesktopApp = true;
+    try {
+      const unindexedLocalImage = createAttachmentResourceResolver({
+        vault: {
+          getAbstractFileByPath: () => null,
+          getResourcePath: () => ""
+        }
+      } as unknown as App, process.cwd()).resolve({
+        type: "image",
+        name: "clipboard-1720000000000-0.png",
+        path: `${process.cwd()}/src/tests/composer-actions.ts`
+      });
+      assert.equal(unindexedLocalImage.availability, "available");
+      assert.equal(unindexedLocalImage.vaultRelativePath, "src/tests/composer-actions.ts");
+      assert.match(unindexedLocalImage.resourceUri ?? "", /^file:\/\//u);
+    } finally {
+      platform.isDesktopApp = originalDesktopApp;
+    }
+    for (const [attachment, kind, icon] of [
+      [{ type: "file", name: "clip.mp4", path: "/tmp/clip.mp4", mimeType: "video/mp4" }, "video", "film"],
+      [{ type: "file", name: "brief.pdf", path: "/tmp/brief.pdf" }, "pdf", "file-text"],
+      [{ type: "file", name: "budget.xlsx", path: "/tmp/budget.xlsx" }, "spreadsheet", "table-2"],
+      [{ type: "file", name: "proposal.docx", path: "/tmp/proposal.docx" }, "document", "file-pen-line"],
+      [{ type: "file", name: "demo.pptx", path: "/tmp/demo.pptx" }, "presentation", "presentation"],
+      [{ type: "file", name: "assets.zip", path: "/tmp/assets.zip" }, "archive", "archive"],
+      [{ type: "file", name: "notes.txt", path: "/tmp/notes.txt" }, "text", "align-left"],
+      [{ type: "file", name: "view.ts", path: "/tmp/view.ts" }, "code", "code"],
+      [{ type: "file", name: "blob.bin", path: "/tmp/blob.bin" }, "unknown", "file"]
+    ] as const) {
+      assert.equal(attachmentPresentationKind(attachment), kind);
+      assert.equal(attachmentPresentationIcon(attachment), icon);
+    }
     renderComposerAttachments(
       attachmentContainer as unknown as HTMLElement,
       {
         selectedSkill: null,
         attachments: [
           { type: "image", name: "cover #1.png", path: "/tmp/Echo Ink/cover #1.png" },
-          { type: "file", name: "requirements.md", path: "/tmp/Echo Ink/requirements.md" },
+          { type: "file", name: "meeting.mp4", path: "/tmp/Echo Ink/meeting.mp4", mimeType: "video/mp4" },
           { type: "image", name: "clipboard-1720000000000-1.png", path: "/tmp/Echo Ink/missing.png" }
         ],
         attachmentResolver
@@ -110,12 +148,14 @@ export async function runComposerActionTests(): Promise<void> {
     assert.equal(imageRemove.getAttribute("aria-label"), "移除图片：cover #1.png");
     imageRemove.click();
 
-    const fileChip = attachmentContainer.querySelector(".codex-attachment-file-chip")!;
-    assert.equal(fileChip.getAttribute("title"), "requirements.md");
-    assert.equal(fileChip.querySelector(".codex-attachment-name")?.textContent, "requirements.md");
-    assert.ok(fileChip.querySelector(".codex-attachment-file-icon"));
-    const fileRemove = fileChip.querySelector(".codex-attachment-file-remove")!;
-    assert.equal(fileRemove.getAttribute("aria-label"), "移除文件：requirements.md");
+    const fileTile = attachmentContainer.querySelector(".codex-attachment-file-tile")!;
+    assert.equal(fileTile.getAttribute("title"), "meeting.mp4");
+    assert.equal(fileTile.getAttribute("aria-label"), "文件：meeting.mp4");
+    assert.equal(fileTile.getAttribute("data-attachment-kind"), "video");
+    assert.equal(fileTile.querySelector(".codex-attachment-name"), null);
+    assert.ok(fileTile.querySelector(".codex-attachment-file-icon"));
+    const fileRemove = fileTile.querySelector(".codex-attachment-file-remove")!;
+    assert.equal(fileRemove.getAttribute("aria-label"), "移除文件：meeting.mp4");
     fileRemove.click();
     const attachmentList = attachmentContainer.querySelector(".codex-ai-elements-attachments-list")!;
     assert.equal(attachmentList.getAttribute("data-ai-elements-pattern"), "attachments");
@@ -132,7 +172,7 @@ export async function runComposerActionTests(): Promise<void> {
     assert.doesNotMatch(renderedComposerText(attachmentContainer), /clipboard-/u);
     assert.deepEqual(removedAttachments, [
       "/tmp/Echo Ink/cover #1.png",
-      "/tmp/Echo Ink/requirements.md"
+      "/tmp/Echo Ink/meeting.mp4"
     ]);
 
     const missing = attachmentResolver.resolve({
@@ -160,9 +200,12 @@ export async function runComposerActionTests(): Promise<void> {
     assert.match(css, /@keyframes echoink-animate-mic/u);
     assert.match(css, /prefers-reduced-motion:\s*no-preference/u);
     assert.match(css, /\.codex-attachment-thumbnail \{[\s\S]*?width:\s*84px;[\s\S]*?height:\s*84px;/u);
+    assert.match(css, /\.codex-attachment-file-tile \{[\s\S]*?width:\s*84px;[\s\S]*?height:\s*84px;/u);
     assert.match(css, /\.codex-attachment-thumbnail-image \{[\s\S]*?object-fit:\s*cover;/u);
     assert.match(css, /\.codex-attachment-thumbnail-remove \{[\s\S]*?width:\s*28px;[\s\S]*?height:\s*28px;/u);
-    assert.match(css, /@media \(max-width:\s*560px\)[\s\S]*?\.codex-attachment-thumbnail \{[\s\S]*?width:\s*72px;[\s\S]*?height:\s*72px;/u);
+    assert.match(css, /\.codex-ai-elements-attachments-list \{[\s\S]*?flex-wrap:\s*nowrap;[\s\S]*?overflow-x:\s*auto;/u);
+    assert.match(css, /\.codex-message-attachments \{[\s\S]*?flex-wrap:\s*nowrap;[\s\S]*?justify-content:\s*safe\s+flex-end;[\s\S]*?overflow-x:\s*auto;/u);
+    assert.match(css, /@media \(max-width:\s*560px\)[\s\S]*?\.codex-attachment-thumbnail,[\s\S]*?\.codex-attachment-file-tile,[\s\S]*?\.codex-message-attachment-tile \{[\s\S]*?width:\s*72px;[\s\S]*?height:\s*72px;/u);
     assert.match(css, /\.codex-composer-send-button\.codex-send-button\.is-stop-action\s*\{[\s\S]*?color:\s*var\(--text-normal\);[\s\S]*?box-shadow:\s*none\s*!important;/u);
     assert.match(css, /\.codex-composer-send-button\.codex-send-button\.is-stop-action:is\(:hover, :focus-visible\)[\s\S]*?--echoink-conversation-status-danger/u);
     assert.doesNotMatch(turnRunnerSource, /Pi Chat 的附件入口尚未完成切换，本轮没有发送/u);

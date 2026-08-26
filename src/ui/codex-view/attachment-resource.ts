@@ -10,6 +10,18 @@ import type { StoredAttachment } from "../../settings/settings";
 
 export type EchoInkAttachmentAvailability = "available" | "unavailable";
 
+export type EchoInkAttachmentPresentationKind =
+  | "image"
+  | "video"
+  | "pdf"
+  | "spreadsheet"
+  | "document"
+  | "presentation"
+  | "archive"
+  | "text"
+  | "code"
+  | "unknown";
+
 export interface EchoInkAttachmentResourceView {
   readonly attachment: Readonly<StoredAttachment>;
   readonly displayName: string;
@@ -23,6 +35,70 @@ export interface EchoInkAttachmentResourceResolver {
     attachment: Readonly<StoredAttachment>,
     displayIndex?: number
   ): Readonly<EchoInkAttachmentResourceView>;
+}
+
+const VIDEO_EXTENSIONS = new Set([
+  "avi", "flv", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "webm", "wmv"
+]);
+const SPREADSHEET_EXTENSIONS = new Set(["csv", "ods", "tsv", "xls", "xlsb", "xlsm", "xlsx"]);
+const DOCUMENT_EXTENSIONS = new Set(["doc", "docm", "docx", "odt", "rtf"]);
+const PRESENTATION_EXTENSIONS = new Set(["odp", "pot", "potx", "pps", "ppsx", "ppt", "pptx"]);
+const ARCHIVE_EXTENSIONS = new Set(["7z", "bz2", "gz", "rar", "tar", "tgz", "xz", "zip"]);
+const CODE_EXTENSIONS = new Set([
+  "bash", "c", "cc", "cpp", "css", "go", "h", "html", "java", "js", "json", "jsx",
+  "kt", "lua", "mjs", "php", "py", "rb", "rs", "sh", "sql", "svg", "swift", "toml",
+  "ts", "tsx", "vue", "xml", "yaml", "yml", "zsh"
+]);
+const TEXT_EXTENSIONS = new Set(["log", "md", "markdown", "rst", "text", "txt"]);
+
+const ATTACHMENT_PRESENTATION_ICONS: Readonly<Record<EchoInkAttachmentPresentationKind, string>> = Object.freeze({
+  image: "image",
+  video: "film",
+  pdf: "file-text",
+  spreadsheet: "table-2",
+  document: "file-pen-line",
+  presentation: "presentation",
+  archive: "archive",
+  text: "align-left",
+  code: "code",
+  unknown: "file"
+});
+
+export function attachmentPresentationKind(
+  attachment: Readonly<StoredAttachment>
+): EchoInkAttachmentPresentationKind {
+  if (attachment.type === "image") return "image";
+  const mimeType = normalizedMimeType(attachment.mimeType);
+  const extension = fileExtension(attachment.name) || fileExtension(attachment.path);
+  if (mimeType.startsWith("video/") || VIDEO_EXTENSIONS.has(extension)) return "video";
+  if (mimeType === "application/pdf" || extension === "pdf") return "pdf";
+  if (isSpreadsheetMimeType(mimeType) || SPREADSHEET_EXTENSIONS.has(extension)) return "spreadsheet";
+  if (isPresentationMimeType(mimeType) || PRESENTATION_EXTENSIONS.has(extension)) return "presentation";
+  if (isArchiveMimeType(mimeType) || ARCHIVE_EXTENSIONS.has(extension)) return "archive";
+  if (isDocumentMimeType(mimeType) || DOCUMENT_EXTENSIONS.has(extension)) return "document";
+  if (isCodeMimeType(mimeType) || CODE_EXTENSIONS.has(extension)) return "code";
+  if (mimeType.startsWith("text/") || TEXT_EXTENSIONS.has(extension)) return "text";
+  return "unknown";
+}
+
+export function attachmentPresentationIcon(
+  attachment: Readonly<StoredAttachment>
+): string {
+  return ATTACHMENT_PRESENTATION_ICONS[attachmentPresentationKind(attachment)];
+}
+
+/** Returns a stable local-path identity for merging transient and durable projections. */
+export function attachmentPathIdentity(
+  attachment: Readonly<StoredAttachment>
+): string | null {
+  const source = attachment.path.trim();
+  if (!source) return null;
+  if (/^(?:blob:|data:|https?:)/iu.test(source)) return source;
+  if (/^file:/iu.test(source)) {
+    const localPath = localPathFromFileUri(source);
+    return localPath ? normalizeAbsolutePath(localPath) : source;
+  }
+  return normalizeAbsolutePath(source);
 }
 
 /** Shared resource resolver used by Composer and durable message attachments. */
@@ -90,6 +166,19 @@ function resolveAttachmentResource(
         vaultRelativePath
       });
     }
+    const localPath = localPathForVaultResource(
+      source,
+      vaultPath,
+      vaultRelativePath
+    );
+    if (Platform.isDesktopApp && localPath && existsSync(localPath)) {
+      return Object.freeze({
+        ...base,
+        availability: "available" as const,
+        resourceUri: localFileUri(localPath),
+        vaultRelativePath
+      });
+    }
     return Object.freeze({
       ...base,
       availability: "unavailable" as const,
@@ -136,6 +225,47 @@ function toVaultRelativePath(source: string, vaultPath: string): string | null {
   if (!normalizedSource.startsWith(prefix)) return null;
   const relative = normalizePath(normalizedSource.slice(prefix.length));
   return relative || null;
+}
+
+function localPathForVaultResource(
+  source: string,
+  vaultPath: string,
+  vaultRelativePath: string
+): string | null {
+  if (isAbsolutePath(source)) return source;
+  if (!vaultPath) return null;
+  return `${vaultPath}/${vaultRelativePath}`;
+}
+
+function normalizedMimeType(value: string | undefined): string {
+  return value?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
+}
+
+function isSpreadsheetMimeType(mimeType: string): boolean {
+  return mimeType === "text/csv"
+    || mimeType === "text/tab-separated-values"
+    || /(?:spreadsheet|excel)/u.test(mimeType);
+}
+
+function isDocumentMimeType(mimeType: string): boolean {
+  return /(?:msword|wordprocessing|opendocument\.text|rtf)/u.test(mimeType);
+}
+
+function isPresentationMimeType(mimeType: string): boolean {
+  return /(?:presentation|powerpoint)/u.test(mimeType);
+}
+
+function isArchiveMimeType(mimeType: string): boolean {
+  return /(?:7z|bzip2|compressed|gzip|rar|tar|zip)/u.test(mimeType);
+}
+
+function isCodeMimeType(mimeType: string): boolean {
+  return mimeType === "application/json"
+    || mimeType === "application/sql"
+    || mimeType === "application/xml"
+    || mimeType === "application/yaml"
+    || mimeType === "application/x-yaml"
+    || /(?:ecmascript|javascript|typescript)/u.test(mimeType);
 }
 
 function normalizeAbsolutePath(value: string): string {
