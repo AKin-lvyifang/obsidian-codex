@@ -169,7 +169,7 @@ export function renderToolbar(host: CodexComposerHost): void {
       workspaceDisplayName: workspacePath ? workspaceDisplayName(workspacePath) : "",
       workspaceValid: workspacePath ? workspaceDirectoryExists(workspacePath) : false,
       contextLedger: session.contextLedger,
-      contextPanelOpen: host.contextPanelOpen && host.plugin.settings.showContext
+      contextPanelOpen: host.contextPanelOpen
     },
     {
       onOpenAddMenu: (event) => openAddMenu(host, event),
@@ -186,7 +186,6 @@ export function renderToolbar(host: CodexComposerHost): void {
       onOpenWorkspaceMenu: (event, nextSession) => host.openWorkspaceMenu(event, nextSession),
       onOpenModelMenu: (event) => host.openModelMenu(event),
       onToggleContextPanel: () => {
-        if (!host.plugin.settings.showContext) return;
         if (host.contextPanelOpen) {
           closeContextPopover(host, true);
           return;
@@ -929,8 +928,6 @@ export function updateContextForSession(host: CodexComposerHost, session: Stored
   }
   if (session.id !== host.plugin.settings.activeSessionId) return;
   if (!host.contextEl) return;
-  host.contextEl.toggleClass("is-hidden", !host.plugin.settings.showContext);
-  if (!host.plugin.settings.showContext) return;
   const view = contextUsageView(tokenUsage, session.contextLedger);
   host.contextEl.setCssProps({ "--codex-context-angle": `${view.angle}deg` });
   const tooltip = view.percent === null || view.effectiveInputBudget === null
@@ -956,7 +953,7 @@ function syncContextPopover(
   host: CodexComposerHost,
   ledger: StoredSession["contextLedger"]
 ): void {
-  if (!host.contextPanelOpen || !host.plugin.settings.showContext) {
+  if (!host.contextPanelOpen) {
     host.contextPanelOpen = false;
     host.contextEl.setAttribute("aria-expanded", "false");
     return;

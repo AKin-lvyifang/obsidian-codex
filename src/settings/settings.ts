@@ -438,7 +438,6 @@ export interface CodexForObsidianSettings {
   defaultMode: UiMode;
   autoOpen: boolean;
   autoOpenHome: boolean;
-  showContext: boolean;
   customWelcomeEnabled: boolean;
   customWelcomeTitle: string;
   customWelcomeSubtitle: string;
@@ -474,7 +473,6 @@ export const DEFAULT_SETTINGS: CodexForObsidianSettings = {
   defaultMode: "agent",
   autoOpen: false,
   autoOpenHome: false,
-  showContext: true,
   customWelcomeEnabled: false,
   customWelcomeTitle: DEFAULT_ECHOINK_WELCOME_TITLE,
   customWelcomeSubtitle: DEFAULT_ECHOINK_WELCOME_SUBTITLE,

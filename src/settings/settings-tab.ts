@@ -588,8 +588,8 @@ export class CodexSettingTab extends PluginSettingTab {
     const page = createSettingsPage(containerEl, {
       title: zh ? "基础设置" : "General",
       description: zh
-        ? "调整 EchoInk 的界面语言、启动方式和对话显示。"
-        : "Choose EchoInk's language, startup behavior, and conversation display."
+        ? "调整 EchoInk 的界面语言、启动方式、长期记忆和个性化。"
+        : "Choose EchoInk's language, startup behavior, long-term memory, and personalization."
     });
     const interfaceSection = createSettingsSection(page, {
       title: zh ? "界面与启动" : "Interface and startup",
@@ -681,22 +681,6 @@ export class CodexSettingTab extends PluginSettingTab {
       }));
 
     this.renderFilePersonalizationSettings(page);
-
-    const conversationSection = createSettingsSection(page, {
-      title: zh ? "对话显示" : "Conversation display",
-      surface: "group"
-    });
-    const conversationGroup = createSettingsGroup(conversationSection);
-    applySettingsRow(new Setting(conversationGroup)
-      .setName(copy.general.showContext)
-      .setDesc(zh ? "在对话顶部显示当前上下文容量和使用情况。" : "Show current context capacity and usage above conversations.")
-      .addToggle((toggle) => {
-        labelSettingsToggle(toggle, copy.general.showContext);
-        toggle.setValue(this.plugin.settings.showContext).onChange(async (value) => {
-          this.plugin.settings.showContext = value;
-          await this.plugin.saveSettings();
-        });
-      }));
   }
 
   private renderFilePersonalizationSettings(page: HTMLElement): void {

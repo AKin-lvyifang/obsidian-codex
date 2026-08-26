@@ -2116,11 +2116,22 @@ async function assertSettingsAccessibleNamesAndOverflow(): Promise<void> {
     "启动时自动打开侧栏",
     "启动时自动打开首页",
     "使用长期记忆",
-    "显示上下文容量",
     settingsCopy("zh-CN").general.customWelcome
   ]) {
     assertSettingsToggleAccessibleName(tab.containerEl, label);
   }
+  assert.doesNotMatch(
+    tab.containerEl.textContent,
+    /显示上下文容量|在对话顶部显示当前上下文容量|对话显示/u
+  );
+  settings.settingsLanguage = "en";
+  tab.display();
+  assert.doesNotMatch(
+    tab.containerEl.textContent,
+    /Show context usage|Show current context capacity and usage above conversations|conversation display/iu
+  );
+  settings.settingsLanguage = "zh-CN";
+  tab.display();
   // 人格系统重构草案 §1.1：用户不能手动编辑 AGENT.md / USER.md，设置页
   // 不再有「保存文件」编辑按钮；两份文件只由模板选择与做梦投影写入。
   assert.ok(!Array.from(tab.containerEl.querySelectorAll("button"))
@@ -2447,6 +2458,15 @@ function assertSettingsV52MigrationContract(): void {
       normalizeSettingsData({ memory: { enabled: true, useLongTermMemory: false } }).settings.memory.useLongTermMemory,
       false
     );
+  });
+
+  check("retired context display setting is dropped without hiding the Composer meter", () => {
+    const normalized = normalizeSettingsData({
+      ...structuredClone(DEFAULT_SETTINGS),
+      showContext: false
+    });
+    assert.equal(normalized.changed, true);
+    assert.equal(Object.hasOwn(normalized.settings, "showContext"), false);
   });
 
   check("v50 flat and auto Provider settings migrate to one explicit enabled default model", () => {

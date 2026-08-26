@@ -36,6 +36,13 @@ export async function runComposerActionTests(): Promise<void> {
   (globalThis as unknown as { document: Document }).document = testDocument as unknown as Document;
   try {
     const send = renderAction();
+    assert.equal(send.context.getAttribute("aria-label"), "查看上下文用量");
+    assert.equal(send.context.hasClass("is-hidden"), false);
+    send.context.onclick?.({
+      preventDefault: () => undefined,
+      stopPropagation: () => undefined
+    });
+    assert.equal(send.calls.context, 1, "Composer context meter remains available without a settings gate");
     assert.equal(send.primary.getAttribute("aria-label"), "发送");
     assert.equal(send.primary.hasClass("is-send-action"), true);
     assert.equal(send.primary.querySelectorAll(".echoink-animate-icon-send-horizontal").length, 1);
@@ -601,7 +608,7 @@ async function assertExactComposerProviderModelSelection(): Promise<void> {
 }
 
 function renderAction(overrides: Partial<ComposerToolbarState> = {}) {
-  const calls = { send: 0, mic: 0, enqueue: 0, stop: 0, resume: 0, cancelKnowledge: 0 };
+  const calls = { send: 0, mic: 0, context: 0, enqueue: 0, stop: 0, resume: 0, cancelKnowledge: 0 };
   const callbacks: ComposerToolbarCallbacks = {
     onOpenAddMenu: () => undefined,
     onEnhancePrompt: () => undefined,
@@ -609,7 +616,7 @@ function renderAction(overrides: Partial<ComposerToolbarState> = {}) {
     onPermissionChange: () => undefined,
     onOpenWorkspaceMenu: () => undefined,
     onOpenModelMenu: () => undefined,
-    onToggleContextPanel: () => undefined,
+    onToggleContextPanel: () => { calls.context += 1; },
     onMicInput: () => { calls.mic += 1; },
     onCancelKnowledgeTask: () => { calls.cancelKnowledge += 1; },
     onStopTurn: () => { calls.stop += 1; },
@@ -645,6 +652,7 @@ function renderAction(overrides: Partial<ComposerToolbarState> = {}) {
   renderComposerToolbar(container as unknown as HTMLElement, workspace as unknown as HTMLElement, state, callbacks);
   return {
     calls,
+    context: container.querySelector(".codex-context-meter")!,
     primary: container.querySelector(".codex-composer-send-button")!,
     mic: container.querySelector(".codex-composer-mic-button")!
   };
