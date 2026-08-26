@@ -68,17 +68,27 @@ export function resolveKnowledgeMaintenanceSubmitSnapshot(
   ) {
     throw new Error("知识初始化无法冻结当前 Provider/模型，请先检查 Provider 设置。");
   }
+  const capabilities = resolveEchoInkPiReasoningCapabilities(
+    active.provider.runtimeProviderId,
+    active.model.id,
+    active.model.reasoning
+  );
+  if (
+    !capabilities.supported
+    || (capabilities.supportsOff && !active.model.reasoningEnabled)
+  ) {
+    return Object.freeze({
+      runtimeProviderId: active.provider.runtimeProviderId,
+      modelId: active.model.id,
+      reasoning: "none"
+    });
+  }
   if (apiProviderModelHadInvalidStoredReasoningEffort(
     active.provider.id,
     active.model
   )) {
     throw new Error("知识初始化发现非法思考强度，请先在 Composer 完成回落。");
   }
-  const capabilities = resolveEchoInkPiReasoningCapabilities(
-    active.provider.runtimeProviderId,
-    active.model.id,
-    active.model.metadataSource === "manual" && active.model.reasoning
-  );
   const stored = normalizeEchoInkReasoningEffort(
     active.model.reasoningEffort
   );

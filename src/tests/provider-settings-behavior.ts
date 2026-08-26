@@ -206,7 +206,7 @@ import {
 } from "../plugin/openai-codex-oauth-service";
 
 export async function runProviderSettingsBehaviorTests(): Promise<void> {
-  assertSettingsV52MigrationContract();
+  assertSettingsV53MigrationContract();
   assertPiReasoningCapabilityContract();
   assertKnowledgeMaintenanceSubmitSnapshotContract();
   await assertPiReasoningPayloadContract();
@@ -2379,15 +2379,56 @@ function assertProviderModelReasoningOverrideBoundary(): void {
     save: async () => ({ saved: true })
   });
   catalogModal.open();
-  assert.equal(
-    providerModalElementByFocusKey(
-      catalogModal,
-      `toggle:model:${normalizedCatalogModel.id}:reasoning`
-    ),
-    null,
-    "Pi catalog models must not expose a manual reasoning switch"
+  const catalogReasoning = providerModalElementByFocusKey(
+    catalogModal,
+    `toggle:model:${normalizedCatalogModel.id}:reasoning`
   );
+  assert.ok(catalogReasoning, "Pi catalog models expose the user reasoning preference");
+  assert.equal(catalogReasoning.checked, false);
+  assert.equal(catalogReasoning.disabled, false);
+  catalogReasoning.checked = true;
+  catalogReasoning.onchange?.(new Event("change"));
+  const editedCatalogModel = primaryProviderModel(
+    (catalogModal as unknown as { draft: ApiProviderConfig }).draft
+  );
+  assert.equal(editedCatalogModel.reasoning, true);
+  assert.equal(editedCatalogModel.reasoningEnabled, true);
   catalogModal.close();
+
+  const unsupportedProvider = createApiProviderConfig(
+    "custom",
+    "unsupported-reasoning-modal"
+  );
+  unsupportedProvider.runtimeProviderId = "openai";
+  const unsupportedModel = createApiProviderModelConfig(
+    "custom",
+    "gpt-4",
+    unsupportedProvider.runtimeProviderId
+  );
+  unsupportedProvider.models = [unsupportedModel];
+  unsupportedProvider.defaultModelId = unsupportedModel.id;
+  const unsupportedModal = new ProviderModelModal({
+    app: new App(),
+    draft: unsupportedProvider,
+    editing: true,
+    language: "en",
+    copy: settingsCopy("en"),
+    preflight,
+    save: async () => ({ saved: true })
+  });
+  unsupportedModal.open();
+  const unsupportedReasoning = providerModalElementByFocusKey(
+    unsupportedModal,
+    `toggle:model:${unsupportedModel.id}:reasoning`
+  );
+  assert.ok(unsupportedReasoning);
+  assert.equal(unsupportedReasoning.checked, false);
+  assert.equal(unsupportedReasoning.disabled, true);
+  assert.match(
+    unsupportedModal.contentEl.textContent,
+    /does not support reasoning mode/u
+  );
+  unsupportedModal.close();
 
   const manualProvider = createApiProviderConfig(
     "custom",
@@ -2399,12 +2440,12 @@ function assertProviderModelReasoningOverrideBoundary(): void {
     manualProvider.runtimeProviderId
   );
   manualModel.metadataSource = "manual";
-  manualModel.reasoning = true;
+  manualModel.reasoning = false;
   manualProvider.models = [manualModel];
   manualProvider.defaultModelId = manualModel.id;
   const normalizedManualProvider = normalizeSettingsData({
     ...structuredClone(DEFAULT_SETTINGS),
-    settingsVersion: 52,
+    settingsVersion: 53,
     apiProviders: [manualProvider]
   }).settings.apiProviders[0];
   assert.ok(normalizedManualProvider);
@@ -2412,7 +2453,8 @@ function assertProviderModelReasoningOverrideBoundary(): void {
     normalizedManualProvider
   );
   assert.equal(normalizedManualModel.metadataSource, "manual");
-  assert.equal(normalizedManualModel.reasoning, true);
+  assert.equal(normalizedManualModel.reasoning, false);
+  assert.equal(normalizedManualModel.reasoningEnabled, false);
   const manualModal = new ProviderModelModal({
     app: new App(),
     draft: normalizedManualProvider,
@@ -2428,11 +2470,18 @@ function assertProviderModelReasoningOverrideBoundary(): void {
     `toggle:model:${normalizedManualModel.id}:reasoning`
   );
   assert.ok(manualReasoning);
-  assert.equal(manualReasoning.checked, true);
+  assert.equal(manualReasoning.checked, false);
   assert.equal(manualReasoning.disabled, false);
+  manualReasoning.checked = true;
+  manualReasoning.onchange?.(new Event("change"));
+  const editedManualModel = primaryProviderModel(
+    (manualModal as unknown as { draft: ApiProviderConfig }).draft
+  );
+  assert.equal(editedManualModel.reasoning, true);
+  assert.equal(editedManualModel.reasoningEnabled, true);
   manualModal.close();
 }
-function assertSettingsV52MigrationContract(): void {
+function assertSettingsV53MigrationContract(): void {
   const failures: Error[] = [];
   const check = (label: string, assertion: () => void): void => {
     try {
@@ -2443,7 +2492,7 @@ function assertSettingsV52MigrationContract(): void {
   };
 
   check("fresh install does not select a Provider without a usable API Key", () => {
-    assert.equal(DEFAULT_SETTINGS.settingsVersion, 52);
+    assert.equal(DEFAULT_SETTINGS.settingsVersion, 53);
     assert.equal(DEFAULT_SETTINGS.activeApiProviderId, "");
     assert.equal(DEFAULT_SETTINGS.memory.useLongTermMemory, true);
     assert.equal(
@@ -2506,6 +2555,7 @@ function assertSettingsV52MigrationContract(): void {
       input: ["text", "image"],
       toolCalling: true,
       reasoning: true,
+      reasoningEnabled: true,
       reasoningEffort: "high",
       contextWindow: 96_000,
       modelMaxTokens: 12_000,
@@ -2531,40 +2581,61 @@ function assertSettingsV52MigrationContract(): void {
   });
 
   check("v51 preserves an active non-default enabled Composer model", () => {
-    const provider = createApiProviderConfig("custom", "current-multi-model");
+    const provider = createApiProviderConfig("deepseek", "current-multi-model");
     provider.name = "Current multi-model";
-    provider.baseUrl = "https://current.example/v1";
     provider.apiKey = "fixture-key";
-    replaceProviderModels(provider, "model-default", "model-selected");
+    replaceProviderModels(
+      provider,
+      "deepseek-v4-flash",
+      "deepseek-v4-pro"
+    );
     const normalized = normalizeSettingsData({
       ...structuredClone(DEFAULT_SETTINGS),
       settingsVersion: 51,
       defaultReasoning: "high",
       activeApiProviderId: provider.id,
-      defaultModel: "model-selected",
+      defaultModel: "deepseek-v4-pro",
       apiProviders: [provider]
     }).settings;
     assert.equal(normalized.activeApiProviderId, provider.id);
-    assert.equal(normalized.apiProviders[0]?.defaultModelId, "model-default");
-    assert.equal(normalized.defaultModel, "model-selected");
+    assert.equal(normalized.apiProviders[0]?.defaultModelId, "deepseek-v4-flash");
+    assert.equal(normalized.defaultModel, "deepseek-v4-pro");
     assert.equal(Object.hasOwn(normalized, "defaultReasoning"), false);
     assert.equal(
       normalized.apiProviders[0]?.models.find(
-        (model) => model.id === "model-selected"
+        (model) => model.id === "deepseek-v4-pro"
       )?.reasoningEffort,
       "high"
     );
     assert.equal(
       normalized.apiProviders[0]?.models.find(
-        (model) => model.id === "model-default"
+        (model) => model.id === "deepseek-v4-pro"
+      )?.reasoningEnabled,
+      true
+    );
+    assert.equal(
+      normalized.apiProviders[0]?.models.find(
+        (model) => model.id === "deepseek-v4-flash"
       )?.reasoningEffort,
       undefined
     );
+    assert.equal(
+      normalized.apiProviders[0]?.models.find(
+        (model) => model.id === "deepseek-v4-flash"
+      )?.reasoningEnabled,
+      false
+    );
   });
 
-  check("v52 round-trips every model-scoped reasoning preference", () => {
+  check("new models default to reasoning disabled", () => {
+    const model = createApiProviderModelConfig("deepseek", "deepseek-v4-pro");
+    assert.equal(model.reasoning, true);
+    assert.equal(model.reasoningEnabled, false);
+    assert.equal(model.reasoningEffort, undefined);
+  });
+
+  check("v52 positive reasoning strengths migrate to enabled and retain their wire value", () => {
     const efforts = [
-      "none",
       "minimal",
       "low",
       "medium",
@@ -2576,13 +2647,73 @@ function assertSettingsV52MigrationContract(): void {
       const provider = createApiProviderConfig("deepseek", `roundtrip-${effort}`);
       const model = primaryProviderModel(provider);
       model.reasoningEffort = effort;
+      delete (model as Partial<ApiProviderModelConfig>).reasoningEnabled;
       const reopened = normalizeSettingsData({
         ...structuredClone(DEFAULT_SETTINGS),
         settingsVersion: 52,
         apiProviders: [provider]
       }).settings.apiProviders[0]?.models[0];
+      assert.equal(reopened?.reasoningEnabled, true);
       assert.equal(reopened?.reasoningEffort, effort);
     }
+  });
+
+  check("v52 none migrates to disabled and is removed from strength storage", () => {
+    const provider = createApiProviderConfig("deepseek", "migrate-none");
+    const model = primaryProviderModel(provider);
+    delete (model as Partial<ApiProviderModelConfig>).reasoningEnabled;
+    model.reasoningEffort = "none";
+    const reopened = normalizeSettingsData({
+      ...structuredClone(DEFAULT_SETTINGS),
+      settingsVersion: 52,
+      apiProviders: [provider]
+    }).settings.apiProviders[0]?.models[0];
+    assert.equal(reopened?.reasoningEnabled, false);
+    assert.equal(reopened?.reasoningEffort, undefined);
+  });
+
+  check("v52 manual reasoning capability remains enabled without a stored strength", () => {
+    const provider = createApiProviderConfig("custom", "legacy-manual-reasoning");
+    const model = createApiProviderModelConfig(
+      "custom",
+      "manual-reasoner",
+      provider.runtimeProviderId
+    );
+    model.metadataSource = "manual";
+    model.reasoning = true;
+    delete (model as Partial<ApiProviderModelConfig>).reasoningEnabled;
+    provider.models = [model];
+    provider.defaultModelId = model.id;
+    const reopened = normalizeSettingsData({
+      ...structuredClone(DEFAULT_SETTINGS),
+      settingsVersion: 52,
+      apiProviders: [provider]
+    }).settings.apiProviders[0]?.models[0];
+    assert.equal(reopened?.reasoning, true);
+    assert.equal(reopened?.reasoningEnabled, true);
+  });
+
+  check("v53 explicit disable retains the last positive strength for re-enable", () => {
+    const provider = createApiProviderConfig("deepseek", "disabled-last-strength");
+    const model = primaryProviderModel(provider);
+    model.reasoningEnabled = false;
+    model.reasoningEffort = "high";
+    const disabled = normalizeSettingsData({
+      ...structuredClone(DEFAULT_SETTINGS),
+      settingsVersion: 53,
+      apiProviders: [provider]
+    }).settings.apiProviders[0]?.models[0];
+    assert.equal(disabled?.reasoningEnabled, false);
+    assert.equal(disabled?.reasoningEffort, "high");
+    assert.ok(disabled);
+    disabled.reasoningEnabled = true;
+    const enabled = normalizeSettingsData({
+      ...structuredClone(DEFAULT_SETTINGS),
+      settingsVersion: 53,
+      apiProviders: [{ ...provider, models: [disabled] }]
+    }).settings.apiProviders[0]?.models[0];
+    assert.equal(enabled?.reasoningEnabled, true);
+    assert.equal(enabled?.reasoningEffort, "high");
   });
 
   check("invalid stored reasoning preference is not admitted", () => {
@@ -2591,6 +2722,7 @@ function assertSettingsV52MigrationContract(): void {
       reasoningEffort: string;
     };
     model.reasoningEffort = "turbo";
+    delete (model as Partial<ApiProviderModelConfig>).reasoningEnabled;
     const normalized = normalizeSettingsData({
       ...structuredClone(DEFAULT_SETTINGS),
       settingsVersion: 52,
@@ -2633,7 +2765,7 @@ function assertSettingsV52MigrationContract(): void {
     );
     assert.equal(
       resolveComposerReasoningState(normalized, provider.id, reopened.id)?.status,
-      "missing"
+      "disabled"
     );
   });
 
@@ -2643,6 +2775,7 @@ function assertSettingsV52MigrationContract(): void {
       reasoningEffort: string;
     };
     model.reasoningEffort = "turbo";
+    delete (model as Partial<ApiProviderModelConfig>).reasoningEnabled;
     const invalid = normalizeSettingsData({
       ...structuredClone(DEFAULT_SETTINGS),
       settingsVersion: 52,
@@ -2810,7 +2943,10 @@ function assertSettingsV52MigrationContract(): void {
     assert.equal(migrated.defaultModelId, modelId);
     assert.equal(normalized.activeApiProviderId, providerSettingsId);
     assert.equal(normalized.defaultModel, modelId);
-    assert.deepEqual(migrated.models, legacyProvider.models);
+    assert.deepEqual(migrated.models, [{
+      ...legacyProvider.models[0],
+      reasoningEnabled: true
+    }]);
     assert.equal(resolveConfiguredPiProviderTransportKind({
       providerId: migrated.providerId ?? "custom",
       runtimeProviderId: migrated.runtimeProviderId,
@@ -2905,9 +3041,7 @@ function assertSettingsV52MigrationContract(): void {
       maxOutputTokens: 12_000
     });
     assert.deepEqual(once.apiProviders[1]?.models[0]?.limitsOverride, {
-      contextWindow: 262_144,
-      modelMaxTokens: 200_000,
-      maxOutputTokens: 65_536
+      modelMaxTokens: 200_000
     });
     assert.equal(once.apiProviders[1]?.models[0]?.maxOutputTokens, 65_536);
 
@@ -2920,6 +3054,7 @@ function assertSettingsV52MigrationContract(): void {
     assert.deepEqual(unknown.input, ["text"]);
     assert.equal(unknown.toolCalling, false);
     assert.equal(unknown.reasoning, false);
+    assert.equal(unknown.reasoningEnabled, false);
     assert.equal(unknown.metadataSource, "unknown");
   });
 
@@ -2972,6 +3107,55 @@ function assertSettingsV52MigrationContract(): void {
     assert.equal(model.maxOutputTokens, baseline.maxOutputTokens);
   });
 
+  check("limits equal to reliable model metadata are pruned while real overrides remain", () => {
+    const provider = createApiProviderConfig("deepseek", "redundant-limits-v53");
+    const model = primaryProviderModel(provider);
+    const baseline = structuredClone(model);
+    applyApiProviderModelLimitsOverride(
+      model,
+      "deepseek",
+      provider.runtimeProviderId,
+      {
+        contextWindow: baseline.contextWindow,
+        modelMaxTokens: baseline.modelMaxTokens,
+        maxOutputTokens: baseline.maxOutputTokens
+      }
+    );
+    assert.equal(Object.hasOwn(model, "limitsOverride"), false);
+
+    applyApiProviderModelLimitsOverride(
+      model,
+      "deepseek",
+      provider.runtimeProviderId,
+      {
+        contextWindow: baseline.contextWindow + 1_024,
+        modelMaxTokens: baseline.modelMaxTokens,
+        maxOutputTokens: baseline.maxOutputTokens
+      }
+    );
+    assert.deepEqual(model.limitsOverride, {
+      contextWindow: baseline.contextWindow + 1_024
+    });
+    assert.equal(model.contextWindow, baseline.contextWindow + 1_024);
+    assert.equal(model.modelMaxTokens, baseline.modelMaxTokens);
+    assert.equal(model.maxOutputTokens, baseline.maxOutputTokens);
+
+    applyApiProviderModelLimitsOverride(
+      model,
+      "deepseek",
+      provider.runtimeProviderId,
+      {
+        modelMaxTokens: 120_000,
+        maxOutputTokens: baseline.maxOutputTokens + 1
+      }
+    );
+    assert.deepEqual(model.limitsOverride, {
+      modelMaxTokens: 120_000
+    });
+    assert.equal(model.modelMaxTokens, 120_000);
+    assert.equal(model.maxOutputTokens, 120_000);
+  });
+
   check("discovered IDs use exact runtime Provider metadata from the Pi catalog", () => {
     const catalog = MOONSHOTAI_CN_MODELS["kimi-k2.7-code"];
     assert.ok(catalog);
@@ -2989,6 +3173,7 @@ function assertSettingsV52MigrationContract(): void {
         : ["text"],
       toolCalling: true,
       reasoning: catalog.reasoning,
+      reasoningEnabled: false,
       contextWindow: catalog.contextWindow,
       modelMaxTokens: catalog.maxTokens,
       maxOutputTokens: 65_536,
@@ -3319,7 +3504,7 @@ function assertSettingsV52MigrationContract(): void {
   });
 
   if (failures.length > 0) {
-    throw new AggregateError(failures, "Settings v52 migration contract failed");
+    throw new AggregateError(failures, "Settings v53 migration contract failed");
   }
 }
 
@@ -3343,6 +3528,12 @@ function assertPiReasoningCapabilityContract(): void {
     "high",
     "max"
   ]);
+  assert.deepEqual(deepSeek.enabledOptions.map((option) => option.effort), [
+    "high",
+    "max"
+  ]);
+  assert.equal(deepSeek.supported, true);
+  assert.equal(deepSeek.supportsOff, true);
   assert.equal(deepSeek.defaultEffort, "high");
 
   for (const providerId of ["qwen-token-plan", "qwen-token-plan-cn"]) {
@@ -3354,6 +3545,11 @@ function assertPiReasoningCapabilityContract(): void {
       "none",
       "medium"
     ]);
+    assert.deepEqual(qwen.enabledOptions.map((option) => option.effort), [
+      "medium"
+    ]);
+    assert.equal(qwen.supported, true);
+    assert.equal(qwen.supportsOff, true);
     assert.equal(qwen.defaultEffort, "medium");
   }
 
@@ -3399,6 +3595,13 @@ function assertPiReasoningCapabilityContract(): void {
     "xhigh",
     "max"
   ]);
+  assert.deepEqual(
+    resolveEchoInkPiReasoningCapabilities(
+      "openai-codex",
+      "gpt-5.6-sol"
+    ).enabledOptions.map((option) => option.effort),
+    ["low", "medium", "high", "xhigh", "max"]
+  );
   assert.deepEqual(efforts("openai", "gpt-4"), []);
   assert.deepEqual(efforts("unknown-runtime", "gpt-5.6-sol"), []);
   assert.deepEqual(efforts("unknown-runtime", "manual-reasoner", true), [
@@ -3416,6 +3619,13 @@ function assertKnowledgeMaintenanceSubmitSnapshotContract(): void {
   settings.defaultModel = provider.defaultModelId;
   const model = primaryProviderModel(provider);
 
+  assert.deepEqual(resolveKnowledgeMaintenanceSubmitSnapshot(settings), {
+    runtimeProviderId: provider.runtimeProviderId,
+    modelId: model.id,
+    reasoning: "none"
+  });
+
+  model.reasoningEnabled = true;
   assert.deepEqual(resolveKnowledgeMaintenanceSubmitSnapshot(settings), {
     runtimeProviderId: provider.runtimeProviderId,
     modelId: model.id,
@@ -3442,10 +3652,11 @@ function assertKnowledgeMaintenanceSubmitSnapshotContract(): void {
   const invalidModel = primaryProviderModel(
     invalidProvider
   ) as ApiProviderModelConfig & { reasoningEffort: string };
+  invalidModel.reasoningEnabled = true;
   invalidModel.reasoningEffort = "turbo";
   const invalidSettings = normalizeSettingsData({
     ...structuredClone(DEFAULT_SETTINGS),
-    settingsVersion: 52,
+    settingsVersion: 53,
     activeApiProviderId: invalidProvider.id,
     defaultModel: invalidProvider.defaultModelId,
     apiProviders: [invalidProvider]
@@ -7297,13 +7508,30 @@ async function assertProviderModelModalPreflightLifecycle(): Promise<void> {
   );
   assert.match(
     modal.contentEl.textContent,
-    /Per-request max output/u
+    /Per-request output limit/u
   );
   assert.doesNotMatch(
     modal.contentEl.textContent,
     /Actual max output/u
   );
   const primaryModelId = primaryProviderModel(provider).id;
+  const primaryModelRow = providerModalElementByFocusKey(
+    modal,
+    `model-enabled:${primaryModelId}`
+  )?.closest<ProviderModalTestElement>(".codex-provider-model-choice");
+  assert.ok(primaryModelRow);
+  const capabilityTags = primaryModelRow.querySelectorAll<ProviderModalTestElement>(
+    ".codex-provider-model-tag"
+  );
+  assert.equal(capabilityTags.length, 4);
+  assert.deepEqual(
+    capabilityTags.map((tag) => tag.textContent),
+    ["Built-in preset", "text only", "Tool calling", "Reasoning supported"]
+  );
+  assert.doesNotMatch(
+    primaryModelRow.querySelector(".codex-provider-model-capabilities")?.textContent ?? "",
+    /\s·\s/u
+  );
   for (const key of [
     "contextWindow",
     "modelMaxTokens",
@@ -7315,7 +7543,10 @@ async function assertProviderModelModalPreflightLifecycle(): Promise<void> {
     );
     assert.ok(input);
     assert.equal(input.value, "");
-    assert.match(input.getAttribute("placeholder") ?? "", /^\d+$/u);
+    assert.match(
+      input.getAttribute("placeholder") ?? "",
+      /^Auto \([\d,]+\)$/u
+    );
   }
   const apiKey = providerModalElementByFocusKey(modal, "apiKey");
   assert.ok(apiKey);

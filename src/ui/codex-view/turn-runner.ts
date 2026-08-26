@@ -869,7 +869,7 @@ function frozenTurnReasoningSelectionIsValid(
   const capabilities = resolveEchoInkPiReasoningCapabilities(
     selection.runtimeProviderId,
     selection.model,
-    model.metadataSource === "manual" && model.reasoning
+    model.reasoning
   );
   return isEchoInkPiReasoningEffortSupported(
     capabilities,

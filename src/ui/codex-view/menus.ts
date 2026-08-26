@@ -52,6 +52,9 @@ export interface ModelMenuState {
   selectedProviderSettingsId: string;
   selectedModel: string;
   selectedReasoning: ReasoningEffort | null;
+  reasoningCurrentValue: string;
+  reasoningDisabledReason: string;
+  reasoningAdjustable: boolean;
   reasoningOptions: readonly Readonly<{
     effort: ReasoningEffort;
     label: string;
@@ -96,6 +99,8 @@ interface ComposerParameterSection {
   icon: string;
   label: string;
   currentValue: string;
+  disabled?: boolean;
+  disabledReason?: string;
   options: ComposerParameterOption[];
   onSelect: (option: ComposerParameterOption) => void;
 }
@@ -328,22 +333,21 @@ function parameterSections(
         });
       }
     }];
-  if (state.reasoningOptions.length > 0) {
-    sections.push({
-      id: "reasoning",
-      icon: "brain",
-      label: "思考强度",
-      currentValue: state.reasoningOptions.find(
-        (option) => option.effort === state.selectedReasoning
-      )?.label ?? "未选择",
-      options: state.reasoningOptions.map((option) => ({
-        value: option.effort,
-        label: option.label,
-        selected: state.selectedReasoning === option.effort
-      })),
-      onSelect: (option) => callbacks.onSelectReasoning(option.value as ReasoningEffort)
-    });
-  }
+  sections.push({
+    id: "reasoning",
+    icon: "brain",
+    label: "思考强度",
+    currentValue: state.reasoningCurrentValue,
+    disabled: !state.reasoningAdjustable
+      || Boolean(state.reasoningDisabledReason),
+    disabledReason: state.reasoningDisabledReason,
+    options: state.reasoningOptions.map((option) => ({
+      value: option.effort,
+      label: option.label,
+      selected: state.selectedReasoning === option.effort
+    })),
+    onSelect: (option) => callbacks.onSelectReasoning(option.value as ReasoningEffort)
+  });
   if (!includeRuntimeOptions) return sections;
 
   sections.push({
@@ -396,15 +400,23 @@ function openComposerParameterMenu(event: MouseEvent, sections: ComposerParamete
 
   for (const section of sections) {
     const trigger = createParameterTrigger(root, section);
-    trigger.onmouseenter = () => openParameterSubmenu(active, section, trigger, false);
+    trigger.onmouseenter = () => {
+      if (section.disabled) {
+        closeActiveParameterSubmenu(active);
+        return;
+      }
+      openParameterSubmenu(active, section, trigger, false);
+    };
     trigger.onclick = (clickEvent) => {
       clickEvent.preventDefault();
       clickEvent.stopPropagation();
+      if (section.disabled) return;
       openParameterSubmenu(active, section, trigger, true);
     };
     trigger.onkeydown = (keyEvent) => {
       if (keyEvent.key !== "ArrowRight" && keyEvent.key !== "Enter" && keyEvent.key !== " ") return;
       keyEvent.preventDefault();
+      if (section.disabled) return;
       openParameterSubmenu(active, section, trigger, true);
     };
   }
@@ -437,13 +449,9 @@ function openComposerParameterMenu(event: MouseEvent, sections: ComposerParamete
     if (keyEvent.key !== "Escape") return;
     keyEvent.preventDefault();
     if (active.submenu) {
-      active.submenu.remove();
-      active.submenu = null;
-      active.activeSectionId = "";
-      active.activeTrigger?.removeClass("is-open");
-      active.activeTrigger?.setAttribute("aria-expanded", "false");
-      active.activeTrigger?.focus();
-      active.activeTrigger = null;
+      const trigger = active.activeTrigger;
+      closeActiveParameterSubmenu(active);
+      trigger?.focus();
       return;
     }
     closeComposerParameterMenu();
@@ -474,17 +482,31 @@ function createParameterTrigger(container: HTMLElement, section: ComposerParamet
     cls: "codex-parameter-menu-item codex-parameter-menu-trigger",
     attr: {
       type: "button",
-      role: "menuitem",
-      "aria-haspopup": "menu",
-      "aria-expanded": "false"
+      role: "menuitem"
     }
   });
+  trigger.toggleClass("is-disabled", Boolean(section.disabled));
+  if (section.disabled) {
+    trigger.setAttribute("aria-disabled", "true");
+    if (section.disabledReason) {
+      trigger.setAttribute("title", section.disabledReason);
+      trigger.setAttribute(
+        "aria-label",
+        `${section.label}：${section.currentValue}。${section.disabledReason}`
+      );
+    }
+  } else {
+    trigger.setAttribute("aria-haspopup", "menu");
+    trigger.setAttribute("aria-expanded", "false");
+  }
   const icon = trigger.createSpan({ cls: "codex-parameter-menu-icon" });
   setIcon(icon, section.icon);
   trigger.createSpan({ cls: "codex-parameter-menu-label", text: section.label });
   trigger.createSpan({ cls: "codex-parameter-menu-value", text: section.currentValue });
-  const chevron = trigger.createSpan({ cls: "codex-parameter-menu-chevron" });
-  setIcon(chevron, "chevron-right");
+  if (!section.disabled) {
+    const chevron = trigger.createSpan({ cls: "codex-parameter-menu-chevron" });
+    setIcon(chevron, "chevron-right");
+  }
   return trigger;
 }
 
@@ -494,7 +516,7 @@ function openParameterSubmenu(
   trigger: HTMLButtonElement,
   focusFirstOption: boolean
 ): void {
-  if (activeComposerParameterMenu !== active) return;
+  if (activeComposerParameterMenu !== active || section.disabled) return;
   if (active.activeSectionId === section.id && active.submenu) {
     if (focusFirstOption) active.submenu.querySelector<HTMLButtonElement>("button")?.focus();
     return;
@@ -556,6 +578,17 @@ function openParameterSubmenu(
   active.submenu = panel;
   positionActiveSubmenu(active);
   if (focusFirstOption) panel.querySelector<HTMLButtonElement>("button")?.focus();
+}
+
+function closeActiveParameterSubmenu(
+  active: ActiveComposerParameterMenu
+): void {
+  active.activeTrigger?.removeClass("is-open");
+  active.activeTrigger?.setAttribute("aria-expanded", "false");
+  active.submenu?.remove();
+  active.submenu = null;
+  active.activeSectionId = "";
+  active.activeTrigger = null;
 }
 
 function positionActiveSubmenu(active: ActiveComposerParameterMenu): void {

@@ -508,10 +508,15 @@ export function composerModelMenuState(host: CodexComposerHost) {
     selectedProviderSettingsId: host.selectedProviderSettingsId,
     selectedModel: host.selectedModel,
     selectedReasoning: reasoning?.effort ?? null,
-    reasoningOptions: reasoning?.capabilities.options.map((option) => ({
-      effort: option.effort,
-      label: composerReasoningOptionLabel(option)
-    })) ?? [],
+    reasoningCurrentValue: composerReasoningCurrentValue(reasoning),
+    reasoningDisabledReason: composerReasoningDisabledReason(reasoning),
+    reasoningAdjustable: reasoning?.adjustable ?? false,
+    reasoningOptions: reasoning?.adjustable
+      ? reasoning.enabledOptions.map((option) => ({
+          effort: option.effort,
+          label: composerReasoningOptionLabel(option)
+        }))
+      : [],
     selectedMode: host.selectedMode
   };
 }
@@ -598,9 +603,15 @@ export function selectComposerReasoning(host: CodexComposerHost, reasoning: Reas
   const state = ensureComposerReasoningPreference(host);
   if (
     !state
-    || !state.capabilities.options.some((option) => option.effort === reasoning)
+    || !state.enabled
+    || !state.adjustable
+    || !state.enabledOptions.some((option) => option.effort === reasoning)
   ) {
-    new Notice("当前模型不支持这个思考强度，请重新选择");
+    new Notice(state && !state.enabled
+      ? "请先在模型设置中开启思考模式"
+      : state && !state.adjustable
+        ? "当前模型的思考强度由模型决定"
+        : "当前模型不支持这个思考强度，请重新选择");
     return;
   }
   state.model.reasoningEffort = reasoning;
@@ -617,12 +628,14 @@ export function selectComposerMode(host: CodexComposerHost, mode: UiMode): void 
 export function currentComposerSummary(host: CodexComposerHost): string {
   const model = shortModelLabel(host.effectiveModel());
   const reasoning = ensureComposerReasoningPreference(host);
-  if (!reasoning?.effort) return model;
-  const option = reasoning.capabilities.options.find(
+  if (!reasoning?.supported || !reasoning.enabled || reasoning.effort === "none") {
+    return model;
+  }
+  const option = reasoning.enabledOptions.find(
     (candidate) => candidate.effort === reasoning.effort
   );
   return `${model} ${option?.display === "toggle"
-    ? "开"
+    ? "默认"
     : compactReasoningLabel(reasoning.effort)}`;
 }
 
@@ -693,7 +706,7 @@ function showComposerReasoningFallbackNotice(
 function composerReasoningEffortLabel(
   state: Readonly<ComposerReasoningState>
 ): string {
-  const option = state.capabilities.options.find(
+  const option = state.enabledOptions.find(
     (candidate) => candidate.effort === state.effort
   );
   return option ? composerReasoningOptionLabel(option) : "合法默认值";
@@ -702,9 +715,36 @@ function composerReasoningEffortLabel(
 function composerReasoningOptionLabel(
   option: Readonly<EchoInkPiReasoningOption>
 ): string {
-  if (option.display === "off") return "关闭";
-  if (option.display === "toggle") return "开启";
   return labelFor(option.effort);
+}
+
+function composerReasoningCurrentValue(
+  state: Readonly<ComposerReasoningState> | null
+): string {
+  if (!state?.supported || !state.enabled || state.effort === "none") {
+    return "关闭";
+  }
+  const option = state.enabledOptions.find(
+    (candidate) => candidate.effort === state.effort
+  );
+  return !state.adjustable && option?.display === "toggle"
+    ? "模型默认"
+    : labelFor(state.effort);
+}
+
+function composerReasoningDisabledReason(
+  state: Readonly<ComposerReasoningState> | null
+): string {
+  if (!state) return "请先选择可用模型";
+  if (!state.supported) return "当前模型不支持思考模式";
+  if (!state.enabled) return "请先在模型设置中开启思考模式";
+  if (state.adjustable) return "";
+  const option = state.enabledOptions.find(
+    (candidate) => candidate.effort === state.effort
+  );
+  return option?.display === "toggle"
+    ? "当前模型只支持开启或关闭，思考强度由模型自动决定"
+    : "当前模型只有一个可用思考强度";
 }
 
 function saveComposerSettings(

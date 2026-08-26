@@ -1048,12 +1048,12 @@ function renderComposerImageFallback(
 export function labelFor(value: string): string {
   const labels: Record<string, string> = {
     none: "关闭",
-    minimal: "极低思考",
-    low: "低思考",
-    medium: "中思考",
-    high: "高思考",
-    xhigh: "超高思考",
-    max: "最强思考",
+    minimal: "低",
+    low: "低",
+    medium: "中",
+    high: "高",
+    xhigh: "极高",
+    max: "最高",
     "read-only": "只读",
     "workspace-write": "工作区可写",
     "danger-full-access": "完全访问权限",
@@ -1067,13 +1067,13 @@ export function labelFor(value: string): string {
 
 export function compactReasoningLabel(value: ReasoningEffort): string {
   const labels: Record<string, string> = {
-    none: "无",
-    minimal: "极低",
+    none: "关闭",
+    minimal: "低",
     low: "低",
     medium: "中",
     high: "高",
     xhigh: "极高",
-    max: "最强"
+    max: "最高"
   };
   return labels[value] ?? value;
 }

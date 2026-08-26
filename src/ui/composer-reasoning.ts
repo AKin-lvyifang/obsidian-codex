@@ -8,8 +8,8 @@ import {
   clearApiProviderModelInvalidStoredReasoningEffort
 } from "../settings/settings";
 import {
-  echoInkPiReasoningOption,
   resolveEchoInkPiReasoningCapabilities,
+  type EchoInkPiReasoningOption,
   type EchoInkPiReasoningCapabilities
 } from "../settings/pi-model-catalog";
 import type { ReasoningEffort } from "../types/app-server";
@@ -18,8 +18,12 @@ export interface ComposerReasoningState {
   readonly provider: ApiProviderConfig;
   readonly model: ApiProviderModelConfig;
   readonly capabilities: Readonly<EchoInkPiReasoningCapabilities>;
-  readonly effort: ReasoningEffort | null;
-  readonly status: "valid" | "missing" | "invalid" | "unavailable";
+  readonly supported: boolean;
+  readonly enabled: boolean;
+  readonly adjustable: boolean;
+  readonly enabledOptions: readonly Readonly<EchoInkPiReasoningOption>[];
+  readonly effort: ReasoningEffort;
+  readonly status: "valid" | "missing" | "invalid" | "disabled" | "unavailable";
   readonly previousEffort: ReasoningEffort | undefined;
 }
 
@@ -36,20 +40,44 @@ export function resolveComposerReasoningState(
   const capabilities = resolveEchoInkPiReasoningCapabilities(
     provider.runtimeProviderId,
     model.id,
-    model.metadataSource === "manual" && model.reasoning
+    model.reasoning
   );
+  const supported = capabilities.supported;
+  const enabled = supported
+    && (!capabilities.supportsOff || model.reasoningEnabled);
+  const enabledOptions = capabilities.enabledOptions;
+  const adjustable = enabled && enabledOptions.length > 1;
   const previousEffort = model.reasoningEffort;
   const invalidStoredEffort =
     apiProviderModelHadInvalidStoredReasoningEffort(provider.id, model);
+
+  if (!supported || !enabled) {
+    return Object.freeze({
+      provider,
+      model,
+      capabilities,
+      supported,
+      enabled,
+      adjustable: false,
+      enabledOptions,
+      effort: "none",
+      status: supported ? "disabled" : "unavailable",
+      previousEffort
+    });
+  }
   if (
     previousEffort
     && !invalidStoredEffort
-    && echoInkPiReasoningOption(capabilities, previousEffort)
+    && enabledOptions.some((option) => option.effort === previousEffort)
   ) {
     return Object.freeze({
       provider,
       model,
       capabilities,
+      supported,
+      enabled,
+      adjustable,
+      enabledOptions,
       effort: previousEffort,
       status: "valid",
       previousEffort
@@ -60,7 +88,11 @@ export function resolveComposerReasoningState(
     provider,
     model,
     capabilities,
-    effort,
+    supported,
+    enabled,
+    adjustable,
+    enabledOptions,
+    effort: effort ?? "none",
     status: previousEffort || invalidStoredEffort
       ? "invalid"
       : effort ? "missing" : "unavailable",
@@ -72,8 +104,8 @@ export function applyComposerReasoningFallback(
   state: Readonly<ComposerReasoningState>
 ): boolean {
   if (state.status !== "missing" && state.status !== "invalid") return false;
-  if (state.effort) state.model.reasoningEffort = state.effort;
-  else delete state.model.reasoningEffort;
+  if (state.effort === "none") return false;
+  state.model.reasoningEffort = state.effort;
   clearApiProviderModelInvalidStoredReasoningEffort(
     state.provider.id,
     state.model

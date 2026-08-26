@@ -7,6 +7,7 @@ import {
   renderComposerNoteMentionMenu,
   renderComposerResourcePanel,
   renderComposerToolbar,
+  labelFor,
   type ComposerToolbarCallbacks,
   type ComposerToolbarState
 } from "../ui/codex-view/composer";
@@ -24,6 +25,10 @@ import {
   selectComposerReasoning
 } from "../ui/codex-view/composer-controller";
 import {
+  closeComposerParameterMenu,
+  openModelMenu
+} from "../ui/codex-view/menus";
+import {
   createApiProviderConfig,
   createApiProviderModelConfig,
   DEFAULT_SETTINGS,
@@ -32,8 +37,17 @@ import {
 
 export async function runComposerActionTests(): Promise<void> {
   const originalDocument = globalThis.document;
+  const originalHTMLElement = (globalThis as unknown as {
+    HTMLElement?: unknown;
+  }).HTMLElement;
+  const originalMutationObserver = (globalThis as unknown as {
+    MutationObserver?: unknown;
+  }).MutationObserver;
   const testDocument = new ComposerTestDocument();
   (globalThis as unknown as { document: Document }).document = testDocument as unknown as Document;
+  (globalThis as unknown as { HTMLElement: unknown }).HTMLElement = ComposerTestElement;
+  (globalThis as unknown as { MutationObserver: unknown }).MutationObserver =
+    ComposerTestMutationObserver;
   try {
     const send = renderAction();
     assert.equal(send.context.getAttribute("aria-label"), "查看上下文用量");
@@ -334,6 +348,17 @@ export async function runComposerActionTests(): Promise<void> {
     console.log("PASS conversation-ui: composer actions, compact attachments, and exact Provider/model selection preserve send semantics");
   } finally {
     (globalThis as unknown as { document?: Document }).document = originalDocument;
+    if (originalHTMLElement === undefined) {
+      delete (globalThis as unknown as { HTMLElement?: unknown }).HTMLElement;
+    } else {
+      (globalThis as unknown as { HTMLElement: unknown }).HTMLElement = originalHTMLElement;
+    }
+    if (originalMutationObserver === undefined) {
+      delete (globalThis as unknown as { MutationObserver?: unknown }).MutationObserver;
+    } else {
+      (globalThis as unknown as { MutationObserver: unknown }).MutationObserver =
+        originalMutationObserver;
+    }
   }
 }
 
@@ -345,7 +370,8 @@ function assertAdaptiveComposerReasoning(): void {
     "deepseek",
     "deepseek-v4-pro"
   );
-  alternate.reasoningEffort = "none";
+  alternate.reasoningEnabled = false;
+  alternate.reasoningEffort = "high";
   provider.models.push(alternate);
   settings.apiProviders = [provider];
   settings.activeApiProviderId = provider.id;
@@ -372,15 +398,41 @@ function assertAdaptiveComposerReasoning(): void {
   };
 
   openTestNoticeMessages.length = 0;
+  const disabledDeepSeek = composerModelMenuState(host);
+  assert.equal(disabledDeepSeek.selectedReasoning, "none");
+  assert.equal(disabledDeepSeek.reasoningCurrentValue, "关闭");
+  assert.equal(disabledDeepSeek.reasoningAdjustable, false);
+  assert.match(disabledDeepSeek.reasoningDisabledReason, /模型设置中开启思考模式/u);
+  assert.deepEqual(disabledDeepSeek.reasoningOptions, []);
+  assert.equal(primary.reasoningEffort, "xhigh", "disabled models retain their last strength");
+  assert.equal(saveCount, 0);
+  assert.deepEqual(openTestNoticeMessages, []);
+
+  primary.reasoningEnabled = true;
   const deepSeek = composerModelMenuState(host);
   assert.equal(primary.reasoningEffort, "high");
   assert.equal(deepSeek.selectedReasoning, "high");
+  assert.equal(deepSeek.reasoningCurrentValue, "高");
+  assert.equal(deepSeek.reasoningAdjustable, true);
+  assert.equal(deepSeek.reasoningDisabledReason, "");
   assert.deepEqual(
     deepSeek.reasoningOptions.map((option) => [option.effort, option.label]),
-    [["none", "关闭"], ["high", "高思考"], ["max", "最强思考"]]
+    [["high", "高"], ["max", "最高"]]
   );
   assert.equal(saveCount, 1);
-  assert.match(openTestNoticeMessages.at(-1) ?? "", /原思考强度已不可用，已回落为高思考/u);
+  assert.match(openTestNoticeMessages.at(-1) ?? "", /原思考强度已不可用，已回落为高/u);
+  assert.deepEqual(
+    (["minimal", "low", "medium", "high", "xhigh", "max"] as const)
+      .map((effort) => [effort, labelFor(effort)]),
+    [
+      ["minimal", "低"],
+      ["low", "低"],
+      ["medium", "中"],
+      ["high", "高"],
+      ["xhigh", "极高"],
+      ["max", "最高"]
+    ]
+  );
 
   const invalidStoredProvider = createApiProviderConfig(
     "deepseek",
@@ -390,11 +442,12 @@ function assertAdaptiveComposerReasoning(): void {
   const invalidStoredModel = invalidStoredProvider.models[0] as typeof primary & {
     reasoningEffort: string;
   };
+  invalidStoredModel.reasoningEnabled = true;
   invalidStoredModel.reasoningEffort = "turbo";
   const invalidStoredSettings = structuredClone(
     normalizeSettingsData({
       ...structuredClone(DEFAULT_SETTINGS),
-      settingsVersion: 52,
+      settingsVersion: 53,
       activeApiProviderId: invalidStoredProvider.id,
       defaultModel: invalidStoredModel.id,
       apiProviders: [invalidStoredProvider]
@@ -422,7 +475,7 @@ function assertAdaptiveComposerReasoning(): void {
   assert.equal(invalidSaveCount, 1);
   assert.match(
     openTestNoticeMessages.at(-1) ?? "",
-    /原思考强度已不可用，已回落为高思考/u
+    /原思考强度已不可用，已回落为高/u
   );
   assert.doesNotMatch(JSON.stringify(invalidStoredSettings), /turbo/u);
 
@@ -431,9 +484,12 @@ function assertAdaptiveComposerReasoning(): void {
     "missing-stored-reasoning"
   );
   missingProvider.apiKey = "fixture-key";
+  const missingModel = missingProvider.models[0];
+  assert.ok(missingModel);
+  missingModel.reasoningEnabled = true;
   const missingSettings = normalizeSettingsData({
     ...structuredClone(DEFAULT_SETTINGS),
-    settingsVersion: 52,
+    settingsVersion: 53,
     activeApiProviderId: missingProvider.id,
     defaultModel: missingProvider.defaultModelId,
     apiProviders: [missingProvider]
@@ -468,7 +524,21 @@ function assertAdaptiveComposerReasoning(): void {
   host.selectedModel = alternate.id;
   const restored = composerModelMenuState(host);
   assert.equal(restored.selectedReasoning, "none");
+  assert.equal(restored.reasoningCurrentValue, "关闭");
+  assert.deepEqual(restored.reasoningOptions, []);
+  assert.equal(alternate.reasoningEffort, "high");
   assert.equal(primary.reasoningEffort, "max");
+
+  alternate.reasoningEnabled = true;
+  const restoredEnabled = composerModelMenuState(host);
+  assert.equal(restoredEnabled.selectedReasoning, "high");
+  assert.equal(restoredEnabled.reasoningCurrentValue, "高");
+  assert.deepEqual(
+    restoredEnabled.reasoningOptions.map((option) => option.effort),
+    ["high", "max"]
+  );
+  host.selectedModel = primary.id;
+  assert.equal(composerModelMenuState(host).selectedReasoning, "max");
 
   const qwenProvider = createApiProviderConfig("custom", "qwen-adaptive");
   qwenProvider.runtimeProviderId = "qwen-token-plan";
@@ -484,12 +554,20 @@ function assertAdaptiveComposerReasoning(): void {
   settings.apiProviders.push(qwenProvider);
   host.selectedProviderSettingsId = qwenProvider.id;
   host.selectedModel = qwenModel.id;
+  const qwenDisabled = composerModelMenuState(host);
+  assert.equal(qwenDisabled.selectedReasoning, "none");
+  assert.equal(qwenDisabled.reasoningCurrentValue, "关闭");
+  assert.deepEqual(qwenDisabled.reasoningOptions, []);
+  assert.match(qwenDisabled.reasoningDisabledReason, /模型设置中开启思考模式/u);
+
+  qwenModel.reasoningEnabled = true;
   const qwen = composerModelMenuState(host);
   assert.equal(qwenModel.reasoningEffort, "medium");
-  assert.deepEqual(
-    qwen.reasoningOptions.map((option) => [option.effort, option.label]),
-    [["none", "关闭"], ["medium", "开启"]]
-  );
+  assert.equal(qwen.selectedReasoning, "medium");
+  assert.equal(qwen.reasoningCurrentValue, "模型默认");
+  assert.equal(qwen.reasoningAdjustable, false);
+  assert.deepEqual(qwen.reasoningOptions, []);
+  assert.match(qwen.reasoningDisabledReason, /模型自动决定/u);
 
   const nonReasoningProvider = createApiProviderConfig(
     "custom",
@@ -509,9 +587,57 @@ function assertAdaptiveComposerReasoning(): void {
   host.selectedProviderSettingsId = nonReasoningProvider.id;
   host.selectedModel = nonReasoningModel.id;
   const nonReasoning = composerModelMenuState(host);
-  assert.equal(nonReasoning.selectedReasoning, null);
+  assert.equal(nonReasoning.selectedReasoning, "none");
+  assert.equal(nonReasoning.reasoningCurrentValue, "关闭");
+  assert.equal(nonReasoning.reasoningAdjustable, false);
+  assert.match(nonReasoning.reasoningDisabledReason, /不支持思考模式/u);
   assert.deepEqual(nonReasoning.reasoningOptions, []);
   assert.equal(nonReasoningModel.reasoningEffort, undefined);
+
+  assertDisabledReasoningMenuRow(nonReasoning);
+}
+
+function assertDisabledReasoningMenuRow(
+  state: ReturnType<typeof composerModelMenuState>
+): void {
+  closeComposerParameterMenu();
+  const anchor = new ComposerTestElement("button");
+  anchor.setConnected(true);
+  anchor.ownerDocument.body.appendChild(anchor);
+  openModelMenu({
+    currentTarget: anchor,
+    preventDefault: () => undefined,
+    stopPropagation: () => undefined
+  } as unknown as MouseEvent, state, {
+    onSelectModel: () => undefined,
+    onSelectReasoning: () => {
+      assert.fail("disabled reasoning row must not select a fake strength");
+    },
+    onSelectMode: () => undefined
+  });
+  const menu = anchor.ownerDocument.body.querySelector(
+    ".codex-composer-parameter-menu"
+  );
+  assert.ok(menu);
+  const reasoningTrigger = menu
+    .querySelectorAll(".codex-parameter-menu-trigger")
+    .find((trigger) => trigger.querySelector(
+      ".codex-parameter-menu-label"
+    )?.textContent === "思考强度");
+  assert.ok(reasoningTrigger);
+  assert.equal(reasoningTrigger.getAttribute("aria-disabled"), "true");
+  assert.equal(reasoningTrigger.getAttribute("aria-haspopup"), null);
+  assert.equal(reasoningTrigger.querySelector(".codex-parameter-menu-chevron"), null);
+  reasoningTrigger.onclick?.({
+    preventDefault: () => undefined,
+    stopPropagation: () => undefined
+  });
+  assert.equal(
+    anchor.ownerDocument.body.querySelector(".codex-composer-parameter-submenu"),
+    null
+  );
+  closeComposerParameterMenu();
+  anchor.remove();
 }
 
 function renderedComposerText(root: ComposerTestElement): string {
@@ -660,12 +786,23 @@ function renderAction(overrides: Partial<ComposerToolbarState> = {}) {
 
 class ComposerTestDocument {
   activeElement: ComposerTestElement | null = null;
+  readonly body = new ComposerTestElement("body");
+  readonly documentElement = { clientWidth: 1_280, clientHeight: 800 };
+  readonly defaultView = {
+    addEventListener: () => undefined,
+    removeEventListener: () => undefined
+  };
+  constructor() {
+    this.body.setConnected(true);
+  }
   createElement(tagName: string): ComposerTestElement {
     return new ComposerTestElement(tagName);
   }
   createElementNS(_namespace: string, tagName: string): ComposerTestElement {
     return new ComposerTestElement(tagName);
   }
+  addEventListener(): void {}
+  removeEventListener(): void {}
 }
 
 class ComposerTestElement {
@@ -686,12 +823,39 @@ class ComposerTestElement {
   onclick: ((event?: unknown) => void) | null = null;
   onchange: (() => void) | null = null;
   onkeydown: ((event: KeyboardEvent) => void) | null = null;
+  onmouseenter: (() => void) | null = null;
+  parentElement: ComposerTestElement | null = null;
+  private connected = false;
   private readonly attributes = new Map<string, string>();
 
   constructor(readonly tagName: string) {}
 
-  empty(): void { this.children.length = 0; }
-  append(...children: ComposerTestElement[]): void { this.children.push(...children); }
+  get isConnected(): boolean { return this.connected; }
+  empty(): void {
+    for (const child of this.children) {
+      child.parentElement = null;
+      child.setConnected(false);
+    }
+    this.children.length = 0;
+  }
+  append(...children: ComposerTestElement[]): void {
+    for (const child of children) this.appendChild(child);
+  }
+  appendChild(child: ComposerTestElement): ComposerTestElement {
+    child.parentElement?.removeChild(child);
+    child.parentElement = this;
+    child.setConnected(this.connected);
+    this.children.push(child);
+    return child;
+  }
+  removeChild(child: ComposerTestElement): ComposerTestElement {
+    const index = this.children.indexOf(child);
+    if (index >= 0) this.children.splice(index, 1);
+    child.parentElement = null;
+    child.setConnected(false);
+    return child;
+  }
+  remove(): void { this.parentElement?.removeChild(this); }
   replaceChildren(...children: ComposerTestElement[]): void { this.empty(); this.append(...children); }
   createDiv(options: Record<string, unknown> = {}): ComposerTestElement { return this.createEl("div", options); }
   createSpan(options: Record<string, unknown> = {}): ComposerTestElement { return this.createEl("span", options); }
@@ -725,6 +889,23 @@ class ComposerTestElement {
   getAttribute(name: string): string | null { return name === "class" ? this.className : this.attributes.get(name) ?? null; }
   removeAttribute(name: string): void { this.attributes.delete(name); }
   get ownerDocument(): ComposerTestDocument { return globalThis.document as unknown as ComposerTestDocument; }
+  setCssStyles(_styles: Partial<CSSStyleDeclaration>): void {}
+  getBoundingClientRect(): DOMRect {
+    return {
+      x: 0,
+      y: 100,
+      top: 100,
+      bottom: 132,
+      left: 0,
+      right: 240,
+      width: 240,
+      height: 32,
+      toJSON: () => ({})
+    } as DOMRect;
+  }
+  contains(element: ComposerTestElement): boolean {
+    return element === this || this.children.some((child) => child.contains(element));
+  }
   querySelector(selector: string): ComposerTestElement | null { return this.querySelectorAll(selector)[0] ?? null; }
   querySelectorAll(selector: string): ComposerTestElement[] {
     const matches: ComposerTestElement[] = [];
@@ -747,6 +928,16 @@ class ComposerTestElement {
   }
   click(): void { if (!this.disabled) this.onclick?.({}); }
   focus(): void { if (!this.disabled) this.ownerDocument.activeElement = this; }
+  setConnected(connected: boolean): void {
+    this.connected = connected;
+    for (const child of this.children) child.setConnected(connected);
+  }
+}
+
+class ComposerTestMutationObserver {
+  constructor(_callback: MutationCallback) {}
+  observe(): void {}
+  disconnect(): void {}
 }
 
 function keyEvent(key: string): KeyboardEvent {

@@ -355,8 +355,11 @@ export interface ApiProviderModelConfig {
   displayName: string;
   input: ApiProviderModelInput[];
   toolCalling: boolean;
+  /** Pi/catalog capability metadata. This does not express the user's preference. */
   reasoning: boolean;
-  /** User preference scoped to this exact Provider model record. */
+  /** User master switch scoped to this exact Provider model record. */
+  reasoningEnabled: boolean;
+  /** Last valid positive strength, retained while reasoning is disabled. */
   reasoningEffort?: ReasoningEffort;
   contextWindow: number;
   /** Provider-published model output ceiling. */
@@ -457,7 +460,7 @@ export const DEFAULT_REVIEW_OUTPUT_DIR = "outputs";
 
 export const DEFAULT_SETTINGS: CodexForObsidianSettings = {
   productGeneration: "pi-agent-product-v1",
-  settingsVersion: 52,
+  settingsVersion: 53,
   settingsLanguage: "zh-CN",
   settingsTab: "providers",
   proxyEnabled: false,
@@ -629,7 +632,7 @@ export function normalizeSettingsData(input: unknown): { settings: CodexForObsid
   if (settings.proxyEndpoint || settings.proxyCredentialRef) {
     settings.proxyUrl = "";
   }
-  migrateLegacyReasoningPreference(settings, data);
+  migrateLegacyReasoningPreference(settings, data, previousVersion);
   normalizeApiProviderSelection(settings);
   settings.settingsVersion = DEFAULT_SETTINGS.settingsVersion;
   const languageChanged = data?.settingsLanguage !== normalizedLanguage;
@@ -810,6 +813,7 @@ export function createApiProviderModelConfig(
       input: preset.imageInput ? ["text", "image"] : ["text"],
       toolCalling: preset.toolCalling,
       reasoning: preset.reasoning,
+      reasoningEnabled: false,
       contextWindow: preset.contextWindow,
       modelMaxTokens: preset.modelMaxTokens,
       maxOutputTokens: preset.maxOutputTokens,
@@ -828,6 +832,7 @@ export function createApiProviderModelConfig(
       // Model has no separate toolCalling field; input is not used to infer it.
       toolCalling: true,
       reasoning: catalogModel.reasoning,
+      reasoningEnabled: false,
       contextWindow: catalogModel.contextWindow,
       modelMaxTokens: catalogModel.maxTokens,
       maxOutputTokens: Math.min(
@@ -848,6 +853,7 @@ export function createApiProviderModelConfig(
     input: ["text"],
     toolCalling: false,
     reasoning: false,
+    reasoningEnabled: false,
     contextWindow: 64_000,
     modelMaxTokens: 8_192,
     maxOutputTokens: 8_192,
@@ -867,10 +873,33 @@ export function applyApiProviderModelLimitsOverride(
     model.id,
     runtimeProviderId
   );
+  if (limitsOverride.contextWindow === baseline.contextWindow) {
+    delete limitsOverride.contextWindow;
+  }
+  if (limitsOverride.modelMaxTokens === baseline.modelMaxTokens) {
+    delete limitsOverride.modelMaxTokens;
+  }
   const contextWindow = limitsOverride.contextWindow
     ?? baseline.contextWindow;
   const modelMaxTokens = limitsOverride.modelMaxTokens
     ?? baseline.modelMaxTokens;
+  const automaticMaxOutputTokens = Math.min(
+    baseline.maxOutputTokens,
+    contextWindow,
+    modelMaxTokens,
+    1_000_000
+  );
+  if (
+    limitsOverride.maxOutputTokens !== undefined
+    && Math.min(
+      limitsOverride.maxOutputTokens,
+      contextWindow,
+      modelMaxTokens,
+      1_000_000
+    ) === automaticMaxOutputTokens
+  ) {
+    delete limitsOverride.maxOutputTokens;
+  }
   const requestedMaxOutputTokens = limitsOverride.maxOutputTokens
     ?? baseline.maxOutputTokens;
   model.contextWindow = contextWindow;
@@ -904,7 +933,10 @@ export function applyApiProviderModelPreset(
   if (index >= 0) {
     const previous = provider.models[index];
     const previousEffort = previous?.reasoningEffort;
-    if (previousEffort) model.reasoningEffort = previousEffort;
+    model.reasoningEnabled = Boolean(previous?.reasoningEnabled && model.reasoning);
+    if (previousEffort && previousEffort !== "none") {
+      model.reasoningEffort = previousEffort;
+    }
     if (previous) {
       clearApiProviderModelInvalidStoredReasoningEffort(provider.id, previous);
     }
@@ -1210,9 +1242,14 @@ export function isValidApiProviderModelConfig(
     || model.input.some((entry) => entry !== "text" && entry !== "image")
     || typeof model.toolCalling !== "boolean"
     || typeof model.reasoning !== "boolean"
+    || typeof model.reasoningEnabled !== "boolean"
+    || (model.reasoningEnabled && !model.reasoning)
     || (
       model.reasoningEffort !== undefined
-      && !normalizeEchoInkReasoningEffort(model.reasoningEffort)
+      && (
+        !normalizeEchoInkReasoningEffort(model.reasoningEffort)
+        || model.reasoningEffort === "none"
+      )
     )
     || !["preset", "catalog", "unknown", "manual"].includes(String(model.metadataSource))
     || !isValidApiProviderModelLimitsOverride(model.limitsOverride)
@@ -2237,8 +2274,10 @@ function migrateLegacyReasoningPreference(
     CodexForObsidianSettings,
     "apiProviders"
   >,
-  data: Record<string, unknown>
+  data: Record<string, unknown>,
+  previousVersion: number
 ): void {
+  if (previousVersion >= 52) return;
   const effort = normalizeEchoInkReasoningEffort(data.defaultReasoning);
   const providerSettingsId = typeof data.activeApiProviderId === "string"
     ? data.activeApiProviderId.trim()
@@ -2251,9 +2290,15 @@ function migrateLegacyReasoningPreference(
     (candidate) => candidate.id === providerSettingsId
   );
   const model = provider ? getApiProviderModel(provider, modelId) : null;
-  if (model && model.reasoningEffort === undefined) {
-    model.reasoningEffort = effort;
+  if (!model) return;
+  if (effort === "none") {
+    model.reasoningEnabled = false;
+    delete model.reasoningEffort;
+    return;
   }
+  if (!model.reasoning) return;
+  model.reasoningEnabled = true;
+  if (model.reasoningEffort === undefined) model.reasoningEffort = effort;
 }
 
 function normalizeApiProviderModels(
@@ -2351,9 +2396,16 @@ function normalizeStoredApiProviderModel(
   }
   if (record.metadataSource === "manual") {
     const catalogModel = resolveEchoInkPiCatalogModel(runtimeProviderId, id);
+    const presetModel = getApiProviderModelPreset(providerId, id);
     if (catalogModel) normalized.reasoning = catalogModel.reasoning;
+    else if (presetModel) normalized.reasoning = presetModel.reasoning;
   }
-  return withStoredReasoningEffort(normalized, record.reasoningEffort);
+  return withStoredReasoningPreference(
+    normalized,
+    record.reasoningEnabled,
+    record.reasoningEffort,
+    record.metadataSource === "manual" && record.reasoning === true
+  );
 }
 
 function normalizeLegacyApiProviderModel(
@@ -2419,6 +2471,7 @@ function normalizeManualApiProviderModel(
     reasoning: typeof record.reasoning === "boolean"
       ? record.reasoning
       : preset?.reasoning ?? false,
+    reasoningEnabled: false,
     contextWindow: baseline.contextWindow,
     modelMaxTokens: baseline.modelMaxTokens,
     maxOutputTokens: baseline.maxOutputTokens,
@@ -2435,7 +2488,12 @@ function normalizeManualApiProviderModel(
     runtimeProviderId,
     limitsOverride
   );
-  return withStoredReasoningEffort(normalized, record.reasoningEffort);
+  return withStoredReasoningPreference(
+    normalized,
+    record.reasoningEnabled,
+    record.reasoningEffort,
+    record.reasoning === true
+  );
 }
 
 function normalizeLegacyApiProviderModelLimits(
@@ -2482,18 +2540,38 @@ function normalizeLegacyApiProviderModelLimits(
   };
 }
 
-function withStoredReasoningEffort(
+function withStoredReasoningPreference(
   model: ApiProviderModelConfig,
-  value: unknown
+  enabledValue: unknown,
+  effortValue: unknown,
+  legacyReasoningEnabled: boolean
 ): ApiProviderModelConfig {
-  const effort = normalizeEchoInkReasoningEffort(value);
-  if (effort) {
+  const effort = normalizeEchoInkReasoningEffort(effortValue);
+  const explicitEnabled = typeof enabledValue === "boolean"
+    ? enabledValue
+    : undefined;
+  const legacyEffortEnabled = effortValue !== undefined
+    && effortValue !== "none";
+  const enabled = effort === "none"
+    ? false
+    : explicitEnabled ?? Boolean(
+      effort
+      || legacyEffortEnabled
+      || legacyReasoningEnabled
+    );
+  model.reasoningEnabled = Boolean(model.reasoning && enabled);
+  delete model.reasoningEffort;
+  INVALID_STORED_REASONING_EFFORT_MODELS.delete(model);
+  EXPLICIT_VALID_STORED_REASONING_EFFORT_MODELS.delete(model);
+  if (effort && effort !== "none") {
     model.reasoningEffort = effort;
-    INVALID_STORED_REASONING_EFFORT_MODELS.delete(model);
     EXPLICIT_VALID_STORED_REASONING_EFFORT_MODELS.add(model);
-  } else if (value !== undefined) {
+  } else if (effort === "none") {
+    // `none` is a valid legacy off state. It is migrated to the master switch
+    // and must clear any earlier invalid-value identity for this model.
+    EXPLICIT_VALID_STORED_REASONING_EFFORT_MODELS.add(model);
+  } else if (effortValue !== undefined && effort !== "none") {
     INVALID_STORED_REASONING_EFFORT_MODELS.add(model);
-    EXPLICIT_VALID_STORED_REASONING_EFFORT_MODELS.delete(model);
   }
   return model;
 }

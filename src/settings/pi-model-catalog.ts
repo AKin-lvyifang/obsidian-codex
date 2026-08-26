@@ -74,7 +74,14 @@ export interface EchoInkPiReasoningOption {
 
 export interface EchoInkPiReasoningCapabilities {
   readonly source: "catalog" | "manual" | "unknown";
+  /** Whether Pi exposes at least one real enabled reasoning state. */
+  readonly supported: boolean;
+  /** Whether Pi exposes a real off request for this model. */
+  readonly supportsOff: boolean;
+  /** Raw, wire-distinct Pi states, including off when it is real. */
   readonly options: readonly Readonly<EchoInkPiReasoningOption>[];
+  /** Positive Composer choices normalized to the five product bands. */
+  readonly enabledOptions: readonly Readonly<EchoInkPiReasoningOption>[];
   readonly defaultEffort: ReasoningEffort | null;
 }
 
@@ -141,11 +148,24 @@ export function resolveEchoInkPiModelReasoningCapabilities(
     }
   }
   const options = [...groups.values()];
+  const enabledOptions = canonicalEnabledReasoningOptions(options);
   const clampedDefault = clampThinkingLevel(model, "medium");
   const defaultWireValueKey = reasoningWireValueKey(model, clampedDefault);
-  const defaultEffort = options.find(
+  const rawDefault = options.find(
     (option) => option.wireValueKey === defaultWireValueKey
-  )?.effort ?? null;
+  ) ?? null;
+  const defaultEffort = rawDefault && rawDefault.effort !== "none"
+    ? enabledOptions.find(
+        (option) => option.wireValueKey === rawDefault.wireValueKey
+      )?.effort
+      ?? enabledOptions.find(
+        (option) => reasoningPresentationBand(option.effort)
+          === reasoningPresentationBand(rawDefault.effort)
+      )?.effort
+      ?? null
+    : enabledOptions.find((option) => option.effort === "medium")?.effort
+      ?? enabledOptions[0]?.effort
+      ?? null;
   return frozenCapabilities("catalog", options, defaultEffort);
 }
 
@@ -177,8 +197,10 @@ export function isEchoInkPiReasoningEffortSupported(
   effort: ReasoningEffort
 ): boolean {
   if (echoInkPiReasoningOption(capabilities, effort)) return true;
-  // Models with no configurable reasoning still have one legal Pi state: off.
-  return effort === "none" && capabilities.options.length === 0;
+  // Models without reasoning still have one legal Pi state: off. A reasoning
+  // model may only use off when Pi exposes a real off request for it.
+  return effort === "none"
+    && (!capabilities.supported || capabilities.supportsOff);
 }
 
 function frozenCapabilities(
@@ -186,11 +208,53 @@ function frozenCapabilities(
   options: readonly EchoInkPiReasoningOption[],
   defaultEffort: ReasoningEffort | null
 ): Readonly<EchoInkPiReasoningCapabilities> {
+  const frozenOptions = Object.freeze(
+    options.map((option) => Object.freeze({ ...option }))
+  );
+  const enabledOptions = Object.freeze(
+    canonicalEnabledReasoningOptions(frozenOptions)
+  );
+  const supported = enabledOptions.length > 0;
   return Object.freeze({
     source,
-    options: Object.freeze(options.map((option) => Object.freeze({ ...option }))),
-    defaultEffort
+    supported,
+    supportsOff: supported
+      && frozenOptions.some((option) => option.effort === "none"),
+    options: frozenOptions,
+    enabledOptions,
+    defaultEffort: supported ? defaultEffort : null
   });
+}
+
+function canonicalEnabledReasoningOptions(
+  options: readonly Readonly<EchoInkPiReasoningOption>[]
+): Readonly<EchoInkPiReasoningOption>[] {
+  const bands = new Map<string, Readonly<EchoInkPiReasoningOption>>();
+  for (const option of options) {
+    if (option.effort === "none") continue;
+    const band = reasoningPresentationBand(option.effort);
+    const current = bands.get(band);
+    if (!current || reasoningBandOptionPreference(option)
+      > reasoningBandOptionPreference(current)) {
+      bands.set(band, option);
+    }
+  }
+  return [...bands.values()];
+}
+
+function reasoningPresentationBand(effort: ReasoningEffort): string {
+  if (effort === "minimal" || effort === "low") return "low";
+  return effort;
+}
+
+function reasoningBandOptionPreference(
+  option: Readonly<EchoInkPiReasoningOption>
+): number {
+  // Both minimal and low are presented as the low product band. Prefer low
+  // when Pi exposes both; retain minimal when it is the only real low state.
+  if (option.effort === "low") return 2;
+  if (option.effort === "minimal") return 1;
+  return 0;
 }
 
 function reasoningOptionPreference(

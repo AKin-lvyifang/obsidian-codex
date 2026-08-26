@@ -28,13 +28,14 @@ import { renderProviderBrandIcon } from "./provider-brand-icons";
 import {
   API_PROVIDER_PRESETS,
   apiProviderApiKeyRequired,
+  getApiProviderModelPreset,
   getApiProviderPreset,
   normalizeApiProviderId,
   type ApiProviderPreset,
   type ApiProviderProtocol
 } from "./provider-presets";
 import { providerTooltipBaseUrl } from "./provider-tooltip";
-import { resolveEchoInkPiCatalogModel } from "./pi-model-catalog";
+import { resolveEchoInkPiReasoningCapabilities } from "./pi-model-catalog";
 import {
   ProviderPreflightSession,
   providerPreflightApiKeyReady,
@@ -913,10 +914,10 @@ export class ProviderModelModal extends Modal {
     defaultLabel.createSpan({
       text: this.label("默认", "Default")
     });
-    row.createDiv({
-      cls: `codex-provider-model-capabilities is-${model.metadataSource}`,
-      text: this.modelCapabilityText(model)
+    const capabilityTags = row.createDiv({
+      cls: `codex-provider-model-capabilities is-${model.metadataSource}`
     });
+    this.renderModelCapabilityTags(capabilityTags, model);
     if (enabled) this.renderModelAdvancedSettings(row, enabled);
   }
 
@@ -1001,10 +1002,17 @@ export class ProviderModelModal extends Modal {
       cls: "codex-provider-model-advanced-heading",
       text: this.label("模型能力", "Model capabilities")
     });
-    capabilities.createDiv({
+    const capabilityDescription = capabilities.createDiv({
       cls: "codex-provider-model-advanced-description",
       text: this.modelCapabilityDescription(model)
     });
+    const refreshCapabilityCopy = (): void => {
+      capabilityDescription.setText(this.modelCapabilityDescription(model));
+      const tags = container.querySelector<HTMLElement>(
+        ".codex-provider-model-capabilities"
+      );
+      if (tags) this.renderModelCapabilityTags(tags, model);
+    };
     const toggles = capabilities.createDiv({
       cls: "codex-provider-custom-toggles"
     });
@@ -1016,6 +1024,7 @@ export class ProviderModelModal extends Modal {
       (value) => {
         model.toolCalling = value;
         model.metadataSource = "manual";
+        refreshCapabilityCopy();
       }
     );
     this.renderToggle(
@@ -1026,23 +1035,58 @@ export class ProviderModelModal extends Modal {
       (value) => {
         model.input = value ? ["text", "image"] : ["text"];
         model.metadataSource = "manual";
+        refreshCapabilityCopy();
       }
     );
-    if (!resolveEchoInkPiCatalogModel(
+    const reasoningCapabilities = resolveEchoInkPiReasoningCapabilities(
       this.draft.runtimeProviderId,
-      model.id
-    )) {
-      this.renderToggle(
-        toggles,
-        this.label("思考模式", "Reasoning mode"),
-        `model:${model.id}:reasoning`,
-        model.reasoning,
-        (value) => {
-          model.reasoning = value;
+      model.id,
+      model.reasoning
+    );
+    const knownCapability = reasoningCapabilities.source === "catalog"
+      || Boolean(getApiProviderModelPreset(this.providerId, model.id));
+    const reasoningSupported = knownCapability
+      ? reasoningCapabilities.supported
+      : model.reasoning || reasoningCapabilities.supported;
+    const reasoningAlwaysEnabled = knownCapability
+      && reasoningSupported
+      && !reasoningCapabilities.supportsOff;
+    const reasoningDisabled = knownCapability && (
+      !reasoningSupported || reasoningAlwaysEnabled
+    );
+    this.renderToggle(
+      toggles,
+      this.label("思考模式", "Reasoning mode"),
+      `model:${model.id}:reasoning`,
+      reasoningAlwaysEnabled || (
+        reasoningSupported && model.reasoningEnabled === true
+      ),
+      (value) => {
+        if (!knownCapability && value) {
+          model.reasoning = true;
+          model.reasoningEnabled = true;
           model.metadataSource = "manual";
+          refreshCapabilityCopy();
+          return;
         }
-      );
-    }
+        model.reasoningEnabled = value;
+        refreshCapabilityCopy();
+      },
+      {
+        disabled: reasoningDisabled,
+        description: knownCapability && !reasoningSupported
+          ? this.label(
+            "此模型不支持思考模式。",
+            "This model does not support reasoning mode."
+          )
+          : reasoningAlwaysEnabled
+            ? this.label(
+              "此模型的思考模式始终开启。",
+              "Reasoning mode is always enabled for this model."
+            )
+            : undefined
+      }
+    );
     const limits = advanced.createDiv({
       cls: "codex-provider-model-advanced-group is-limits"
     });
@@ -1053,8 +1097,8 @@ export class ProviderModelModal extends Modal {
     limits.createDiv({
       cls: "codex-provider-model-advanced-description",
       text: this.label(
-        "每项都可单独覆盖；留空会沿用可靠模型元数据或内部保守值，且不会保存用户覆盖。",
-        "Override each limit independently. Blank fields inherit reliable model metadata or an internal conservative value and are not saved as user overrides."
+        "默认留空并自动使用模型值，无需填写；只有需要手动覆盖时才输入。",
+        "Leave these fields blank to use automatic model values. Enter a value only when a manual override is needed."
       )
     });
     const tokens = limits.createDiv({ cls: "codex-provider-context-grid" });
@@ -1070,7 +1114,7 @@ export class ProviderModelModal extends Modal {
       tokens,
       model,
       "modelMaxTokens",
-      this.label("模型最大输出", "Model max output"),
+      this.label("模型输出上限", "Model output limit"),
       1,
       1_000_000
     );
@@ -1078,7 +1122,7 @@ export class ProviderModelModal extends Modal {
       tokens,
       model,
       "maxOutputTokens",
-      this.label("每次请求最大输出", "Per-request max output"),
+      this.label("单次输出上限", "Per-request output limit"),
       1,
       1_000_000
     );
@@ -1106,7 +1150,7 @@ export class ProviderModelModal extends Modal {
         value: model.limitsOverride?.[key] === undefined
           ? ""
           : String(model.limitsOverride[key]),
-        placeholder: String(model[key]),
+        placeholder: this.modelLimitPlaceholder(model[key]),
         "data-modal-focus-key": `model:${model.id}:${key}`
       }
     }) as HTMLInputElement;
@@ -1117,14 +1161,15 @@ export class ProviderModelModal extends Modal {
     });
     input.setAttr("aria-describedby", hintId);
     const updateHint = (): void => {
+      const formattedValue = this.formatModelLimit(model[key]);
       hint.setText(model.limitsOverride?.[key] === undefined
         ? this.label(
-          `留空时采用有效值 ${model[key].toLocaleString()}`,
-          `Blank uses effective value ${model[key].toLocaleString()}`
+          `留空即自动使用默认值 ${formattedValue}，无需填写。`,
+          `Leave blank to use the automatic default of ${formattedValue}; no entry is required.`
         )
         : this.label(
-          `当前有效值 ${model[key].toLocaleString()}`,
-          `Effective value ${model[key].toLocaleString()}`
+          `当前手动值 ${formattedValue}；清空即可恢复自动。`,
+          `Current manual value: ${formattedValue}. Clear the field to restore automatic mode.`
         ));
     };
     updateHint();
@@ -1138,7 +1183,7 @@ export class ProviderModelModal extends Modal {
           this.draft.runtimeProviderId,
           limitsOverride
         );
-        input.placeholder = String(model[key]);
+        input.placeholder = this.modelLimitPlaceholder(model[key]);
         updateHint();
         this.invalidatePreflight();
         return;
@@ -1156,7 +1201,8 @@ export class ProviderModelModal extends Modal {
         this.draft.runtimeProviderId,
         limitsOverride
       );
-      input.placeholder = String(model[key]);
+      if (model.limitsOverride?.[key] === undefined) input.value = "";
+      input.placeholder = this.modelLimitPlaceholder(model[key]);
       updateHint();
       this.invalidatePreflight();
     };
@@ -1186,29 +1232,62 @@ export class ProviderModelModal extends Modal {
       );
   }
 
-  private modelCapabilityText(model: ApiProviderModelConfig): string {
+  private modelCapabilityTags(model: ApiProviderModelConfig): string[] {
     const source = model.metadataSource === "unknown"
-      ? this.label("能力未知", "Capabilities unknown")
+      ? this.label("能力待确认", "Capabilities unverified")
       : model.metadataSource === "manual"
-        ? this.label("手动覆盖", "Manual override")
+        ? this.label("手动配置", "Manual configuration")
         : model.metadataSource === "catalog"
-          ? this.label("Pi 目录能力", "Pi catalog capabilities")
-          : this.label("已知能力", "Known capabilities");
+          ? this.label("Pi 目录", "Pi catalog")
+          : this.label("内置预设", "Built-in preset");
     const input = apiProviderModelSupportsImage(model)
-      ? this.label("文字 + 图片", "text + image")
+      ? this.label("图片输入", "Image input")
       : this.label("仅文字", "text only");
+    const reasoningCapabilities = resolveEchoInkPiReasoningCapabilities(
+      this.draft.runtimeProviderId,
+      model.id,
+      model.reasoning
+    );
+    const knownCapability = reasoningCapabilities.source === "catalog"
+      || Boolean(getApiProviderModelPreset(this.providerId, model.id));
+    const reasoning = knownCapability
+      ? reasoningCapabilities.supported
+        ? this.label("支持思考", "Reasoning supported")
+        : this.label("不支持思考", "Reasoning unsupported")
+      : model.reasoning
+        ? this.label("支持思考", "Reasoning supported")
+        : this.label("思考待确认", "Reasoning unverified");
     return [
       source,
       input,
-      this.label(
-        `工具 ${model.toolCalling ? "是" : "否"}`,
-        `tools ${model.toolCalling ? "yes" : "no"}`
-      ),
-      this.label(
-        `推理 ${model.reasoning ? "是" : "否"}`,
-        `reasoning ${model.reasoning ? "yes" : "no"}`
-      )
-    ].join(" · ");
+      model.toolCalling
+        ? this.label("工具调用", "Tool calling")
+        : this.label("无工具调用", "No tool calling"),
+      reasoning
+    ];
+  }
+
+  private renderModelCapabilityTags(
+    container: HTMLElement,
+    model: ApiProviderModelConfig
+  ): void {
+    container.empty();
+    container.className = `codex-provider-model-capabilities is-${model.metadataSource}`;
+    for (const text of this.modelCapabilityTags(model)) {
+      container.createSpan({
+        cls: "codex-provider-model-tag",
+        text
+      });
+    }
+  }
+
+  private formatModelLimit(value: number): string {
+    return value.toLocaleString(this.zh ? "zh-CN" : "en-US");
+  }
+
+  private modelLimitPlaceholder(value: number): string {
+    const formattedValue = this.formatModelLimit(value);
+    return this.label(`自动（${formattedValue}）`, `Auto (${formattedValue})`);
   }
 
   private renderPreflightStatus(statusRow: HTMLElement): void {
@@ -1444,22 +1523,40 @@ export class ProviderModelModal extends Modal {
     label: string,
     focusKey: string,
     checked: boolean,
-    onChange: (value: boolean) => void
+    onChange: (value: boolean) => void,
+    options: Readonly<{
+      disabled?: boolean;
+      description?: string;
+    }> = {}
   ): void {
     const control = container.createEl("label", {
-      cls: "codex-provider-custom-toggle"
+      cls: `codex-provider-custom-toggle${options.disabled ? " is-disabled" : ""}`
     });
     const input = control.createEl("input", {
       attr: { type: "checkbox", "data-modal-focus-key": `toggle:${focusKey}` }
     }) as HTMLInputElement;
     input.checked = checked;
+    input.disabled = options.disabled === true;
     input.onchange = () => {
       this.focusIntent = `toggle:${focusKey}`;
       onChange(input.checked);
       this.invalidatePreflight();
       this.restoreFocusIntent();
     };
-    control.createSpan({ text: label });
+    const copy = control.createSpan({ cls: "codex-provider-custom-toggle-copy" });
+    copy.createSpan({
+      cls: "codex-provider-custom-toggle-label",
+      text: label
+    });
+    if (options.description) {
+      const descriptionId = `${this.accessibilityId}-${focusKey.replace(/[^A-Za-z0-9_-]/gu, "-")}-description`;
+      copy.createSpan({
+        cls: "codex-provider-custom-toggle-description",
+        text: options.description,
+        attr: { id: descriptionId }
+      });
+      input.setAttr("aria-describedby", descriptionId);
+    }
   }
 
   private updateProtocolPill(): void {
