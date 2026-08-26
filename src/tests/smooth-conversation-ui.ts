@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { TFile } from "obsidian";
-import type { ChatMessage, SettingsLanguage } from "../settings/settings";
+import type { ChatMessage, SettingsLanguage, StoredSession } from "../settings/settings";
 import { settingsCopy } from "../settings/i18n";
 import { extractProcessFileRefs, stableHashedIdentity } from "../core/mapping";
 import { PiChatUiProjector } from "../harness/pi-native/pi-chat-ui-projector";
@@ -34,6 +34,7 @@ import {
 import type { EchoInkTaskPlanSnapshot } from "../types/task-plan";
 import type { EchoInkQuestionInteraction } from "../types/conversation-turn";
 import { InteractionDockController } from "../ui/codex-view/interaction-dock";
+import { renderCodexTabs } from "../ui/codex-view/tabs";
 
 type TestEventHandler = (event: {
   preventDefault(): void;
@@ -42,6 +43,7 @@ type TestEventHandler = (event: {
 
 interface TestActivationEvent {
   readonly isTrusted: boolean;
+  readonly detail?: number;
   readonly key?: string;
   readonly code?: string;
   preventDefault(): void;
@@ -59,14 +61,20 @@ class FakeElement {
   clientWidth = 420;
   checked = false;
   boundingHeight = 0;
+  boundingLeft = 0;
+  boundingWidth = 56;
   disabled = false;
+  focusVisible = false;
   focused = false;
   id = "";
   open = false;
   parent: FakeElement | null = null;
   scrollHeight = 640;
+  scrollLeft = 0;
   scrollTop = 0;
+  scrollWidth = 420;
   src = "";
+  style: Record<string, string> = {};
   textContent = "";
   value = "";
   onclick: ((event: TestActivationEvent) => unknown) | null = null;
@@ -74,7 +82,17 @@ class FakeElement {
   onerror: (() => unknown) | null = null;
   onload: (() => unknown) | null = null;
   oninput: (() => unknown) | null = null;
+  onblur: (() => unknown) | null = null;
+  onfocus: (() => unknown) | null = null;
   onkeydown: ((event: TestActivationEvent) => unknown) | null = null;
+  onmouseenter: (() => unknown) | null = null;
+  onmouseleave: (() => unknown) | null = null;
+  onpointerdown: ((event: {
+    readonly button: number;
+    readonly isPrimary: boolean;
+    readonly pointerType: string;
+  }) => unknown) | null = null;
+  onpointercancel: (() => unknown) | null = null;
   ontoggle: ((event: { readonly isTrusted: boolean }) => unknown) | null = null;
 
   constructor(readonly tag: string) {}
@@ -125,6 +143,7 @@ class FakeElement {
   }
 
   empty(): void {
+    for (const child of this.children) child.parent = null;
     this.children = [];
     this.content = [];
     this.textContent = "";
@@ -210,14 +229,53 @@ class FakeElement {
     return null;
   }
 
+  contains(candidate: unknown): boolean {
+    if (candidate === this) return true;
+    return this.children.some((child) => child.contains(candidate));
+  }
+
   focus(): void {
+    const testDocument = (globalThis as unknown as {
+      document?: { activeElement: FakeElement | null };
+    }).document;
+    const previous = testDocument?.activeElement;
+    const inheritFocusVisible = previous?.focusVisible === true;
+    if (previous && previous !== this) {
+      previous.focused = false;
+      previous.onblur?.();
+    }
+    if (testDocument) testDocument.activeElement = this;
+    if (inheritFocusVisible) this.focusVisible = true;
     this.focused = true;
+    this.onfocus?.();
+  }
+
+  blur(): void {
+    const testDocument = (globalThis as unknown as {
+      document?: { activeElement: FakeElement | null };
+    }).document;
+    if (testDocument?.activeElement === this) testDocument.activeElement = null;
+    this.focused = false;
+    this.onblur?.();
+  }
+
+  matches(selector: string): boolean {
+    if (selector === ":focus-visible") return this.focused && this.focusVisible;
+    return this.matchesSelector(selector);
   }
 
   setCssStyles(_styles: Record<string, string>): void {}
 
-  getBoundingClientRect(): { height: number } {
-    return { height: this.boundingHeight };
+  getBoundingClientRect(): { height: number; left: number; width: number } {
+    return {
+      height: this.boundingHeight,
+      left: this.boundingLeft,
+      width: this.boundingWidth
+    };
+  }
+
+  scrollTo(options: { left?: number }): void {
+    if (typeof options.left === "number") this.scrollLeft = options.left;
   }
 
   findByClass(cls: string): FakeElement | null {
@@ -363,6 +421,167 @@ function clickElement(element: FakeElement): void {
     preventDefault: () => undefined,
     stopPropagation: () => undefined
   } as never);
+}
+
+function testConversationSession(
+  id: string,
+  title: string,
+  createdAt: number
+): StoredSession {
+  return {
+    id,
+    title,
+    kind: "chat",
+    piSessionId: `pi-${id}`,
+    bodyAuthority: "pi_session_only",
+    cwd: "/disposable-vault",
+    messages: [],
+    createdAt,
+    updatedAt: createdAt
+  };
+}
+
+function assertSessionSummaryTooltipLifecycle(): void {
+  const testGlobal = globalThis as unknown as Record<string, unknown>;
+  const originalDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
+  const originalHTMLElement = Object.getOwnPropertyDescriptor(globalThis, "HTMLElement");
+  const testDocument: { activeElement: FakeElement | null } = { activeElement: null };
+  Object.defineProperty(testGlobal, "document", {
+    configurable: true,
+    value: testDocument
+  });
+  Object.defineProperty(testGlobal, "HTMLElement", {
+    configurable: true,
+    value: FakeElement
+  });
+
+  try {
+    const container = new FakeElement("div");
+    const sessions = [
+      testConversationSession("first", "第一会话", 1),
+      testConversationSession("second", "第二会话", 2)
+    ];
+    let activeSessionId = "first";
+    const render = () => renderCodexTabs(
+      container as unknown as HTMLElement,
+      sessions,
+      activeSessionId,
+      {
+        onActivate: (session) => {
+          activeSessionId = session.id;
+          render();
+        },
+        onContextMenu: () => undefined,
+        onRename: () => undefined,
+        onDeleteSessions: () => undefined,
+        onCreateSession: () => undefined
+      }
+    );
+    render();
+
+    const pointerTarget = container.findAllByClass("codex-session-tab")[1]!;
+    pointerTarget.onmouseenter?.();
+    assert.equal(
+      container.findByClass("codex-session-summary-tooltip")?.hasClass("is-visible"),
+      true,
+      "pointer hover shows the session summary"
+    );
+    pointerTarget.onpointerdown?.({
+      button: 0,
+      isPrimary: true,
+      pointerType: "mouse"
+    });
+    assert.equal(
+      container.findByClass("codex-session-summary-tooltip")?.hasClass("is-visible"),
+      false,
+      "primary pointer down dismisses the current summary before activation"
+    );
+    pointerTarget.onpointercancel?.();
+    pointerTarget.onmouseenter?.();
+    assert.equal(
+      container.findByClass("codex-session-summary-tooltip")?.hasClass("is-visible"),
+      true,
+      "a cancelled pointer activation releases the one-shot dismissal"
+    );
+    pointerTarget.onpointerdown?.({
+      button: 0,
+      isPrimary: true,
+      pointerType: "mouse"
+    });
+    pointerTarget.focus();
+    pointerTarget.onclick?.({
+      isTrusted: true,
+      detail: 1,
+      preventDefault: () => undefined,
+      stopPropagation: () => undefined
+    });
+
+    const selectedAfterPointerSwitch = container
+      .findAllByClass("codex-session-tab")
+      .find((tab) => tab.getAttribute("aria-selected") === "true")!;
+    const tooltipAfterPointerSwitch = container.findByClass("codex-session-summary-tooltip")!;
+    selectedAfterPointerSwitch.onmouseenter?.();
+    assert.equal(selectedAfterPointerSwitch.getAttribute("data-session-id"), "second");
+    assert.equal(
+      tooltipAfterPointerSwitch.hasClass("is-visible"),
+      false,
+      "pointer activation must keep the summary closed after focus restoration"
+    );
+    assert.equal(tooltipAfterPointerSwitch.getAttribute("aria-hidden"), "true");
+
+    selectedAfterPointerSwitch.onmouseleave?.();
+    selectedAfterPointerSwitch.onmouseenter?.();
+    assert.equal(tooltipAfterPointerSwitch.hasClass("is-visible"), true);
+    selectedAfterPointerSwitch.onmouseleave?.();
+    assert.equal(
+      tooltipAfterPointerSwitch.hasClass("is-visible"),
+      false,
+      "pointer-focused tabs must dismiss the summary on mouse leave"
+    );
+
+    selectedAfterPointerSwitch.blur();
+    const keyboardTarget = container.findAllByClass("codex-session-tab")[0]!;
+    keyboardTarget.focusVisible = true;
+    keyboardTarget.focus();
+    const tooltipBeforeKeyboardActivation = container.findByClass(
+      "codex-session-summary-tooltip"
+    )!;
+    assert.equal(
+      tooltipBeforeKeyboardActivation.hasClass("is-visible"),
+      true,
+      "keyboard-visible focus keeps the accessible session summary"
+    );
+    keyboardTarget.onclick?.({
+      isTrusted: true,
+      detail: 0,
+      preventDefault: () => undefined,
+      stopPropagation: () => undefined
+    });
+    const selectedAfterKeyboardSwitch = container
+      .findAllByClass("codex-session-tab")
+      .find((tab) => tab.getAttribute("aria-selected") === "true")!;
+    const tooltipAfterKeyboardSwitch = container.findByClass(
+      "codex-session-summary-tooltip"
+    )!;
+    assert.equal(selectedAfterKeyboardSwitch.getAttribute("data-session-id"), "first");
+    assert.equal(
+      tooltipAfterKeyboardSwitch.hasClass("is-visible"),
+      true,
+      "keyboard activation keeps the summary visible after focus restoration"
+    );
+    selectedAfterKeyboardSwitch.onmouseleave?.();
+    assert.equal(tooltipAfterKeyboardSwitch.hasClass("is-visible"), true);
+    selectedAfterKeyboardSwitch.blur();
+    assert.equal(tooltipAfterKeyboardSwitch.hasClass("is-visible"), false);
+  } finally {
+    if (originalDocument) Object.defineProperty(testGlobal, "document", originalDocument);
+    else delete testGlobal.document;
+    if (originalHTMLElement) {
+      Object.defineProperty(testGlobal, "HTMLElement", originalHTMLElement);
+    } else {
+      delete testGlobal.HTMLElement;
+    }
+  }
 }
 
 async function assertInteractionDockContracts(): Promise<void> {
@@ -560,6 +779,7 @@ function taskPlanMessage(
 }
 
 export async function runSmoothConversationUiTests(): Promise<void> {
+  assertSessionSummaryTooltipLifecycle();
   assert.equal(
     settingsCopy("zh-CN").general.settingsLanguageDesc,
     "控制 EchoInk 界面语言；不会改写 Prompt、会话内容或用户自定义名称。"

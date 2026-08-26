@@ -34,6 +34,7 @@ interface CodexSessionNavigatorState {
   trackScrollLeft: number;
   trackScrollRestored: boolean;
   suppressTrackClickUntil: number;
+  activationDismissedSummarySessionId: string;
   lastActiveSessionId: string;
   renderGeneration: number;
   focusRequestSequence: number;
@@ -452,9 +453,18 @@ export function renderCodexTabs(
         tabindex: tabStop ? "0" : "-1"
       }
     });
-    tab.onmouseenter = () => showSummary(tab, summary);
+    let pointerActivationPending = false;
+    tab.onmouseenter = () => {
+      if (state.activationDismissedSummarySessionId === session.id) return;
+      state.activationDismissedSummarySessionId = "";
+      showSummary(tab, summary);
+    };
     tab.onmouseleave = () => {
-      if (typeof document === "undefined" || document.activeElement !== tab) {
+      pointerActivationPending = false;
+      if (state.activationDismissedSummarySessionId === session.id) {
+        state.activationDismissedSummarySessionId = "";
+      }
+      if (!tab.matches(":focus-visible")) {
         hideSummary(tab);
       }
     };
@@ -467,14 +477,44 @@ export function renderCodexTabs(
       });
       setSessionTabStop(tabElements, tab, state);
       revealSessionTrackItemMinimally(track, tab, state);
-      showSummary(tab, summary);
+      if (
+        tab.matches(":focus-visible")
+        && state.activationDismissedSummarySessionId !== session.id
+      ) {
+        state.activationDismissedSummarySessionId = "";
+        showSummary(tab, summary);
+      }
     };
     tab.onblur = () => hideSummary(tab);
+    tab.onpointerdown = (event) => {
+      if (!event.isPrimary || event.button !== 0) return;
+      pointerActivationPending = true;
+      state.activationDismissedSummarySessionId = session.id;
+      hideSummary(tab);
+    };
+    tab.onpointercancel = () => {
+      pointerActivationPending = false;
+      if (state.activationDismissedSummarySessionId === session.id) {
+        state.activationDismissedSummarySessionId = "";
+      }
+    };
     tab.createSpan({ cls: "codex-session-tab-title", text: String(index + 1) });
     tab.onclick = (event) => {
       if (!shouldSuppressSessionTrackClick(state.suppressTrackClickUntil)) {
+        const pointerActivation = pointerActivationPending || event.detail > 0;
+        pointerActivationPending = false;
+        if (pointerActivation) {
+          state.activationDismissedSummarySessionId = session.id;
+          hideSummary(tab);
+        } else {
+          state.activationDismissedSummarySessionId = "";
+        }
         activate(session);
         return;
+      }
+      pointerActivationPending = false;
+      if (state.activationDismissedSummarySessionId === session.id) {
+        state.activationDismissedSummarySessionId = "";
       }
       event.preventDefault();
       event.stopPropagation();
@@ -1091,6 +1131,7 @@ function navigatorStateFor(container: HTMLElement): CodexSessionNavigatorState {
     trackScrollLeft: 0,
     trackScrollRestored: false,
     suppressTrackClickUntil: 0,
+    activationDismissedSummarySessionId: "",
     lastActiveSessionId: "",
     renderGeneration: 0,
     focusRequestSequence: 0,
