@@ -241,6 +241,40 @@ export function getApiProviderPreset(
     ?? API_PROVIDER_PRESETS[API_PROVIDER_PRESETS.length - 1];
 }
 
+export function apiProviderPresetDisplayName(
+  providerId: ApiProviderId,
+  language: "zh-CN" | "en"
+): string {
+  const name = getApiProviderPreset(providerId).name;
+  const divider = " / ";
+  const dividerIndex = name.indexOf(divider);
+  if (dividerIndex < 0) return name;
+  const chinese = name.slice(0, dividerIndex).trim();
+  const english = name.slice(dividerIndex + divider.length).trim();
+  return language === "en"
+    ? english || chinese || name
+    : chinese || english || name;
+}
+
+export function apiProviderConfiguredDisplayName(
+  providerId: ApiProviderId,
+  configuredName: string,
+  language: "zh-CN" | "en"
+): string {
+  const preset = getApiProviderPreset(providerId);
+  const configured = configuredName.trim();
+  const localized = apiProviderPresetDisplayName(providerId, language);
+  if (preset.id !== "custom") return localized;
+  const presetNames = new Set([
+    preset.name,
+    apiProviderPresetDisplayName(providerId, "zh-CN"),
+    apiProviderPresetDisplayName(providerId, "en")
+  ]);
+  return !configured || presetNames.has(configured)
+    ? localized
+    : configured;
+}
+
 export function getApiProviderModelPreset(
   providerId: ApiProviderId,
   modelId: string

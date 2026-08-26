@@ -5,6 +5,7 @@ import type {
   ImageContent,
   Model
 } from "@earendil-works/pi-ai";
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import {
   createPiNativeControlledProvider,
   createPiNativeModelFromCatalog,
@@ -115,6 +116,15 @@ function assertCurrentModelImageCapabilityIsCanonical(): void {
   assert.equal(configuredResolved.reasoning, true);
   assert.equal(piModelSupportsImageInput(configuredResolved), true);
   assert.deepEqual(configuredResolved.input, ["text", "image"]);
+  assert.deepEqual(getSupportedThinkingLevels(configuredResolved), [
+    "off",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+  ]);
 
   const textOnly = createPiNativeModelFromConfiguration({
     catalogModel: providerModel(),

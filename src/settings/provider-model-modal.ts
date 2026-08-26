@@ -28,6 +28,8 @@ import { renderProviderBrandIcon } from "./provider-brand-icons";
 import {
   API_PROVIDER_PRESETS,
   apiProviderApiKeyRequired,
+  apiProviderConfiguredDisplayName,
+  apiProviderPresetDisplayName,
   getApiProviderModelPreset,
   getApiProviderPreset,
   normalizeApiProviderId,
@@ -303,7 +305,13 @@ export class ProviderModelModal extends Modal {
               && this.preflight.state.status === "available"
           );
           if (result.saved) {
-            this.announce(this.options.copy.providers.saved(this.draft.name));
+            this.announce(this.options.copy.providers.saved(
+              apiProviderConfiguredDisplayName(
+                this.providerId,
+                this.draft.name,
+                this.options.language
+              )
+            ));
             this.close();
             return;
           }
@@ -371,7 +379,11 @@ export class ProviderModelModal extends Modal {
       }
     });
     trigger.id = this.providerTriggerId;
-    const triggerName = renderProviderIdentity(trigger, providerId, selected.name);
+    const triggerName = renderProviderIdentity(
+      trigger,
+      providerId,
+      apiProviderPresetDisplayName(providerId, this.options.language)
+    );
     triggerName.id = `${this.providerTriggerId}-name`;
     trigger.setAttr("aria-labelledby", `${providerLabel.id} ${triggerName.id}`);
     this.applyProviderUrlTooltip(trigger, providerId);
@@ -415,7 +427,11 @@ export class ProviderModelModal extends Modal {
         text: this.label(group.zh, group.en)
       });
       const rows = presets.map((item) => ({
-        element: this.renderProviderOption(options, item.id, item.name),
+        element: this.renderProviderOption(
+          options,
+          item.id,
+          apiProviderPresetDisplayName(item.id, this.options.language)
+        ),
         text: `${item.id} ${item.name}`.toLowerCase()
       }));
       optionRows.push(...rows);

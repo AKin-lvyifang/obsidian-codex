@@ -28,9 +28,6 @@ import {
   OPENAI_MODELS
 } from "@earendil-works/pi-ai/providers/openai.models";
 import {
-  QWEN_TOKEN_PLAN_MODELS
-} from "@earendil-works/pi-ai/providers/qwen-token-plan.models";
-import {
   QWEN_TOKEN_PLAN_CN_MODELS
 } from "@earendil-works/pi-ai/providers/qwen-token-plan-cn.models";
 import {
@@ -46,6 +43,7 @@ import {
   createApiProviderModelConfig,
   DEFAULT_SETTINGS,
   normalizeSettingsData,
+  providerConnectionLabel,
   resolveEchoInkWelcomeCopy,
   removeApiProvider,
   type ApiProviderConfig,
@@ -54,6 +52,7 @@ import {
 import CodexForObsidianPlugin from "../main";
 import {
   API_PROVIDER_PRESETS,
+  apiProviderConfiguredDisplayName,
   apiProviderRequestUrl,
   getApiProviderPreset,
   isQwenTokenPlanApiProviderUrl,
@@ -98,6 +97,9 @@ import {
 import {
   createPiProviderModelDefinition
 } from "../harness/pi/production-pi-model-resolver";
+import {
+  createPiNativeModelFromConfiguration
+} from "../harness/pi-native/pi-native-controlled-provider";
 import {
   ProviderPreflightSession,
   providerPreflightApiKeyReady
@@ -1705,9 +1707,27 @@ async function assertSettingsAccessibleNamesAndOverflow(): Promise<void> {
     "ollama",
     "ui-contract-no-key"
   );
-  settings.apiProviders = [provider, missingCredential, credentialFree];
+  const customProvider = createApiProviderConfig(
+    "custom",
+    "ui-contract-custom"
+  );
+  customProvider.name = "A/B Private Gateway";
+  customProvider.apiKey = "fixture-custom-key";
+  customProvider.models = [createApiProviderModelConfig(
+    "custom",
+    "manual-model",
+    customProvider.runtimeProviderId
+  )];
+  customProvider.defaultModelId = customProvider.models[0].id;
+  settings.apiProviders = [
+    provider,
+    missingCredential,
+    credentialFree,
+    customProvider
+  ];
   activateApiProvider(settings, provider);
   settings.settingsTab = "providers";
+  settings.settingsLanguage = "zh-CN";
   const maintenanceReportPath = "outputs/maintenance-2026-08-25.md";
   const maintenanceAt = Date.UTC(2026, 7, 25, 6, 30);
   settings.knowledgeBase.maintenanceHistory = [{
@@ -1883,12 +1903,59 @@ async function assertSettingsAccessibleNamesAndOverflow(): Promise<void> {
   const identity = tab.containerEl.querySelector(
     ".codex-provider-saved-identity"
   );
-  assert.match(identity?.getAttribute("aria-label") ?? "", /DeepSeek/u);
+  assert.match(identity?.getAttribute("aria-label") ?? "", /深度求索/u);
+  const savedProviderName = (providerId: string) => tab.containerEl
+    .querySelector<ProviderModalTestElement>(
+      `[data-echoink-focus-key="provider:${providerId}:edit"]`
+    )
+    ?.closest(".codex-provider-saved-row")
+    ?.querySelector<ProviderModalTestElement>(".codex-provider-saved-provider")
+    ?.textContentAssignments.at(-1);
+  assert.equal(savedProviderName(provider.id), "深度求索");
+  assert.equal(savedProviderName(customProvider.id), customProvider.name);
+  assert.equal(
+    apiProviderConfiguredDisplayName(
+      "deepseek",
+      "旧名称 / Legacy name",
+      "zh-CN"
+    ),
+    "深度求索"
+  );
+  assert.equal(
+    apiProviderConfiguredDisplayName(
+      "deepseek",
+      "旧名称 / Legacy name",
+      "en"
+    ),
+    "DeepSeek"
+  );
+  assert.equal(
+    apiProviderConfiguredDisplayName(
+      "custom",
+      getApiProviderPreset("custom").name,
+      "zh-CN"
+    ),
+    "自定义"
+  );
+  assert.equal(
+    apiProviderConfiguredDisplayName(
+      "custom",
+      getApiProviderPreset("custom").name,
+      "en"
+    ),
+    "Custom"
+  );
+  settings.settingsLanguage = "en";
+  tab.display();
+  assert.equal(savedProviderName(provider.id), "DeepSeek");
+  assert.equal(savedProviderName(customProvider.id), customProvider.name);
+  settings.settingsLanguage = "zh-CN";
+  tab.display();
   for (const action of ["edit", "delete"]) {
     const button = tab.containerEl.querySelector(
       `[data-echoink-focus-key="provider:${provider.id}:${action}"]`
     );
-    assert.match(button?.getAttribute("aria-label") ?? "", /DeepSeek/u);
+    assert.match(button?.getAttribute("aria-label") ?? "", /深度求索/u);
   }
   const providerRows = new Map([
     [provider.id, ["API Key 已填写", "is-ready"]],
@@ -2173,6 +2240,20 @@ async function assertSettingsAccessibleNamesAndOverflow(): Promise<void> {
   assert.equal(
     optionForProvider(credentialFree.id)?.disabled,
     false
+  );
+  assert.match(optionForProvider(provider.id)?.textContent ?? "", /^深度求索 · /u);
+  assert.doesNotMatch(optionForProvider(provider.id)?.textContent ?? "", / \/ /u);
+  assert.match(
+    optionForProvider(customProvider.id)?.textContent ?? "",
+    new RegExp(`^${customProvider.name} · `, "u")
+  );
+  assert.match(
+    providerConnectionLabel(settings, "zh-CN"),
+    /^深度求索 · /u
+  );
+  assert.match(
+    providerConnectionLabel(settings, "en"),
+    /^DeepSeek · /u
   );
   const dashboard = tab.containerEl.querySelector<ProviderModalTestElement>(
     ".codex-kb-settings-dashboard"
@@ -3543,15 +3624,39 @@ function assertPiReasoningCapabilityContract(): void {
     );
     assert.deepEqual(qwen.options.map((option) => option.effort), [
       "none",
-      "medium"
+      "low",
+      "medium",
+      "xhigh"
     ]);
     assert.deepEqual(qwen.enabledOptions.map((option) => option.effort), [
-      "medium"
+      "low",
+      "medium",
+      "xhigh"
     ]);
     assert.equal(qwen.supported, true);
     assert.equal(qwen.supportsOff, true);
-    assert.equal(qwen.defaultEffort, "medium");
+    assert.equal(qwen.defaultEffort, "xhigh");
   }
+
+  const qwenGa = resolveEchoInkPiReasoningCapabilities(
+    "qwen",
+    "qwen3.8-max",
+    true
+  );
+  assert.deepEqual(
+    qwenGa.enabledOptions.map((option) => option.effort),
+    ["low", "medium", "xhigh"]
+  );
+  assert.equal(qwenGa.defaultEffort, "xhigh");
+
+  const qwenSingleDefault = resolveEchoInkPiReasoningCapabilities(
+    "qwen-token-plan-cn",
+    "qwen3.7-plus"
+  );
+  assert.deepEqual(
+    qwenSingleDefault.enabledOptions.map((option) => option.effort),
+    ["low", "medium", "high", "xhigh", "max"]
+  );
 
   const glm = resolveEchoInkPiReasoningCapabilities(
     "zai-coding-cn",
@@ -3604,9 +3709,25 @@ function assertPiReasoningCapabilityContract(): void {
   );
   assert.deepEqual(efforts("openai", "gpt-4"), []);
   assert.deepEqual(efforts("unknown-runtime", "gpt-5.6-sol"), []);
-  assert.deepEqual(efforts("unknown-runtime", "manual-reasoner", true), [
+  const manual = resolveEchoInkPiReasoningCapabilities(
+    "unknown-runtime",
+    "manual-reasoner",
+    true
+  );
+  assert.deepEqual(manual.options.map((option) => option.effort), [
     "none",
-    "medium"
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+  ]);
+  assert.deepEqual(manual.enabledOptions.map((option) => option.effort), [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
   ]);
 }
 
@@ -3715,16 +3836,66 @@ async function assertPiReasoningPayloadContract(): Promise<void> {
     assert.deepEqual(deepSeekMax.thinking, { type: "enabled" });
     assert.equal(deepSeekMax.reasoning_effort, "max");
 
-    const qwen = QWEN_TOKEN_PLAN_MODELS["qwen3.8-max-preview"];
+    const qwen = resolveEchoInkPiCatalogModel(
+      "qwen-token-plan",
+      "qwen3.8-max-preview"
+    );
     assert.ok(qwen);
-    const qwenOff = await capturePiPayload(qwen, "off");
-    const qwenOn = await capturePiPayload(qwen, "medium");
+    const qwenOff = await captureDispatchedPiPayload(qwen, "off");
     assert.equal(qwenOff.enable_thinking, false);
-    assert.equal(qwenOn.enable_thinking, true);
-    for (const payload of [qwenOff, qwenOn]) {
+    assert.equal(Object.hasOwn(qwenOff, "reasoning_effort"), false);
+    for (const level of ["low", "medium", "xhigh"] as const) {
+      const payload = await captureDispatchedPiPayload(qwen, level);
+      assert.equal(payload.enable_thinking, true);
+      assert.equal(payload.reasoning_effort, level);
+      assert.equal(Object.hasOwn(payload, "thinking_budget"), false);
       assert.equal(Object.hasOwn(payload, "thinking"), false);
       assert.equal(Object.hasOwn(payload, "reasoning"), false);
-      assert.equal(Object.hasOwn(payload, "reasoning_effort"), false);
+    }
+
+    const qwenGa = createPiNativeModelFromConfiguration({
+      catalogModel: undefined,
+      provider: {
+        providerId: "qwen",
+        apiProtocol: "openai-completions",
+        authMode: "api-key",
+        baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        modelRef: "qwen3.8-max"
+      },
+      configured: {
+        apiProtocol: "openai-completions",
+        contextWindow: 1_000_000,
+        maxOutputTokens: 65_536,
+        reasoning: true,
+        imageInput: true
+      }
+    });
+    for (const level of ["low", "medium", "xhigh"] as const) {
+      const payload = await captureDispatchedPiPayload(qwenGa, level);
+      assert.equal(payload.enable_thinking, true);
+      assert.equal(payload.reasoning_effort, level);
+    }
+
+    const custom = createPiNativeModelFromConfiguration({
+      catalogModel: undefined,
+      provider: {
+        providerId: "echoink-custom",
+        apiProtocol: "openai-completions",
+        authMode: "api-key",
+        baseUrl: "https://custom.example/v1",
+        modelRef: "manual-reasoner"
+      },
+      configured: {
+        apiProtocol: "openai-completions",
+        contextWindow: 64_000,
+        maxOutputTokens: 8_192,
+        reasoning: true,
+        imageInput: false
+      }
+    });
+    for (const level of ["xhigh", "max"] as const) {
+      const payload = await captureDispatchedPiPayload(custom, level);
+      assert.equal(payload.reasoning_effort, level);
     }
 
     const gpt = OPENAI_MODELS["gpt-5.6-sol"];
@@ -3843,6 +4014,34 @@ async function capturePiPayload(
     }
   };
   const stream = streamSimple(model, context, options);
+  await stream.result();
+  assert.ok(payload && typeof payload === "object" && !Array.isArray(payload));
+  return payload as Record<string, unknown>;
+}
+
+async function captureDispatchedPiPayload(
+  model: Model<Api>,
+  reasoning: ModelThinkingLevel
+): Promise<Record<string, unknown>> {
+  let payload: unknown;
+  const stream = new PiProviderProtocolDispatcher().streamSimple({
+    model,
+    context: {
+      messages: [{
+        role: "user",
+        content: "EchoInk final payload fixture",
+        timestamp: 1
+      }]
+    },
+    apiKey: "fixture-not-a-real-key",
+    options: {
+      reasoning,
+      onPayload(value) {
+        payload = structuredClone(value);
+        throw new Error("echoink_payload_captured_before_network");
+      }
+    }
+  });
   await stream.result();
   assert.ok(payload && typeof payload === "object" && !Array.isArray(payload));
   return payload as Record<string, unknown>;
@@ -6028,9 +6227,16 @@ function assertQwenProviderContract(): void {
 
   const [catalogModelId] = Object.keys(QWEN_TOKEN_PLAN_CN_MODELS);
   assert.ok(catalogModelId);
+  const resolvedCatalogModel = resolveEchoInkPiCatalogModel(
+    "qwen-token-plan-cn",
+    catalogModelId
+  );
+  assert.ok(resolvedCatalogModel);
+  assert.equal(resolvedCatalogModel.id, catalogModelId);
+  assert.equal(resolvedCatalogModel.provider, "qwen-token-plan-cn");
   assert.equal(
-    resolveEchoInkPiCatalogModel("qwen-token-plan-cn", catalogModelId),
-    QWEN_TOKEN_PLAN_CN_MODELS[catalogModelId]
+    resolvedCatalogModel.contextWindow,
+    QWEN_TOKEN_PLAN_CN_MODELS[catalogModelId]?.contextWindow
   );
   assert.equal(resolveEchoInkPiCatalogModel("qwen", catalogModelId), null);
 
@@ -6234,7 +6440,7 @@ async function assertQwenTokenPlanTransportContract(): Promise<void> {
     featureRequest.body
   ) as Record<string, any>;
   assert.equal(featurePayload.enable_thinking, true);
-  assert.equal(Object.hasOwn(featurePayload, "reasoning_effort"), false);
+  assert.equal(featurePayload.reasoning_effort, "high");
   assert.equal(featurePayload.max_tokens, 256);
   assert.equal(featurePayload.tools[0].function.name, "note_read");
   assert.deepEqual(featurePayload.messages[1].content, [
@@ -6289,7 +6495,7 @@ async function assertQwenTokenPlanTransportContract(): Promise<void> {
       },
       apiKey: fixtureKey,
       options: {
-        ...(reasoning && reasoning !== "off" ? { reasoning } : {}),
+        ...(reasoning ? { reasoning } : {}),
         maxTokens: 64,
         temperature: 0,
         cacheRetention: "none",
@@ -6302,6 +6508,31 @@ async function assertQwenTokenPlanTransportContract(): Promise<void> {
   const qwenOff = await captureReasoningPayload("qwen3.7-plus", "off");
   assert.equal(qwenOff.enable_thinking, false);
   assert.equal(Object.hasOwn(qwenOff, "reasoning_effort"), false);
+  assert.equal(Object.hasOwn(qwenOff, "thinking_budget"), false);
+  for (const reasoning of [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+  ] as const) {
+    const payload = await captureReasoningPayload(
+      "qwen3.7-plus",
+      reasoning
+    );
+    assert.equal(payload.enable_thinking, true);
+    assert.equal(payload.reasoning_effort, reasoning);
+    assert.equal(Object.hasOwn(payload, "thinking_budget"), false);
+  }
+  for (const reasoning of ["low", "medium", "xhigh"] as const) {
+    const payload = await captureReasoningPayload(
+      "qwen3.8-max-preview",
+      reasoning
+    );
+    assert.equal(payload.enable_thinking, true);
+    assert.equal(payload.reasoning_effort, reasoning);
+    assert.equal(Object.hasOwn(payload, "thinking_budget"), false);
+  }
   const deepSeekHigh = await captureReasoningPayload(
     "deepseek-v4-pro",
     "high"
@@ -6321,6 +6552,55 @@ async function assertQwenTokenPlanTransportContract(): Promise<void> {
   );
   assert.deepEqual(deepSeekOff.thinking, { type: "disabled" });
   assert.equal(Object.hasOwn(deepSeekOff, "reasoning_effort"), false);
+
+  const manualQwenModel = createPiNativeModelFromConfiguration({
+    catalogModel: undefined,
+    provider: {
+      providerId: "qwen-token-plan-cn",
+      apiProtocol: "openai-completions",
+      authMode: "api-key",
+      baseUrl: transportInput.baseUrl,
+      modelRef: "qwen3.8-max"
+    },
+    configured: {
+      apiProtocol: "openai-completions",
+      contextWindow: 1_000_000,
+      maxOutputTokens: 65_536,
+      reasoning: true,
+      imageInput: true
+    }
+  });
+  for (const reasoning of [
+    "low",
+    "medium",
+    "xhigh"
+  ] as const) {
+    await reasoningDispatcher.stream({
+      model: manualQwenModel,
+      context: {
+        messages: [{
+          role: "user",
+          content: "只回复 OK",
+          timestamp: Date.now()
+        }],
+        tools: []
+      },
+      apiKey: fixtureKey,
+      options: {
+        reasoning,
+        maxTokens: 64,
+        temperature: 0,
+        cacheRetention: "none",
+        maxRetries: 0,
+        timeoutMs: 1_000
+      }
+    }).result();
+    const payload = reasoningPayloads.at(-1) ?? {};
+    assert.equal(payload.reasoning_effort, reasoning);
+    assert.equal(payload.enable_thinking, true);
+    assert.equal(Object.hasOwn(payload, "thinking_budget"), false);
+    assert.equal(Object.hasOwn(payload, "thinking"), false);
+  }
 
   const failureCases: Array<{
     status: number;
@@ -7054,6 +7334,10 @@ async function assertProviderPickerGroupingAndFiltering(): Promise<void> {
   );
   assert.ok(picker && options && trigger && search);
   assert.equal(openTestModals.length, modalRegistryBaseline + 1);
+  assert.equal(
+    trigger.querySelector(".codex-provider-option-name")?.textContent,
+    "深度求索"
+  );
   assert.deepEqual(
     options.children.map((child) => child.hasClass("codex-provider-combobox-group")
       ? `group:${child.textContent}`
@@ -7095,6 +7379,22 @@ async function assertProviderPickerGroupingAndFiltering(): Promise<void> {
   ]);
   assert.equal(optionIds.includes("grok"), false);
   assert.doesNotMatch(options.textContent, /Grok/iu);
+  const providerOptionName = (
+    root: ProviderModalTestElement,
+    providerId: string
+  ) => root.querySelector<ProviderModalTestElement>(
+    `[data-provider-id="${providerId}"]`
+  )?.querySelector(".codex-provider-option-name")?.textContent;
+  assert.equal(providerOptionName(options, "deepseek"), "深度求索");
+  assert.equal(
+    providerOptionName(options, "qwen-token-plan"),
+    "通义千问 Token Plan"
+  );
+  for (const optionName of options.querySelectorAll<ProviderModalTestElement>(
+    ".codex-provider-option-name"
+  )) {
+    assert.doesNotMatch(optionName.textContent, / \/ /u);
+  }
   const oauthPreset = API_PROVIDER_PRESETS.find((preset) => preset.id === "openai-codex");
   const tokenPlanPreset = API_PROVIDER_PRESETS.find(
     (preset) => preset.id === "qwen-token-plan"
@@ -7199,6 +7499,27 @@ async function assertProviderPickerGroupingAndFiltering(): Promise<void> {
   const englishModal = createModal("en");
   englishModal.open();
   assert.equal(openTestModals.length, modalRegistryBaseline + 1);
+  const englishTrigger = englishModal.contentEl.querySelector<ProviderModalTestElement>(
+    ".codex-provider-combobox-trigger"
+  );
+  const englishOptions = englishModal.contentEl.querySelector<ProviderModalTestElement>(
+    ".codex-provider-combobox-options"
+  );
+  assert.ok(englishTrigger && englishOptions);
+  assert.equal(
+    englishTrigger.querySelector(".codex-provider-option-name")?.textContent,
+    "DeepSeek"
+  );
+  assert.equal(providerOptionName(englishOptions, "deepseek"), "DeepSeek");
+  assert.equal(
+    providerOptionName(englishOptions, "qwen-token-plan"),
+    "Qwen Token Plan"
+  );
+  for (const optionName of englishOptions.querySelectorAll<ProviderModalTestElement>(
+    ".codex-provider-option-name"
+  )) {
+    assert.doesNotMatch(optionName.textContent, / \/ /u);
+  }
   assert.deepEqual(
     englishModal.contentEl.querySelectorAll<ProviderModalTestElement>(
       ".codex-provider-combobox-group"

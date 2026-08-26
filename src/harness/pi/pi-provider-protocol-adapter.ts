@@ -5,6 +5,7 @@ import {
   type AssistantMessageEventStream,
   type Context,
   type Model,
+  type ModelThinkingLevel,
   type ProviderStreams,
   type SimpleStreamOptions,
   type StreamOptions,
@@ -31,6 +32,9 @@ import type {
   ControlledPiStreamInput,
   ControlledPiStreamPort
 } from "./production-pi-model-resolver";
+import {
+  applyEchoInkPiReasoningPayload
+} from "../../settings/pi-model-catalog";
 
 export type PiProviderProtocolAdapters = Readonly<
   Record<ApiProviderProtocol, ProviderStreams>
@@ -70,7 +74,7 @@ export class PiProviderProtocolDispatcher {
     options: Omit<StreamOptions, "apiKey"> & Pick<SimpleStreamOptions, "reasoning">;
   }): AssistantMessageEventStream {
     const protocol = requireApiProviderProtocol(input.model.api);
-    const { reasoning, ...streamOptions } = input.options;
+    const { reasoning, onPayload, ...streamOptions } = input.options;
     const clampedReasoning = reasoning
       ? clampThinkingLevel(input.model, reasoning)
       : undefined;
@@ -83,6 +87,10 @@ export class PiProviderProtocolDispatcher {
       {
         ...streamOptions,
         ...(reasoningEffort ? { reasoningEffort } : {}),
+        onPayload: composeReasoningPayloadTransform(
+          clampedReasoning,
+          onPayload
+        ),
         apiKey: input.apiKey
       }
     );
@@ -95,15 +103,38 @@ export class PiProviderProtocolDispatcher {
     options: Omit<SimpleStreamOptions, "apiKey">;
   }): AssistantMessageEventStream {
     const protocol = requireApiProviderProtocol(input.model.api);
+    const { onPayload, ...streamOptions } = input.options;
+    const clampedReasoning = input.options.reasoning
+      ? clampThinkingLevel(input.model, input.options.reasoning)
+      : undefined;
     return this.adapters[protocol].streamSimple(
       input.model,
       input.context,
       {
-        ...input.options,
+        ...streamOptions,
+        onPayload: composeReasoningPayloadTransform(
+          clampedReasoning,
+          onPayload
+        ),
         apiKey: input.apiKey
       }
     );
   }
+}
+
+function composeReasoningPayloadTransform(
+  level: ModelThinkingLevel | undefined,
+  downstream: StreamOptions["onPayload"]
+): NonNullable<StreamOptions["onPayload"]> {
+  return async (payload, model) => {
+    const transformed = applyEchoInkPiReasoningPayload(
+      payload,
+      model,
+      level
+    );
+    if (!downstream) return transformed;
+    return await downstream(transformed, model) ?? transformed;
+  };
 }
 
 export class PiProviderProtocolTransport

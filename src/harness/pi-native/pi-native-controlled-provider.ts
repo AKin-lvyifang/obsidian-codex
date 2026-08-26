@@ -14,6 +14,9 @@ import type {
   PiProviderRuntimeConfigPort
 } from "../pi/production-pi-model-resolver";
 import type { ApiProviderProtocol } from "../../settings/provider-presets";
+import {
+  withEchoInkResolvedPiReasoningModel
+} from "../../settings/pi-model-catalog";
 
 const MAX_CONTROLLED_OUTPUT_TOKENS = 1_000_000;
 const DEFAULT_PROVIDER_TIMEOUT_MS = 30_000;
@@ -101,17 +104,23 @@ export function createPiNativeModelFromConfiguration(input: {
     imageInput: boolean;
   };
 }): Model<Api> {
-  const configuredModel = createConfiguredPiNativeModel(input);
+  const configuredModel = withEchoInkResolvedPiReasoningModel(
+    createConfiguredPiNativeModel(input)
+  );
   if (!input.catalogModel) return configuredModel;
-  const catalogModel = createPiNativeModelFromCatalog({
-    catalogModel: input.catalogModel,
-    provider: input.provider
-  });
-  return withResolvedPiModelImageCapability(deepFreeze({
-    ...structuredClone(catalogModel),
-    contextWindow: input.configured.contextWindow,
-    maxTokens: input.configured.maxOutputTokens
-  }), input.configured.imageInput);
+  const catalogModel = withEchoInkResolvedPiReasoningModel(
+    createPiNativeModelFromCatalog({
+      catalogModel: input.catalogModel,
+      provider: input.provider
+    })
+  );
+  return withEchoInkResolvedPiReasoningModel(
+    withResolvedPiModelImageCapability(deepFreeze({
+      ...structuredClone(catalogModel),
+      contextWindow: input.configured.contextWindow,
+      maxTokens: input.configured.maxOutputTokens
+    }), input.configured.imageInput)
+  );
 }
 
 function createConfiguredPiNativeModel(input: {
@@ -151,7 +160,18 @@ function createConfiguredPiNativeModel(input: {
       cacheWrite: 0
     },
     contextWindow: configured.contextWindow,
-    maxTokens: configured.maxOutputTokens
+    maxTokens: configured.maxOutputTokens,
+    ...(configured.reasoning
+      ? {
+          thinkingLevelMap: {
+            low: "low",
+            medium: "medium",
+            high: "high",
+            xhigh: "xhigh",
+            max: "max"
+          }
+        }
+      : {})
   };
   if (configured.apiProtocol === "openai-completions") {
     model.compat = {

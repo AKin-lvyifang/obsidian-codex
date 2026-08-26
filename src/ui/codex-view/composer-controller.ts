@@ -12,6 +12,10 @@ import {
 } from "../../settings/settings";
 import type { EchoInkPiReasoningOption } from "../../settings/pi-model-catalog";
 import type { ProviderBrandId } from "../../settings/provider-brand-icons";
+import {
+  apiProviderConfiguredDisplayName,
+  normalizeApiProviderId
+} from "../../settings/provider-presets";
 import type { PermissionMode, ReasoningEffort, UiMode } from "../../types/app-server";
 import { knowledgeCommandQueryForInput } from "../../knowledge-base/commands";
 import { contextUsageView } from "../../core/mapping";
@@ -529,7 +533,15 @@ export function composerProviderModelOptions(
     apiProviderHasUsableCredential(provider, settings.openAICodexCredential)
       ? provider.models.map((model) => ({
           providerSettingsId: provider.id,
-          providerName: provider.name,
+          providerName: apiProviderConfiguredDisplayName(
+            normalizeApiProviderId(
+              provider.providerId,
+              provider.baseUrl,
+              provider.name
+            ),
+            provider.name,
+            settings.settingsLanguage
+          ),
           modelId: model.id,
           modelName: model.displayName || model.id
         }))
@@ -595,7 +607,18 @@ export async function selectComposerModel(
   ensureComposerReasoningPreference(host);
   host.renderToolbar();
   if (correctedReasoning) showComposerReasoningFallbackNotice(correctedReasoning);
-  new Notice(`已切换到 ${target.name} · ${targetModel.displayName || targetModel.id}`);
+  const providerName = apiProviderConfiguredDisplayName(
+    normalizeApiProviderId(
+      target.providerId,
+      target.baseUrl,
+      target.name
+    ),
+    target.name,
+    host.plugin.settings.settingsLanguage
+  );
+  new Notice(host.plugin.settings.settingsLanguage === "en"
+    ? `Switched to ${providerName} · ${targetModel.displayName || targetModel.id}`
+    : `已切换到 ${providerName} · ${targetModel.displayName || targetModel.id}`);
   return true;
 }
 

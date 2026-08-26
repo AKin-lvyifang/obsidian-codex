@@ -412,7 +412,10 @@ export class CodexView extends ItemView {
   private diagnoseCodexFailure(error: unknown, model = this.effectiveModel()): ProviderErrorDiagnostic {
     return diagnoseProviderError(error, {
       model,
-      providerLabel: providerConnectionLabel(this.plugin.settings)
+      providerLabel: providerConnectionLabel(
+        this.plugin.settings,
+        this.plugin.settings.settingsLanguage
+      )
     });
   }
 

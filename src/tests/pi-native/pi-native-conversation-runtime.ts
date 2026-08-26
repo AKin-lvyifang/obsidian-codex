@@ -165,24 +165,16 @@ async function assertReasoningSelectionFailsClosedBeforePiPrompt(): Promise<void
       (error: unknown) => error instanceof PiNativeConversationRuntimeError
         && error.code === "reasoning_level_invalid"
     );
-    for (const reasoning of [
-      "minimal",
-      "low",
-      "high",
-      "xhigh",
-      "max"
-    ] as const) {
-      await assert.rejects(
-        fixture.submit({
-          conversationId,
-          text: `人工两态模型不得接受 ${reasoning}`,
-          submittedAt: 4,
-          reasoning
-        }),
-        (error: unknown) => error instanceof PiNativeConversationRuntimeError
-          && error.code === "reasoning_level_invalid"
-      );
-    }
+    await assert.rejects(
+      fixture.submit({
+        conversationId,
+        text: "人工五档模型不暴露 minimal 别名",
+        submittedAt: 4,
+        reasoning: "minimal"
+      }),
+      (error: unknown) => error instanceof PiNativeConversationRuntimeError
+        && error.code === "reasoning_level_invalid"
+    );
     assert.deepEqual(session.thinkingLevelChanges, []);
     assert.deepEqual(session.promptTexts, []);
     assert.equal(session.sessionManager.getEntries().length, baselineEntries);
@@ -202,17 +194,21 @@ async function assertReasoningSelectionFailsClosedBeforePiPrompt(): Promise<void
     assert.deepEqual(session.thinkingLevelChanges, []);
     assert.deepEqual(session.promptTexts, []);
 
-    const valid = await fixture.submit({
-      conversationId,
-      text: "合法代表进入 Pi",
-      submittedAt: 6,
-      runtimeProviderId: "fixture-provider",
-      modelId: "fixture-model",
-      reasoning: "medium"
-    });
-    assert.deepEqual(session.thinkingLevelChanges, ["medium"]);
-    session.finishSuccessful("ok");
-    await valid.result;
+    const accepted = ["low", "medium", "high", "xhigh", "max"] as const;
+    for (const [index, reasoning] of accepted.entries()) {
+      const valid = await fixture.submit({
+        conversationId,
+        text: `合法五档 ${reasoning} 进入 Pi`,
+        submittedAt: 6 + index,
+        runtimeProviderId: "fixture-provider",
+        modelId: "fixture-model",
+        reasoning
+      });
+      assert.equal(session.thinkingLevelChanges.at(-1), reasoning);
+      session.finishSuccessful(`ok-${reasoning}`);
+      await valid.result;
+    }
+    assert.deepEqual(session.thinkingLevelChanges, accepted);
   });
 
   await withFixture(["reasoning-none-run"], async (fixture) => {
@@ -3501,7 +3497,9 @@ class ControlledAgentSession {
       minimal: "low",
       low: "low",
       medium: "medium",
-      high: "high"
+      high: "high",
+      xhigh: "xhigh",
+      max: "max"
     }
   };
   readonly thinkingLevelChanges: ModelThinkingLevel[] = [];

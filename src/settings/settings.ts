@@ -3,6 +3,7 @@ import type { OAuthCredential } from "@earendil-works/pi-ai";
 import {
   apiProviderAuthMode,
   apiProviderApiKeyRequired,
+  apiProviderConfiguredDisplayName,
   apiProviderMaxOutputReserve,
   getApiProviderPreset,
   getApiProviderModelPreset,
@@ -1323,7 +1324,16 @@ export function selectActiveConversationSession(
 export function providerConnectionLabel(settings: Pick<CodexForObsidianSettings, "providerMode" | "activeApiProviderId" | "apiProviders">, language: SettingsLanguage = "zh-CN"): string {
   const provider = getActiveApiProvider(settings);
   if (!provider) return language === "en" ? "Provider not configured" : "Provider 未配置";
-  return `${provider.name} · ${providerModelLabel(provider, language)}`;
+  const providerId = normalizeApiProviderId(
+    provider.providerId,
+    provider.baseUrl,
+    provider.name
+  );
+  return `${apiProviderConfiguredDisplayName(
+    providerId,
+    provider.name,
+    language
+  )} · ${providerModelLabel(provider, language)}`;
 }
 
 export function ensureModelChoices(models: CodexModel[], ...preferredModels: Array<string | null | undefined>): CodexModel[] {

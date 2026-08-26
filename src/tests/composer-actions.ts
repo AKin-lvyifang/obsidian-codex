@@ -562,12 +562,45 @@ function assertAdaptiveComposerReasoning(): void {
 
   qwenModel.reasoningEnabled = true;
   const qwen = composerModelMenuState(host);
-  assert.equal(qwenModel.reasoningEffort, "medium");
-  assert.equal(qwen.selectedReasoning, "medium");
-  assert.equal(qwen.reasoningCurrentValue, "模型默认");
-  assert.equal(qwen.reasoningAdjustable, false);
-  assert.deepEqual(qwen.reasoningOptions, []);
-  assert.match(qwen.reasoningDisabledReason, /模型自动决定/u);
+  assert.equal(qwenModel.reasoningEffort, "xhigh");
+  assert.equal(qwen.selectedReasoning, "xhigh");
+  assert.equal(qwen.reasoningCurrentValue, "极高");
+  assert.equal(qwen.reasoningAdjustable, true);
+  assert.deepEqual(
+    qwen.reasoningOptions.map((option) => [option.effort, option.label]),
+    [
+      ["low", "低"],
+      ["medium", "中"],
+      ["xhigh", "极高"]
+    ]
+  );
+  assert.equal(qwen.reasoningDisabledReason, "");
+
+  const manualQwenModel = createApiProviderModelConfig(
+    "custom",
+    "qwen3.8-max",
+    qwenProvider.runtimeProviderId
+  );
+  manualQwenModel.reasoning = true;
+  manualQwenModel.reasoningEnabled = true;
+  qwenProvider.models.push(manualQwenModel);
+  host.selectedModel = manualQwenModel.id;
+  const manualQwen = composerModelMenuState(host);
+  assert.equal(manualQwenModel.reasoningEffort, "xhigh");
+  assert.equal(manualQwen.selectedReasoning, "xhigh");
+  assert.equal(manualQwen.reasoningCurrentValue, "极高");
+  assert.equal(manualQwen.reasoningAdjustable, true);
+  assert.equal(manualQwen.reasoningDisabledReason, "");
+  assert.deepEqual(
+    manualQwen.reasoningOptions.map((option) => [option.effort, option.label]),
+    [
+      ["low", "低"],
+      ["medium", "中"],
+      ["xhigh", "极高"]
+    ]
+  );
+  selectComposerReasoning(host, "low");
+  assert.equal(manualQwenModel.reasoningEffort, "low");
 
   const nonReasoningProvider = createApiProviderConfig(
     "custom",
@@ -645,6 +678,36 @@ function renderedComposerText(root: ComposerTestElement): string {
 }
 
 async function assertExactComposerProviderModelSelection(): Promise<void> {
+  const localizedSettings = structuredClone(DEFAULT_SETTINGS);
+  const deepSeek = createApiProviderConfig("deepseek", "provider-deepseek");
+  deepSeek.apiKey = "fixture-deepseek-key";
+  const tokenPlan = createApiProviderConfig(
+    "qwen-token-plan",
+    "provider-token-plan"
+  );
+  tokenPlan.apiKey = "fixture-token-plan-key";
+  tokenPlan.models = [createApiProviderModelConfig(
+    "qwen-token-plan",
+    "qwen3.8-max-preview",
+    tokenPlan.runtimeProviderId
+  )];
+  tokenPlan.defaultModelId = tokenPlan.models[0].id;
+  localizedSettings.apiProviders = [deepSeek, tokenPlan];
+  const localizedHost: any = { plugin: { settings: localizedSettings } };
+  assert.deepEqual(
+    composerProviderModelOptions(localizedHost).map(
+      (option) => option.providerName
+    ),
+    ["深度求索", "通义千问 Token Plan"]
+  );
+  localizedSettings.settingsLanguage = "en";
+  assert.deepEqual(
+    composerProviderModelOptions(localizedHost).map(
+      (option) => option.providerName
+    ),
+    ["DeepSeek", "Qwen Token Plan"]
+  );
+
   const settings = structuredClone(DEFAULT_SETTINGS);
   const first = createApiProviderConfig("custom", "provider-first");
   first.name = "First Provider";

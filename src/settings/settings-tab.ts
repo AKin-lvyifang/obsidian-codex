@@ -66,6 +66,7 @@ import {
 } from "./settings";
 import {
   apiProviderApiKeyRequired,
+  apiProviderConfiguredDisplayName,
   getApiProviderPreset,
   normalizeApiProviderBaseUrl,
   normalizeApiProviderId
@@ -1584,11 +1585,20 @@ export class CodexSettingTab extends PluginSettingTab {
             provider,
             this.plugin.settings.openAICodexCredential
           );
+          const providerDisplayName = apiProviderConfiguredDisplayName(
+            normalizeApiProviderId(
+              provider.providerId,
+              provider.baseUrl,
+              provider.name
+            ),
+            provider.name,
+            this.plugin.settings.settingsLanguage
+          );
           for (const model of provider.models) {
             const value = providerModelSelectionValue(provider.id, model.id);
             dropdown.addOption(
               value,
-              `${provider.name} · ${model.displayName}${credentialReady ? "" : (
+              `${providerDisplayName} · ${model.displayName}${credentialReady ? "" : (
                 provider.authMode === "oauth"
                   ? (zh ? "（需要登录）" : " (sign-in required)")
                   : (zh ? "（需重新保存 API Key）" : " (API key required)")
@@ -1630,9 +1640,18 @@ export class CodexSettingTab extends PluginSettingTab {
                 }
                 activateApiProviderModel(settings, candidate, selection.modelId);
               });
+              const providerDisplayName = apiProviderConfiguredDisplayName(
+                normalizeApiProviderId(
+                  target.providerId,
+                  target.baseUrl,
+                  target.name
+                ),
+                target.name,
+                this.plugin.settings.settingsLanguage
+              );
               new Notice(zh
-                ? `已切换到 ${target.name} · ${selection.modelId}`
-                : `Now using ${target.name} · ${selection.modelId}`);
+                ? `已切换到 ${providerDisplayName} · ${selection.modelId}`
+                : `Now using ${providerDisplayName} · ${selection.modelId}`);
             } catch (error) {
               new Notice(error instanceof Error ? error.message : copy.providers.saveFailed);
             }
@@ -2733,11 +2752,17 @@ export class CodexSettingTab extends PluginSettingTab {
     const active = getActiveApiProvider(this.plugin.settings);
 
     for (const saved of this.plugin.settings.apiProviders) {
-      const providerId = getApiProviderPreset(normalizeApiProviderId(
+      const preset = getApiProviderPreset(normalizeApiProviderId(
         saved.providerId,
         saved.baseUrl,
         saved.name
-      )).id;
+      ));
+      const providerId = preset.id;
+      const providerDisplayName = apiProviderConfiguredDisplayName(
+        providerId,
+        saved.name,
+        this.plugin.settings.settingsLanguage
+      );
       const defaultModel = getDefaultApiProviderModel(saved);
       const modelDisplayName = defaultModel
         ? `${defaultModel.displayName}${saved.models.length > 1
@@ -2750,7 +2775,7 @@ export class CodexSettingTab extends PluginSettingTab {
       const identity = row.createDiv({
         cls: "codex-provider-saved-identity",
         attr: {
-          "aria-label": `${modelDisplayName} · ${saved.name}`
+          "aria-label": `${modelDisplayName} · ${providerDisplayName}`
         }
       });
       const rowIcon = identity.createSpan({
@@ -2766,16 +2791,16 @@ export class CodexSettingTab extends PluginSettingTab {
       });
       const savedProvider = savedCopy.createDiv({
         cls: "codex-provider-saved-provider",
-        text: saved.name,
+        text: providerDisplayName,
         attr: {
           tabindex: "0",
           "aria-label": providerId === "openai-codex"
             ? (this.plugin.settings.settingsLanguage === "en"
-              ? `${saved.name}. OpenAI OAuth.`
-              : `${saved.name}。OpenAI OAuth。`)
+              ? `${providerDisplayName}. OpenAI OAuth.`
+              : `${providerDisplayName}。OpenAI OAuth。`)
             : this.plugin.settings.settingsLanguage === "en"
-              ? `${saved.name}. Provider endpoint: ${saved.baseUrl}`
-              : `${saved.name}。Provider 地址：${saved.baseUrl}`
+              ? `${providerDisplayName}. Provider endpoint: ${saved.baseUrl}`
+              : `${providerDisplayName}。Provider 地址：${saved.baseUrl}`
         }
       });
       if (providerId !== "openai-codex") {
@@ -2836,8 +2861,8 @@ export class CodexSettingTab extends PluginSettingTab {
         cls: "codex-provider-row-action",
         attr: {
           type: "button",
-          title: label(`编辑 ${saved.name} · ${modelDisplayName}`, `Edit ${saved.name} · ${modelDisplayName}`),
-          "aria-label": label(`编辑 ${saved.name} · ${modelDisplayName}`, `Edit ${saved.name} · ${modelDisplayName}`),
+          title: label(`编辑 ${providerDisplayName} · ${modelDisplayName}`, `Edit ${providerDisplayName} · ${modelDisplayName}`),
+          "aria-label": label(`编辑 ${providerDisplayName} · ${modelDisplayName}`, `Edit ${providerDisplayName} · ${modelDisplayName}`),
           "data-echoink-focus-key": `provider:${saved.id}:edit`
         }
       });
@@ -2849,8 +2874,8 @@ export class CodexSettingTab extends PluginSettingTab {
         cls: "codex-provider-row-action is-delete",
         attr: {
           type: "button",
-          title: label(`删除 ${saved.name} · ${modelDisplayName}`, `Delete ${saved.name} · ${modelDisplayName}`),
-          "aria-label": label(`删除 ${saved.name} · ${modelDisplayName}`, `Delete ${saved.name} · ${modelDisplayName}`),
+          title: label(`删除 ${providerDisplayName} · ${modelDisplayName}`, `Delete ${providerDisplayName} · ${modelDisplayName}`),
+          "aria-label": label(`删除 ${providerDisplayName} · ${modelDisplayName}`, `Delete ${providerDisplayName} · ${modelDisplayName}`),
           "data-echoink-focus-key": `provider:${saved.id}:delete`
         }
       });
@@ -3017,7 +3042,13 @@ export class CodexSettingTab extends PluginSettingTab {
       } else {
         this.verifiedProviderConnections.delete(draft.id);
       }
-      new Notice(this.copy.providers.saved(draft.name));
+      new Notice(this.copy.providers.saved(
+        apiProviderConfiguredDisplayName(
+          providerId,
+          draft.name,
+          this.plugin.settings.settingsLanguage
+        )
+      ));
       this.scheduleDisplay();
       return { saved: true };
     } catch (error) {
@@ -3033,9 +3064,18 @@ export class CodexSettingTab extends PluginSettingTab {
       (item) => item.id === providerId
     );
     if (!provider) return;
+    const providerDisplayName = apiProviderConfiguredDisplayName(
+      normalizeApiProviderId(
+        provider.providerId,
+        provider.baseUrl,
+        provider.name
+      ),
+      provider.name,
+      this.plugin.settings.settingsLanguage
+    );
     const accepted = await confirmModal(
       this.app,
-      this.copy.providers.deleteConfirm(provider.name),
+      this.copy.providers.deleteConfirm(providerDisplayName),
       this.plugin.settings.activeApiProviderId === providerId
         ? (this.plugin.settings.settingsLanguage === "en"
           ? "The active model will be removed. EchoInk will switch to the next saved model, or become unconfigured if none remains."
@@ -3069,10 +3109,21 @@ export class CodexSettingTab extends PluginSettingTab {
           settings.defaultModel = "";
         }
       }, wasActive ? (fallback ? "replace" : "suspend") : "preserve");
+      const fallbackDisplayName = fallback
+        ? apiProviderConfiguredDisplayName(
+            normalizeApiProviderId(
+              fallback.providerId,
+              fallback.baseUrl,
+              fallback.name
+            ),
+            fallback.name,
+            this.plugin.settings.settingsLanguage
+          )
+        : "";
       new Notice(fallback && wasActive
         ? (this.plugin.settings.settingsLanguage === "en"
-          ? `Removed. Now using ${fallback.name} · ${fallback.defaultModelId}.`
-          : `已删除，现已切换到 ${fallback.name} · ${fallback.defaultModelId}。`)
+          ? `Removed. Now using ${fallbackDisplayName} · ${fallback.defaultModelId}.`
+          : `已删除，现已切换到 ${fallbackDisplayName} · ${fallback.defaultModelId}。`)
         : (this.plugin.settings.settingsLanguage === "en"
           ? "Saved model removed."
           : "已删除已保存模型。"));

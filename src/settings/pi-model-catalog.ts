@@ -33,6 +33,11 @@ import {
 import {
   ZAI_CODING_CN_MODELS
 } from "@earendil-works/pi-ai/providers/zai-coding-cn.models";
+import {
+  applyEchoInkProviderReasoningWirePolicy,
+  resolveEchoInkProviderReasoningWirePolicy,
+  withEchoInkProviderReasoningWirePolicy
+} from "../harness/pi/provider-reasoning-wire-policy";
 import type { ReasoningEffort } from "../types/app-server";
 
 const ECHOINK_PI_MODEL_CATALOGS = Object.freeze({
@@ -95,7 +100,8 @@ export function resolveEchoInkPiCatalogModel(
   const catalog = ECHOINK_PI_MODEL_CATALOGS[providerId] as Readonly<
     Record<string, Model<Api>>
   >;
-  return Object.hasOwn(catalog, id) ? catalog[id] ?? null : null;
+  const model = Object.hasOwn(catalog, id) ? catalog[id] ?? null : null;
+  return model ? withEchoInkResolvedPiReasoningModel(model) : null;
 }
 
 export function resolveEchoInkPiReasoningCapabilities(
@@ -110,6 +116,28 @@ export function resolveEchoInkPiReasoningCapabilities(
   if (!manuallyConfiguredReasoning) {
     return frozenCapabilities("unknown", [], null);
   }
+  const providerPolicy = resolveEchoInkProviderReasoningWirePolicy(
+    runtimeProviderId,
+    modelId
+  );
+  if (providerPolicy) {
+    return frozenCapabilities("manual", [
+      {
+        effort: "none",
+        piLevel: "off",
+        display: "off",
+        wireValueKey: `${providerPolicy.id}:off`
+      },
+      ...providerPolicy.selectableLevels.map((level) => ({
+        effort: level as ReasoningEffort,
+        piLevel: level,
+        display: "level" as const,
+        wireValueKey: `${providerPolicy.id}:${
+          providerPolicy.thinkingLevelMap[level] ?? level
+        }`
+      }))
+    ], providerPolicy.defaultLevel as ReasoningEffort);
+  }
   return frozenCapabilities("manual", [
     {
       effort: "none",
@@ -118,10 +146,34 @@ export function resolveEchoInkPiReasoningCapabilities(
       wireValueKey: "manual:off"
     },
     {
+      effort: "low",
+      piLevel: "low",
+      display: "level",
+      wireValueKey: "manual:low"
+    },
+    {
       effort: "medium",
       piLevel: "medium",
-      display: "toggle",
-      wireValueKey: "manual:on"
+      display: "level",
+      wireValueKey: "manual:medium"
+    },
+    {
+      effort: "high",
+      piLevel: "high",
+      display: "level",
+      wireValueKey: "manual:high"
+    },
+    {
+      effort: "xhigh",
+      piLevel: "xhigh",
+      display: "level",
+      wireValueKey: "manual:xhigh"
+    },
+    {
+      effort: "max",
+      piLevel: "max",
+      display: "level",
+      wireValueKey: "manual:max"
     }
   ], "medium");
 }
@@ -149,7 +201,21 @@ export function resolveEchoInkPiModelReasoningCapabilities(
   }
   const options = [...groups.values()];
   const enabledOptions = canonicalEnabledReasoningOptions(options);
-  const clampedDefault = clampThinkingLevel(model, "medium");
+  const providerPolicy = resolveEchoInkProviderReasoningWirePolicy(
+    model.provider,
+    model.id
+  );
+  if (enabledOptions.length === 1 && !providerPolicy) {
+    return frozenCapabilities(
+      "catalog",
+      experimentalFiveLevelOptions(options),
+      "medium"
+    );
+  }
+  const clampedDefault = clampThinkingLevel(
+    model,
+    providerPolicy?.defaultLevel ?? "medium"
+  );
   const defaultWireValueKey = reasoningWireValueKey(model, clampedDefault);
   const rawDefault = options.find(
     (option) => option.wireValueKey === defaultWireValueKey
@@ -167,6 +233,62 @@ export function resolveEchoInkPiModelReasoningCapabilities(
       ?? enabledOptions[0]?.effort
       ?? null;
   return frozenCapabilities("catalog", options, defaultEffort);
+}
+
+export function withEchoInkResolvedPiReasoningModel<TApi extends Api>(
+  model: Model<TApi>
+): Model<TApi> {
+  const providerResolved = withEchoInkProviderReasoningWirePolicy(model);
+  const capabilities = resolveEchoInkPiModelReasoningCapabilities(
+    providerResolved
+  );
+  if (!echoInkPiReasoningUsesExperimentalFiveLevels(capabilities)) {
+    return providerResolved;
+  }
+  return {
+    ...structuredClone(providerResolved),
+    thinkingLevelMap: {
+      ...providerResolved.thinkingLevelMap,
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: "xhigh",
+      max: "max"
+    }
+  };
+}
+
+export function applyEchoInkPiReasoningPayload(
+  payload: unknown,
+  model: Readonly<Model<Api>>,
+  level: ModelThinkingLevel | undefined
+): unknown {
+  if (resolveEchoInkProviderReasoningWirePolicy(model.provider, model.id)) {
+    return applyEchoInkProviderReasoningWirePolicy(payload, model, level);
+  }
+  const capabilities = resolveEchoInkPiModelReasoningCapabilities(
+    model as Model<Api>
+  );
+  if (
+    !echoInkPiReasoningUsesExperimentalFiveLevels(capabilities)
+    || !isPlainRecord(payload)
+  ) return payload;
+  const next: Record<string, unknown> = { ...payload };
+  if (!level || level === "off") {
+    delete next.reasoning_effort;
+  } else {
+    next.reasoning_effort = level;
+  }
+  return next;
+}
+
+export function echoInkPiReasoningUsesExperimentalFiveLevels(
+  capabilities: Readonly<EchoInkPiReasoningCapabilities>
+): boolean {
+  return capabilities.enabledOptions.length === 5
+    && capabilities.enabledOptions.every(
+      (option) => option.wireValueKey.startsWith("experimental:")
+    );
 }
 
 export function echoInkReasoningEffortToPiLevel(
@@ -242,6 +364,25 @@ function canonicalEnabledReasoningOptions(
   return [...bands.values()];
 }
 
+function experimentalFiveLevelOptions(
+  rawOptions: readonly Readonly<EchoInkPiReasoningOption>[]
+): EchoInkPiReasoningOption[] {
+  const off = rawOptions.find((option) => option.effort === "none");
+  const enabled = ([
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+  ] as const).map((level) => ({
+    effort: level,
+    piLevel: level,
+    display: "level" as const,
+    wireValueKey: `experimental:${level}`
+  }));
+  return off ? [{ ...off }, ...enabled] : enabled;
+}
+
 function reasoningPresentationBand(effort: ReasoningEffort): string {
   if (effort === "minimal" || effort === "low") return "low";
   return effort;
@@ -274,6 +415,9 @@ function reasoningOptionDisplay(
   level: ModelThinkingLevel
 ): EchoInkPiReasoningOption["display"] {
   if (level === "off") return "off";
+  if (resolveEchoInkProviderReasoningWirePolicy(model.provider, model.id)) {
+    return "level";
+  }
   if (model.api !== "openai-completions") return "level";
   const completionsModel = model as Model<"openai-completions">;
   const format = resolvedOpenAICompletionsThinkingFormat(completionsModel);
@@ -309,8 +453,12 @@ function reasoningWireValueKey(
   const mapped = mappedThinkingValue(model, level);
   switch (format) {
     case "qwen":
-    case "qwen-chat-template":
+    case "qwen-chat-template": {
+      if (resolveEchoInkProviderReasoningWirePolicy(model.provider, model.id)) {
+        return `${format}:${enabled ? `on:${mapped}` : "off"}`;
+      }
       return `${format}:${enabled}`;
+    }
     case "zai":
     case "together":
     case "deepseek":
@@ -345,7 +493,14 @@ function reasoningWireEffort(
   if (model.api === "openai-completions") {
     const completionsModel = model as Model<"openai-completions">;
     const format = resolvedOpenAICompletionsThinkingFormat(completionsModel);
-    if (format === "qwen" || format === "qwen-chat-template") return null;
+    if (format === "qwen" || format === "qwen-chat-template") {
+      return resolveEchoInkProviderReasoningWirePolicy(
+        model.provider,
+        model.id
+      )
+        ? mappedThinkingValue(model, level)
+        : null;
+    }
     if (
       (format === "zai" || format === "together" || format === "deepseek")
       && !openAICompletionsSupportsReasoningEffort(completionsModel, format)
@@ -468,4 +623,10 @@ function isEchoInkPiCatalogRuntimeProviderId(
   value: string
 ): value is EchoInkPiCatalogRuntimeProviderId {
   return Object.hasOwn(ECHOINK_PI_MODEL_CATALOGS, value);
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object"
+    && value !== null
+    && !Array.isArray(value);
 }
