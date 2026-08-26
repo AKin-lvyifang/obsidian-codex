@@ -309,13 +309,14 @@ export async function runComposerActionTests(): Promise<void> {
     assert.match(css, /@keyframes echoink-animate-circle-stop-symbol/u);
     assert.match(css, /@keyframes echoink-animate-mic/u);
     assert.match(css, /prefers-reduced-motion:\s*no-preference/u);
-    assert.match(css, /\.codex-attachment-thumbnail \{[\s\S]*?width:\s*84px;[\s\S]*?height:\s*84px;/u);
-    assert.match(css, /\.codex-attachment-file-tile \{[\s\S]*?width:\s*84px;[\s\S]*?height:\s*84px;/u);
+    assert.match(css, /\.codex-attachment-thumbnail \{[\s\S]*?width:\s*72px;[\s\S]*?height:\s*72px;[\s\S]*?flex:\s*0\s+0\s+72px;/u);
+    assert.match(css, /\.codex-attachment-file-tile \{[\s\S]*?width:\s*72px;[\s\S]*?height:\s*72px;[\s\S]*?flex:\s*0\s+0\s+72px;/u);
     assert.match(css, /\.codex-attachment-thumbnail-image \{[\s\S]*?object-fit:\s*contain;/u);
-    assert.match(css, /\.codex-attachment-thumbnail-remove \{[\s\S]*?width:\s*28px;[\s\S]*?height:\s*28px;/u);
+    assert.match(css, /\.codex-attachment-thumbnail-remove \{[\s\S]*?top:\s*-4px;[\s\S]*?right:\s*-4px;[\s\S]*?width:\s*20px;[\s\S]*?height:\s*20px;/u);
+    assert.match(css, /\.codex-attachment-file-remove \{[\s\S]*?top:\s*-4px;[\s\S]*?right:\s*-4px;[\s\S]*?width:\s*20px;[\s\S]*?height:\s*20px;/u);
     assert.match(css, /\.codex-ai-elements-attachments-list \{[\s\S]*?flex-wrap:\s*nowrap;[\s\S]*?overflow-x:\s*auto;/u);
     assert.match(css, /\.codex-message-attachments \{[\s\S]*?flex-wrap:\s*nowrap;[\s\S]*?justify-content:\s*safe\s+flex-end;[\s\S]*?overflow-x:\s*auto;/u);
-    assert.match(css, /@media \(max-width:\s*560px\)[\s\S]*?\.codex-attachment-thumbnail,[\s\S]*?\.codex-attachment-file-tile,[\s\S]*?\.codex-message-attachment-tile \{[\s\S]*?width:\s*72px;[\s\S]*?height:\s*72px;/u);
+    assert.match(css, /\.codex-message-attachment-tile \{[\s\S]*?width:\s*72px;[\s\S]*?height:\s*72px;[\s\S]*?flex:\s*0\s+0\s+72px;/u);
     assert.match(css, /\.codex-composer-send-button\.codex-send-button\.is-stop-action\s*\{[\s\S]*?color:\s*var\(--text-normal\);[\s\S]*?box-shadow:\s*none\s*!important;/u);
     assert.match(css, /\.codex-composer-send-button\.codex-send-button\.is-stop-action:is\(:hover, :focus-visible\)[\s\S]*?--echoink-conversation-status-danger/u);
     assert.doesNotMatch(turnRunnerSource, /Pi Chat 的附件入口尚未完成切换，本轮没有发送/u);

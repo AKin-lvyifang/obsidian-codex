@@ -2459,9 +2459,9 @@ body.theme-light .codex-code-wrapper pre {
   align-items: center;
   justify-content: center;
   box-sizing: border-box;
-  width: 84px;
-  height: 84px;
-  flex: 0 0 84px;
+  width: 72px;
+  height: 72px;
+  flex: 0 0 72px;
   padding: 0;
   border: 1px solid var(--background-modifier-border);
   border-radius: var(--echoink-conversation-radius-md);
@@ -2472,7 +2472,19 @@ body.theme-light .codex-code-wrapper pre {
 }
 
 .codex-message-attachment-preview {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 72px;
+  height: 72px;
+  flex: 0 0 72px;
+  padding: 0;
   overflow: hidden;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--echoink-conversation-radius-md);
+  background: var(--codex-soft-bg);
+  box-shadow: none;
   cursor: zoom-in;
 }
 
@@ -2562,9 +2574,9 @@ body.theme-light .codex-code-wrapper pre {
   align-items: center;
   justify-content: center;
   box-sizing: border-box;
-  width: 84px;
-  height: 84px;
-  flex: 0 0 84px;
+  width: 72px;
+  height: 72px;
+  flex: 0 0 72px;
   padding: 0;
   border: 1px solid var(--background-modifier-border);
   border-radius: var(--echoink-conversation-radius-lg);
@@ -2592,17 +2604,17 @@ body.theme-light .codex-code-wrapper pre {
 
 .codex-attachment-file-remove {
   position: absolute;
-  top: -6px;
-  right: -6px;
+  top: -4px;
+  right: -4px;
   z-index: 2;
-  width: 28px;
-  height: 28px;
+  width: 20px;
+  height: 20px;
   padding: 0;
   border: 1px solid color-mix(in srgb, var(--background-modifier-border) 74%, transparent);
-  border-radius: var(--echoink-conversation-radius-lg);
+  border-radius: 50%;
   color: var(--text-muted);
   background: var(--background-primary);
-  box-shadow: 0 2px 7px rgba(0, 0, 0, 0.18);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.16);
   cursor: pointer;
 }
 
@@ -2613,15 +2625,15 @@ body.theme-light .codex-code-wrapper pre {
 }
 
 .codex-attachment-file-remove svg {
-  width: 13px;
-  height: 13px;
+  width: 11px;
+  height: 11px;
 }
 
 .codex-attachment-thumbnail {
   position: relative;
-  width: 84px;
-  height: 84px;
-  flex: 0 0 84px;
+  width: 72px;
+  height: 72px;
+  flex: 0 0 72px;
 }
 
 .codex-attachment-thumbnail-preview {
@@ -2693,19 +2705,19 @@ body.theme-light .codex-code-wrapper pre {
 .codex-attachment-thumbnail-remove {
   display: inline-flex;
   position: absolute;
-  top: -6px;
-  right: -6px;
+  top: -4px;
+  right: -4px;
   z-index: 2;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: 20px;
+  height: 20px;
   padding: 0;
   border: 1px solid color-mix(in srgb, var(--background-modifier-border) 74%, transparent);
-  border-radius: var(--echoink-conversation-radius-lg);
+  border-radius: 50%;
   color: var(--text-muted);
   background: var(--background-primary);
-  box-shadow: 0 2px 7px rgba(0, 0, 0, 0.18);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.16);
   cursor: pointer;
 }
 
@@ -2722,18 +2734,8 @@ body.theme-light .codex-code-wrapper pre {
 }
 
 .codex-attachment-thumbnail-remove svg {
-  width: 14px;
-  height: 14px;
-}
-
-@media (max-width: 560px) {
-  .codex-attachment-thumbnail,
-  .codex-attachment-file-tile,
-  .codex-message-attachment-tile {
-    width: 72px;
-    height: 72px;
-    flex-basis: 72px;
-  }
+  width: 11px;
+  height: 11px;
 }
 
 .codex-skill-token {

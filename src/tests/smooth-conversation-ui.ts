@@ -3342,6 +3342,8 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     "the message viewport reserves its scrollbar width instead of invalidating every measured row");
   assert.match(styles, /\.codex-message-attachment-preview img\s*\{[^}]*object-fit:\s*contain;/u,
     "durable screenshot thumbnails preserve the complete image frame");
+  assert.match(styles, /\.codex-message-attachment-preview\s*\{[^}]*width:\s*72px;[^}]*height:\s*72px;[^}]*flex:\s*0\s+0\s+72px;/u,
+    "durable screenshot thumbnails keep the same compact stable footprint as the composer preview");
   assert.match(styles, /\.codex-message-type-assistantTurn\s*\{[\s\S]*?border:\s*0;[\s\S]*?background:\s*transparent;/u);
   assert.match(styles, /\.codex-assistant-turn-spine::before\s*\{[\s\S]*?width:\s*1px;/u);
   assert.doesNotMatch(
