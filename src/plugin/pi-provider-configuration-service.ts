@@ -3,6 +3,7 @@ import type {
   ProviderResponse,
   ProviderStreams
 } from "@earendil-works/pi-ai";
+import { requestUrl } from "obsidian";
 import {
   PiProviderProtocolDispatcher,
   classifyPiProviderConnectionFailure,
@@ -56,6 +57,9 @@ export type PiProviderModelListStatus =
   | "available"
   | "unsupported"
   | "api_key_error"
+  | "rate_or_service_error"
+  | "network_error"
+  | "response_format_error"
   | "temporary_failure";
 
 export interface PiProviderModelListResult {
@@ -124,9 +128,7 @@ export class PiProviderConfigurationService {
       draft: normalized,
       apiKey,
       fetchImpl: this.options.fetchImpl
-        ?? (isLoopbackApiProviderUrl(normalized.baseUrl)
-          ? loopbackProviderFetch
-          : fetch),
+        ?? providerModelFetchForUrl(normalized.baseUrl),
       timeoutMs: this.options.timeoutMs ?? PROVIDER_REQUEST_TIMEOUT_MS
     });
   }
@@ -290,17 +292,20 @@ export async function requestProviderModels(input: {
       : input.apiKey
         ? { authorization: `Bearer ${input.apiKey}` }
         : {};
-    const response = await input.fetchImpl(
-      apiProviderModelsUrl(
-        input.draft.baseUrl,
-        input.draft.apiProtocol
+    const response = await abortableProviderRequest(
+      input.fetchImpl(
+        apiProviderModelsUrl(
+          input.draft.baseUrl,
+          input.draft.apiProtocol
+        ),
+        {
+          method: "GET",
+          headers,
+          signal: controller.signal,
+          redirect: "error"
+        }
       ),
-      {
-        method: "GET",
-        headers,
-        signal: controller.signal,
-        redirect: "error"
-      }
+      controller.signal
     );
     if (response.status === 401 || response.status === 403) {
       return { status: "api_key_error", models: [] };
@@ -309,21 +314,79 @@ export async function requestProviderModels(input: {
       return { status: "unsupported", models: [] };
     }
     if (response.status === 429 || response.status >= 500) {
-      return { status: "temporary_failure", models: [] };
+      return { status: "rate_or_service_error", models: [] };
     }
     if (response.status < 200 || response.status >= 300) {
-      return { status: "temporary_failure", models: [] };
+      return { status: "unsupported", models: [] };
     }
-    const body = await response.json();
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch {
+      return { status: "response_format_error", models: [] };
+    }
     const models = modelIdsFromResponse(body);
     return models === null
-      ? { status: "unsupported", models: [] }
+      ? { status: "response_format_error", models: [] }
       : { status: "available", models };
   } catch {
-    return { status: "temporary_failure", models: [] };
+    return { status: "network_error", models: [] };
   } finally {
     clearTimeout(timeout);
   }
+}
+
+export function createObsidianProviderFetch(
+  requestImpl: typeof requestUrl = requestUrl
+): PiProviderFetch {
+  return async (input, init) => {
+    const response = await requestImpl({
+      url: input,
+      method: init.method ?? "GET",
+      headers: init.headers as Record<string, string> | undefined,
+      throw: false
+    });
+    return {
+      status: response.status,
+      json: async () => response.json
+    };
+  };
+}
+
+export const obsidianProviderFetch = createObsidianProviderFetch();
+
+export function providerModelFetchForUrl(
+  baseUrl: string,
+  cloudFetch: PiProviderFetch = obsidianProviderFetch,
+  localFetch: PiProviderFetch = loopbackProviderFetch
+): PiProviderFetch {
+  return isLoopbackApiProviderUrl(baseUrl) ? localFetch : cloudFetch;
+}
+
+function abortableProviderRequest<T>(
+  request: Promise<T>,
+  signal: AbortSignal
+): Promise<T> {
+  if (signal.aborted) {
+    return Promise.reject(new Error("provider_model_list_aborted"));
+  }
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => {
+      signal.removeEventListener("abort", abort);
+      reject(new Error("provider_model_list_aborted"));
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    void request.then(
+      (value) => {
+        signal.removeEventListener("abort", abort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", abort);
+        reject(error);
+      }
+    );
+  });
 }
 
 export async function testProviderConnection(input: {

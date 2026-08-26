@@ -8,6 +8,7 @@ import {
   type ProviderStreams,
   type SimpleStreamOptions,
   type StreamOptions,
+  clampThinkingLevel,
   getOverflowPatterns,
   isContextOverflow
 } from "@earendil-works/pi-ai";
@@ -66,14 +67,22 @@ export class PiProviderProtocolDispatcher {
     model: Model<Api>;
     context: Context;
     apiKey: string;
-    options: Omit<StreamOptions, "apiKey">;
+    options: Omit<StreamOptions, "apiKey"> & Pick<SimpleStreamOptions, "reasoning">;
   }): AssistantMessageEventStream {
     const protocol = requireApiProviderProtocol(input.model.api);
+    const { reasoning, ...streamOptions } = input.options;
+    const clampedReasoning = reasoning
+      ? clampThinkingLevel(input.model, reasoning)
+      : undefined;
+    const reasoningEffort = clampedReasoning === "off"
+      ? undefined
+      : clampedReasoning;
     return this.adapters[protocol].stream(
       input.model,
       input.context,
       {
-        ...input.options,
+        ...streamOptions,
+        ...(reasoningEffort ? { reasoningEffort } : {}),
         apiKey: input.apiKey
       }
     );
@@ -128,8 +137,16 @@ implements ControlledPiStreamPort {
     }
     let responseStatus: number | null = null;
     try {
-      const upstream = (this.options.dispatcher
-        ?? new PiProviderProtocolDispatcher()).streamSimple({
+      const dispatcher = this.options.dispatcher
+        ?? new PiProviderProtocolDispatcher();
+      const dispatch = input.options.maxTokens === undefined
+        && (
+          input.model.api === "openai-completions"
+          || input.model.api === "openai-responses"
+        )
+        ? dispatcher.stream.bind(dispatcher)
+        : dispatcher.streamSimple.bind(dispatcher);
+      const upstream = dispatch({
         model: input.model,
         context: input.context,
         apiKey,
@@ -138,7 +155,9 @@ implements ControlledPiStreamPort {
           ...(input.options.reasoning
             ? { reasoning: input.options.reasoning }
             : {}),
-          maxTokens: input.options.maxTokens,
+          ...(input.options.maxTokens === undefined
+            ? {}
+            : { maxTokens: input.options.maxTokens }),
           temperature: input.options.temperature,
           cacheRetention: input.options.cacheRetention,
           maxRetries: input.options.maxRetries,

@@ -305,10 +305,11 @@ function controlledProviderStream(
           ...(streamOptions?.reasoning
             ? { reasoning: streamOptions.reasoning }
             : {}),
-          maxTokens: requestMaxTokens(
+          ...requestMaxTokens(
             streamOptions?.maxTokens,
             options.maxTokens,
-            registeredModel.maxTokens
+            registeredModel.maxTokens,
+            registeredModel.api === "anthropic-messages"
           ),
           temperature: boundedNumber(
             streamOptions?.temperature ?? options.temperature,
@@ -428,8 +429,14 @@ function captureExecutionContext(
 function requestMaxTokens(
   requested: number | undefined,
   configured: number | undefined,
-  modelMaximum: number
-): number {
+  modelMaximum: number,
+  required: boolean
+): Readonly<{ maxTokens?: number }> {
+  if (
+    configured === undefined
+    && requested === undefined
+    && !required
+  ) return {};
   const modelLimit = Math.min(modelMaximum, MAX_CONTROLLED_OUTPUT_TOKENS);
   const configuredLimit = boundedInteger(
     configured,
@@ -443,7 +450,9 @@ function requestMaxTokens(
     modelLimit,
     modelLimit
   );
-  return Math.min(requestedLimit, configuredLimit, modelLimit);
+  return {
+    maxTokens: Math.min(requestedLimit, configuredLimit, modelLimit)
+  };
 }
 
 function hasAmbientCredential(

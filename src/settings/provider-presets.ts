@@ -4,14 +4,15 @@ export const API_PROVIDER_IDS = [
   "kimi",
   "minimax",
   "deepseek",
+  "qwen",
+  "qwen-token-plan",
   "ollama",
   "custom",
   // Compatibility-only identities. They remain readable so an existing
   // saved configuration is never destroyed by a settings migration, but they
   // are not rendered as new product presets.
   "openai",
-  "anthropic",
-  "qwen"
+  "anthropic"
 ] as const;
 
 export type ApiProviderId = typeof API_PROVIDER_IDS[number];
@@ -27,6 +28,12 @@ export type ApiProviderProtocol =
   typeof API_PROVIDER_PROTOCOLS[number];
 
 export type ApiProviderAuthMode = "api-key" | "oauth";
+
+export type ApiProviderGroupId =
+  | "account"
+  | "provider"
+  | "token-plan"
+  | "other";
 
 const KIMI_K2_CONTEXT_WINDOW = 262_144;
 const KIMI_MAX_OUTPUT_RESERVE = 65_536;
@@ -47,8 +54,17 @@ export interface ApiProviderModelPreset {
 
 export interface ApiProviderPreset {
   readonly id: Extract<ApiProviderId,
-    "openai-codex" | "glm" | "kimi" | "minimax" | "deepseek" | "ollama" | "custom">;
+    | "openai-codex"
+    | "glm"
+    | "kimi"
+    | "minimax"
+    | "deepseek"
+    | "qwen"
+    | "qwen-token-plan"
+    | "ollama"
+    | "custom">;
   readonly name: string;
+  readonly group: ApiProviderGroupId;
   readonly runtimeProviderId: string;
   readonly baseUrl: string;
   readonly docsUrl: string;
@@ -72,6 +88,7 @@ export const API_PROVIDER_PRESETS: readonly ApiProviderPreset[] =
     preset({
       id: "openai-codex",
       name: "OpenAI Codex Beta",
+      group: "account",
       runtimeProviderId: "openai-codex",
       baseUrl: "https://chatgpt.com/backend-api",
       docsUrl: "https://developers.openai.com/codex/",
@@ -100,6 +117,7 @@ export const API_PROVIDER_PRESETS: readonly ApiProviderPreset[] =
     preset({
       id: "glm",
       name: "智谱开放平台 / GLM API",
+      group: "provider",
       runtimeProviderId: "zai-coding-cn",
       baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4",
       docsUrl: "https://docs.bigmodel.cn/cn/guide/develop/openai/introduction",
@@ -115,6 +133,7 @@ export const API_PROVIDER_PRESETS: readonly ApiProviderPreset[] =
     preset({
       id: "kimi",
       name: "Kimi 中国版 / Kimi China",
+      group: "provider",
       runtimeProviderId: "moonshotai-cn",
       baseUrl: "https://api.moonshot.cn/v1",
       docsUrl: "https://platform.moonshot.cn/docs/guide/start-using-kimi-api",
@@ -130,6 +149,7 @@ export const API_PROVIDER_PRESETS: readonly ApiProviderPreset[] =
     preset({
       id: "minimax",
       name: "MiniMax 中国版 / MiniMax China",
+      group: "provider",
       runtimeProviderId: "minimax-cn",
       baseUrl: "https://api.minimaxi.com/anthropic",
       docsUrl: "https://platform.minimaxi.com/document/Guides",
@@ -145,6 +165,7 @@ export const API_PROVIDER_PRESETS: readonly ApiProviderPreset[] =
     preset({
       id: "deepseek",
       name: "深度求索 / DeepSeek",
+      group: "provider",
       runtimeProviderId: "deepseek",
       baseUrl: "https://api.deepseek.com",
       docsUrl: "https://api-docs.deepseek.com/",
@@ -157,8 +178,33 @@ export const API_PROVIDER_PRESETS: readonly ApiProviderPreset[] =
       ]
     }),
     preset({
+      id: "qwen",
+      name: "通义千问 / Qwen API",
+      group: "provider",
+      runtimeProviderId: "qwen",
+      baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      docsUrl: "https://help.aliyun.com/zh/model-studio/getting-started/first-api-call-to-qwen",
+      apiProtocol: "openai-completions",
+      apiKeyRequired: true,
+      modelDiscovery: "supported",
+      models: []
+    }),
+    preset({
+      id: "qwen-token-plan",
+      name: "通义千问 Token Plan / Qwen Token Plan",
+      group: "token-plan",
+      runtimeProviderId: "qwen-token-plan-cn",
+      baseUrl: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+      docsUrl: "https://help.aliyun.com/zh/model-studio/token-plan",
+      apiProtocol: "openai-completions",
+      apiKeyRequired: true,
+      modelDiscovery: "supported",
+      models: []
+    }),
+    preset({
       id: "ollama",
       name: "Ollama 本地 / Ollama",
+      group: "provider",
       runtimeProviderId: "ollama",
       baseUrl: "http://127.0.0.1:11434/v1",
       docsUrl: "https://docs.ollama.com/api/openai-compatibility",
@@ -173,6 +219,7 @@ export const API_PROVIDER_PRESETS: readonly ApiProviderPreset[] =
     preset({
       id: "custom",
       name: "自定义 / Custom",
+      group: "other",
       runtimeProviderId: "echoink-custom",
       baseUrl: "",
       docsUrl: "",
@@ -273,6 +320,11 @@ export function normalizeApiProviderId(
     || normalizedName === "minimax"
   ) return "minimax";
   if (
+    normalizedBaseUrl.includes("token-plan.cn-beijing.maas.aliyuncs.com")
+    || normalizedName === "qwen token plan"
+    || normalizedName === "通义千问 token plan"
+  ) return "qwen-token-plan";
+  if (
     normalizedBaseUrl.includes("dashscope")
     || normalizedName === "qwen"
   ) return "qwen";
@@ -291,9 +343,20 @@ export function normalizeApiProviderProtocol(
   value: unknown,
   providerId: ApiProviderId
 ): ApiProviderProtocol {
+  if (providerId === "anthropic") return "anthropic-messages";
+  if (providerId === "openai") {
+    return value === "openai-responses"
+      ? "openai-responses"
+      : "openai-completions";
+  }
   if (
-    typeof value === "string"
-    && (API_PROVIDER_PROTOCOLS as readonly string[]).includes(value)
+    providerId === "custom"
+    && typeof value === "string"
+    && [
+      "openai-completions",
+      "openai-responses",
+      "anthropic-messages"
+    ].includes(value)
   ) {
     return value as ApiProviderProtocol;
   }

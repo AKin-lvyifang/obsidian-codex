@@ -11,6 +11,7 @@ import type {
   OpenAICodexAuthStatus
 } from "../plugin/openai-codex-oauth-service";
 import {
+  applyApiProviderModelLimitsOverride,
   apiProviderModelSupportsImage,
   createApiProviderConfig,
   createApiProviderModelConfig,
@@ -27,7 +28,6 @@ import { renderProviderBrandIcon } from "./provider-brand-icons";
 import {
   API_PROVIDER_PRESETS,
   apiProviderApiKeyRequired,
-  apiProviderMaxOutputReserve,
   getApiProviderPreset,
   normalizeApiProviderId,
   type ApiProviderPreset,
@@ -78,7 +78,6 @@ export class ProviderModelModal extends Modal {
   private draft: ApiProviderConfig;
   private apiKeyInput = "";
   private readonly preflight: ProviderPreflightSession;
-  private customProtocolEnabled: boolean;
   private closed = true;
   private suppressModalClose = false;
   private saving = false;
@@ -124,8 +123,6 @@ export class ProviderModelModal extends Modal {
   constructor(private readonly options: ProviderModelModalOptions) {
     super(options.app);
     this.draft = structuredClone(options.draft);
-    this.customProtocolEnabled =
-      this.draft.apiProtocol !== "openai-completions";
     this.preflight = new ProviderPreflightSession(
       options.preflight,
       (state) => {
@@ -289,17 +286,6 @@ export class ProviderModelModal extends Modal {
           this.render();
           this.focusField(field);
           return;
-        }
-        for (const model of this.draft.models) {
-          model.maxOutputTokens = Math.min(
-            model.contextWindow,
-            model.modelMaxTokens,
-            apiProviderMaxOutputReserve(
-              this.providerId,
-              model.id,
-              model.maxOutputTokens
-            )
-          );
         }
         this.saving = true;
         save.disabled = true;
@@ -527,7 +513,6 @@ export class ProviderModelModal extends Modal {
     const replacement = createApiProviderConfig(providerId, this.draft.id);
     this.draft = { ...replacement, apiKey: "" };
     this.apiKeyInput = "";
-    this.customProtocolEnabled = false;
     this.preflight.reset();
     if (providerId === "openai-codex") {
       void this.loadCodexAuthStatus();
@@ -1008,7 +993,20 @@ export class ProviderModelModal extends Modal {
     advanced.createEl("summary", {
       text: this.label("高级设置", "Advanced settings")
     });
-    const toggles = advanced.createDiv({ cls: "codex-provider-custom-toggles" });
+    const capabilities = advanced.createDiv({
+      cls: "codex-provider-model-advanced-group is-capabilities"
+    });
+    capabilities.createDiv({
+      cls: "codex-provider-model-advanced-heading",
+      text: this.label("模型能力", "Model capabilities")
+    });
+    capabilities.createDiv({
+      cls: "codex-provider-model-advanced-description",
+      text: this.modelCapabilityDescription(model)
+    });
+    const toggles = capabilities.createDiv({
+      cls: "codex-provider-custom-toggles"
+    });
     this.renderToggle(
       toggles,
       this.label("工具调用", "Tool calling"),
@@ -1039,7 +1037,21 @@ export class ProviderModelModal extends Modal {
         model.metadataSource = "manual";
       }
     );
-    const tokens = advanced.createDiv({ cls: "codex-provider-context-grid" });
+    const limits = advanced.createDiv({
+      cls: "codex-provider-model-advanced-group is-limits"
+    });
+    limits.createDiv({
+      cls: "codex-provider-model-advanced-heading",
+      text: this.label("上下文与输出", "Context and output")
+    });
+    limits.createDiv({
+      cls: "codex-provider-model-advanced-description",
+      text: this.label(
+        "每项都可单独覆盖；留空会沿用可靠模型元数据或内部保守值，且不会保存用户覆盖。",
+        "Override each limit independently. Blank fields inherit reliable model metadata or an internal conservative value and are not saved as user overrides."
+      )
+    });
+    const tokens = limits.createDiv({ cls: "codex-provider-context-grid" });
     this.renderModelNumberField(
       tokens,
       model,
@@ -1060,7 +1072,7 @@ export class ProviderModelModal extends Modal {
       tokens,
       model,
       "maxOutputTokens",
-      this.label("实际最大输出", "Actual max output"),
+      this.label("每次请求最大输出", "Per-request max output"),
       1,
       1_000_000
     );
@@ -1085,17 +1097,87 @@ export class ProviderModelModal extends Modal {
         min: String(min),
         max: String(max),
         step: "1",
-        value: String(model[key]),
+        value: model.limitsOverride?.[key] === undefined
+          ? ""
+          : String(model.limitsOverride[key]),
+        placeholder: String(model[key]),
         "data-modal-focus-key": `model:${model.id}:${key}`
       }
     }) as HTMLInputElement;
+    const hintId = `${id}-hint`;
+    const hint = field.createDiv({
+      cls: "codex-provider-context-field-hint",
+      attr: { id: hintId }
+    });
+    input.setAttr("aria-describedby", hintId);
+    const updateHint = (): void => {
+      hint.setText(model.limitsOverride?.[key] === undefined
+        ? this.label(
+          `留空时采用有效值 ${model[key].toLocaleString()}`,
+          `Blank uses effective value ${model[key].toLocaleString()}`
+        )
+        : this.label(
+          `当前有效值 ${model[key].toLocaleString()}`,
+          `Effective value ${model[key].toLocaleString()}`
+        ));
+    };
+    updateHint();
     input.oninput = () => {
+      const limitsOverride = { ...model.limitsOverride };
+      if (!input.value.trim()) {
+        delete limitsOverride[key];
+        applyApiProviderModelLimitsOverride(
+          model,
+          this.providerId,
+          this.draft.runtimeProviderId,
+          limitsOverride
+        );
+        input.placeholder = String(model[key]);
+        updateHint();
+        this.invalidatePreflight();
+        return;
+      }
       const value = Number(input.value);
-      if (!Number.isSafeInteger(value)) return;
-      model[key] = value;
-      model.metadataSource = "manual";
+      if (
+        !Number.isSafeInteger(value)
+        || value < min
+        || value > max
+      ) return;
+      limitsOverride[key] = value;
+      applyApiProviderModelLimitsOverride(
+        model,
+        this.providerId,
+        this.draft.runtimeProviderId,
+        limitsOverride
+      );
+      input.placeholder = String(model[key]);
+      updateHint();
       this.invalidatePreflight();
     };
+  }
+
+  private modelCapabilityDescription(model: ApiProviderModelConfig): string {
+    if (model.metadataSource === "unknown") {
+      return this.label(
+        "尚无可靠能力元数据；以下开关使用保守状态，可按 Provider 文档覆盖。",
+        "Reliable capability metadata is unavailable. The controls use conservative states and can be overridden from the provider documentation."
+      );
+    }
+    if (model.metadataSource === "manual") {
+      return this.label(
+        "以下能力包含你保存的手动设置。",
+        "These capabilities include your saved manual settings."
+      );
+    }
+    return model.metadataSource === "catalog"
+      ? this.label(
+        "能力来自固定 Pi 模型目录，可按 Provider 文档覆盖。",
+        "Capabilities come from the pinned Pi model catalog and can be overridden from the provider documentation."
+      )
+      : this.label(
+        "能力来自 EchoInk 内置模型预设，可按 Provider 文档覆盖。",
+        "Capabilities come from EchoInk's built-in model preset and can be overridden from the provider documentation."
+      );
   }
 
   private modelCapabilityText(model: ApiProviderModelConfig): string {
@@ -1119,10 +1201,7 @@ export class ProviderModelModal extends Modal {
       this.label(
         `推理 ${model.reasoning ? "是" : "否"}`,
         `reasoning ${model.reasoning ? "yes" : "no"}`
-      ),
-      `context ${model.contextWindow.toLocaleString()}`,
-      `model max ${model.modelMaxTokens.toLocaleString()}`,
-      `output ${model.maxOutputTokens.toLocaleString()}`
+      )
     ].join(" · ");
   }
 
@@ -1132,6 +1211,9 @@ export class ProviderModelModal extends Modal {
       this.preflight.state.operation === "model_list"
       && (
         this.preflight.state.status === "api_key_error"
+        || this.preflight.state.status === "rate_or_service_error"
+        || this.preflight.state.status === "network_error"
+        || this.preflight.state.status === "response_format_error"
         || this.preflight.state.status === "temporary_failure"
       )
     ) {
@@ -1179,6 +1261,13 @@ export class ProviderModelModal extends Modal {
     statusRow.className = `codex-provider-model-status is-${this.preflight.state.status}`;
     statusRow.empty();
     this.renderPreflightStatus(statusRow);
+    const discover = this.contentEl.querySelector<HTMLButtonElement>(
+      '[data-modal-focus-key="model-discover"]'
+    );
+    if (discover) {
+      discover.disabled = !this.canDiscoverModels()
+        || this.preflight.state.status === "loading";
+    }
   }
 
   private modelChoices(): string[] {
@@ -1246,6 +1335,15 @@ export class ProviderModelModal extends Modal {
     if (state.status === "api_key_error") {
       return this.options.copy.providers.modelListApiKeyError;
     }
+    if (state.status === "rate_or_service_error") {
+      return this.options.copy.providers.modelListRateOrServiceError;
+    }
+    if (state.status === "network_error") {
+      return this.options.copy.providers.modelListNetworkError;
+    }
+    if (state.status === "response_format_error") {
+      return this.options.copy.providers.modelListResponseFormatError;
+    }
     if (state.status === "temporary_failure") {
       return this.options.copy.providers.modelListFailed;
     }
@@ -1292,38 +1390,19 @@ export class ProviderModelModal extends Modal {
     };
     this.renderFieldError(endpoint, "endpoint");
 
+    this.renderCustomProtocolField(container);
     this.renderApiKeyField(container);
     this.renderModelSelectionField(container);
+  }
 
-    const advanced = container.createDiv({ cls: "codex-provider-custom-advanced" });
-    advanced.createDiv({
-      cls: "codex-provider-custom-heading",
-      text: this.label("高级配置", "Advanced settings")
-    });
-    const toggles = advanced.createDiv({ cls: "codex-provider-custom-toggles" });
-    let protocolField: HTMLElement | null = null;
-    this.renderToggle(toggles, this.label("自定义协议", "Custom protocol"), "custom-protocol", this.customProtocolEnabled, (value) => {
-      this.focusIntent = "toggle:custom-protocol";
-      this.customProtocolEnabled = value;
-      if (!value) {
-        const protocolChanged = this.draft.apiProtocol !== "openai-completions";
-        this.draft.apiProtocol = "openai-completions";
-        if (protocolChanged) {
-          this.render();
-        }
-      }
-      protocolField?.toggleAttribute("hidden", !value);
-      this.updateProtocolPill();
-    });
-
+  private renderCustomProtocolField(container: HTMLElement): void {
     const protocolId = this.controlId("protocol");
-    protocolField = this.createField(
-      advanced,
+    const protocolField = this.createField(
+      container,
       this.label("API 协议", "API protocol"),
       protocolId
     );
     protocolField.addClass("codex-provider-protocol-field");
-    protocolField.toggleAttribute("hidden", !this.customProtocolEnabled);
     const select = protocolField.createEl("select", {
       cls: "codex-provider-modal-input",
       attr: {
@@ -1691,7 +1770,7 @@ export class ProviderModelModal extends Modal {
 
 type ComboboxFocusTarget = "search" | "selected" | "last";
 
-type ProviderPickerGroupKey = "account" | "provider" | "other";
+type ProviderPickerGroupKey = ApiProviderPreset["group"];
 
 const PROVIDER_PICKER_GROUPS: readonly Readonly<{
   key: ProviderPickerGroupKey;
@@ -1700,15 +1779,14 @@ const PROVIDER_PICKER_GROUPS: readonly Readonly<{
 }>[] = Object.freeze([
   { key: "account", zh: "登录账户", en: "Account sign-in" },
   { key: "provider", zh: "供应商", en: "Providers" },
+  { key: "token-plan", zh: "Token Plan", en: "Token plans" },
   { key: "other", zh: "其他", en: "Other" }
 ]);
 
 function providerPickerGroupKey(
-  preset: Pick<ApiProviderPreset, "authMode" | "baseUrl">
+  preset: Pick<ApiProviderPreset, "group">
 ): ProviderPickerGroupKey {
-  if (preset.authMode === "oauth") return "account";
-  if (preset.baseUrl.trim()) return "provider";
-  return "other";
+  return preset.group;
 }
 
 interface ComboboxKeyboardBinding {
