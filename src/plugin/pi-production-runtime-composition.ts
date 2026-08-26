@@ -50,7 +50,10 @@ import {
   type PiNativeNoteMentionTurnContext,
   type PiNativeTaskPlanTurnContext
 } from "../harness/pi-native/pi-native-conversation-runtime";
-import { buildPiNoteMentionContextMessage } from "../harness/pi-native/pi-note-mentions";
+import {
+  buildPiNoteMentionContextMessage,
+  PI_NOTE_MENTIONS_CONTEXT_DETAILS_KEY
+} from "../harness/pi-native/pi-note-mentions";
 import type {
   PiKnowledgeMaintenanceToolPort,
   PiKnowledgeReference,
@@ -813,12 +816,6 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
     hidden: true,
     factory: async (pi) => {
       await vaultFactory(pi);
-      pi.on("before_agent_start", async () => {
-        const turn = input.currentNoteMentionTurn?.() ?? null;
-        if (!turn) return undefined;
-        const message = buildPiNoteMentionContextMessage(turn.noteMentions);
-        return message ? { message } : undefined;
-      });
       // Pi persists before_agent_start messages. Stage request-only context
       // here, then deliver it through the non-persistent context event below.
       let transientTurnContext: AgentMessage | null = null;
@@ -853,6 +850,10 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
         const systemPromptResult = systemPrompt === event.systemPrompt
           ? {}
           : { systemPrompt };
+        const noteMentionTurn = input.currentNoteMentionTurn?.() ?? null;
+        const noteMentionMessage = noteMentionTurn
+          ? buildPiNoteMentionContextMessage(noteMentionTurn.noteMentions)
+          : null;
         const memoryTurn = input.currentMemoryTurn?.();
         if (memoryTurn && input.personalMemory) {
           const effectiveMode = memoryTurn.memoryMode;
@@ -960,48 +961,56 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
           }
         }
         if (turn?.kind === "ask") {
+          const message = mergePiBeforeAgentStartNoteMentionContext({
+            customType: "echoink-knowledge-ask-resource-v1",
+            content: turn.providerResourceText,
+            display: false,
+            details: knowledgeReferenceEntryDetails(
+              turn.references.map((reference) => ({ ...reference }))
+            )
+          }, noteMentionMessage);
           return {
             ...systemPromptResult,
-            message: {
-              customType: "echoink-knowledge-ask-resource-v1",
-              content: turn.providerResourceText,
-              display: false,
-              details: knowledgeReferenceEntryDetails(
-                turn.references.map((reference) => ({ ...reference }))
-              )
-            }
+            message
           };
         }
         if (turn?.kind === "maintain") {
           const command = turn.command;
+          const message = mergePiBeforeAgentStartNoteMentionContext({
+            customType: "echoink-knowledge-maintenance-command-v1",
+            content: [
+                "当前轮是一次性 Knowledge Maintenance。",
+                "只可使用 vault_search、note_read 和 knowledge_maintain。",
+                echoInkKnowledgeMaintenanceProtocolPrompt(),
+                command.preference.providerResourceText,
+                maintenanceScopeProviderPrompt(command.scope),
+                "由当前同一个 AgentSession 生成完整、有序 candidateActions；",
+                "candidateActions 只包含 wiki/** 或 projects/** 的 Markdown 候选。",
+                "每个候选必须携带 expectedTarget：更新已有目标前先 note_read，并原样使用其 contentRevision；确认不存在时使用 kind=missing。",
+                "raw/index.md、Tracker 和维护报告由 EchoInk 自动生成，不要作为候选动作传入。",
+                "自检后调用一次 knowledge_maintain；工具会直接写入并回读。不要调用任何 Vault 写 Tool。",
+                `用户维护请求：${command.request}`
+              ].join("\n"),
+            display: false,
+            details: Object.freeze({
+              type: "echoink.knowledge-maintenance-command.v1",
+              mode: command.mode,
+              scope: command.scope.mode,
+              preferenceProfileVersion:
+                command.preference.profileVersion,
+              preferenceState: command.preference.state,
+              preferenceRevision: command.preference.revision
+            })
+          }, noteMentionMessage);
           return {
             ...systemPromptResult,
-            message: {
-              customType: "echoink-knowledge-maintenance-command-v1",
-              content: [
-                  "当前轮是一次性 Knowledge Maintenance。",
-                  "只可使用 vault_search、note_read 和 knowledge_maintain。",
-                  echoInkKnowledgeMaintenanceProtocolPrompt(),
-                  command.preference.providerResourceText,
-                  maintenanceScopeProviderPrompt(command.scope),
-                  "由当前同一个 AgentSession 生成完整、有序 candidateActions；",
-                  "candidateActions 只包含 wiki/** 或 projects/** 的 Markdown 候选。",
-                  "每个候选必须携带 expectedTarget：更新已有目标前先 note_read，并原样使用其 contentRevision；确认不存在时使用 kind=missing。",
-                  "raw/index.md、Tracker 和维护报告由 EchoInk 自动生成，不要作为候选动作传入。",
-                  "自检后调用一次 knowledge_maintain；工具会直接写入并回读。不要调用任何 Vault 写 Tool。",
-                  `用户维护请求：${command.request}`
-                ].join("\n"),
-              display: false,
-              details: Object.freeze({
-                type: "echoink.knowledge-maintenance-command.v1",
-                mode: command.mode,
-                scope: command.scope.mode,
-                preferenceProfileVersion:
-                  command.preference.profileVersion,
-                preferenceState: command.preference.state,
-                preferenceRevision: command.preference.revision
-              })
-            }
+            message
+          };
+        }
+        if (noteMentionMessage) {
+          return {
+            ...systemPromptResult,
+            message: noteMentionMessage
           };
         }
         if (!memoryTurn) {
@@ -1047,6 +1056,36 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
         return { messages };
       });
     }
+  });
+}
+
+function mergePiBeforeAgentStartNoteMentionContext(
+  message: Readonly<{
+    customType: string;
+    content: string;
+    display: false;
+    details: unknown;
+  }>,
+  noteMentionMessage: Extract<AgentMessage, { role: "custom" }> | null
+): Readonly<{
+  customType: string;
+  content: string;
+  display: false;
+  details: unknown;
+}> {
+  if (!noteMentionMessage) return message;
+  const details = message.details
+    && typeof message.details === "object"
+    && !Array.isArray(message.details)
+    ? message.details as Readonly<Record<string, unknown>>
+    : Object.freeze({});
+  return Object.freeze({
+    ...message,
+    content: [message.content, String(noteMentionMessage.content)].join("\n\n"),
+    details: Object.freeze({
+      ...details,
+      [PI_NOTE_MENTIONS_CONTEXT_DETAILS_KEY]: noteMentionMessage.details
+    })
   });
 }
 

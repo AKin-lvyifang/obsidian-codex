@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   agentIdentityStateJson,
@@ -26,6 +27,8 @@ import {
 } from "../harness/memory/personal-memory-repository";
 import { estimatePiContextTokens } from "../harness/pi-native/pi-context-budget";
 import { PiChatUiProjector } from "../harness/pi-native/pi-chat-ui-projector";
+import { createControlledVaultResourceLoader } from "../harness/pi-native/controlled-resources";
+import { noteMentionReferencesFromPiContext } from "../harness/pi-native/pi-note-mentions";
 import { createPiKnowledgeInlineExtension } from "../plugin/pi-production-runtime-composition";
 import { withPersonalMemoryFixture } from "./personal-memory-fixture";
 
@@ -40,6 +43,7 @@ export async function runMemoryRecallHarnessContractScenarios(): Promise<void> {
   await scenarioCreateIsIdempotentAndBroadConflictsDoNotWrite();
   await scenarioRecallUsesOneBoundedTurnSnapshot();
   scenarioRecallProgressReusesAndDismissesOneTemporaryMessage();
+  await scenarioControlledInlineExtensionUsesOneBeforeAgentStartHandler();
   await scenarioHotPathPreparesRecallBeforeProviderRequest();
   console.log("PASS Memory Recall Harness contract scenarios");
 }
@@ -911,4 +915,114 @@ async function scenarioHotPathPreparesRecallBeforeProviderRequest(): Promise<voi
     transformed.messages.find((message: any) => message.customType === "echoink-personal-memory-context-v1")?.content ?? "",
     /mem_recall/u
   );
+}
+
+async function scenarioControlledInlineExtensionUsesOneBeforeAgentStartHandler(): Promise<void> {
+  const vaultRoot = await mkdtemp(path.join(
+    tmpdir(),
+    "echoink-controlled-inline-extension-"
+  ));
+  try {
+    let knowledgeTurn: any = null;
+    const noteMentionTurn = Object.freeze({
+      noteMentions: Object.freeze([Object.freeze({
+        vaultRelativePath: "projects/合并验收.md",
+        fileName: "合并验收.md",
+        content: "# 合并验收\n\nNOTE_MENTION_FULL_BODY"
+      })])
+    });
+    const loader = await createControlledVaultResourceLoader({
+      vaultRoot,
+      inlineExtension: createPiKnowledgeInlineExtension({
+        vaultSecurity: Object.freeze({
+          name: "controlled-inline-extension-test",
+          hidden: true,
+          factory: async (pi: any) => {
+            pi.on("tool_call", async () => undefined);
+            pi.on("tool_result", async () => undefined);
+          }
+        }) as never,
+        currentTurn: () => knowledgeTurn,
+        currentMemoryTurn: () => null,
+        currentNoteMentionTurn: () => noteMentionTurn,
+        currentTaskPlanTurn: () => null
+      })
+    });
+    const extension = loader.getExtensions().extensions[0];
+    assert.ok(extension, "the production Inline Extension must materialize");
+    assert.equal(extension.handlers.get("before_agent_start")?.length, 1);
+    for (const event of ["context", "tool_call", "tool_result"] as const) {
+      assert.equal(extension.handlers.get(event)?.length, 1, `${event} remains registered`);
+    }
+    const beforeAgentStart = extension.handlers.get("before_agent_start")?.[0] as
+      | ((event: any) => Promise<any>)
+      | undefined;
+    assert.ok(beforeAgentStart);
+    const event = {
+      type: "before_agent_start",
+      prompt: "结合提及的笔记回答",
+      systemPrompt: "SYSTEM",
+      systemPromptOptions: { skills: [] }
+    };
+
+    const noteOnly = await beforeAgentStart(event);
+    assert.equal(noteOnly?.message?.customType, "echoink-note-mentions-context-v1");
+    assert.match(String(noteOnly?.message?.content), /NOTE_MENTION_FULL_BODY/u);
+
+    knowledgeTurn = {
+      kind: "ask",
+      providerResourceText: "KNOWLEDGE_ASK_RESOURCE",
+      references: []
+    };
+    const askWithNote = await beforeAgentStart(event);
+    assert.equal(askWithNote?.message?.customType, "echoink-knowledge-ask-resource-v1");
+    assert.equal(askWithNote?.message?.details?.type, "echoink.knowledge-references.v1");
+    assert.match(String(askWithNote?.message?.content), /KNOWLEDGE_ASK_RESOURCE/u);
+    assert.match(String(askWithNote?.message?.content), /NOTE_MENTION_FULL_BODY/u);
+    assert.deepEqual(
+      noteMentionReferencesFromPiContext(
+        askWithNote?.message?.customType,
+        askWithNote?.message?.details
+      ),
+      [{ vaultRelativePath: "projects/合并验收.md", fileName: "合并验收.md" }]
+    );
+
+    knowledgeTurn = {
+      kind: "maintain",
+      command: {
+        mode: "maintain",
+        request: "",
+        scope: { mode: "global" },
+        preference: {
+          profileVersion: "echoink-knowledge-preference-profile-v1",
+          state: "default",
+          revision: `sha256:${"a".repeat(64)}`,
+          providerResourceText: "KNOWLEDGE_MAINTENANCE_PREFERENCE"
+        }
+      }
+    };
+    const maintainWithNote = await beforeAgentStart(event);
+    assert.equal(
+      maintainWithNote?.message?.customType,
+      "echoink-knowledge-maintenance-command-v1"
+    );
+    assert.equal(
+      maintainWithNote?.message?.details?.type,
+      "echoink.knowledge-maintenance-command.v1"
+    );
+    assert.match(
+      String(maintainWithNote?.message?.content),
+      /KNOWLEDGE_MAINTENANCE_PREFERENCE/u
+    );
+    assert.match(String(maintainWithNote?.message?.content), /NOTE_MENTION_FULL_BODY/u);
+    assert.deepEqual(
+      noteMentionReferencesFromPiContext(
+        maintainWithNote?.message?.customType,
+        maintainWithNote?.message?.details
+      ),
+      [{ vaultRelativePath: "projects/合并验收.md", fileName: "合并验收.md" }]
+    );
+  } finally {
+    await rm(vaultRoot, { recursive: true, force: true });
+  }
 }

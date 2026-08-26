@@ -6,6 +6,8 @@ export const PI_NOTE_MENTIONS_CONTEXT_CUSTOM_TYPE =
   "echoink-note-mentions-context-v1";
 export const PI_NOTE_MENTIONS_CONTEXT_DETAILS_TYPE =
   "echoink.note-mentions-context.v1";
+export const PI_NOTE_MENTIONS_CONTEXT_DETAILS_KEY =
+  "noteMentionsContext";
 
 export function normalizePiChatNoteMentions(
   values: readonly Readonly<PiChatNoteMention>[] | undefined
@@ -64,13 +66,18 @@ export function noteMentionReferencesFromPiContext(
   customType: unknown,
   details: unknown
 ): readonly Readonly<NoteMentionReference>[] {
+  const root = details && typeof details === "object" && !Array.isArray(details)
+    ? details as Record<string, unknown>
+    : null;
+  const contextDetails = customType === PI_NOTE_MENTIONS_CONTEXT_CUSTOM_TYPE
+    ? root
+    : root?.[PI_NOTE_MENTIONS_CONTEXT_DETAILS_KEY];
   if (
-    customType !== PI_NOTE_MENTIONS_CONTEXT_CUSTOM_TYPE
-    || !details
-    || typeof details !== "object"
-    || Array.isArray(details)
+    !contextDetails
+    || typeof contextDetails !== "object"
+    || Array.isArray(contextDetails)
   ) return Object.freeze([]);
-  const envelope = details as Record<string, unknown>;
+  const envelope = contextDetails as Record<string, unknown>;
   if (
     envelope.type !== PI_NOTE_MENTIONS_CONTEXT_DETAILS_TYPE
     || envelope.schemaVersion !== 1
