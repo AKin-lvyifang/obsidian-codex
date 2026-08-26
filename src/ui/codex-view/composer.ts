@@ -971,25 +971,21 @@ export function renderComposerAttachments(container: HTMLElement, state: Compose
       });
       markAIElementsAttachmentItem(thumbnail, "image");
       const preview = thumbnail.createDiv({ cls: "codex-attachment-thumbnail-preview" });
-      const fallback = preview.createDiv({
-        cls: "codex-attachment-thumbnail-fallback",
-        attr: { "aria-hidden": "true" }
-      });
-      const fallbackIcon = fallback.createSpan({ cls: "codex-attachment-thumbnail-fallback-icon" });
-      setIcon(fallbackIcon, "image-off");
-      fallback.createSpan({
-        cls: "codex-attachment-thumbnail-name",
-        text: `${displayName} · 无法预览`
-      });
       if (resource.resourceUri && resource.availability === "available") {
         const image = preview.createEl("img", {
           cls: "codex-attachment-thumbnail-image",
           attr: { alt: displayName, draggable: "false" }
         });
-        image.src = resource.resourceUri;
         image.onload = () => thumbnail.removeClass("is-broken");
-        image.onerror = () => thumbnail.addClass("is-broken");
+        image.onerror = () => {
+          renderComposerImageFallback(preview, displayName);
+          thumbnail.addClass("is-broken");
+          thumbnail.setAttribute("title", `${displayName} · 无法预览`);
+          thumbnail.setAttribute("aria-label", `图片：${displayName}，无法预览`);
+        };
+        image.src = resource.resourceUri;
       } else {
+        renderComposerImageFallback(preview, displayName);
         thumbnail.addClass("is-broken");
       }
       const remove = thumbnail.createEl("button", {
@@ -1030,6 +1026,23 @@ export function renderComposerAttachments(container: HTMLElement, state: Compose
     setIcon(remove, "x");
     remove.onclick = () => callbacks.onRemoveAttachment(item.path);
   }
+}
+
+function renderComposerImageFallback(
+  preview: HTMLElement,
+  displayName: string
+): void {
+  if (preview.querySelector(".codex-attachment-thumbnail-fallback")) return;
+  const fallback = preview.createDiv({
+    cls: "codex-attachment-thumbnail-fallback",
+    attr: { "aria-hidden": "true" }
+  });
+  const fallbackIcon = fallback.createSpan({ cls: "codex-attachment-thumbnail-fallback-icon" });
+  setIcon(fallbackIcon, "image-off");
+  fallback.createSpan({
+    cls: "codex-attachment-thumbnail-name",
+    text: `${displayName} · 无法预览`
+  });
 }
 
 export function labelFor(value: string): string {

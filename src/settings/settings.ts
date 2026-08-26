@@ -7,6 +7,7 @@ import {
   getApiProviderPreset,
   getApiProviderModelPreset,
   isLoopbackApiProviderUrl,
+  isQwenTokenPlanApiProviderUrl,
   normalizeApiProviderId,
   normalizeApiProviderProtocol,
   normalizeApiProviderBaseUrl,
@@ -542,6 +543,9 @@ export const DEFAULT_SETTINGS: CodexForObsidianSettings = {
 export function normalizeSettingsData(input: unknown): { settings: CodexForObsidianSettings; changed: boolean } {
   const data = settingsRecord(input) ?? {};
   const retiredDataPresent = hasRetiredSettingsData(data);
+  const legacyTokenPlanCustomPresent = hasLegacyTokenPlanCustomProvider(
+    data.apiProviders
+  );
   const currentProductData = data.productGeneration === DEFAULT_SETTINGS.productGeneration;
   const currentData = Object.fromEntries(
     Object.keys(DEFAULT_SETTINGS)
@@ -648,6 +652,7 @@ export function normalizeSettingsData(input: unknown): { settings: CodexForObsid
       || sessionBoundaryChanged
       || welcomeSettingsChanged
       || retiredDataPresent
+      || legacyTokenPlanCustomPresent
   };
 }
 
@@ -686,6 +691,16 @@ function hasRetiredSettingsData(data: Record<string, unknown>): boolean {
   return Array.isArray(resources.catalog) && resources.catalog.some((resource) => {
     const record = settingsRecord(resource);
     return Boolean(record && Object.hasOwn(record, "scopes"));
+  });
+}
+
+function hasLegacyTokenPlanCustomProvider(value: unknown): boolean {
+  if (!Array.isArray(value)) return false;
+  return value.some((item) => {
+    const provider = settingsRecord(item);
+    return provider?.providerId === "custom"
+      && typeof provider.baseUrl === "string"
+      && isQwenTokenPlanApiProviderUrl(provider.baseUrl.trim());
   });
 }
 
@@ -2166,21 +2181,25 @@ function normalizeApiProviders(
     const queryParams = normalizeQueryParams(record.queryParams);
     const name = typeof record.name === "string" ? record.name.trim() : "";
     const baseUrl = typeof record.baseUrl === "string" ? record.baseUrl.trim() : "";
+    const migratesLegacyTokenPlanCustom = record.providerId === "custom"
+      && isQwenTokenPlanApiProviderUrl(baseUrl);
     const providerId = normalizeApiProviderId(
       record.providerId,
       baseUrl,
       name
     );
     const preset = getApiProviderPreset(providerId);
-    const runtimeProviderId = normalizeRuntimeProviderId(
-      record.runtimeProviderId,
-      providerId === "custom"
-        ? preset.runtimeProviderId
-        : providerId === "openai"
-          || providerId === "anthropic"
-          ? providerId
-          : preset.runtimeProviderId
-    );
+    const runtimeProviderId = providerId === "qwen-token-plan"
+      ? preset.runtimeProviderId
+      : normalizeRuntimeProviderId(
+        record.runtimeProviderId,
+        providerId === "custom"
+          ? preset.runtimeProviderId
+          : providerId === "openai"
+            || providerId === "anthropic"
+            ? providerId
+            : preset.runtimeProviderId
+      );
     const modelSelection = normalizeApiProviderModels(
       record,
       providerId,
@@ -2198,7 +2217,10 @@ function normalizeApiProviders(
         ? normalizeApiProviderProtocol(record.apiProtocol, providerId)
         : preset.apiProtocol,
       authMode: apiProviderAuthMode(providerId),
-      name: name || preset.name,
+      name: migratesLegacyTokenPlanCustom
+        && (!name || name === getApiProviderPreset("custom").name)
+        ? preset.name
+        : name || preset.name,
       baseUrl: baseUrl || preset.baseUrl,
       models: modelSelection.models,
       defaultModelId: modelSelection.defaultModelId,

@@ -172,10 +172,13 @@ function resolveAttachmentResource(
       vaultRelativePath
     );
     if (Platform.isDesktopApp && localPath && existsSync(localPath)) {
+      const adapterResourceUri = app.vault.adapter.getResourcePath(
+        normalizePath(vaultRelativePath)
+      );
       return Object.freeze({
         ...base,
         availability: "available" as const,
-        resourceUri: localFileUri(localPath),
+        resourceUri: adapterResourceUri || localFileUri(localPath),
         vaultRelativePath
       });
     }

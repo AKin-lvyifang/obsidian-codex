@@ -58,6 +58,7 @@ class FakeElement {
   clientHeight = 640;
   clientWidth = 420;
   checked = false;
+  boundingHeight = 0;
   disabled = false;
   focused = false;
   id = "";
@@ -70,6 +71,8 @@ class FakeElement {
   value = "";
   onclick: ((event: TestActivationEvent) => unknown) | null = null;
   onchange: (() => unknown) | null = null;
+  onerror: (() => unknown) | null = null;
+  onload: (() => unknown) | null = null;
   oninput: (() => unknown) | null = null;
   onkeydown: ((event: TestActivationEvent) => unknown) | null = null;
   ontoggle: ((event: { readonly isTrusted: boolean }) => unknown) | null = null;
@@ -214,7 +217,7 @@ class FakeElement {
   setCssStyles(_styles: Record<string, string>): void {}
 
   getBoundingClientRect(): { height: number } {
-    return { height: 0 };
+    return { height: this.boundingHeight };
   }
 
   findByClass(cls: string): FakeElement | null {
@@ -1289,6 +1292,190 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       "粘贴图片 2.png：图片附件不可在本地打开"
     );
     assert.doesNotMatch(renderedText(imageAttachments), /clipboard-/u);
+
+    const failedImageRenderer = new CodexMessageListRenderer();
+    bindRenderer(failedImageRenderer, context);
+    let failedImageMeasureSchedules = 0;
+    (failedImageRenderer as unknown as {
+      env: { onScheduleMeasure: () => void };
+    }).env.onScheduleMeasure = () => { failedImageMeasureSchedules += 1; };
+    const failedImageMessage: ChatMessage = {
+      id: "user-image-load-failure",
+      role: "user",
+      text: "失败图片",
+      attachments: [{
+        type: "image",
+        name: "cover #1.png",
+        path: "images/cover #1.png",
+        mimeType: "image/png",
+        availability: "available"
+      }],
+      createdAt: 1_700_000_000_600
+    };
+    const firstFailedImage = renderMessage(failedImageRenderer, failedImageMessage, {
+      showAgentFooter: false,
+      showAgentHeader: false
+    });
+    const failedResourceImage = firstFailedImage.findAllByTag("img")[0]!;
+    failedResourceImage.onerror?.();
+    assert.equal(
+      firstFailedImage.findAllByClass("codex-message-attachment-unavailable").length,
+      1,
+      "a failed image load settles into one fixed-size unavailable tile"
+    );
+    const repeatedFailedImage = renderMessage(failedImageRenderer, failedImageMessage, {
+      showAgentFooter: false,
+      showAgentHeader: false
+    });
+    assert.equal(repeatedFailedImage.findAllByTag("img").length, 0,
+      "the same failed resource is not reloaded on the next full message render");
+    assert.equal(
+      repeatedFailedImage.findAllByClass("codex-message-attachment-unavailable").length,
+      1
+    );
+    assert.equal(failedImageMeasureSchedules, 0,
+      "fixed-size image failure replacement does not request an unmeasurable table rebuild");
+
+    const measuredRowsRenderer = new CodexMessageListRenderer();
+    bindRenderer(measuredRowsRenderer, context);
+    const measuredMessages = new FakeElement("div");
+    measuredMessages.scrollHeight = 900;
+    measuredMessages.scrollTop = 120;
+    const measuredVirtualList = new FakeElement("div");
+    const measuredRow = measuredVirtualList.createDiv({ cls: "codex-virtual-row" });
+    measuredRow.dataset.rowId = "message:stable-image";
+    measuredRow.boundingHeight = 120;
+    assert.equal(measuredRowsRenderer.measureVisibleVirtualRows(
+      measuredMessages as unknown as HTMLElement,
+      measuredVirtualList as unknown as HTMLElement,
+      false,
+      { rerender: false }
+    ), true);
+    measuredMessages.scrollTop = 120;
+    assert.equal(measuredRowsRenderer.measureVisibleVirtualRows(
+      measuredMessages as unknown as HTMLElement,
+      measuredVirtualList as unknown as HTMLElement,
+      true,
+      { rerender: false }
+    ), false);
+    assert.equal(measuredMessages.scrollTop, 120,
+      "an unchanged ResizeObserver measurement neither rewrites scrollTop nor starts another render");
+
+    const terminalRenderer = new CodexMessageListRenderer();
+    bindRenderer(terminalRenderer, context);
+    let terminalProgressSchedules = 0;
+    (terminalRenderer as unknown as {
+      env: { onScheduleRunProgress: () => void };
+    }).env.onScheduleRunProgress = () => { terminalProgressSchedules += 1; };
+    const terminalProjection = buildAgentTurnProjection([{
+      id: "terminal-error-only",
+      role: "system",
+      itemType: "error",
+      title: "回答失败",
+      text: "Provider 返回了明确错误",
+      status: "failed",
+      runId: "terminal-error-run",
+      turnId: "terminal-error-run",
+      createdAt: 1_700_000_000_700,
+      completedAt: 1_700_000_000_700
+    }]);
+    const terminalTurn = terminalProjection[0]?.kind === "assistantTurn"
+      ? terminalProjection[0].turn
+      : null;
+    assert.ok(terminalTurn);
+    const terminalSurface = new FakeElement("div");
+    (terminalRenderer as unknown as {
+      renderAssistantTurn(
+        container: unknown,
+        turn: NonNullable<typeof terminalTurn>,
+        showAgentHeader: boolean
+      ): void;
+    }).renderAssistantTurn(terminalSurface, terminalTurn!, false);
+    assert.equal(terminalProgressSchedules, 0,
+      "a failed terminal Turn never schedules the 700ms progress repaint");
+    assert.equal(terminalSurface.findAllByClass("codex-smooth-ai-loader").length, 0);
+    assert.equal(terminalSurface.findAllByClass("codex-message-type-error").length, 1);
+    assert.match(renderedText(terminalSurface), /Provider 返回了明确错误/u,
+      "the terminal diagnostic remains visible instead of being replaced by a loader");
+
+    const processFailureProjection = buildAgentTurnProjection([{
+      id: "terminal-process-reasoning",
+      role: "assistant",
+      itemType: "reasoning",
+      text: "已完成失败前的推理",
+      status: "completed",
+      runId: "terminal-process-run",
+      turnId: "terminal-process-run",
+      createdAt: 1_700_000_000_800,
+      completedAt: 1_700_000_000_850
+    }, {
+      id: "terminal-process-error",
+      role: "system",
+      itemType: "error",
+      title: "回答失败",
+      text: "工具执行后 Provider 失败",
+      status: "failed",
+      runId: "terminal-process-run",
+      turnId: "terminal-process-run",
+      createdAt: 1_700_000_000_900,
+      completedAt: 1_700_000_000_900
+    }]);
+    const processFailureTurn = processFailureProjection[0]?.kind === "assistantTurn"
+      ? processFailureProjection[0].turn
+      : null;
+    assert.ok(processFailureTurn?.processNodes.length);
+    const processFailureSurface = new FakeElement("div");
+    (terminalRenderer as unknown as {
+      renderAssistantTurn(
+        container: unknown,
+        turn: NonNullable<typeof processFailureTurn>,
+        showAgentHeader: boolean
+      ): void;
+    }).renderAssistantTurn(processFailureSurface, processFailureTurn!, false);
+    assert.equal(processFailureSurface.findAllByClass("codex-assistant-turn-process").length, 1);
+    assert.equal(processFailureSurface.findAllByClass("codex-message-type-error").length, 1);
+    assert.match(renderedText(processFailureSurface), /工具执行后 Provider 失败/u,
+      "a terminal diagnostic remains visible after existing process nodes");
+
+    const emptyAnswerFailureProjection = buildAgentTurnProjection([{
+      id: "terminal-empty-answer",
+      role: "assistant",
+      text: "",
+      status: "completed",
+      runId: "terminal-empty-answer-run",
+      turnId: "terminal-empty-answer-run",
+      createdAt: 1_700_000_001_000,
+      completedAt: 1_700_000_001_000
+    }, {
+      id: "terminal-empty-answer-error",
+      role: "system",
+      itemType: "error",
+      title: "回答失败",
+      text: "空回答之后的明确错误",
+      status: "failed",
+      runId: "terminal-empty-answer-run",
+      turnId: "terminal-empty-answer-run",
+      createdAt: 1_700_000_001_050,
+      completedAt: 1_700_000_001_050
+    }]);
+    const emptyAnswerFailureTurn = emptyAnswerFailureProjection[0]?.kind === "assistantTurn"
+      ? emptyAnswerFailureProjection[0].turn
+      : null;
+    assert.equal(emptyAnswerFailureTurn?.finalAnswer?.id, "terminal-empty-answer");
+    const emptyAnswerFailureSurface = new FakeElement("div");
+    (terminalRenderer as unknown as {
+      renderAssistantTurn(
+        container: unknown,
+        turn: NonNullable<typeof emptyAnswerFailureTurn>,
+        showAgentHeader: boolean
+      ): void;
+    }).renderAssistantTurn(emptyAnswerFailureSurface, emptyAnswerFailureTurn!, false);
+    assert.equal(emptyAnswerFailureSurface.findAllByClass("codex-assistant-turn-final").length, 0);
+    assert.equal(emptyAnswerFailureSurface.findAllByClass("codex-message-type-error").length, 1);
+    assert.match(renderedText(emptyAnswerFailureSurface), /空回答之后的明确错误/u,
+      "an empty finalAnswer cannot suppress the terminal diagnostic");
+    assert.equal(terminalProgressSchedules, 0,
+      "terminal diagnostics with process or empty-answer history never restart progress polling");
 
     await assertInteractionDockContracts();
 
@@ -3151,6 +3338,10 @@ export async function runSmoothConversationUiTests(): Promise<void> {
   assert.match(styles, /--echoink-conversation-line-caption:\s*var\(--echoink-conversation-line-status\);/u);
   assert.match(styles, /--echoink-conversation-line-body:\s*1\.55;/u);
   assert.match(styles, /--echoink-conversation-radius-md:\s*var\(--radius-m, 8px\);/u);
+  assert.match(styles, /\.codex-messages\s*\{[^}]*scrollbar-gutter:\s*stable;/u,
+    "the message viewport reserves its scrollbar width instead of invalidating every measured row");
+  assert.match(styles, /\.codex-message-attachment-preview img\s*\{[^}]*object-fit:\s*contain;/u,
+    "durable screenshot thumbnails preserve the complete image frame");
   assert.match(styles, /\.codex-message-type-assistantTurn\s*\{[\s\S]*?border:\s*0;[\s\S]*?background:\s*transparent;/u);
   assert.match(styles, /\.codex-assistant-turn-spine::before\s*\{[\s\S]*?width:\s*1px;/u);
   assert.doesNotMatch(

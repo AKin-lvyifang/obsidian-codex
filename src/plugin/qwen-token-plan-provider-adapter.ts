@@ -23,11 +23,14 @@ import type {
   ControlledPiStreamInput
 } from "../harness/pi/production-pi-model-resolver";
 import {
-  apiProviderRequestUrl
+  apiProviderRequestUrl,
+  isQwenTokenPlanApiProviderUrl,
+  QWEN_TOKEN_PLAN_API_BASE_URL
 } from "../settings/provider-presets";
 
-const QWEN_TOKEN_PLAN_HOST = "token-plan.cn-beijing.maas.aliyuncs.com";
-const QWEN_TOKEN_PLAN_BASE_PATH = "/compatible-mode/v1";
+const QWEN_TOKEN_PLAN_BASE_URL = new URL(QWEN_TOKEN_PLAN_API_BASE_URL);
+const QWEN_TOKEN_PLAN_HOST = QWEN_TOKEN_PLAN_BASE_URL.hostname;
+const QWEN_TOKEN_PLAN_BASE_PATH = QWEN_TOKEN_PLAN_BASE_URL.pathname;
 const QWEN_TOKEN_PLAN_COMPLETIONS_PATH =
   `${QWEN_TOKEN_PLAN_BASE_PATH}/chat/completions`;
 const MAX_QWEN_TOKEN_PLAN_RESPONSE_BYTES = 16 * 1024 * 1024;
@@ -84,22 +87,6 @@ export function createQwenTokenPlanOpenAICompletionsAdapter(
     streamSimple: (model, context, options = {}) =>
       start(model, context, options)
   });
-}
-
-export function isQwenTokenPlanApiProviderUrl(baseUrl: string): boolean {
-  try {
-    const parsed = new URL(baseUrl);
-    return parsed.protocol === "https:"
-      && parsed.hostname === QWEN_TOKEN_PLAN_HOST
-      && (parsed.port === "" || parsed.port === "443")
-      && parsed.pathname.replace(/\/+$/u, "") === QWEN_TOKEN_PLAN_BASE_PATH
-      && !parsed.username
-      && !parsed.password
-      && !parsed.search
-      && !parsed.hash;
-  } catch {
-    return false;
-  }
 }
 
 export async function requestQwenTokenPlanProvider(

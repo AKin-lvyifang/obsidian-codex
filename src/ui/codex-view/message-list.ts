@@ -338,6 +338,7 @@ export function nextReasoningDisclosureState(
 export class CodexMessageListRenderer {
   private virtualSessionId = "";
   private virtualRowHeights = new Map<string, number>();
+  private failedAttachmentResourceUris = new Set<string>();
   private viewportResizeObserver: ResizeObserver | null = null;
   private visibleRowsResizeObserver: ResizeObserver | null = null;
   private observedMessagesEl: HTMLElement | null = null;
@@ -369,6 +370,7 @@ export class CodexMessageListRenderer {
     if (this.virtualSessionId !== env.sessionId) {
       this.virtualSessionId = env.sessionId;
       this.virtualRowHeights.clear();
+      this.failedAttachmentResourceUris.clear();
       this.cancelVirtualRerenderTrailing(true);
       this.resetVirtualRerenderThrottle();
     }
@@ -428,9 +430,6 @@ export class CodexMessageListRenderer {
 
   measureVisibleVirtualRows(messagesEl: HTMLElement, virtualListEl: HTMLElement, forceBottom = false, options: { rerender?: boolean } = {}): boolean {
     if (messagesEl.clientHeight === 0) return false;
-    if (forceBottom && (this.virtualRerenderScheduled || this.virtualRerenderTrailingTimer !== null)) {
-      this.virtualRerenderPendingForceBottom = true;
-    }
     let changed = false;
     for (const child of Array.from(virtualListEl.children)) {
       if (!(child instanceof HTMLElement)) continue;
@@ -444,11 +443,14 @@ export class CodexMessageListRenderer {
         changed = true;
       }
     }
+    if (changed && forceBottom && (this.virtualRerenderScheduled || this.virtualRerenderTrailingTimer !== null)) {
+      this.virtualRerenderPendingForceBottom = true;
+    }
     if (changed && options.rerender !== false) this.scheduleMeasuredRowsRerender(forceBottom);
     if (!changed) {
       this.resetVirtualRerenderThrottle();
     }
-    if (forceBottom) {
+    if (changed && forceBottom) {
       messagesEl.scrollTop = messagesEl.scrollHeight;
     }
     return changed;
@@ -509,6 +511,7 @@ export class CodexMessageListRenderer {
   resetVirtualWindow(): void {
     this.virtualSessionId = "";
     this.virtualRowHeights.clear();
+    this.failedAttachmentResourceUris.clear();
     this.cancelVirtualRerenderTrailing(true);
     this.resetVirtualRerenderThrottle();
   }
@@ -1545,7 +1548,14 @@ export class CodexMessageListRenderer {
     }
 
     const answer = turn.finalAnswer;
-    if (answer && (displayTextForMessage(answer).trim() || answer.status === "running")) {
+    const hasDisplayableAnswer = Boolean(
+      answer
+      && (
+        displayTextForMessage(answer).trim()
+        || (answer.status === "running" && !isTerminalTurnStatus(turn.status))
+      )
+    );
+    if (answer && hasDisplayableAnswer) {
       const answerSection = bodyHost.createDiv({ cls: "codex-assistant-turn-final" });
       answerSection.dataset.messageId = answer.id;
       this.renderAssistantTurnSectionLabel(
@@ -1563,10 +1573,34 @@ export class CodexMessageListRenderer {
       }
     }
 
-    if (!turn.processNodes.length && !answer) {
+    const terminalMessage = !hasDisplayableAnswer && isTerminalTurnStatus(turn.status)
+      ? turn.messages.slice().reverse().find((message) =>
+          message.role === "system"
+          && message.itemType === "error"
+          && displayTextForMessage(message).trim()
+        )
+      : undefined;
+    if (terminalMessage) {
+      this.renderMessage(bodyHost, terminalMessage, {
+        showAgentHeader: false,
+        showAgentFooter: false,
+        allowConversationDerive: false
+      });
+      return;
+    }
+
+    if (!turn.processNodes.length && !hasDisplayableAnswer) {
       const empty = bodyHost.createDiv({ cls: "codex-assistant-turn-empty" });
-      renderSmoothAILoader(empty, copy.message.preparingReply);
-      env.onScheduleRunProgress();
+      if (
+        turn.status === "preparing"
+        || turn.status === "running"
+        || turn.status === "completing"
+      ) {
+        renderSmoothAILoader(empty, copy.message.preparingReply);
+        env.onScheduleRunProgress();
+      } else {
+        empty.setText(formatAgentTurnSummary(turn, env.settingsLanguage));
+      }
     }
   }
 
@@ -2445,10 +2479,16 @@ export class CodexMessageListRenderer {
         attachment.type === "image" ? "image" : "document"
       );
       if (attachment.type === "image") {
-        if (resource.availability === "unavailable" || !resource.resourceUri) {
+        if (
+          resource.availability === "unavailable"
+          || !resource.resourceUri
+          || this.failedAttachmentResourceUris.has(resource.resourceUri)
+        ) {
           renderUnavailablePiImage(item, resource.displayName);
           continue;
         }
+        const resourceUri = resource.resourceUri;
+        const sessionId = this.requireEnv().sessionId;
         const preview = item.createEl("button", {
           cls: "codex-message-attachment-preview",
           attr: {
@@ -2458,17 +2498,19 @@ export class CodexMessageListRenderer {
           }
         });
         const img = preview.createEl("img", { attr: { alt: "", draggable: "false" } });
-        img.src = resource.resourceUri;
-        img.onload = () => this.requireEnv().onScheduleMeasure();
+        img.onload = () => this.scheduleMeasureIfVirtualRowHeightChanged(item, sessionId);
         img.onerror = () => {
+          if (this.env?.sessionId !== sessionId) return;
+          this.failedAttachmentResourceUris.add(resourceUri);
           preview.remove();
           renderUnavailablePiImage(item, resource.displayName);
-          this.requireEnv().onScheduleMeasure();
+          this.scheduleMeasureIfVirtualRowHeightChanged(item, sessionId);
         };
+        img.src = resourceUri;
         preview.onclick = (event) => {
           event.preventDefault();
           event.stopPropagation();
-          void this.openAttachment(attachment, resource.resourceUri);
+          void this.openAttachment(attachment, resourceUri);
         };
         continue;
       }
@@ -2492,6 +2534,23 @@ export class CodexMessageListRenderer {
         event.stopPropagation();
         void this.openAttachment(attachment, resource.resourceUri);
       };
+    }
+  }
+
+  private scheduleMeasureIfVirtualRowHeightChanged(
+    element: HTMLElement,
+    sessionId: string
+  ): void {
+    if (this.env?.sessionId !== sessionId) return;
+    const row = element.closest<HTMLElement>(".codex-virtual-row");
+    const rowId = row?.dataset.rowId;
+    if (!row || !rowId) return;
+    const previousHeight = this.virtualRowHeights.get(rowId);
+    if (previousHeight === undefined) return;
+    const measuredHeight = row.getBoundingClientRect().height;
+    if (!Number.isFinite(measuredHeight) || measuredHeight <= 0) return;
+    if (Math.ceil(measuredHeight) !== previousHeight) {
+      this.requireEnv().onScheduleMeasure();
     }
   }
 

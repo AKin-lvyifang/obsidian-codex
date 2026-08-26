@@ -178,6 +178,7 @@ body.theme-light .codex-container {
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   padding: 12px 14px 10px;
   position: relative;
 }
@@ -2479,7 +2480,7 @@ body.theme-light .codex-code-wrapper pre {
   display: block;
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
 }
 
 .codex-message-attachment-preview:hover,
@@ -2637,7 +2638,7 @@ body.theme-light .codex-code-wrapper pre {
   display: block;
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
 }
 
 .codex-attachment-thumbnail-fallback {

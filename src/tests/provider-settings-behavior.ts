@@ -55,7 +55,10 @@ import CodexForObsidianPlugin from "../main";
 import {
   API_PROVIDER_PRESETS,
   apiProviderRequestUrl,
-  normalizeApiProviderProtocol
+  getApiProviderPreset,
+  isQwenTokenPlanApiProviderUrl,
+  normalizeApiProviderProtocol,
+  QWEN_TOKEN_PLAN_API_BASE_URL
 } from "../settings/provider-presets";
 import {
   resolveEchoInkPiCatalogModel,
@@ -2729,6 +2732,120 @@ function assertSettingsV52MigrationContract(): void {
         ["openai", "openai-completions"]
       ]
     );
+  });
+
+  check("exact legacy Token Plan custom settings migrate without losing model state", () => {
+    const providerSettingsId = "legacy-token-plan-custom";
+    const modelId = "fixture-token-plan-model";
+    const apiKey = "fixture-token-plan-migration-key";
+    const legacyProvider = {
+      id: providerSettingsId,
+      providerId: "custom",
+      runtimeProviderId: "echoink-custom",
+      apiProtocol: "openai-responses",
+      authMode: "oauth",
+      name: "自定义 / Custom",
+      baseUrl: QWEN_TOKEN_PLAN_API_BASE_URL,
+      models: [{
+        id: modelId,
+        displayName: "Fixture Token Plan Model",
+        input: ["text", "image"],
+        toolCalling: true,
+        reasoning: true,
+        reasoningEffort: "max",
+        contextWindow: 128_000,
+        modelMaxTokens: 64_000,
+        maxOutputTokens: 16_000,
+        limitsOverride: {
+          contextWindow: 128_000,
+          modelMaxTokens: 64_000,
+          maxOutputTokens: 16_000
+        },
+        metadataSource: "manual"
+      }],
+      defaultModelId: modelId,
+      apiKey
+    };
+    const migration = normalizeSettingsData({
+      ...structuredClone(DEFAULT_SETTINGS),
+      settingsVersion: 52,
+      activeApiProviderId: providerSettingsId,
+      defaultModel: modelId,
+      apiProviders: [legacyProvider]
+    });
+    assert.equal(migration.changed, true);
+    const normalized = migration.settings;
+    const migrated = normalized.apiProviders[0];
+    assert.ok(migrated);
+    assert.equal(migrated.id, providerSettingsId);
+    assert.equal(migrated.providerId, "qwen-token-plan");
+    assert.equal(migrated.runtimeProviderId, "qwen-token-plan-cn");
+    assert.equal(migrated.apiProtocol, "openai-completions");
+    assert.equal(migrated.authMode, "api-key");
+    assert.equal(
+      migrated.name,
+      getApiProviderPreset("qwen-token-plan").name
+    );
+    assert.equal(migrated.apiKey, apiKey);
+    assert.equal(migrated.defaultModelId, modelId);
+    assert.equal(normalized.activeApiProviderId, providerSettingsId);
+    assert.equal(normalized.defaultModel, modelId);
+    assert.deepEqual(migrated.models, legacyProvider.models);
+    assert.equal(resolveConfiguredPiProviderTransportKind({
+      providerId: migrated.providerId ?? "custom",
+      runtimeProviderId: migrated.runtimeProviderId,
+      apiProtocol: migrated.apiProtocol,
+      baseUrl: migrated.baseUrl
+    }), "qwen-token-plan");
+    assert.equal(
+      normalizeSettingsData(structuredClone(normalized)).changed,
+      false
+    );
+
+    const similar = normalizeSettingsData({
+      ...structuredClone(DEFAULT_SETTINGS),
+      settingsVersion: 52,
+      apiProviders: [{
+        ...legacyProvider,
+        id: "similar-custom-provider",
+        baseUrl: `${QWEN_TOKEN_PLAN_API_BASE_URL}/models`
+      }]
+    }).settings.apiProviders[0];
+    assert.ok(similar);
+    assert.equal(similar.providerId, "custom");
+    assert.equal(similar.runtimeProviderId, "echoink-custom");
+    assert.equal(resolveConfiguredPiProviderTransportKind({
+      providerId: similar.providerId ?? "custom",
+      runtimeProviderId: similar.runtimeProviderId,
+      apiProtocol: similar.apiProtocol,
+      baseUrl: similar.baseUrl
+    }), "default");
+
+    const emptyName = normalizeSettingsData({
+      ...structuredClone(DEFAULT_SETTINGS),
+      settingsVersion: 52,
+      apiProviders: [{
+        ...legacyProvider,
+        id: "empty-name-token-plan",
+        name: " "
+      }]
+    }).settings.apiProviders[0];
+    assert.equal(
+      emptyName?.name,
+      getApiProviderPreset("qwen-token-plan").name
+    );
+
+    const customName = normalizeSettingsData({
+      ...structuredClone(DEFAULT_SETTINGS),
+      settingsVersion: 52,
+      apiProviders: [{
+        ...legacyProvider,
+        id: "named-token-plan",
+        name: "My Token Plan"
+      }]
+    }).settings.apiProviders[0];
+    assert.equal(customName?.providerId, "qwen-token-plan");
+    assert.equal(customName?.name, "My Token Plan");
   });
 
   check("v51 manual limits migrate with legacy clamping and remain idempotent", () => {
@@ -5647,6 +5764,28 @@ function assertQwenProviderContract(): void {
     baseUrl: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
     apiProtocol: "openai-completions"
   });
+  assert.equal(
+    isQwenTokenPlanApiProviderUrl(QWEN_TOKEN_PLAN_API_BASE_URL),
+    true
+  );
+  assert.equal(
+    isQwenTokenPlanApiProviderUrl(`${QWEN_TOKEN_PLAN_API_BASE_URL}/`),
+    true
+  );
+  assert.equal(isQwenTokenPlanApiProviderUrl(
+    "https://token-plan.cn-beijing.maas.aliyuncs.com:443/compatible-mode/v1"
+  ), true);
+  for (const invalidUrl of [
+    "http://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+    "https://token-plan.cn-beijing.maas.aliyuncs.com:444/compatible-mode/v1",
+    "https://token-plan.cn-beijing.maas.aliyuncs.com.example/compatible-mode/v1",
+    `${QWEN_TOKEN_PLAN_API_BASE_URL}/models`,
+    `${QWEN_TOKEN_PLAN_API_BASE_URL}?fixture=1`,
+    `${QWEN_TOKEN_PLAN_API_BASE_URL}#fixture`,
+    "https://fixture@token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+  ]) {
+    assert.equal(isQwenTokenPlanApiProviderUrl(invalidUrl), false, invalidUrl);
+  }
 
   const qwenSvg = providerBrandSvg("qwen");
   assert.equal(providerBrandSvg("qwen-token-plan"), qwenSvg);

@@ -126,6 +126,9 @@ export async function runComposerActionTests(): Promise<void> {
     try {
       const unindexedLocalImage = createAttachmentResourceResolver({
         vault: {
+          adapter: {
+            getResourcePath: (path: string) => `app://echoink-hidden/${path}`
+          },
           getAbstractFileByPath: () => null,
           getResourcePath: () => ""
         }
@@ -136,7 +139,11 @@ export async function runComposerActionTests(): Promise<void> {
       });
       assert.equal(unindexedLocalImage.availability, "available");
       assert.equal(unindexedLocalImage.vaultRelativePath, "src/tests/composer-actions.ts");
-      assert.match(unindexedLocalImage.resourceUri ?? "", /^file:\/\//u);
+      assert.equal(
+        unindexedLocalImage.resourceUri,
+        "app://echoink-hidden/src/tests/composer-actions.ts",
+        "hidden Vault resources use the adapter URI that Obsidian's renderer can load"
+      );
     } finally {
       platform.isDesktopApp = originalDesktopApp;
     }
@@ -182,9 +189,12 @@ export async function runComposerActionTests(): Promise<void> {
     assert.equal(image.src, "app://echoink-vault/cover%20%231.png");
     assert.equal(thumbnail.getAttribute("title"), "cover #1.png");
     assert.equal(thumbnail.getAttribute("role"), "listitem");
+    assert.equal(thumbnail.querySelector(".codex-attachment-thumbnail-name"), null,
+      "a loadable image is only a real thumbnail; its filename remains in title and aria metadata");
     image.onerror?.();
     assert.equal(thumbnail.hasClass("is-broken"), true, "unsupported image switches to its fallback");
     assert.ok(thumbnail.querySelector(".codex-attachment-thumbnail-fallback"));
+    assert.equal(thumbnail.getAttribute("aria-label"), "图片：cover #1.png，无法预览");
     const imageRemove = thumbnail.querySelector(".codex-attachment-thumbnail-remove")!;
     assert.equal(imageRemove.getAttribute("aria-label"), "移除图片：cover #1.png");
     imageRemove.click();
@@ -301,7 +311,7 @@ export async function runComposerActionTests(): Promise<void> {
     assert.match(css, /prefers-reduced-motion:\s*no-preference/u);
     assert.match(css, /\.codex-attachment-thumbnail \{[\s\S]*?width:\s*84px;[\s\S]*?height:\s*84px;/u);
     assert.match(css, /\.codex-attachment-file-tile \{[\s\S]*?width:\s*84px;[\s\S]*?height:\s*84px;/u);
-    assert.match(css, /\.codex-attachment-thumbnail-image \{[\s\S]*?object-fit:\s*cover;/u);
+    assert.match(css, /\.codex-attachment-thumbnail-image \{[\s\S]*?object-fit:\s*contain;/u);
     assert.match(css, /\.codex-attachment-thumbnail-remove \{[\s\S]*?width:\s*28px;[\s\S]*?height:\s*28px;/u);
     assert.match(css, /\.codex-ai-elements-attachments-list \{[\s\S]*?flex-wrap:\s*nowrap;[\s\S]*?overflow-x:\s*auto;/u);
     assert.match(css, /\.codex-message-attachments \{[\s\S]*?flex-wrap:\s*nowrap;[\s\S]*?justify-content:\s*safe\s+flex-end;[\s\S]*?overflow-x:\s*auto;/u);

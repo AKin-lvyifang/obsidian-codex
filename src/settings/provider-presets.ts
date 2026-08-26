@@ -37,6 +37,10 @@ export type ApiProviderGroupId =
 
 const KIMI_K2_CONTEXT_WINDOW = 262_144;
 const KIMI_MAX_OUTPUT_RESERVE = 65_536;
+export const QWEN_TOKEN_PLAN_API_BASE_URL =
+  "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1";
+const QWEN_TOKEN_PLAN_API_HOST = "token-plan.cn-beijing.maas.aliyuncs.com";
+const QWEN_TOKEN_PLAN_API_BASE_PATH = "/compatible-mode/v1";
 
 export interface ApiProviderModelPreset {
   readonly id: string;
@@ -194,7 +198,7 @@ export const API_PROVIDER_PRESETS: readonly ApiProviderPreset[] =
       name: "通义千问 Token Plan / Qwen Token Plan",
       group: "token-plan",
       runtimeProviderId: "qwen-token-plan-cn",
-      baseUrl: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+      baseUrl: QWEN_TOKEN_PLAN_API_BASE_URL,
       docsUrl: "https://help.aliyun.com/zh/model-studio/token-plan",
       apiProtocol: "openai-completions",
       apiKeyRequired: true,
@@ -286,6 +290,12 @@ export function normalizeApiProviderId(
   name = ""
 ): ApiProviderId {
   if (
+    value === "custom"
+    && isQwenTokenPlanApiProviderUrl(baseUrl)
+  ) {
+    return "qwen-token-plan";
+  }
+  if (
     typeof value === "string"
     && (API_PROVIDER_IDS as readonly string[]).includes(value)
   ) {
@@ -320,7 +330,7 @@ export function normalizeApiProviderId(
     || normalizedName === "minimax"
   ) return "minimax";
   if (
-    normalizedBaseUrl.includes("token-plan.cn-beijing.maas.aliyuncs.com")
+    isQwenTokenPlanApiProviderUrl(baseUrl)
     || normalizedName === "qwen token plan"
     || normalizedName === "通义千问 token plan"
   ) return "qwen-token-plan";
@@ -397,6 +407,22 @@ export function isLoopbackApiProviderUrl(baseUrl: string): boolean {
   try {
     const parsed = new URL(baseUrl);
     return parsed.protocol === "http:" && isLoopbackHostname(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+export function isQwenTokenPlanApiProviderUrl(baseUrl: string): boolean {
+  try {
+    const parsed = new URL(baseUrl);
+    return parsed.protocol === "https:"
+      && parsed.hostname === QWEN_TOKEN_PLAN_API_HOST
+      && (parsed.port === "" || parsed.port === "443")
+      && parsed.pathname.replace(/\/+$/u, "") === QWEN_TOKEN_PLAN_API_BASE_PATH
+      && !parsed.username
+      && !parsed.password
+      && !parsed.search
+      && !parsed.hash;
   } catch {
     return false;
   }
