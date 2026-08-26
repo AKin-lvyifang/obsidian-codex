@@ -10,8 +10,9 @@ import {
   type StoredAttachment,
   type StoredSession
 } from "../../settings/settings";
+import type { EchoInkPiReasoningOption } from "../../settings/pi-model-catalog";
 import type { ProviderBrandId } from "../../settings/provider-brand-icons";
-import type { PermissionMode, ReasoningEffort, ServiceTierChoice, UiMode } from "../../types/app-server";
+import type { PermissionMode, ReasoningEffort, UiMode } from "../../types/app-server";
 import { knowledgeCommandQueryForInput } from "../../knowledge-base/commands";
 import { contextUsageView } from "../../core/mapping";
 import { composerStateForRuntimeState, type ComposerPrimaryActionState } from "../composer-state";
@@ -47,6 +48,11 @@ import {
   setPiConversationRecovering
 } from "./pi-conversation-support";
 import { positionAnchoredMenu } from "./floating-menu-position";
+import {
+  applyComposerReasoningFallback,
+  resolveComposerReasoningState,
+  type ComposerReasoningState
+} from "../composer-reasoning";
 
 let contextPopoverId = 0;
 
@@ -76,8 +82,6 @@ export interface CodexComposerHost {
   attachments: StoredAttachment[];
   selectedProviderSettingsId: string;
   selectedModel: string;
-  selectedReasoning: ReasoningEffort;
-  selectedServiceTier: ServiceTierChoice;
   selectedPermission: PermissionMode;
   selectedMode: UiMode;
   skillsRequested: boolean;
@@ -118,6 +122,7 @@ export interface CodexComposerHost {
 
 export function renderToolbar(host: CodexComposerHost): void {
   if (!host.toolbarEl) return;
+  ensureComposerReasoningPreference(host);
   disposeContextPopover(host);
   host.renderQueue();
   host.renderAttachments();
@@ -473,18 +478,21 @@ export function openModelMenu(host: CodexComposerHost, event: MouseEvent): void 
   showModelMenu(event, composerModelMenuState(host), {
     onSelectModel: (selection) => void selectComposerModel(host, selection),
     onSelectReasoning: (reasoning) => selectComposerReasoning(host, reasoning),
-    onSelectServiceTier: (tier) => selectComposerServiceTier(host, tier),
     onSelectMode: (mode) => selectComposerMode(host, mode)
   });
 }
 
 export function composerModelMenuState(host: CodexComposerHost) {
+  const reasoning = ensureComposerReasoningPreference(host);
   return {
     providerModels: composerProviderModelOptions(host),
     selectedProviderSettingsId: host.selectedProviderSettingsId,
     selectedModel: host.selectedModel,
-    selectedReasoning: host.selectedReasoning,
-    selectedServiceTier: host.selectedServiceTier,
+    selectedReasoning: reasoning?.effort ?? null,
+    reasoningOptions: reasoning?.capabilities.options.map((option) => ({
+      effort: option.effort,
+      label: composerReasoningOptionLabel(option)
+    })) ?? [],
     selectedMode: host.selectedMode
   };
 }
@@ -512,6 +520,7 @@ export async function selectComposerModel(
     modelId: string;
   }>
 ): Promise<boolean> {
+  let correctedReasoning: Readonly<ComposerReasoningState> | null = null;
   const target = host.plugin.settings.apiProviders.find(
     (provider) => provider.id === selection.providerSettingsId
   );
@@ -542,6 +551,14 @@ export async function selectComposerModel(
         throw new Error("Provider authentication unavailable");
       }
       activateApiProviderModel(settings, candidate, selection.modelId);
+      const reasoning = resolveComposerReasoningState(
+        settings,
+        selection.providerSettingsId,
+        selection.modelId
+      );
+      if (reasoning && applyComposerReasoningFallback(reasoning)) {
+        if (reasoning.status === "invalid") correctedReasoning = reasoning;
+      }
     });
   } catch (error) {
     new Notice(
@@ -551,20 +568,24 @@ export async function selectComposerModel(
   }
   host.selectedProviderSettingsId = selection.providerSettingsId;
   host.selectedModel = selection.modelId;
+  ensureComposerReasoningPreference(host);
   host.renderToolbar();
+  if (correctedReasoning) showComposerReasoningFallbackNotice(correctedReasoning);
   new Notice(`已切换到 ${target.name} · ${targetModel.displayName || targetModel.id}`);
   return true;
 }
 
 export function selectComposerReasoning(host: CodexComposerHost, reasoning: ReasoningEffort): void {
-  host.selectedReasoning = reasoning;
-  persistComposerDefaults(host);
-  host.renderToolbar();
-}
-
-export function selectComposerServiceTier(host: CodexComposerHost, tier: ServiceTierChoice): void {
-  host.selectedServiceTier = tier;
-  persistComposerDefaults(host);
+  const state = ensureComposerReasoningPreference(host);
+  if (
+    !state
+    || !state.capabilities.options.some((option) => option.effort === reasoning)
+  ) {
+    new Notice("当前模型不支持这个思考强度，请重新选择");
+    return;
+  }
+  state.model.reasoningEffort = reasoning;
+  saveComposerSettings(host, "思考强度");
   host.renderToolbar();
 }
 
@@ -575,7 +596,15 @@ export function selectComposerMode(host: CodexComposerHost, mode: UiMode): void 
 }
 
 export function currentComposerSummary(host: CodexComposerHost): string {
-  return `${shortModelLabel(host.effectiveModel())} ${compactReasoningLabel(host.selectedReasoning)}`;
+  const model = shortModelLabel(host.effectiveModel());
+  const reasoning = ensureComposerReasoningPreference(host);
+  if (!reasoning?.effort) return model;
+  const option = reasoning.capabilities.options.find(
+    (candidate) => candidate.effort === reasoning.effort
+  );
+  return `${model} ${option?.display === "toggle"
+    ? "开"
+    : compactReasoningLabel(reasoning.effort)}`;
 }
 
 export function currentComposerSummaryTitle(host: CodexComposerHost): string {
@@ -602,13 +631,70 @@ export function currentComposerProviderBrand(host: CodexComposerHost): ProviderB
 
 export function persistComposerDefaults(host: CodexComposerHost): void {
   host.plugin.settings.defaultModel = host.selectedModel;
-  host.plugin.settings.defaultReasoning = host.selectedReasoning;
-  host.plugin.settings.defaultServiceTier = host.selectedServiceTier;
   host.plugin.settings.defaultPermission = host.selectedPermission;
   host.plugin.settings.defaultMode = host.selectedMode;
+  saveComposerSettings(host, "运行参数");
+}
+
+export function ensureComposerReasoningPreference(
+  host: Pick<
+    CodexComposerHost,
+    "plugin" | "selectedProviderSettingsId" | "selectedModel"
+  >,
+  notify = true
+): Readonly<ComposerReasoningState> | null {
+  const state = resolveComposerReasoningState(
+    host.plugin.settings,
+    host.selectedProviderSettingsId,
+    host.selectedModel
+  );
+  if (!state || !applyComposerReasoningFallback(state)) return state;
+  saveComposerSettings(host, "思考强度");
+  if (notify && state.status === "invalid") {
+    showComposerReasoningFallbackNotice(state);
+  }
+  return state;
+}
+
+function showComposerReasoningFallbackNotice(
+  state: Readonly<ComposerReasoningState>
+): void {
+  const modelName = state.model.displayName || state.model.id;
+  if (state.effort) {
+    new Notice(
+      `${modelName} 原思考强度已不可用，已回落为${composerReasoningEffortLabel(
+        state
+      )}`
+    );
+  } else {
+    new Notice(`${modelName} 已不支持可配置思考，原偏好已移除`);
+  }
+}
+
+function composerReasoningEffortLabel(
+  state: Readonly<ComposerReasoningState>
+): string {
+  const option = state.capabilities.options.find(
+    (candidate) => candidate.effort === state.effort
+  );
+  return option ? composerReasoningOptionLabel(option) : "合法默认值";
+}
+
+function composerReasoningOptionLabel(
+  option: Readonly<EchoInkPiReasoningOption>
+): string {
+  if (option.display === "off") return "关闭";
+  if (option.display === "toggle") return "开启";
+  return labelFor(option.effort);
+}
+
+function saveComposerSettings(
+  host: Pick<CodexComposerHost, "plugin">,
+  label: string
+): void {
   void host.plugin.saveSettings(true).catch((error) => {
     console.error("Codex composer defaults save failed", error);
-    new Notice(`运行参数保存失败：${error instanceof Error ? error.message : String(error)}`);
+    new Notice(`${label}保存失败：${error instanceof Error ? error.message : String(error)}`);
   });
 }
 

@@ -17,6 +17,8 @@ import {
   type PiChatUiViewModel
 } from "../../harness/pi-native/pi-chat-ui-projector";
 import type {
+  ApiProviderConfig,
+  ApiProviderModelConfig,
   ChatMessage,
   StoredAttachment,
   StoredSession
@@ -45,6 +47,11 @@ import { preparePiChatImages } from "./pi-image-input";
 import {
   cloneEchoInkAssistantTurn
 } from "../../types/conversation-turn";
+import {
+  isEchoInkPiReasoningEffortSupported,
+  resolveEchoInkPiReasoningCapabilities
+} from "../../settings/pi-model-catalog";
+import type { TurnOptions } from "../turn-options";
 
 const activeComposerTransfers = new WeakMap<
   CodexViewTurnContext,
@@ -360,13 +367,23 @@ export async function createQueuedTurnFromComposer(view: CodexViewTurnContext, o
   const piDraftId = session.bodyAuthority === "pi_session_only"
     ? selectedPiConversationDraftId(view.plugin, session.id)
     : undefined;
+  const turnOptions = view.currentTurnOptions(session);
+  if (!frozenTurnReasoningSelectionIsValid(
+    view.plugin.settings,
+    turnOptions
+  )) {
+    new Notice(
+      "当前 Provider、模型或思考强度已失效，本轮没有入队；请重新选择后发送。"
+    );
+    return null;
+  }
   return {
     id: newId("queued-turn"),
     sessionId: session.id,
     text,
     attachments,
     skill,
-    turnOptions: view.currentTurnOptions(session),
+    turnOptions,
     kind: "chat",
     createdAt: Date.now(),
     ...(piDraftId ? { piDraftId } : {})
@@ -435,6 +452,12 @@ async function prepareTurnProviderModel(
     new Notice(retainQueueHead
       ? "队列所选 Provider 或模型已不可用；队首已保留并暂停，请检查 Provider 设置后继续。"
       : "所选 Provider 或模型已不可用，请检查 Provider 设置后重试。");
+    return false;
+  }
+  if (!frozenTurnReasoningSelectionIsValid(settings, selection)) {
+    new Notice(retainQueueHead
+      ? "队列冻结的 Provider、模型或思考强度已与当前 Pi 能力不一致；队首已保留并暂停，请删除后重新发送。"
+      : "当前思考强度已不可用，请重新选择后重试。");
     return false;
   }
   if (
@@ -566,6 +589,8 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
       text: submittedText,
       submittedAt,
       mode: item.turnOptions.mode === "plan" ? "plan" : "agent",
+      runtimeProviderId: item.turnOptions.runtimeProviderId,
+      modelId: item.turnOptions.model,
       reasoning: item.turnOptions.reasoning,
       memoryMode: piChatMemoryModeForGlobalSetting(
         view.plugin.settings?.memory?.useLongTermMemory !== false
@@ -789,6 +814,35 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
     view.renderToolbar();
     view.applyStatus();
   }
+}
+
+function frozenTurnReasoningSelectionIsValid(
+  settings: CodexViewTurnContext["plugin"]["settings"],
+  selection: Pick<
+    TurnOptions,
+    "providerSettingsId" | "runtimeProviderId" | "model" | "reasoning"
+  >
+): boolean {
+  const provider: ApiProviderConfig | undefined = settings.apiProviders.find(
+    (candidate) => candidate.id === selection.providerSettingsId
+  );
+  const model: ApiProviderModelConfig | null = provider
+    ? getApiProviderModel(provider, selection.model)
+    : null;
+  if (
+    !provider
+    || !model
+    || provider.runtimeProviderId !== selection.runtimeProviderId
+  ) return false;
+  const capabilities = resolveEchoInkPiReasoningCapabilities(
+    selection.runtimeProviderId,
+    selection.model,
+    model.metadataSource === "manual" && model.reasoning
+  );
+  return isEchoInkPiReasoningEffortSupported(
+    capabilities,
+    selection.reasoning
+  );
 }
 
 function assertPiChatRuntimeEventIdentity(

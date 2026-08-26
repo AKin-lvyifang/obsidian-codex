@@ -1,7 +1,7 @@
 import { Menu, Notice, setIcon } from "obsidian";
 import { filterSkillResources } from "../../resources/registry";
 import type { EchoInkResource } from "../../resources/types";
-import type { ReasoningEffort, ServiceTierChoice, UiMode } from "../../types/app-server";
+import type { ReasoningEffort, UiMode } from "../../types/app-server";
 import { knowledgeCommandOptions, type KnowledgeBaseCommandOption } from "../../knowledge-base/commands";
 import { selectKnowledgeCommandItem, setKnowledgeCommandMenuOpen } from "../knowledge-command-menu";
 import { labelFor } from "./composer";
@@ -51,8 +51,11 @@ export interface ModelMenuState {
   providerModels: ComposerProviderModelOption[];
   selectedProviderSettingsId: string;
   selectedModel: string;
-  selectedReasoning: ReasoningEffort;
-  selectedServiceTier: ServiceTierChoice;
+  selectedReasoning: ReasoningEffort | null;
+  reasoningOptions: readonly Readonly<{
+    effort: ReasoningEffort;
+    label: string;
+  }>[];
   selectedMode: UiMode;
 }
 
@@ -69,7 +72,6 @@ export interface ModelMenuCallbacks {
     modelId: string;
   }>) => void;
   onSelectReasoning: (reasoning: ReasoningEffort) => void;
-  onSelectServiceTier: (tier: ServiceTierChoice) => void;
   onSelectMode: (mode: UiMode) => void;
 }
 
@@ -304,8 +306,7 @@ function parameterSections(
     model.providerSettingsId === state.selectedProviderSettingsId
     && model.modelId === state.selectedModel
   );
-  const sections: ComposerParameterSection[] = [
-    {
+  const sections: ComposerParameterSection[] = [{
       id: "model",
       icon: "box",
       label: "模型",
@@ -326,37 +327,26 @@ function parameterSections(
           modelId: option.value
         });
       }
-    },
-    {
+    }];
+  if (state.reasoningOptions.length > 0) {
+    sections.push({
       id: "reasoning",
       icon: "brain",
       label: "思考强度",
-      currentValue: labelFor(state.selectedReasoning),
-      options: (["low", "medium", "high", "xhigh"] as ReasoningEffort[]).map((effort) => ({
-        value: effort,
-        label: labelFor(effort),
-        selected: state.selectedReasoning === effort
+      currentValue: state.reasoningOptions.find(
+        (option) => option.effort === state.selectedReasoning
+      )?.label ?? "未选择",
+      options: state.reasoningOptions.map((option) => ({
+        value: option.effort,
+        label: option.label,
+        selected: state.selectedReasoning === option.effort
       })),
       onSelect: (option) => callbacks.onSelectReasoning(option.value as ReasoningEffort)
-    }
-  ];
+    });
+  }
   if (!includeRuntimeOptions) return sections;
 
-  const runtimeCallbacks = callbacks;
-  sections.push(
-    {
-      id: "speed",
-      icon: "gauge",
-      label: "速度",
-      currentValue: labelFor(state.selectedServiceTier),
-      options: (["standard", "fast", "flex"] as ServiceTierChoice[]).map((tier) => ({
-        value: tier,
-        label: labelFor(tier),
-        selected: state.selectedServiceTier === tier
-      })),
-      onSelect: (option) => runtimeCallbacks.onSelectServiceTier(option.value as ServiceTierChoice)
-    },
-    {
+  sections.push({
       id: "mode",
       icon: "route",
       label: "模式",
@@ -366,9 +356,8 @@ function parameterSections(
         label: labelFor(mode),
         selected: state.selectedMode === mode
       })),
-      onSelect: (option) => runtimeCallbacks.onSelectMode(option.value as UiMode)
-    }
-  );
+      onSelect: (option) => callbacks.onSelectMode(option.value as UiMode)
+    });
   return sections;
 }
 

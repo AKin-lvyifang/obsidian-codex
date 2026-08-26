@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { TFile, type App } from "obsidian";
+import { openTestNoticeMessages } from "./obsidian-shim";
 import {
   renderComposerAttachments,
   renderComposerToolbar,
@@ -11,12 +12,14 @@ import { createAttachmentResourceResolver } from "../ui/codex-view/attachment-re
 import {
   composerModelMenuState,
   composerProviderModelOptions,
-  selectComposerModel
+  selectComposerModel,
+  selectComposerReasoning
 } from "../ui/codex-view/composer-controller";
 import {
   createApiProviderConfig,
   createApiProviderModelConfig,
-  DEFAULT_SETTINGS
+  DEFAULT_SETTINGS,
+  normalizeSettingsData
 } from "../settings/settings";
 
 export async function runComposerActionTests(): Promise<void> {
@@ -166,10 +169,188 @@ export async function runComposerActionTests(): Promise<void> {
     assert.match(turnRunnerSource, /preparePiChatImages/u);
     assert.match(turnRunnerSource, /preparedImages\.length/u);
     await assertExactComposerProviderModelSelection();
+    assertAdaptiveComposerReasoning();
     console.log("PASS conversation-ui: composer actions, compact attachments, and exact Provider/model selection preserve send semantics");
   } finally {
     (globalThis as unknown as { document?: Document }).document = originalDocument;
   }
+}
+
+function assertAdaptiveComposerReasoning(): void {
+  const settings = structuredClone(DEFAULT_SETTINGS);
+  const provider = createApiProviderConfig("deepseek", "adaptive-reasoning");
+  provider.apiKey = "fixture-key";
+  const alternate = createApiProviderModelConfig(
+    "deepseek",
+    "deepseek-v4-pro"
+  );
+  alternate.reasoningEffort = "none";
+  provider.models.push(alternate);
+  settings.apiProviders = [provider];
+  settings.activeApiProviderId = provider.id;
+  settings.defaultModel = provider.defaultModelId;
+  const primary = provider.models.find(
+    (model) => model.id === provider.defaultModelId
+  );
+  assert.ok(primary);
+  primary.reasoningEffort = "xhigh";
+
+  let saveCount = 0;
+  let renderCount = 0;
+  const host: any = {
+    plugin: {
+      settings,
+      saveSettings: async () => { saveCount += 1; }
+    },
+    selectedProviderSettingsId: provider.id,
+    selectedModel: primary.id,
+    selectedPermission: settings.defaultPermission,
+    selectedMode: settings.defaultMode,
+    effectiveModel: () => host.selectedModel,
+    renderToolbar: () => { renderCount += 1; }
+  };
+
+  openTestNoticeMessages.length = 0;
+  const deepSeek = composerModelMenuState(host);
+  assert.equal(primary.reasoningEffort, "high");
+  assert.equal(deepSeek.selectedReasoning, "high");
+  assert.deepEqual(
+    deepSeek.reasoningOptions.map((option) => [option.effort, option.label]),
+    [["none", "关闭"], ["high", "高思考"], ["max", "最强思考"]]
+  );
+  assert.equal(saveCount, 1);
+  assert.match(openTestNoticeMessages.at(-1) ?? "", /原思考强度已不可用，已回落为高思考/u);
+
+  const invalidStoredProvider = createApiProviderConfig(
+    "deepseek",
+    "invalid-stored-reasoning"
+  );
+  invalidStoredProvider.apiKey = "fixture-key";
+  const invalidStoredModel = invalidStoredProvider.models[0] as typeof primary & {
+    reasoningEffort: string;
+  };
+  invalidStoredModel.reasoningEffort = "turbo";
+  const invalidStoredSettings = structuredClone(
+    normalizeSettingsData({
+      ...structuredClone(DEFAULT_SETTINGS),
+      settingsVersion: 52,
+      activeApiProviderId: invalidStoredProvider.id,
+      defaultModel: invalidStoredModel.id,
+      apiProviders: [invalidStoredProvider]
+    }).settings
+  );
+  const normalizedInvalidProvider = invalidStoredSettings.apiProviders[0];
+  const normalizedInvalidModel = normalizedInvalidProvider?.models[0];
+  assert.ok(normalizedInvalidProvider && normalizedInvalidModel);
+  let invalidSaveCount = 0;
+  const invalidHost: any = {
+    plugin: {
+      settings: invalidStoredSettings,
+      saveSettings: async () => { invalidSaveCount += 1; }
+    },
+    selectedProviderSettingsId: normalizedInvalidProvider.id,
+    selectedModel: normalizedInvalidModel.id,
+    selectedPermission: invalidStoredSettings.defaultPermission,
+    selectedMode: invalidStoredSettings.defaultMode,
+    effectiveModel: () => invalidHost.selectedModel,
+    renderToolbar: () => undefined
+  };
+  openTestNoticeMessages.length = 0;
+  composerModelMenuState(invalidHost);
+  assert.equal(normalizedInvalidModel.reasoningEffort, "high");
+  assert.equal(invalidSaveCount, 1);
+  assert.match(
+    openTestNoticeMessages.at(-1) ?? "",
+    /原思考强度已不可用，已回落为高思考/u
+  );
+  assert.doesNotMatch(JSON.stringify(invalidStoredSettings), /turbo/u);
+
+  const missingProvider = createApiProviderConfig(
+    "deepseek",
+    "missing-stored-reasoning"
+  );
+  missingProvider.apiKey = "fixture-key";
+  const missingSettings = normalizeSettingsData({
+    ...structuredClone(DEFAULT_SETTINGS),
+    settingsVersion: 52,
+    activeApiProviderId: missingProvider.id,
+    defaultModel: missingProvider.defaultModelId,
+    apiProviders: [missingProvider]
+  }).settings;
+  const normalizedMissingProvider = missingSettings.apiProviders[0];
+  const normalizedMissingModel = normalizedMissingProvider?.models[0];
+  assert.ok(normalizedMissingProvider && normalizedMissingModel);
+  let missingSaveCount = 0;
+  const missingHost: any = {
+    plugin: {
+      settings: missingSettings,
+      saveSettings: async () => { missingSaveCount += 1; }
+    },
+    selectedProviderSettingsId: normalizedMissingProvider.id,
+    selectedModel: normalizedMissingModel.id,
+    selectedPermission: missingSettings.defaultPermission,
+    selectedMode: missingSettings.defaultMode,
+    effectiveModel: () => missingHost.selectedModel,
+    renderToolbar: () => undefined
+  };
+  openTestNoticeMessages.length = 0;
+  composerModelMenuState(missingHost);
+  assert.equal(normalizedMissingModel.reasoningEffort, "high");
+  assert.equal(missingSaveCount, 1);
+  assert.deepEqual(openTestNoticeMessages, []);
+
+  selectComposerReasoning(host, "max");
+  assert.equal(primary.reasoningEffort, "max");
+  assert.equal(saveCount, 2);
+  assert.equal(renderCount, 1);
+
+  host.selectedModel = alternate.id;
+  const restored = composerModelMenuState(host);
+  assert.equal(restored.selectedReasoning, "none");
+  assert.equal(primary.reasoningEffort, "max");
+
+  const qwenProvider = createApiProviderConfig("custom", "qwen-adaptive");
+  qwenProvider.runtimeProviderId = "qwen-token-plan";
+  qwenProvider.baseUrl = "https://qwen.example/v1";
+  qwenProvider.apiKey = "fixture-key";
+  const qwenModel = createApiProviderModelConfig(
+    "custom",
+    "qwen3.8-max-preview",
+    qwenProvider.runtimeProviderId
+  );
+  qwenProvider.models = [qwenModel];
+  qwenProvider.defaultModelId = qwenModel.id;
+  settings.apiProviders.push(qwenProvider);
+  host.selectedProviderSettingsId = qwenProvider.id;
+  host.selectedModel = qwenModel.id;
+  const qwen = composerModelMenuState(host);
+  assert.equal(qwenModel.reasoningEffort, "medium");
+  assert.deepEqual(
+    qwen.reasoningOptions.map((option) => [option.effort, option.label]),
+    [["none", "关闭"], ["medium", "开启"]]
+  );
+
+  const nonReasoningProvider = createApiProviderConfig(
+    "custom",
+    "non-reasoning"
+  );
+  nonReasoningProvider.runtimeProviderId = "openai";
+  nonReasoningProvider.baseUrl = "https://openai.example/v1";
+  nonReasoningProvider.apiKey = "fixture-key";
+  const nonReasoningModel = createApiProviderModelConfig(
+    "custom",
+    "gpt-4",
+    nonReasoningProvider.runtimeProviderId
+  );
+  nonReasoningProvider.models = [nonReasoningModel];
+  nonReasoningProvider.defaultModelId = nonReasoningModel.id;
+  settings.apiProviders.push(nonReasoningProvider);
+  host.selectedProviderSettingsId = nonReasoningProvider.id;
+  host.selectedModel = nonReasoningModel.id;
+  const nonReasoning = composerModelMenuState(host);
+  assert.equal(nonReasoning.selectedReasoning, null);
+  assert.deepEqual(nonReasoning.reasoningOptions, []);
+  assert.equal(nonReasoningModel.reasoningEffort, undefined);
 }
 
 function renderedComposerText(root: ComposerTestElement): string {
@@ -216,8 +397,6 @@ async function assertExactComposerProviderModelSelection(): Promise<void> {
     running: false,
     selectedProviderSettingsId: first.id,
     selectedModel: "shared-model",
-    selectedReasoning: settings.defaultReasoning,
-    selectedServiceTier: settings.defaultServiceTier,
     selectedPermission: settings.defaultPermission,
     selectedMode: settings.defaultMode,
     effectiveModel: () => host.selectedModel,

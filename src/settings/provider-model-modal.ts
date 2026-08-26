@@ -34,6 +34,7 @@ import {
   type ApiProviderProtocol
 } from "./provider-presets";
 import { providerTooltipBaseUrl } from "./provider-tooltip";
+import { resolveEchoInkPiCatalogModel } from "./pi-model-catalog";
 import {
   ProviderPreflightSession,
   providerPreflightApiKeyReady,
@@ -1027,16 +1028,21 @@ export class ProviderModelModal extends Modal {
         model.metadataSource = "manual";
       }
     );
-    this.renderToggle(
-      toggles,
-      this.label("思考模式", "Reasoning mode"),
-      `model:${model.id}:reasoning`,
-      model.reasoning,
-      (value) => {
-        model.reasoning = value;
-        model.metadataSource = "manual";
-      }
-    );
+    if (!resolveEchoInkPiCatalogModel(
+      this.draft.runtimeProviderId,
+      model.id
+    )) {
+      this.renderToggle(
+        toggles,
+        this.label("思考模式", "Reasoning mode"),
+        `model:${model.id}:reasoning`,
+        model.reasoning,
+        (value) => {
+          model.reasoning = value;
+          model.metadataSource = "manual";
+        }
+      );
+    }
     const limits = advanced.createDiv({
       cls: "codex-provider-model-advanced-group is-limits"
     });

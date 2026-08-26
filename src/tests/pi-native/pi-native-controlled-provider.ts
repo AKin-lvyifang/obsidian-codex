@@ -112,6 +112,7 @@ function assertCurrentModelImageCapabilityIsCanonical(): void {
     provider: apiKeyProvider,
     configured: configuredModelMetadata(apiKeyProvider, true)
   });
+  assert.equal(configuredResolved.reasoning, true);
   assert.equal(piModelSupportsImageInput(configuredResolved), true);
   assert.deepEqual(configuredResolved.input, ["text", "image"]);
 
@@ -145,7 +146,11 @@ function assertConfiguredModelCapabilitiesAndCatalogImageTruthMerge(): void {
       imageInput: false
     }
   });
-  assert.equal(configured.reasoning, false);
+  assert.equal(
+    configured.reasoning,
+    true,
+    "catalog reasoning truth must ignore a manual false override"
+  );
   assert.equal(configured.contextWindow, 96_000);
   assert.equal(configured.maxTokens, 12_000);
   assert.deepEqual(configured.input, ["text", "image"]);

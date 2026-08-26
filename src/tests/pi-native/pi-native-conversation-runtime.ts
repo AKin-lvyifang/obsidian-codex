@@ -17,8 +17,11 @@ import {
   type AgentSessionEvent
 } from "@earendil-works/pi-coding-agent";
 import type {
+  Api,
   AssistantMessage,
   ImageContent,
+  Model,
+  ModelThinkingLevel,
   UserMessage
 } from "@earendil-works/pi-ai";
 import { FileConversationCatalog } from "../../harness/pi-native/file-conversation-catalog";
@@ -35,6 +38,7 @@ import {
 } from "../../harness/pi-native/pi-native-conversation-runtime";
 import type {
   PiChatPreparedImage,
+  PiChatSubmitRequest,
   PiChatRuntimeEvent,
   PiKnowledgeRuntimePort,
   PiKnowledgeReference
@@ -98,6 +102,7 @@ export async function runPiNativeConversationRuntimeTests(): Promise<void> {
   await assertUserQuestionUsesCentralFailClosedSecurity();
   assertReasoningSummaryLifecycleSemantics();
   await assertReasoningSummaryRuntimeLifecycle();
+  await assertReasoningSelectionFailsClosedBeforePiPrompt();
   assertKnowledgeMaintenanceRequiresExplicitCommand();
   await assertProjectionAndCatalogManagementStayAgentSessionFree();
   await assertKnowledgeAskUsesAgentAndReadOnlyTools();
@@ -125,6 +130,122 @@ export async function runPiNativeConversationRuntimeTests(): Promise<void> {
   await assertDerivationExcludesIdentityBoundOperationalState();
   await assertDerivedActivationFailureRemainsAVisibleDurableConversation();
   await runPiNativeTaskPlanRuntimeTests();
+}
+
+async function assertReasoningSelectionFailsClosedBeforePiPrompt(): Promise<void> {
+  await withFixture(["reasoning-valid-run"], async (fixture) => {
+    const conversationId = "reasoning-selection-validation";
+    await fixture.runtime.createConversation({
+      conversationId,
+      title: "Reasoning selection validation",
+      cwd: fixture.root,
+      createdAt: 1
+    });
+    await fixture.runtime.activateConversation(conversationId);
+    const session = fixture.latestSession();
+    const baselineEntries = session.sessionManager.getEntries().length;
+
+    await assert.rejects(
+      fixture.runtime.submit({
+        conversationId,
+        text: "缺失冻结身份不得进入 Pi",
+        submittedAt: 2
+      } as PiChatSubmitRequest),
+      (error: unknown) => error instanceof PiNativeConversationRuntimeError
+        && error.code === "provider_execution_unbound"
+    );
+    await assert.rejects(
+      fixture.runtime.submit({
+        conversationId,
+        text: "缺失冻结强度不得进入 Pi",
+        submittedAt: 3,
+        runtimeProviderId: "fixture-provider",
+        modelId: "fixture-model"
+      } as PiChatSubmitRequest),
+      (error: unknown) => error instanceof PiNativeConversationRuntimeError
+        && error.code === "reasoning_level_invalid"
+    );
+    for (const reasoning of [
+      "minimal",
+      "low",
+      "high",
+      "xhigh",
+      "max"
+    ] as const) {
+      await assert.rejects(
+        fixture.submit({
+          conversationId,
+          text: `人工两态模型不得接受 ${reasoning}`,
+          submittedAt: 4,
+          reasoning
+        }),
+        (error: unknown) => error instanceof PiNativeConversationRuntimeError
+          && error.code === "reasoning_level_invalid"
+      );
+    }
+    assert.deepEqual(session.thinkingLevelChanges, []);
+    assert.deepEqual(session.promptTexts, []);
+    assert.equal(session.sessionManager.getEntries().length, baselineEntries);
+
+    await assert.rejects(
+      fixture.submit({
+        conversationId,
+        text: "冻结身份不得漂移",
+        submittedAt: 5,
+        runtimeProviderId: "different-provider",
+        modelId: "fixture-model",
+        reasoning: "medium"
+      }),
+      (error: unknown) => error instanceof PiNativeConversationRuntimeError
+        && error.code === "provider_execution_unbound"
+    );
+    assert.deepEqual(session.thinkingLevelChanges, []);
+    assert.deepEqual(session.promptTexts, []);
+
+    const valid = await fixture.submit({
+      conversationId,
+      text: "合法代表进入 Pi",
+      submittedAt: 6,
+      runtimeProviderId: "fixture-provider",
+      modelId: "fixture-model",
+      reasoning: "medium"
+    });
+    assert.deepEqual(session.thinkingLevelChanges, ["medium"]);
+    session.finishSuccessful("ok");
+    await valid.result;
+  });
+
+  await withFixture(["reasoning-none-run"], async (fixture) => {
+    const conversationId = "non-reasoning-selection-validation";
+    await fixture.runtime.createConversation({
+      conversationId,
+      title: "Non-reasoning selection validation",
+      cwd: fixture.root,
+      createdAt: 1
+    });
+    await fixture.runtime.activateConversation(conversationId);
+    const session = fixture.latestSession();
+    session.model.reasoning = false;
+    await assert.rejects(
+      fixture.submit({
+        conversationId,
+        text: "非推理模型不得开启思考",
+        submittedAt: 2,
+        reasoning: "medium"
+      }),
+      (error: unknown) => error instanceof PiNativeConversationRuntimeError
+        && error.code === "reasoning_level_invalid"
+    );
+    const valid = await fixture.submit({
+      conversationId,
+      text: "非推理模型保留关闭态",
+      submittedAt: 3,
+      reasoning: "none"
+    });
+    assert.deepEqual(session.thinkingLevelChanges, ["off"]);
+    session.finishSuccessful("ok");
+    await valid.result;
+  });
 }
 
 async function assertUserQuestionUsesCentralFailClosedSecurity(): Promise<void> {
@@ -325,7 +446,7 @@ async function assertReasoningSummaryRuntimeLifecycle(): Promise<void> {
     await fixture.runtime.activateConversation(conversationId);
     const session = fixture.latestSession();
 
-    const taskRun = await fixture.runtime.submit({
+    const taskRun = await fixture.submit({
       conversationId,
       text: "执行结构化任务",
       submittedAt: 2
@@ -394,7 +515,7 @@ async function assertReasoningSummaryRuntimeLifecycle(): Promise<void> {
       && event.summary.activities.some((activity) => activity.kind === "task")
     ), "post-answer Task updates remain visible in the same live snapshot");
 
-    const noTextRun = await fixture.runtime.submit({
+    const noTextRun = await fixture.submit({
       conversationId,
       text: "合法无文本完成",
       submittedAt: 5
@@ -409,7 +530,7 @@ async function assertReasoningSummaryRuntimeLifecycle(): Promise<void> {
     assert.equal(noText?.firstAssistantTextAt, undefined);
     assert.ok(noText?.terminalAt);
 
-    const failedRun = await fixture.runtime.submit({
+    const failedRun = await fixture.submit({
       conversationId,
       text: "失败收口",
       submittedAt: 6
@@ -421,7 +542,7 @@ async function assertReasoningSummaryRuntimeLifecycle(): Promise<void> {
       "failed"
     );
 
-    const interruptedRun = await fixture.runtime.submit({
+    const interruptedRun = await fixture.submit({
       conversationId,
       text: "非 runtime abort 中断",
       submittedAt: 7
@@ -436,7 +557,7 @@ async function assertReasoningSummaryRuntimeLifecycle(): Promise<void> {
       "interrupted"
     );
 
-    const cancelledRun = await fixture.runtime.submit({
+    const cancelledRun = await fixture.submit({
       conversationId,
       text: "runtime abort 取消",
       submittedAt: 8
@@ -561,7 +682,7 @@ Promise<void> {
     });
     await fixture.runtime.activateConversation(conversationId);
     const session = fixture.latestSession();
-    const handle = await fixture.runtime.submit({
+    const handle = await fixture.submit({
       conversationId,
       text: "/maintain raw/a.md",
       maintenanceScope: QUERY_MAINTENANCE_SCOPE,
@@ -670,7 +791,7 @@ Promise<void> {
       await fixture.runtime.activateConversation(conversationId);
       let session = fixture.latestSession();
 
-      const valid = await fixture.runtime.submit({
+      const valid = await fixture.submit({
         conversationId,
         text: "/maintain raw/a.md",
         maintenanceScope: QUERY_MAINTENANCE_SCOPE,
@@ -686,7 +807,7 @@ Promise<void> {
       assert.equal((await valid.result).terminalState, "completed");
       assert.deepEqual(finalizedProductRunIds, [valid.productRunId]);
 
-      const duplicate = await fixture.runtime.submit({
+      const duplicate = await fixture.submit({
         conversationId,
         text: "/maintain raw/a.md",
         maintenanceScope: QUERY_MAINTENANCE_SCOPE,
@@ -708,7 +829,7 @@ Promise<void> {
         conversationId
       );
 
-      const failedResult = await fixture.runtime.submit({
+      const failedResult = await fixture.submit({
         conversationId,
         text: "/maintain raw/a.md",
         maintenanceScope: QUERY_MAINTENANCE_SCOPE,
@@ -735,7 +856,7 @@ Promise<void> {
       assert.equal((await failedResult.result).terminalState, "failed");
       assert.deepEqual(finalizedProductRunIds, [valid.productRunId]);
 
-      const missingTerminal = await fixture.runtime.submit({
+      const missingTerminal = await fixture.submit({
         conversationId,
         text: "/maintain raw/a.md",
         maintenanceScope: QUERY_MAINTENANCE_SCOPE,
@@ -755,7 +876,7 @@ Promise<void> {
       );
 
       for (const [index, status] of (["completed", "noop"] as const).entries()) {
-        const errorSuccess = await fixture.runtime.submit({
+        const errorSuccess = await fixture.submit({
           conversationId,
           text: "/maintain raw/a.md",
           maintenanceScope: QUERY_MAINTENANCE_SCOPE,
@@ -793,7 +914,7 @@ Promise<void> {
         );
       }
 
-      const malformed = await fixture.runtime.submit({
+      const malformed = await fixture.submit({
         conversationId,
         text: "/maintain raw/a.md",
         maintenanceScope: QUERY_MAINTENANCE_SCOPE,
@@ -818,7 +939,7 @@ Promise<void> {
         conversationId
       );
 
-      const mismatched = await fixture.runtime.submit({
+      const mismatched = await fixture.submit({
         conversationId,
         text: "/maintain raw/a.md",
         maintenanceScope: QUERY_MAINTENANCE_SCOPE,
@@ -942,7 +1063,7 @@ Promise<void> {
           fixture,
           conversationId
         );
-        const handle = await fixture.runtime.submit({
+        const handle = await fixture.submit({
           conversationId,
           text: "/maintain raw/a.md",
           maintenanceScope: QUERY_MAINTENANCE_SCOPE,
@@ -994,7 +1115,7 @@ Promise<void> {
           fixture,
           conversationId
         );
-        const handle = await fixture.runtime.submit({
+        const handle = await fixture.submit({
           conversationId,
           text: "/maintain raw/a.md",
           maintenanceScope: QUERY_MAINTENANCE_SCOPE,
@@ -1188,7 +1309,7 @@ async function assertKnowledgeAskUsesAgentAndReadOnlyTools(): Promise<void> {
       await fixture.runtime.activateConversation(conversationId);
       const session = fixture.latestSession();
 
-      const normal = await fixture.runtime.submit({
+      const normal = await fixture.submit({
         conversationId,
         text: "/ask 空库也请解释这个概念",
         memoryMode: "normal",
@@ -1216,7 +1337,7 @@ async function assertKnowledgeAskUsesAgentAndReadOnlyTools(): Promise<void> {
       session.finishSuccessful("当前没有 Vault 依据；这是模型分析。");
       assert.equal((await normal.result).terminalState, "completed");
 
-      const noMemory = await fixture.runtime.submit({
+      const noMemory = await fixture.submit({
         conversationId,
         text: "/ask 不使用 Memory 回答",
         memoryMode: "no_memory",
@@ -1298,7 +1419,7 @@ async function assertAskSourceAttributionCapturesOnlyInjectedPrimaryMemory(): Pr
       });
       await fixture.runtime.activateConversation(conversationId);
       const session = fixture.latestSession();
-      const first = await fixture.runtime.submit({
+      const first = await fixture.submit({
         conversationId,
         text: "/ask 请用已注入来源回答",
         submittedAt: 2
@@ -1333,7 +1454,7 @@ async function assertAskSourceAttributionCapturesOnlyInjectedPrimaryMemory(): Pr
         ]
       });
 
-      const empty = await fixture.runtime.submit({
+      const empty = await fixture.submit({
         conversationId,
         text: "/ask 本轮没有可展示来源",
         submittedAt: 3
@@ -1393,7 +1514,7 @@ async function assertKnowledgeObservationAndProgressArePrivacySafe(): Promise<vo
     });
     await fixture.runtime.activateConversation(conversationId);
     const session = fixture.latestSession();
-    const handle = await fixture.runtime.submit({
+    const handle = await fixture.submit({
       conversationId,
       text: "/ask PRIVATE_QUERY_CANARY",
       submittedAt: 3
@@ -1554,7 +1675,7 @@ async function assertMemoryTurnIsAvailableBeforeUserEntryPersistence(): Promise<
     await fixture.runtime.activateConversation(conversationId);
     for (const memoryMode of ["normal", "no_memory"] as const) {
       const text = `preappend-${memoryMode}`;
-      const handle = await fixture.runtime.submit({
+      const handle = await fixture.submit({
         conversationId,
         text,
         memoryMode,
@@ -1601,7 +1722,7 @@ Promise<void> {
     });
     await fixture.runtime.activateConversation(sourceConversationId);
 
-    const first = await fixture.runtime.submit({
+    const first = await fixture.submit({
       conversationId: sourceConversationId,
       text: "第一条提问",
       submittedAt: 3
@@ -1610,7 +1731,7 @@ Promise<void> {
     const firstSettled = await first.result;
     assert.ok(firstSettled.assistantEntryId);
 
-    const future = await fixture.runtime.submit({
+    const future = await fixture.submit({
       conversationId: sourceConversationId,
       text: "需要重新编辑的第二条提问",
       submittedAt: 4
@@ -1715,7 +1836,7 @@ Promise<void> {
       createdAt: 2
     });
     await fixture.runtime.activateConversation(sourceConversationId);
-    const sourceRun = await fixture.runtime.submit({
+    const sourceRun = await fixture.submit({
       conversationId: sourceConversationId,
       text: "需要保留的来源提问",
       submittedAt: 3
@@ -1932,7 +2053,7 @@ Promise<void> {
     assert.equal(reopenedProjection.contextLedger, undefined);
     const reopenedDerivedAgent = fixture.latestSession();
 
-    const continued = await fixture.runtime.submit({
+    const continued = await fixture.submit({
       conversationId: derived.projection.catalog.conversationId,
       text: "验证派生会话的 Provider Context",
       submittedAt: 17
@@ -2007,7 +2128,7 @@ export async function runPiNativeTaskPlanRuntimeTests(): Promise<void> {
       });
       appendTaskPlanEntry(session.sessionManager, catalog, pending);
 
-      const missingUpdate = await fixture.runtime.submit({
+      const missingUpdate = await fixture.submit({
         conversationId,
         text: "故意遗漏结构化计划更新",
         mode: "plan",
@@ -2025,7 +2146,7 @@ export async function runPiNativeTaskPlanRuntimeTests(): Promise<void> {
         true
       );
 
-      const planned = await fixture.runtime.submit({
+      const planned = await fixture.submit({
         conversationId,
         text: "修改当前计划",
         mode: "plan",
@@ -2063,7 +2184,7 @@ export async function runPiNativeTaskPlanRuntimeTests(): Promise<void> {
       assert.equal(executed.plan.currentStepId, "step-read");
       assert.equal(session.sessionManager.getSessionId(), catalog.piSessionId);
 
-      const run = await fixture.runtime.submit({
+      const run = await fixture.submit({
         conversationId,
         text: "执行当前计划",
         mode: "agent",
@@ -2098,7 +2219,7 @@ export async function runPiNativeTaskPlanRuntimeTests(): Promise<void> {
         planId: pending.planId,
         action: "continue"
       });
-      const autoPauseRun = await fixture.runtime.submit({
+      const autoPauseRun = await fixture.submit({
         conversationId,
         text: "本轮结束时没有写终态",
         mode: "agent",
@@ -2123,7 +2244,7 @@ export async function runPiNativeTaskPlanRuntimeTests(): Promise<void> {
         planId: pending.planId,
         action: "continue"
       });
-      const abortedRun = await fixture.runtime.submit({
+      const abortedRun = await fixture.submit({
         conversationId,
         text: "Provider 自行中断时收口计划",
         mode: "agent",
@@ -2148,7 +2269,7 @@ export async function runPiNativeTaskPlanRuntimeTests(): Promise<void> {
         planId: pending.planId,
         action: "continue"
       });
-      const failedRun = await fixture.runtime.submit({
+      const failedRun = await fixture.submit({
         conversationId,
         text: "本轮 Provider 失败时收口计划",
         mode: "agent",
@@ -2257,7 +2378,7 @@ Promise<void> {
     const session = fixture.latestSession();
     session.enableRuntimeMessageTimestampDrift();
 
-    const handle = await fixture.runtime.submit({
+    const handle = await fixture.submit({
       conversationId,
       text: "durable user message",
       submittedAt: 3
@@ -2376,7 +2497,7 @@ Promise<void> {
       await fixture.runtime.activateConversation(conversationId);
 
       for (const testCase of cases) {
-        const handle = await fixture.runtime.submit({
+        const handle = await fixture.submit({
           conversationId,
           text: testCase.query,
           submittedAt: 3
@@ -2437,7 +2558,7 @@ Promise<void> {
     await fixture.runtime.activateConversation(conversationId);
     fixture.latestSession().failNextPrompt(new Error("prompt start rejected"));
     await assert.rejects(
-      fixture.runtime.submit({
+      fixture.submit({
         conversationId,
         text: "edited but not durably submitted",
         draftId: draft.draftId,
@@ -2451,7 +2572,7 @@ Promise<void> {
       "a prompt that never durably appends its user Entry must retain the draft"
     );
 
-    const handle = await fixture.runtime.submit({
+    const handle = await fixture.submit({
       conversationId,
       text: "edited and explicitly resubmitted",
       draftId: draft.draftId,
@@ -2521,7 +2642,7 @@ Promise<void> {
       const session = fixture.latestSession();
       session.model.input = ["text", "image"];
 
-      const textAndImages = await fixture.runtime.submit({
+      const textAndImages = await fixture.submit({
         conversationId,
         text: "按顺序看这两张图",
         images: orderedImages,
@@ -2550,7 +2671,7 @@ Promise<void> {
         true
       );
 
-      const pureImage = await fixture.runtime.submit({
+      const pureImage = await fixture.submit({
         conversationId,
         text: "",
         images: [orderedImages[1]],
@@ -2588,7 +2709,7 @@ Promise<void> {
     const session = fixture.latestSession();
 
     await assert.rejects(
-      fixture.runtime.submit({
+      fixture.submit({
         conversationId,
         text: "不能发送",
         images: [orderedImages[0]],
@@ -2612,7 +2733,7 @@ Promise<void> {
   await withFixture(["run-recovery"], async (fixture) => {
     const conversationId = "recovery-conversation";
     const userText = "durable user entry before JSONL corruption";
-    const handle = await fixture.runtime.submit({
+    const handle = await fixture.submit({
       conversationId,
       text: userText,
       submittedAt: 3
@@ -2754,7 +2875,7 @@ Promise<void> {
         null
       );
 
-      const normal = await fixture.runtime.submit({
+      const normal = await fixture.submit({
         conversationId: "experience-normal",
         text: "normal source",
         submittedAt: 4,
@@ -2813,7 +2934,7 @@ Promise<void> {
         "deleting the Conversation must invalidate the source pointer"
       );
 
-      const noMemory = await fixture.runtime.submit({
+      const noMemory = await fixture.submit({
         conversationId: "experience-no-memory",
         text: "ephemeral source",
         submittedAt: 5,
@@ -2835,7 +2956,7 @@ async function assertSkillPromptAndBindingValidation(): Promise<void> {
     ["run-skill", "run-plain"],
     async (fixture) => {
       await assert.rejects(
-        fixture.runtime.submit({
+        fixture.submit({
           conversationId: "invalid-submit",
           text: "must not create",
           submittedAt: 1,
@@ -2857,7 +2978,7 @@ async function assertSkillPromptAndBindingValidation(): Promise<void> {
         skillBindingError
       );
 
-      const skillHandle = await fixture.runtime.submit({
+      const skillHandle = await fixture.submit({
         conversationId: "skill-conversation",
         text: "hello",
         submittedAt: 2,
@@ -2873,7 +2994,7 @@ async function assertSkillPromptAndBindingValidation(): Promise<void> {
       assert.equal((await skillHandle.result).state, "product_run_settled");
       assert.equal(fixture.runtime.releaseProductRun(skillHandle.productRunId), true);
 
-      const plainHandle = await fixture.runtime.submit({
+      const plainHandle = await fixture.submit({
         conversationId: "plain-conversation",
         text: "plain text",
         submittedAt: 3
@@ -2928,7 +3049,7 @@ async function assertProductRunPersistenceFailure(
 
       let acceptedFailure: PiNativeConversationRuntimeError | null = null;
       await assert.rejects(
-        fixture.runtime.submit({
+        fixture.submit({
           conversationId: `${stage}-failure-conversation`,
           text: "first attempt",
           submittedAt: 10
@@ -2956,7 +3077,7 @@ async function assertProductRunPersistenceFailure(
         unavailableRunError
       );
 
-      const retry = await fixture.runtime.submit({
+      const retry = await fixture.submit({
         conversationId: `${stage}-failure-conversation`,
         text: "second attempt",
         submittedAt: 11
@@ -2970,7 +3091,7 @@ async function assertProductRunPersistenceFailure(
 
 async function assertSubscriberFailuresAreIsolated(): Promise<void> {
   await withFixture(["run-subscriber"], async (fixture) => {
-    const handle = await fixture.runtime.submit({
+    const handle = await fixture.submit({
       conversationId: "subscriber-conversation",
       text: "subscriber isolation",
       submittedAt: 20
@@ -3004,7 +3125,7 @@ async function assertSettlementFailureIsDiagnosedAndReleasesRun(): Promise<void>
   await withFixture(
     ["run-unsettled", "run-after-unsettled"],
     async (fixture) => {
-      const first = await fixture.runtime.submit({
+      const first = await fixture.submit({
         conversationId: "unsettled-conversation",
         text: "first unsettled run",
         submittedAt: 30
@@ -3025,7 +3146,7 @@ async function assertSettlementFailureIsDiagnosedAndReleasesRun(): Promise<void>
       );
       assert.equal(fixture.runtime.releaseProductRun(first.productRunId), true);
 
-      const second = await fixture.runtime.submit({
+      const second = await fixture.submit({
         conversationId: "unsettled-conversation",
         text: "lock was released",
         submittedAt: 31
@@ -3054,7 +3175,7 @@ async function assertPromptStartFailureReleasesSettlementBarrier(): Promise<void
     session.failNextPrompt(promptStartError);
 
     await assert.rejects(
-      fixture.runtime.submit({
+      fixture.submit({
         conversationId: "prompt-start-failure",
         text: "must fail before the first Entry",
         submittedAt: 40
@@ -3097,7 +3218,7 @@ async function assertConversationTeardownWaitsForSettlement(
     };
 
     const conversationId = `${mode}-barrier-conversation`;
-    const handle = await fixture.runtime.submit({
+    const handle = await fixture.submit({
       conversationId,
       text: `${mode} must await settlement`,
       submittedAt: 50
@@ -3191,6 +3312,9 @@ interface RuntimeFixture {
   catalog: FileConversationCatalog;
   productRuns: FileProductRunStore;
   runtime: PiNativeConversationRuntime;
+  submit(
+    request: RuntimeFixtureSubmitRequest
+  ): ReturnType<PiNativeConversationRuntime["submit"]>;
   sessions: ControlledAgentSession[];
   failNextActivation(error: Error): void;
   setFactoryWarnings(warnings: readonly string[]): void;
@@ -3210,6 +3334,14 @@ interface RuntimeFixture {
   >>[0]): Promise<void>;
   latestSession(): ControlledAgentSession;
 }
+
+type RuntimeFixtureSubmitRequest = Omit<
+  PiChatSubmitRequest,
+  "runtimeProviderId" | "modelId" | "reasoning"
+> & Partial<Pick<
+  PiChatSubmitRequest,
+  "runtimeProviderId" | "modelId" | "reasoning"
+>>;
 
 async function withFixture(
   runIds: readonly string[],
@@ -3301,6 +3433,12 @@ async function withFixture(
       catalog,
       productRuns,
       runtime,
+      submit: (request) => runtime.submit({
+        ...request,
+        runtimeProviderId: request.runtimeProviderId ?? "fixture-provider",
+        modelId: request.modelId ?? "fixture-model",
+        reasoning: request.reasoning ?? "medium"
+      }),
       sessions,
       failNextActivation: (error) => {
         nextActivationError = error;
@@ -3343,7 +3481,30 @@ async function withFixture(
 class ControlledAgentSession {
   readonly promptTexts: string[] = [];
   readonly promptImages: ImageContent[][] = [];
-  readonly model = { input: ["text"] as string[] };
+  readonly model: Model<Api> = {
+    id: "fixture-model",
+    name: "Fixture Model",
+    api: "openai-completions",
+    provider: "fixture-provider",
+    baseUrl: "https://fixture.invalid/v1",
+    reasoning: true,
+    input: ["text"],
+    cost: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0
+    },
+    contextWindow: 128_000,
+    maxTokens: 32_000,
+    thinkingLevelMap: {
+      minimal: "low",
+      low: "low",
+      medium: "medium",
+      high: "high"
+    }
+  };
+  readonly thinkingLevelChanges: ModelThinkingLevel[] = [];
   readonly taskPlanTurns: Array<Readonly<PiNativeTaskPlanTurnContext> | null> = [];
   readonly lifecycleCalls: string[] = [];
   readonly activeToolSelections: string[][] = [];
@@ -3621,6 +3782,10 @@ class ControlledAgentSession {
     );
     this.activeToolNames = [...names];
     this.activeToolSelections.push([...names]);
+  }
+
+  setThinkingLevel(level: ModelThinkingLevel): void {
+    this.thinkingLevelChanges.push(level);
   }
 
   async steer(text: string): Promise<void> {

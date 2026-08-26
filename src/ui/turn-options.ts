@@ -2,18 +2,18 @@ import type { WorkspaceResourceToggles } from "../settings/settings";
 import type {
   PermissionMode,
   ReasoningEffort,
-  ServiceTierChoice,
   UiMode
 } from "../types/app-server";
 
 export interface TurnOptions {
   cwd?: string;
   providerSettingsId: string;
+  /** Runtime Provider identity frozen with this exact turn. */
+  runtimeProviderId: string;
   model: string;
   developerInstructions?: string;
   ephemeral?: boolean;
   reasoning: ReasoningEffort;
-  serviceTier: ServiceTierChoice;
   permission: PermissionMode;
   mode: UiMode;
   mcpEnabled: boolean;

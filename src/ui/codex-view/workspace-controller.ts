@@ -8,11 +8,12 @@ import {
 } from "../../settings/settings";
 import { buildActiveEchoInkResourceCatalog, hasEnabledMcpResources, workspaceResourcesFromEchoInkResources } from "../../resources/registry";
 import type { EchoInkResource } from "../../resources/types";
-import type { PermissionMode, ReasoningEffort, ServiceTierChoice, UiMode } from "../../types/app-server";
+import type { PermissionMode, UiMode } from "../../types/app-server";
 import { showItemInFinder } from "../../core/electron";
 import { textInputModal } from "../modals";
 import { openWorkspaceMenu as showWorkspaceMenu } from "./menus";
 import { normalizeWorkspacePath, pickWorkspaceDirectory, workspaceDirectoryExists, workspaceDisplayName } from "./workspace-utils";
+import { resolveComposerReasoningState } from "../composer-reasoning";
 
 export interface CodexWorkspaceHost {
   readonly app: App;
@@ -20,8 +21,6 @@ export interface CodexWorkspaceHost {
   running: boolean;
   selectedProviderSettingsId: string;
   selectedModel: string;
-  selectedReasoning: ReasoningEffort;
-  selectedServiceTier: ServiceTierChoice;
   selectedPermission: PermissionMode;
   selectedMode: UiMode;
   ensureSession(): StoredSession;
@@ -114,12 +113,21 @@ export function currentTurnOptions(host: CodexWorkspaceHost, session?: StoredSes
   const cwd = session ? normalizeWorkspacePath(session.cwd) : "";
   const catalog = currentEchoInkResourceCatalog(host);
   const workspaceResources = workspaceResourcesFromEchoInkResources(catalog);
+  const model = host.effectiveModel();
+  const provider = host.plugin.settings.apiProviders.find(
+    (candidate) => candidate.id === host.selectedProviderSettingsId
+  );
+  const reasoning = resolveComposerReasoningState(
+    host.plugin.settings,
+    host.selectedProviderSettingsId,
+    model
+  );
   return {
     ...(cwd ? { cwd } : {}),
     providerSettingsId: host.selectedProviderSettingsId,
-    model: host.effectiveModel(),
-    reasoning: host.selectedReasoning,
-    serviceTier: host.selectedServiceTier,
+    runtimeProviderId: provider?.runtimeProviderId ?? "",
+    model,
+    reasoning: reasoning?.effort ?? "none",
     permission: host.selectedPermission,
     mode: host.selectedMode,
     mcpEnabled: hasEnabledMcpResources(catalog),

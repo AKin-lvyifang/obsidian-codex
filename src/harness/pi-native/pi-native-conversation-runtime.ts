@@ -7,10 +7,14 @@ import type {
   SessionManager
 } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type {
-  AssistantMessage,
-  ImageContent,
-  ThinkingContent
+import {
+  clampThinkingLevel,
+  type Api,
+  type AssistantMessage,
+  type ImageContent,
+  type ThinkingContent,
+  type Model,
+  type ModelThinkingLevel
 } from "@earendil-works/pi-ai";
 import {
   routeKnowledgeConversationCommand,
@@ -124,6 +128,11 @@ import {
 } from "../../types/conversation-turn";
 import { PI_USER_QUESTION_TOOL_ID } from "./pi-user-question-tool";
 import { stableHashedIdentity as stableId } from "../../core/mapping";
+import {
+  isEchoInkReasoningEffort,
+  isEchoInkPiReasoningEffortSupported,
+  resolveEchoInkPiReasoningCapabilities
+} from "../../settings/pi-model-catalog";
 
 const BUILTIN_TOOL_NAMES = new Set([
   "bash",
@@ -357,6 +366,7 @@ export type PiNativeConversationRuntimeErrorCode =
   | "session_recovery_invalid"
   | "agent_session_invalid"
   | "image_input_unsupported"
+  | "reasoning_level_invalid"
   | "product_run_start_failed_after_user_entry"
   | "agent_settled_missing"
   | "projection_unsettled"
@@ -1104,6 +1114,11 @@ export class PiNativeConversationRuntime {
         PI_IMAGE_INPUT_UNSUPPORTED_MESSAGE
       );
     }
+    assertPiChatSubmitModelIdentity(active.session, request);
+    const requestedThinkingLevel = validatedPiThinkingLevel(
+      active.session.model,
+      request.reasoning
+    );
 
     const productRunId = this.nextId("product-run");
     const memoryMode = request.memoryMode ?? catalog.defaultMemoryMode;
@@ -1151,10 +1166,8 @@ export class PiNativeConversationRuntime {
     );
 
     try {
-      if (request.reasoning !== undefined) {
-        active.session.setThinkingLevel(
-          request.reasoning === "none" ? "off" : request.reasoning
-        );
+      if (requestedThinkingLevel !== undefined) {
+        active.session.setThinkingLevel(requestedThinkingLevel);
       }
       await this.emitRuntimeEvent(active, execution, {
         type: "reasoning_summary",
@@ -4283,6 +4296,71 @@ function preserveLiveAssistantTurnProjection(
     ) continue;
     carrier.assistantTurn = cloneEchoInkAssistantTurn(turn);
   }
+}
+
+function assertPiChatSubmitModelIdentity(
+  session: Pick<AgentSession, "model">,
+  request: Readonly<PiChatSubmitRequest>
+): void {
+  const runtimeProviderId = typeof request.runtimeProviderId === "string"
+    ? request.runtimeProviderId.trim()
+    : "";
+  const modelId = typeof request.modelId === "string"
+    ? request.modelId.trim()
+    : "";
+  const model = session.model;
+  if (
+    !runtimeProviderId
+    || runtimeProviderId !== request.runtimeProviderId
+    || !modelId
+    || modelId !== request.modelId
+    || !model
+    || model.provider !== runtimeProviderId
+    || model.id !== modelId
+  ) {
+    throw new PiNativeConversationRuntimeError(
+      "provider_execution_unbound",
+      "本轮冻结的 Provider/模型与当前 Pi Session 不一致，已在 Provider 请求前停止。"
+    );
+  }
+}
+
+function validatedPiThinkingLevel(
+  model: Model<Api> | undefined,
+  reasoning: unknown
+): ModelThinkingLevel {
+  if (!model) {
+    throw new PiNativeConversationRuntimeError(
+      "reasoning_level_invalid",
+      "当前 Pi Session 没有可验证的模型，本轮未调用 Provider。"
+    );
+  }
+  if (!isEchoInkReasoningEffort(reasoning)) {
+    throw new PiNativeConversationRuntimeError(
+      "reasoning_level_invalid",
+      "本轮没有合法的冻结思考强度，已在 Provider 请求前停止。"
+    );
+  }
+  const capabilities = resolveEchoInkPiReasoningCapabilities(
+    model.provider,
+    model.id,
+    model.reasoning
+  );
+  if (!isEchoInkPiReasoningEffortSupported(capabilities, reasoning)) {
+    throw new PiNativeConversationRuntimeError(
+      "reasoning_level_invalid",
+      `思考强度 ${reasoning} 不受当前 Pi 模型支持，本轮未调用 Provider。`
+    );
+  }
+  const requested = reasoning === "none" ? "off" : reasoning;
+  const clamped = clampThinkingLevel(model, requested);
+  if (clamped !== requested) {
+    throw new PiNativeConversationRuntimeError(
+      "reasoning_level_invalid",
+      `思考强度 ${reasoning} 会被 Pi 改为 ${clamped}，本轮已在 Provider 请求前停止。`
+    );
+  }
+  return requested;
 }
 
 function localAssistantMessage(

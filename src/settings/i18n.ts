@@ -8,7 +8,7 @@ import type {
   SettingsLanguage,
   SettingsTab,
 } from "./settings";
-import type { PermissionMode, ServiceTierChoice, UiMode } from "../types/app-server";
+import type { PermissionMode, UiMode } from "../types/app-server";
 import type { KnowledgeBaseRunCompletion } from "../knowledge-base/types";
 
 const ZH_CN = {
@@ -44,8 +44,6 @@ const ZH_CN = {
     settingsLanguage: "设置语言",
     settingsLanguageDesc: "控制 EchoInk 界面语言；不会改写 Prompt、会话内容或用户自定义名称。",
     auto: "自动",
-    defaultReasoning: "默认思考强度",
-    defaultSpeed: "默认速度",
     defaultPermission: "默认文件权限",
     defaultMode: "默认模式",
     autoOpen: "启动时自动打开侧栏",
@@ -61,11 +59,6 @@ const ZH_CN = {
       "zh-CN": "中文",
       en: "English"
     } satisfies Record<SettingsLanguage, string>,
-    serviceTierOptions: {
-      standard: "标准",
-      fast: "快速",
-      flex: "弹性"
-    } satisfies Record<ServiceTierChoice, string>,
     permissionOptions: {
       "read-only": "只读",
       "workspace-write": "工作区可写",
@@ -305,8 +298,6 @@ const EN: SettingsCopy = {
     settingsLanguage: "Settings language",
     settingsLanguageDesc: "Controls the EchoInk interface language. Prompts, chats, and custom names are unchanged.",
     auto: "Auto",
-    defaultReasoning: "Default reasoning",
-    defaultSpeed: "Default speed",
     defaultPermission: "Default file access",
     defaultMode: "Default mode",
     autoOpen: "Open sidebar on startup",
@@ -321,11 +312,6 @@ const EN: SettingsCopy = {
     languageOptions: {
       "zh-CN": "中文",
       en: "English"
-    },
-    serviceTierOptions: {
-      standard: "Standard",
-      fast: "Fast",
-      flex: "Flex"
     },
     permissionOptions: {
       "read-only": "Read only",
