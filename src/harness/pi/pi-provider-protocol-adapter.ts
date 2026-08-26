@@ -199,10 +199,10 @@ export function classifyPiProviderConnectionFailure(
   ) {
     return "model";
   }
-  if (status === 404 || status === 405) return "protocol";
+  if ([400, 404, 405, 422].includes(status ?? -1)) return "protocol";
   if (status !== null && status >= 500) return "provider";
   if (
-    /timeout|timed out|abort|network|fetch failed|enotfound|econn|dns|tls|certificate|offline/u.test(
+    /timeout|timed out|abort|network|connection error|failed to fetch|fetch failed|enotfound|econn|dns|tls|certificate|offline/u.test(
       normalized
     )
   ) {

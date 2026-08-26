@@ -10,12 +10,15 @@ import {
   type PiProviderConnectionFailureKind
 } from "../harness/pi/pi-provider-protocol-adapter";
 import {
-  createPiProviderModelDefinition
-} from "../harness/pi/production-pi-model-resolver";
+  createPiNativeModelFromConfiguration
+} from "../harness/pi-native/pi-native-controlled-provider";
 import {
   isValidApiProviderModelId,
   type CodexForObsidianSettings
 } from "../settings/settings";
+import {
+  resolveEchoInkPiCatalogModel
+} from "../settings/pi-model-catalog";
 import {
   apiProviderAuthMode,
   apiProviderApiKeyRequired,
@@ -29,9 +32,11 @@ import {
   type ApiProviderProtocol
 } from "../settings/provider-presets";
 import {
-  createLoopbackOpenAICompletionsAdapter,
   loopbackProviderFetch
 } from "./loopback-openai-provider-adapter";
+import {
+  createConfiguredPiProviderProtocolDispatcher
+} from "./configured-pi-provider-dispatcher";
 
 const PROVIDER_REQUEST_TIMEOUT_MS = 10_000;
 const PROVIDER_MODEL_LIMIT = 200;
@@ -146,15 +151,9 @@ export class PiProviderConfigurationService {
     return await testProviderConnection({
       draft: normalized,
       apiKey,
-      dispatcher: new PiProviderProtocolDispatcher(
-        this.options.adapters
-          ?? (isLoopbackApiProviderUrl(normalized.baseUrl)
-            ? {
-              "openai-completions":
-                createLoopbackOpenAICompletionsAdapter()
-            }
-            : undefined)
-      ),
+      dispatcher: this.options.adapters
+        ? new PiProviderProtocolDispatcher(this.options.adapters)
+        : createConfiguredPiProviderProtocolDispatcher(normalized),
       timeoutMs: this.options.timeoutMs ?? PROVIDER_REQUEST_TIMEOUT_MS
     });
   }
@@ -183,23 +182,11 @@ export class PiProviderConfigurationService {
     const timer = setTimeout(() => abort("timeout"), timeoutMs);
     try {
       const dispatcher = this.options.textGenerationDispatcher
-        ?? new PiProviderProtocolDispatcher(
-          this.options.adapters
-            ?? (isLoopbackApiProviderUrl(normalized.baseUrl)
-              ? { "openai-completions": createLoopbackOpenAICompletionsAdapter() }
-              : undefined)
-        );
+        ?? (this.options.adapters
+          ? new PiProviderProtocolDispatcher(this.options.adapters)
+          : createConfiguredPiProviderProtocolDispatcher(normalized));
       const stream = dispatcher.stream({
-        model: createPiProviderModelDefinition({
-          providerId: normalized.runtimeProviderId,
-          apiProtocol: normalized.apiProtocol,
-          baseUrl: normalized.baseUrl,
-          modelRef: normalized.modelId,
-          contextWindow: normalized.contextWindow,
-          maxOutputTokens: normalized.modelMaxTokens,
-          reasoning: normalized.reasoning,
-          imageInput: normalized.imageInput
-        }),
+        model: createProviderModelFromDraft(normalized),
         context: {
           systemPrompt: input.systemPrompt,
           messages: [{
@@ -401,16 +388,7 @@ export async function testProviderConnection(input: {
   let responseStatus: number | null = null;
   try {
     const stream = input.dispatcher.stream({
-      model: createPiProviderModelDefinition({
-        providerId: input.draft.runtimeProviderId,
-        apiProtocol: input.draft.apiProtocol,
-        baseUrl: input.draft.baseUrl,
-        modelRef: input.draft.modelId,
-        contextWindow: input.draft.contextWindow,
-        maxOutputTokens: input.draft.modelMaxTokens,
-        reasoning: input.draft.reasoning,
-        imageInput: input.draft.imageInput
-      }),
+      model: createProviderModelFromDraft(input.draft),
       context: {
         systemPrompt: "Connection check. Reply with OK only.",
         messages: [{
@@ -461,6 +439,31 @@ export async function testProviderConnection(input: {
   } finally {
     clearTimeout(timer);
   }
+}
+
+function createProviderModelFromDraft(
+  draft: PiProviderConfigurationDraft
+) {
+  return createPiNativeModelFromConfiguration({
+    catalogModel: resolveEchoInkPiCatalogModel(
+      draft.runtimeProviderId,
+      draft.modelId
+    ) ?? undefined,
+    provider: {
+      providerId: draft.runtimeProviderId,
+      apiProtocol: draft.apiProtocol,
+      authMode: draft.authMode,
+      baseUrl: draft.baseUrl,
+      modelRef: draft.modelId
+    },
+    configured: {
+      apiProtocol: draft.apiProtocol,
+      contextWindow: draft.contextWindow,
+      maxOutputTokens: draft.modelMaxTokens,
+      reasoning: draft.reasoning,
+      imageInput: draft.imageInput
+    }
+  });
 }
 
 function normalizeDraft(

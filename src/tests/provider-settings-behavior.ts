@@ -73,11 +73,20 @@ import {
   PiProviderConfigurationService,
   providerModelFetchForUrl,
   requestProviderModels,
+  testProviderConnection,
   type PiProviderConfigurationDraft,
   type PiProviderConnectionTestResult,
   type PiProviderFetch,
   type PiProviderModelListResult
 } from "../plugin/pi-provider-configuration-service";
+import {
+  createConfiguredPiProviderProtocolDispatcher,
+  resolveConfiguredPiProviderTransportKind
+} from "../plugin/configured-pi-provider-dispatcher";
+import {
+  createQwenTokenPlanOpenAICompletionsAdapter,
+  type QwenTokenPlanProviderRequest
+} from "../plugin/qwen-token-plan-provider-adapter";
 import {
   createOpenAICodexSseAdapter,
   PiProviderProtocolDispatcher,
@@ -220,6 +229,7 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   await assertProviderTextGenerationCompletionContract();
   assertPresetRequestMappings();
   assertQwenProviderContract();
+  await assertQwenTokenPlanTransportContract();
   await assertProviderModelDiscoveryRequestContract();
   assertCustomProtocolContract();
   assertOpenAICodexSseAdapterContract();
@@ -5664,6 +5674,412 @@ function assertQwenProviderContract(): void {
   assert.equal(currentComposerProviderBrand({
     plugin: { settings }
   } as never), "qwen");
+}
+
+async function assertQwenTokenPlanTransportContract(): Promise<void> {
+  const transportInput = {
+    providerId: "qwen-token-plan" as const,
+    runtimeProviderId: "qwen-token-plan-cn",
+    apiProtocol: "openai-completions" as const,
+    baseUrl:
+      "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+  };
+  assert.equal(
+    resolveConfiguredPiProviderTransportKind(transportInput),
+    "qwen-token-plan"
+  );
+  assert.equal(resolveConfiguredPiProviderTransportKind({
+    ...transportInput,
+    providerId: "qwen",
+    runtimeProviderId: "qwen",
+    baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  }), "default");
+  assert.equal(resolveConfiguredPiProviderTransportKind({
+    ...transportInput,
+    providerId: "ollama",
+    runtimeProviderId: "ollama",
+    baseUrl: "http://127.0.0.1:11434/v1"
+  }), "loopback");
+
+  const completionSse = (content: string): string => [
+    `data: ${JSON.stringify({
+      id: "fixture-qwen-response",
+      model: "qwen3.7-plus",
+      choices: [{
+        delta: { content },
+        finish_reason: "stop"
+      }]
+    })}`,
+    "data: [DONE]",
+    ""
+  ].join("\n\n");
+  const captured: QwenTokenPlanProviderRequest[] = [];
+  const qwenAdapter = createQwenTokenPlanOpenAICompletionsAdapter(
+    async (request) => {
+      captured.push(request);
+      return {
+        status: 200,
+        headers: { "content-type": "text/event-stream; charset=utf-8" },
+        body: completionSse("OK")
+      };
+    }
+  );
+  const selected = createConfiguredPiProviderProtocolDispatcher(
+    transportInput,
+    { qwenTokenPlan: qwenAdapter }
+  );
+  assert.equal(
+    selected.adapters["openai-completions"],
+    qwenAdapter,
+    "settings preflight, text generation and runtime must share the Token Plan adapter selector"
+  );
+
+  const fixtureKey = "fixture-qwen-token-plan-key";
+  const draft: PiProviderConfigurationDraft = {
+    providerSettingsId: "fixture-qwen-token-plan",
+    providerId: "qwen-token-plan",
+    runtimeProviderId: "qwen-token-plan-cn",
+    apiProtocol: "openai-completions",
+    authMode: "api-key",
+    baseUrl: transportInput.baseUrl,
+    modelId: "qwen3.7-plus",
+    apiKey: fixtureKey,
+    toolCalling: true,
+    imageInput: true,
+    reasoning: true,
+    contextWindow: 1_000_000,
+    modelMaxTokens: 65_536,
+    maxOutputTokens: 8_192
+  };
+  const host = { settings: structuredClone(DEFAULT_SETTINGS) };
+  const service = new PiProviderConfigurationService(host, {
+    adapters: { "openai-completions": qwenAdapter }
+  });
+  assert.deepEqual(await service.testConnection(draft), {
+    status: "available"
+  });
+  assert.equal(await service.generateText({
+    draft,
+    systemPrompt: "Translate.",
+    userPrompt: "只回复 OK",
+    timeoutMs: 1_000,
+    maxTokens: 64
+  }), "OK");
+  assert.equal(captured.length, 2);
+  for (const request of captured) {
+    assert.equal(
+      request.url,
+      `${transportInput.baseUrl}/chat/completions`
+    );
+    assert.equal(request.headers.authorization, `Bearer ${fixtureKey}`);
+    const payload = JSON.parse(request.body) as Record<string, unknown>;
+    assert.equal(payload.model, "qwen3.7-plus");
+    assert.equal(payload.stream, true);
+  }
+
+  let featureRequest: QwenTokenPlanProviderRequest | null = null;
+  const featureAdapter = createQwenTokenPlanOpenAICompletionsAdapter(
+    async (request) => {
+      featureRequest = request;
+      return {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        body: [
+          `data: ${JSON.stringify({
+            id: "fixture-qwen-feature-response",
+            model: "qwen3.7-plus",
+            choices: [{
+              delta: { reasoning_content: "先检查图片。" },
+              finish_reason: null
+            }]
+          })}`,
+          `data: ${JSON.stringify({
+            id: "fixture-qwen-feature-response",
+            model: "qwen3.7-plus",
+            choices: [{
+              delta: {
+                tool_calls: [{
+                  index: 0,
+                  id: "fixture-tool-call",
+                  function: {
+                    name: "note_read",
+                    arguments: "{\"path\":\"Inbox/test.md\"}"
+                  }
+                }]
+              },
+              finish_reason: "tool_calls"
+            }]
+          })}`,
+          "data: [DONE]",
+          ""
+        ].join("\n\n")
+      };
+    }
+  );
+  const featureDispatcher = new PiProviderProtocolDispatcher({
+    "openai-completions": featureAdapter
+  });
+  const qwenCatalogModel = resolveEchoInkPiCatalogModel(
+    "qwen-token-plan-cn",
+    "qwen3.7-plus"
+  );
+  assert.ok(qwenCatalogModel);
+  const featureMessage = await featureDispatcher.stream({
+    model: {
+      ...structuredClone(qwenCatalogModel),
+      baseUrl: transportInput.baseUrl
+    },
+    context: {
+      systemPrompt: "Inspect the supplied note image.",
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: "看看这张图" },
+          { type: "image", mimeType: "image/png", data: "AA==" }
+        ],
+        timestamp: Date.now()
+      }],
+      tools: [{
+        name: "note_read",
+        description: "Read a note",
+        parameters: {
+          type: "object",
+          properties: { path: { type: "string" } },
+          required: ["path"]
+        }
+      }]
+    },
+    apiKey: fixtureKey,
+    options: {
+      reasoning: "high",
+      maxTokens: 256,
+      temperature: 0,
+      cacheRetention: "none",
+      maxRetries: 0,
+      timeoutMs: 1_000
+    }
+  }).result();
+  assert.ok(featureRequest);
+  const featurePayload = JSON.parse(
+    featureRequest.body
+  ) as Record<string, any>;
+  assert.equal(featurePayload.enable_thinking, true);
+  assert.equal(Object.hasOwn(featurePayload, "reasoning_effort"), false);
+  assert.equal(featurePayload.max_tokens, 256);
+  assert.equal(featurePayload.tools[0].function.name, "note_read");
+  assert.deepEqual(featurePayload.messages[1].content, [
+    { type: "text", text: "看看这张图" },
+    {
+      type: "image_url",
+      image_url: { url: "data:image/png;base64,AA==" }
+    }
+  ]);
+  assert.deepEqual(
+    featureMessage.content.map((entry) => entry.type),
+    ["thinking", "toolCall"]
+  );
+  assert.deepEqual(featureMessage.content[1], {
+    type: "toolCall",
+    id: "fixture-tool-call",
+    name: "note_read",
+    arguments: { path: "Inbox/test.md" }
+  });
+
+  const reasoningPayloads: Record<string, any>[] = [];
+  const reasoningDispatcher = new PiProviderProtocolDispatcher({
+    "openai-completions": createQwenTokenPlanOpenAICompletionsAdapter(
+      async (request) => {
+        reasoningPayloads.push(JSON.parse(request.body));
+        return {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+          body: completionSse("OK")
+        };
+      }
+    )
+  });
+  const captureReasoningPayload = async (
+    modelId: string,
+    reasoning?: ModelThinkingLevel
+  ): Promise<Record<string, any>> => {
+    const model = resolveEchoInkPiCatalogModel(
+      "qwen-token-plan-cn",
+      modelId
+    );
+    assert.ok(model);
+    await reasoningDispatcher.stream({
+      model: { ...structuredClone(model), baseUrl: transportInput.baseUrl },
+      context: {
+        messages: [{
+          role: "user",
+          content: "只回复 OK",
+          timestamp: Date.now()
+        }],
+        tools: []
+      },
+      apiKey: fixtureKey,
+      options: {
+        ...(reasoning && reasoning !== "off" ? { reasoning } : {}),
+        maxTokens: 64,
+        temperature: 0,
+        cacheRetention: "none",
+        maxRetries: 0,
+        timeoutMs: 1_000
+      }
+    }).result();
+    return reasoningPayloads.at(-1) ?? {};
+  };
+  const qwenOff = await captureReasoningPayload("qwen3.7-plus", "off");
+  assert.equal(qwenOff.enable_thinking, false);
+  assert.equal(Object.hasOwn(qwenOff, "reasoning_effort"), false);
+  const deepSeekHigh = await captureReasoningPayload(
+    "deepseek-v4-pro",
+    "high"
+  );
+  assert.deepEqual(deepSeekHigh.thinking, { type: "enabled" });
+  assert.equal(deepSeekHigh.reasoning_effort, "high");
+  assert.equal(Object.hasOwn(deepSeekHigh, "enable_thinking"), false);
+  const deepSeekMax = await captureReasoningPayload(
+    "deepseek-v4-pro",
+    "max"
+  );
+  assert.deepEqual(deepSeekMax.thinking, { type: "enabled" });
+  assert.equal(deepSeekMax.reasoning_effort, "max");
+  const deepSeekOff = await captureReasoningPayload(
+    "deepseek-v4-pro",
+    "off"
+  );
+  assert.deepEqual(deepSeekOff.thinking, { type: "disabled" });
+  assert.equal(Object.hasOwn(deepSeekOff, "reasoning_effort"), false);
+
+  const failureCases: Array<{
+    status: number;
+    failure: Extract<
+      PiProviderConnectionTestResult,
+      { status: "failed" }
+    >["failure"];
+  }> = [
+    { status: 401, failure: "auth" },
+    { status: 400, failure: "protocol" },
+    { status: 429, failure: "rate_limit" },
+    { status: 503, failure: "provider" }
+  ];
+  for (const entry of failureCases) {
+    const adapter = createQwenTokenPlanOpenAICompletionsAdapter(async () => ({
+      status: entry.status,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ error: { message: "fixture failure" } })
+    }));
+    const result = await testProviderConnection({
+      draft,
+      apiKey: fixtureKey,
+      dispatcher: new PiProviderProtocolDispatcher({
+        "openai-completions": adapter
+      })
+    });
+    assert.deepEqual(result, { status: "failed", failure: entry.failure });
+    assert.equal(JSON.stringify(result).includes(fixtureKey), false);
+  }
+  const overflowTransport = new PiProviderProtocolTransport({
+    authorityId: "fixture-qwen-overflow-authority",
+    storeSetId: "fixture-qwen-overflow-store",
+    resolveAuthToken: async () => fixtureKey,
+    dispatcher: new PiProviderProtocolDispatcher({
+      "openai-completions": createQwenTokenPlanOpenAICompletionsAdapter(
+        async () => ({
+          status: 400,
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            error: {
+              message: "Maximum context length exceeded; reduce input tokens."
+            }
+          })
+        })
+      )
+    })
+  });
+  const overflowStream = await overflowTransport.stream({
+    runId: "fixture-qwen-overflow-run",
+    conversationId: "fixture-qwen-overflow-conversation",
+    turnId: "fixture-qwen-overflow-turn",
+    correlationId: "fixture-qwen-overflow-correlation",
+    provider: {
+      providerId: "qwen-token-plan-cn",
+      apiProtocol: "openai-completions",
+      authMode: "api-key",
+      baseUrl: transportInput.baseUrl,
+      modelRef: "qwen3.7-plus"
+    },
+    model: {
+      ...structuredClone(qwenCatalogModel),
+      baseUrl: transportInput.baseUrl
+    },
+    context: {
+      messages: [{
+        role: "user",
+        content: "fixture oversized context",
+        timestamp: Date.now()
+      }],
+      tools: []
+    },
+    options: {
+      maxTokens: 64,
+      temperature: 0,
+      cacheRetention: "none",
+      maxRetries: 0,
+      timeoutMs: 1_000
+    }
+  });
+  const overflow = await overflowStream.result();
+  assert.equal(overflow.stopReason, "error");
+  assert.equal(overflow.errorMessage, "context_length_exceeded");
+  assert.equal(JSON.stringify(overflow).includes(fixtureKey), false);
+
+  const network = await testProviderConnection({
+    draft,
+    apiKey: fixtureKey,
+    dispatcher: new PiProviderProtocolDispatcher({
+      "openai-completions": createQwenTokenPlanOpenAICompletionsAdapter(
+        async () => {
+          throw new Error("Connection error.");
+        }
+      )
+    })
+  });
+  assert.deepEqual(network, { status: "failed", failure: "network" });
+  assert.equal(JSON.stringify(network).includes(fixtureKey), false);
+
+  const malformed = await testProviderConnection({
+    draft,
+    apiKey: fixtureKey,
+    dispatcher: new PiProviderProtocolDispatcher({
+      "openai-completions": createQwenTokenPlanOpenAICompletionsAdapter(
+        async () => ({
+          status: 200,
+          headers: { "content-type": "application/json" },
+          body: "{}"
+        })
+      )
+    })
+  });
+  assert.deepEqual(malformed, { status: "failed", failure: "protocol" });
+
+  const timedOut = await testProviderConnection({
+    draft,
+    apiKey: fixtureKey,
+    dispatcher: new PiProviderProtocolDispatcher({
+      "openai-completions": createQwenTokenPlanOpenAICompletionsAdapter(
+        async (request) => await new Promise((_resolve, reject) => {
+          request.signal?.addEventListener("abort", () => {
+            reject(new Error("qwen_token_plan_aborted"));
+          }, { once: true });
+        })
+      )
+    }),
+    timeoutMs: 5
+  });
+  assert.deepEqual(timedOut, { status: "failed", failure: "network" });
+  assert.equal(JSON.stringify([malformed, timedOut]).includes(fixtureKey), false);
 }
 
 async function assertProviderModelDiscoveryRequestContract(): Promise<void> {

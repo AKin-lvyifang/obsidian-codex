@@ -135,8 +135,7 @@ import {
   type VerifiedPiRuntimeBinding
 } from "../harness/pi/pi-store-layout";
 import {
-  PiProviderProtocolTransport,
-  PiProviderProtocolDispatcher
+  PiProviderProtocolTransport
 } from "../harness/pi/pi-provider-protocol-adapter";
 import type {
   PiProviderRuntimeConfig,
@@ -163,8 +162,8 @@ import {
 } from "../settings/provider-presets";
 import { PiLocalDataService } from "./pi-local-data-service";
 import {
-  createLoopbackOpenAICompletionsAdapter
-} from "./loopback-openai-provider-adapter";
+  createConfiguredPiProviderProtocolDispatcher
+} from "./configured-pi-provider-dispatcher";
 import {
   ObsidianVaultDomainAdapter,
   createPhase3MaintenanceVaultDomainAdapter
@@ -1309,14 +1308,16 @@ async function createProductionAgentSession(input: {
     storeSetId: binding.pluginData.rootBindingDigest,
     resolveAuthToken: async () =>
       await preparedProvider.resolveAuthToken(),
-    ...(isLoopbackApiProviderUrl(configured.baseUrl)
-      ? {
-        dispatcher: new PiProviderProtocolDispatcher({
-          "openai-completions":
-            createLoopbackOpenAICompletionsAdapter()
-        })
-      }
-      : {})
+    dispatcher: createConfiguredPiProviderProtocolDispatcher({
+      providerId: normalizeApiProviderId(
+        configured.provider.providerId,
+        configured.baseUrl,
+        configured.provider.name
+      ),
+      runtimeProviderId: configured.providerId,
+      apiProtocol: configured.apiProtocol,
+      baseUrl: configured.baseUrl
+    })
   });
   const modelRuntime = await ModelRuntime.create({
     credentials: new InMemoryCredentialStore(),

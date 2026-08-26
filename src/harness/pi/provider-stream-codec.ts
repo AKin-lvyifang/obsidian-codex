@@ -4,6 +4,7 @@ import type {
   AssistantMessage,
   AssistantMessageEventStream,
   Context,
+  ImageContent,
   Message,
   Model,
   TextContent,
@@ -47,6 +48,39 @@ export function buildDeepSeekBody(
   return deepFreeze(body);
 }
 
+/**
+ * Qwen Token Plan uses the OpenAI Chat surface but cannot be reached through
+ * the renderer's browser fetch because its endpoint rejects CORS preflight.
+ * Keep this payload aligned with Pi's Qwen compatibility contract while the
+ * transport is provided by the Obsidian desktop runtime.
+ */
+export function buildQwenTokenPlanBody(
+  input: ControlledPiStreamInput
+): Readonly<Record<string, unknown>> {
+  const body: Record<string, unknown> = {
+    model: input.provider.modelRef,
+    messages: contextMessages(input.context),
+    stream: true,
+    stream_options: { include_usage: true },
+    temperature: input.options.temperature
+  };
+  if (input.options.maxTokens !== undefined) {
+    body.max_tokens = input.options.maxTokens;
+  }
+  if (input.context.tools?.length) {
+    body.tools = input.context.tools.map((tool) => ({
+      type: "function",
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: structuredClone(tool.parameters)
+      }
+    }));
+  }
+  applyProviderReasoningOptions(body, input);
+  return deepFreeze(body);
+}
+
 function applyProviderReasoningOptions(
   body: Record<string, unknown>,
   input: ControlledPiStreamInput
@@ -57,13 +91,20 @@ function applyProviderReasoningOptions(
   ) return;
   const model = input.model as Model<"openai-completions">;
   const level = input.options.reasoning;
-  const mapped = level ? model.thinkingLevelMap?.[level] : undefined;
-  const effort = mapped === null ? undefined : mapped ?? level;
+  const wireLevel: string | undefined = level;
+  const enabled = Boolean(wireLevel && wireLevel !== "off");
+  const mapped = enabled && level
+    ? model.thinkingLevelMap?.[level]
+    : undefined;
+  const effort = mapped === null
+    ? undefined
+    : mapped ?? (enabled ? level : undefined);
   const format = model.compat?.thinkingFormat;
   if (format === "deepseek") {
     body.thinking = { type: effort ? "enabled" : "disabled" };
   } else if (format === "qwen") {
     body.enable_thinking = Boolean(effort);
+    return;
   }
   if (
     effort
@@ -82,21 +123,47 @@ function contextMessages(context: Context): unknown[] {
     result.push({ role: "system", content: context.systemPrompt });
   }
   for (const message of context.messages) {
-    result.push(toDeepSeekMessage(message));
+    result.push(...toOpenAICompatibleMessages(message));
   }
   return result;
 }
 
-function toDeepSeekMessage(message: Message): unknown {
+function toOpenAICompatibleMessages(message: Message): unknown[] {
   if (message.role === "user") {
-    return { role: "user", content: textOnlyContent(message.content) };
+    return [{
+      role: "user",
+      content: openAICompatibleContent(message.content)
+    }];
   }
   if (message.role === "toolResult") {
-    return {
+    const content = openAICompatibleContent(message.content);
+    if (typeof content === "string") {
+      return [{
+        role: "tool",
+        tool_call_id: message.toolCallId,
+        content
+      }];
+    }
+    const text = content
+      .filter((entry): entry is { type: "text"; text: string } =>
+        entry.type === "text"
+      )
+      .map((entry) => entry.text)
+      .join("\n");
+    const images = content.filter((entry) => entry.type === "image_url");
+    return [{
       role: "tool",
       tool_call_id: message.toolCallId,
-      content: textOnlyContent(message.content)
-    };
+      content: text || (images.length ? "(see attached image)" : "")
+    }, ...(images.length
+      ? [{
+        role: "user",
+        content: [{
+          type: "text",
+          text: "Attached image(s) from tool result:"
+        }, ...images]
+      }]
+      : [])];
   }
   const text = message.content
     .filter((entry): entry is TextContent => entry.type === "text")
@@ -118,31 +185,52 @@ function toDeepSeekMessage(message: Message): unknown {
         arguments: JSON.stringify(entry.arguments)
       }
     }));
-  return {
+  return [{
     role: "assistant",
     content: text || null,
     ...(reasoning ? { reasoning_content: reasoning } : {}),
     ...(toolCalls.length ? { tool_calls: toolCalls } : {})
-  };
+  }];
 }
 
-function textOnlyContent(content: unknown): string {
+type OpenAICompatibleContent = string | Array<
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } }
+>;
+
+function openAICompatibleContent(content: unknown): OpenAICompatibleContent {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) {
-    throw new Error("deepseek_non_text_content_unsupported");
+    throw new Error("provider_message_content_invalid");
   }
-  const parts: string[] = [];
+  const parts: Exclude<OpenAICompatibleContent, string> = [];
   for (const entry of content as unknown[]) {
-    if (
-      !isPlainRecord(entry)
-      || entry.type !== "text"
-      || typeof entry.text !== "string"
-    ) {
-      throw new Error("deepseek_non_text_content_unsupported");
+    if (!isPlainRecord(entry)) {
+      throw new Error("provider_message_content_invalid");
     }
-    parts.push(entry.text);
+    if (entry.type === "text" && typeof entry.text === "string") {
+      parts.push({ type: "text", text: entry.text });
+      continue;
+    }
+    if (entry.type === "image") {
+      const image = entry as unknown as ImageContent;
+      if (
+        typeof image.data !== "string"
+        || !/^image\/[A-Za-z0-9.+-]+$/u.test(image.mimeType)
+      ) {
+        throw new Error("provider_image_content_invalid");
+      }
+      parts.push({
+        type: "image_url",
+        image_url: {
+          url: `data:${image.mimeType};base64,${image.data}`
+        }
+      });
+      continue;
+    }
+    throw new Error("provider_message_content_invalid");
   }
-  return parts.join("");
+  return parts;
 }
 
 export function parseDeepSeekSseResponse(
