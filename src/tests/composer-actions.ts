@@ -17,7 +17,10 @@ import {
   createAttachmentResourceResolver
 } from "../ui/codex-view/attachment-resource";
 import { buildNoteMentionCatalog } from "../ui/codex-view/note-mentions";
-import { currentDisplayedMarkdownFile } from "../ui/codex-view/attachments";
+import {
+  currentDisplayedMarkdownFile,
+  openComposerAttachment
+} from "../ui/codex-view/attachments";
 import {
   composerModelMenuState,
   composerProviderModelOptions,
@@ -103,8 +106,12 @@ export async function runComposerActionTests(): Promise<void> {
     const attachmentContainer = new ComposerTestElement("div");
     const removedAttachments: string[] = [];
     const removedNoteMentions: string[] = [];
+    const openedAttachments: string[] = [];
     const vaultFile = Object.assign(Object.create(TFile.prototype), {
       path: "cover #1.png"
+    }) as TFile;
+    const meetingFile = Object.assign(Object.create(TFile.prototype), {
+      path: "meeting.mp4"
     }) as TFile;
     const currentNote = Object.assign(Object.create(TFile.prototype), {
       path: "projects/当前笔记.md",
@@ -137,13 +144,37 @@ export async function runComposerActionTests(): Promise<void> {
       "a previously active Markdown note cannot be added after it stops displaying");
     const attachmentResolver = createAttachmentResourceResolver({
       vault: {
-        getAbstractFileByPath: (path: string) => path === vaultFile.path ? vaultFile : null,
+        getAbstractFileByPath: (path: string) => path === vaultFile.path
+          ? vaultFile
+          : path === meetingFile.path ? meetingFile : null,
         getResourcePath: (file: TFile) => `app://echoink-vault/${encodeURIComponent(file.path)}`
       }
     } as unknown as App, "/tmp/Echo Ink");
     const platform = Platform as { isDesktopApp: boolean };
     const originalDesktopApp = platform.isDesktopApp;
+    const originalWindow = (globalThis as unknown as { window?: unknown }).window;
+    const electronOpenedPaths: string[] = [];
+    const electronShownPaths: string[] = [];
     platform.isDesktopApp = true;
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        require: (moduleName: string) => {
+          assert.equal(moduleName, "electron");
+          return {
+            shell: {
+              openPath: (path: string) => {
+                electronOpenedPaths.push(path);
+                return "";
+              },
+              showItemInFolder: (path: string) => {
+                electronShownPaths.push(path);
+              }
+            }
+          };
+        }
+      }
+    });
     try {
       const unindexedLocalImage = createAttachmentResourceResolver({
         vault: {
@@ -165,8 +196,30 @@ export async function runComposerActionTests(): Promise<void> {
         "app://echoink-hidden/src/tests/composer-actions.ts",
         "hidden Vault resources use the adapter URI that Obsidian's renderer can load"
       );
+      await openComposerAttachment({
+        plugin: { getVaultPath: () => "/tmp/Echo Ink" }
+      } as never, {
+        type: "file",
+        name: "meeting.mp4",
+        path: "/tmp/Echo Ink/meeting.mp4",
+        mimeType: "video/mp4"
+      });
+      assert.deepEqual(electronOpenedPaths, ["/tmp/Echo Ink/meeting.mp4"]);
+      assert.deepEqual(
+        electronShownPaths,
+        [],
+        "Composer FileCard opens with the system default app instead of revealing in Finder"
+      );
     } finally {
       platform.isDesktopApp = originalDesktopApp;
+      if (originalWindow === undefined) {
+        delete (globalThis as unknown as { window?: unknown }).window;
+      } else {
+        Object.defineProperty(globalThis, "window", {
+          configurable: true,
+          value: originalWindow
+        });
+      }
     }
     for (const [attachment, kind, icon] of [
       [{ type: "file", name: "clip.mp4", path: "/tmp/clip.mp4", mimeType: "video/mp4" }, "video", "film"],
@@ -189,7 +242,7 @@ export async function runComposerActionTests(): Promise<void> {
         noteMentions: [{ vaultRelativePath: "projects/项目复盘.md", fileName: "项目复盘.md" }],
         attachments: [
           { type: "image", name: "cover #1.png", path: "/tmp/Echo Ink/cover #1.png" },
-          { type: "file", name: "meeting.mp4", path: "/tmp/Echo Ink/meeting.mp4", mimeType: "video/mp4" },
+          { type: "file", name: "meeting.mp4", path: meetingFile.path, mimeType: "video/mp4" },
           { type: "image", name: "clipboard-1720000000000-1.png", path: "/tmp/Echo Ink/missing.png" }
         ],
         attachmentResolver
@@ -197,7 +250,8 @@ export async function runComposerActionTests(): Promise<void> {
       {
         onRemoveSkill: () => undefined,
         onRemoveNoteMention: (path) => removedNoteMentions.push(path),
-        onRemoveAttachment: (path) => removedAttachments.push(path)
+        onRemoveAttachment: (path) => removedAttachments.push(path),
+        onOpenAttachment: (attachment) => openedAttachments.push(attachment.path)
       }
     );
     const noteChip = attachmentContainer.querySelector(".codex-note-mention-chip")!;
@@ -220,15 +274,25 @@ export async function runComposerActionTests(): Promise<void> {
     assert.equal(imageRemove.getAttribute("aria-label"), "移除图片：cover #1.png");
     imageRemove.click();
 
-    const fileTile = attachmentContainer.querySelector(".codex-attachment-file-tile")!;
-    assert.equal(fileTile.getAttribute("title"), "meeting.mp4");
-    assert.equal(fileTile.getAttribute("aria-label"), "文件：meeting.mp4");
-    assert.equal(fileTile.getAttribute("data-attachment-kind"), "video");
-    assert.equal(fileTile.querySelector(".codex-attachment-name"), null);
-    assert.ok(fileTile.querySelector(".codex-attachment-file-icon"));
-    const fileRemove = fileTile.querySelector(".codex-attachment-file-remove")!;
+    const fileCard = attachmentContainer.querySelector(".codex-file-card-compact")!;
+    assert.equal(fileCard.getAttribute("title"), "meeting.mp4");
+    assert.equal(fileCard.getAttribute("data-attachment-kind"), "video");
+    assert.ok(fileCard.querySelector(".codex-file-card-icon"));
+    assert.equal(fileCard.querySelector(".codex-file-card-name")?.textContent, "meeting.mp4");
+    assert.equal(fileCard.querySelector(".codex-file-card-meta")?.textContent, "大小未知");
+    const fileOpen = fileCard.querySelector(".codex-file-card-open")!;
+    assert.equal(fileOpen.getAttribute("aria-label"), "打开附件：meeting.mp4");
+    fileOpen.onclick?.({
+      preventDefault: () => undefined,
+      stopPropagation: () => undefined
+    } as never);
+    assert.deepEqual(openedAttachments, [meetingFile.path]);
+    const fileRemove = fileCard.querySelector(".codex-file-card-remove")!;
     assert.equal(fileRemove.getAttribute("aria-label"), "移除文件：meeting.mp4");
-    fileRemove.click();
+    fileRemove.onclick?.({
+      preventDefault: () => undefined,
+      stopPropagation: () => undefined
+    } as never);
     const attachmentList = attachmentContainer.querySelector(".codex-ai-elements-attachments-list")!;
     assert.equal(attachmentList.getAttribute("data-ai-elements-pattern"), "attachments");
     assert.equal(attachmentList.getAttribute("data-attachment-variant"), "grid");
@@ -244,7 +308,7 @@ export async function runComposerActionTests(): Promise<void> {
     assert.doesNotMatch(renderedComposerText(attachmentContainer), /clipboard-/u);
     assert.deepEqual(removedAttachments, [
       "/tmp/Echo Ink/cover #1.png",
-      "/tmp/Echo Ink/meeting.mp4"
+      meetingFile.path
     ]);
 
     const noteMenu = new ComposerTestElement("div") as ComposerTestElement & { id: string };
@@ -331,10 +395,11 @@ export async function runComposerActionTests(): Promise<void> {
     assert.match(css, /@keyframes echoink-animate-mic/u);
     assert.match(css, /prefers-reduced-motion:\s*no-preference/u);
     assert.match(css, /\.codex-attachment-thumbnail \{[\s\S]*?width:\s*72px;[\s\S]*?height:\s*72px;[\s\S]*?flex:\s*0\s+0\s+72px;/u);
-    assert.match(css, /\.codex-attachment-file-tile \{[\s\S]*?width:\s*72px;[\s\S]*?height:\s*72px;[\s\S]*?flex:\s*0\s+0\s+72px;/u);
+    assert.match(css, /\.codex-file-card-compact \{[\s\S]*?width:\s*min\(220px,[\s\S]*?height:\s*56px;[\s\S]*?flex:\s*0\s+0\s+min\(220px,/u);
+    assert.match(css, /\.codex-file-card-message \{[\s\S]*?width:\s*min\(288px,[\s\S]*?min-height:\s*68px;[\s\S]*?flex:\s*0\s+0\s+min\(288px,/u);
     assert.match(css, /\.codex-attachment-thumbnail-image \{[\s\S]*?object-fit:\s*contain;/u);
     assert.match(css, /\.codex-attachment-thumbnail-remove \{[\s\S]*?top:\s*-4px;[\s\S]*?right:\s*-4px;[\s\S]*?width:\s*20px;[\s\S]*?height:\s*20px;/u);
-    assert.match(css, /\.codex-attachment-file-remove \{[\s\S]*?top:\s*-4px;[\s\S]*?right:\s*-4px;[\s\S]*?width:\s*20px;[\s\S]*?height:\s*20px;/u);
+    assert.match(css, /\.codex-file-card-remove \{[\s\S]*?top:\s*4px;[\s\S]*?right:\s*4px;[\s\S]*?width:\s*24px;[\s\S]*?height:\s*24px;/u);
     assert.match(css, /\.codex-ai-elements-attachments-list \{[\s\S]*?flex-wrap:\s*nowrap;[\s\S]*?overflow-x:\s*auto;/u);
     assert.match(css, /\.codex-message-attachments \{[\s\S]*?flex-wrap:\s*nowrap;[\s\S]*?justify-content:\s*safe\s+flex-end;[\s\S]*?overflow-x:\s*auto;/u);
     assert.match(css, /\.codex-message-attachment-tile \{[\s\S]*?width:\s*72px;[\s\S]*?height:\s*72px;[\s\S]*?flex:\s*0\s+0\s+72px;/u);

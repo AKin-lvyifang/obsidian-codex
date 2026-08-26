@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { TFile } from "obsidian";
+import { Platform, TFile } from "obsidian";
 import type { ChatMessage, SettingsLanguage, StoredSession } from "../settings/settings";
 import { settingsCopy } from "../settings/i18n";
 import { extractProcessFileRefs, stableHashedIdentity } from "../core/mapping";
@@ -332,7 +332,8 @@ function createTestContext(): TestContext {
   const files = new Map([
     ["projects/Alpha.md", new TFile("projects/Alpha.md")],
     ["outputs/Result.md", new TFile("outputs/Result.md")],
-    ["images/cover #1.png", new TFile("images/cover #1.png")]
+    ["images/cover #1.png", new TFile("images/cover #1.png")],
+    ["videos/meeting.mp4", new TFile("videos/meeting.mp4")]
   ]);
   const openedPaths: string[] = [];
   const app = {
@@ -1393,7 +1394,12 @@ export async function runSmoothConversationUiTests(): Promise<void> {
   const previousDocument = (globalThis as unknown as { document?: unknown }).document;
   const previousHTMLElement = (globalThis as unknown as { HTMLElement?: unknown }).HTMLElement;
   const previousWindow = (globalThis as unknown as { window?: unknown }).window;
+  const platform = Platform as { isDesktopApp: boolean };
+  const previousDesktopApp = platform.isDesktopApp;
+  platform.isDesktopApp = true;
   const imageOverlayBody = new FakeElement("body");
+  const electronOpenedPaths: string[] = [];
+  const electronShownPaths: string[] = [];
   Object.defineProperty(globalThis, "document", {
     configurable: true,
     value: {
@@ -1417,7 +1423,21 @@ export async function runSmoothConversationUiTests(): Promise<void> {
         callback(0);
         return 1;
       },
-      cancelAnimationFrame: () => undefined
+      cancelAnimationFrame: () => undefined,
+      require: (moduleName: string) => {
+        assert.equal(moduleName, "electron");
+        return {
+          shell: {
+            openPath: (path: string) => {
+              electronOpenedPaths.push(path);
+              return "";
+            },
+            showItemInFolder: (path: string) => {
+              electronShownPaths.push(path);
+            }
+          }
+        };
+      }
     }
   });
   try {
@@ -1499,11 +1519,21 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     clickElement(imagePreview);
     const imageOverlay = imageOverlayBody.findByClass("codex-image-overlay")!;
     assert.equal(imageOverlay.findAllByTag("img")[0]?.src, "app://echoink-vault/images/cover%20%231.png");
-    const videoTile = imageAttachments.findByClass("codex-message-attachment-file-tile")!;
-    assert.equal(videoTile.attributes.get("title"), "meeting.mp4");
-    assert.equal(videoTile.attributes.get("aria-label"), "打开附件：meeting.mp4");
-    assert.equal(videoTile.attributes.get("data-attachment-kind"), "video");
-    assert.ok(videoTile.findByClass("codex-message-attachment-icon"));
+    const videoCard = imageAttachments.findByClass("codex-file-card-message")!;
+    assert.equal(videoCard.attributes.get("title"), "meeting.mp4");
+    assert.equal(videoCard.attributes.get("data-attachment-kind"), "video");
+    assert.ok(videoCard.findByClass("codex-file-card-icon"));
+    assert.equal(videoCard.findByClass("codex-file-card-name")?.textContent, "meeting.mp4");
+    assert.equal(videoCard.findByClass("codex-file-card-meta")?.textContent, "大小未知");
+    const videoOpen = videoCard.findByClass("codex-file-card-open")!;
+    assert.equal(videoOpen.attributes.get("aria-label"), "打开附件：meeting.mp4");
+    clickElement(videoOpen);
+    assert.deepEqual(electronOpenedPaths, ["/test-vault/videos/meeting.mp4"]);
+    assert.deepEqual(
+      electronShownPaths,
+      [],
+      "sent FileCard opens with the system default app instead of revealing in Finder"
+    );
     const unavailableImages = imageAttachments.findAllByClass("codex-message-attachment-unavailable");
     assert.equal(unavailableImages.length, 1, "duplicate or missing images render one unavailable state");
     assert.equal(unavailableImages[0]?.attributes.get("role"), "status");
@@ -3523,6 +3553,7 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       "the English Turn does not expose private reasoning"
     );
   } finally {
+    platform.isDesktopApp = previousDesktopApp;
     if (previousDocument === undefined) delete (globalThis as unknown as { document?: unknown }).document;
     else Object.defineProperty(globalThis, "document", { configurable: true, value: previousDocument });
     if (previousHTMLElement === undefined) delete (globalThis as unknown as { HTMLElement?: unknown }).HTMLElement;

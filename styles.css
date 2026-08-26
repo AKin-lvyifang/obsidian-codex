@@ -2439,7 +2439,6 @@ body.theme-light .codex-code-wrapper pre {
 .codex-message-attachments {
   display: flex;
   flex-wrap: nowrap;
-  justify-content: flex-start;
   justify-content: safe flex-end;
   gap: var(--echoink-conversation-space-2);
   max-width: 100%;
@@ -2495,8 +2494,7 @@ body.theme-light .codex-code-wrapper pre {
   object-fit: contain;
 }
 
-.codex-message-attachment-preview:hover,
-.codex-message-attachment-file-tile:hover {
+.codex-message-attachment-preview:hover {
   border-color: color-mix(
     in srgb,
     var(--echoink-conversation-focus) 46%,
@@ -2506,14 +2504,9 @@ body.theme-light .codex-code-wrapper pre {
   background: var(--background-modifier-hover);
 }
 
-.codex-message-attachment-preview:focus-visible,
-.codex-message-attachment-file-tile:focus-visible {
+.codex-message-attachment-preview:focus-visible {
   outline: 2px solid var(--echoink-conversation-focus);
   outline-offset: 2px;
-}
-
-.codex-message-attachment-file-tile {
-  cursor: pointer;
 }
 
 .codex-message-attachment-unavailable {
@@ -2568,65 +2561,195 @@ body.theme-light .codex-code-wrapper pre {
   padding: 7px 3px 3px;
 }
 
-.codex-attachment-file-tile {
+.codex-file-card {
+  position: relative;
+  display: inline-flex;
+  box-sizing: border-box;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--echoink-conversation-radius-lg);
+  background: var(--background-primary);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--text-normal) 8%, transparent);
+}
+
+.codex-file-card-compact {
+  width: min(220px, calc(100vw - 62px));
+  height: 56px;
+  flex: 0 0 min(220px, calc(100vw - 62px));
+}
+
+.codex-file-card-message {
+  width: min(288px, calc(100vw - 74px));
+  min-height: 68px;
+  flex: 0 0 min(288px, calc(100vw - 74px));
+}
+
+.codex-file-card-open {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 100%;
+  padding: 8px 34px 8px 8px;
+  border: 0;
+  border-radius: inherit;
+  color: var(--text-normal);
+  background: transparent;
+  box-shadow: none;
+  font-family: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.codex-file-card-message .codex-file-card-open {
+  padding: 10px 12px;
+}
+
+.codex-file-card-open:hover:not(:disabled) {
+  background: var(--background-modifier-hover);
+}
+
+.codex-file-card-open:focus-visible,
+.codex-file-card-remove:focus-visible {
+  outline: 2px solid var(--echoink-conversation-focus);
+  outline-offset: 2px;
+}
+
+.codex-file-card-open:disabled {
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.codex-file-card-icon-shell {
   position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  box-sizing: border-box;
-  width: 72px;
-  height: 72px;
-  flex: 0 0 72px;
-  padding: 0;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: var(--echoink-conversation-radius-lg);
-  background: var(--codex-soft-bg);
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  border-radius: var(--echoink-conversation-radius-md);
+  color: var(--color-purple);
+  background: color-mix(in srgb, currentColor 12%, var(--background-primary));
 }
 
-.codex-attachment-file-icon,
-.codex-attachment-file-remove {
+.codex-file-card-message .codex-file-card-icon-shell {
+  width: 46px;
+  height: 46px;
+  flex-basis: 46px;
+}
+
+.codex-file-card[data-attachment-kind="pdf"] .codex-file-card-icon-shell {
+  color: var(--color-red);
+}
+
+.codex-file-card[data-attachment-kind="document"] .codex-file-card-icon-shell {
+  color: var(--color-blue);
+}
+
+.codex-file-card[data-attachment-kind="text"] .codex-file-card-icon-shell {
+  color: var(--color-purple);
+}
+
+.codex-file-card[data-attachment-kind="code"] .codex-file-card-icon-shell {
+  color: var(--color-orange);
+}
+
+.codex-file-card-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  flex: 0 0 auto;
 }
 
-.codex-attachment-file-icon {
+.codex-file-card-icon svg {
+  width: 21px;
+  height: 21px;
+}
+
+.codex-file-card-message .codex-file-card-icon svg {
   width: 24px;
   height: 24px;
-  color: var(--text-muted);
 }
 
-.codex-attachment-file-icon svg {
-  width: 24px;
-  height: 24px;
-}
-
-.codex-attachment-file-remove {
+.codex-file-card-type {
   position: absolute;
-  top: -4px;
-  right: -4px;
+  inset-inline-end: 3px;
+  bottom: 2px;
+  max-width: 32px;
+  overflow: hidden;
+  color: currentColor;
+  font-size: 7px;
+  font-weight: 700;
+  line-height: 1;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+.codex-file-card-copy {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.codex-file-card-name,
+.codex-file-card-meta {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-file-card-name {
+  font-size: var(--echoink-conversation-font-label-primary);
+  font-weight: 600;
+  line-height: var(--echoink-conversation-line-label);
+}
+
+.codex-file-card-meta {
+  color: var(--text-muted);
+  font-size: var(--echoink-conversation-font-label-secondary);
+  font-variant-numeric: tabular-nums;
+  font-weight: 400;
+  line-height: var(--echoink-conversation-line-label);
+}
+
+.codex-file-card-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
   z-index: 2;
-  width: 20px;
-  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
   padding: 0;
-  border: 1px solid color-mix(in srgb, var(--background-modifier-border) 74%, transparent);
+  border: 0;
   border-radius: 50%;
   color: var(--text-muted);
-  background: var(--background-primary);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.16);
+  background: transparent;
+  box-shadow: none;
   cursor: pointer;
 }
 
-.codex-attachment-file-remove:hover,
-.codex-attachment-file-remove:focus-visible {
+.codex-file-card-remove:hover,
+.codex-file-card-remove:focus-visible {
   color: var(--text-normal);
   background: var(--background-modifier-hover);
 }
 
-.codex-attachment-file-remove svg {
-  width: 11px;
-  height: 11px;
+.codex-file-card-remove svg {
+  width: 13px;
+  height: 13px;
+}
+
+.codex-file-card.is-unavailable {
+  border-style: dashed;
+  box-shadow: none;
 }
 
 .codex-attachment-thumbnail {
@@ -2727,8 +2850,7 @@ body.theme-light .codex-code-wrapper pre {
   background: var(--background-modifier-hover);
 }
 
-.codex-attachment-thumbnail-remove:focus-visible,
-.codex-attachment-file-remove:focus-visible {
+.codex-attachment-thumbnail-remove:focus-visible {
   outline: 2px solid var(--echoink-conversation-focus);
   outline-offset: 2px;
 }

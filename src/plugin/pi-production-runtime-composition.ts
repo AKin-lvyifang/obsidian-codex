@@ -48,12 +48,18 @@ import {
   type PiNativeKnowledgeTurnContext,
   type PiNativeMemoryTurnContext,
   type PiNativeNoteMentionTurnContext,
+  type PiNativeDocumentTurnContext,
   type PiNativeTaskPlanTurnContext
 } from "../harness/pi-native/pi-native-conversation-runtime";
 import {
   buildPiNoteMentionContextMessage,
   PI_NOTE_MENTIONS_CONTEXT_DETAILS_KEY
 } from "../harness/pi-native/pi-note-mentions";
+import {
+  buildPiDocumentContextMessage,
+  PI_ANTHROPIC_PDF_DOCUMENT_ADAPTER,
+  PI_DOCUMENT_CONTEXT_DETAILS_KEY
+} from "../harness/pi-native/pi-document-context";
 import type {
   PiKnowledgeMaintenanceToolPort,
   PiKnowledgeReference,
@@ -768,6 +774,7 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
   currentTurn(): Readonly<PiNativeKnowledgeTurnContext> | null;
   currentMemoryTurn?(): Readonly<PiNativeMemoryTurnContext> | null;
   currentNoteMentionTurn?(): Readonly<PiNativeNoteMentionTurnContext> | null;
+  currentDocumentTurn?(): Readonly<PiNativeDocumentTurnContext> | null;
   currentTaskPlanTurn?(): Readonly<PiNativeTaskPlanTurnContext> | null;
   personalMemory?: Pick<PersonalMemoryRepository, "loadFixedContext"> & Readonly<{
     prepareTurnContext?(input: Readonly<{
@@ -853,6 +860,10 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
         const noteMentionTurn = input.currentNoteMentionTurn?.() ?? null;
         const noteMentionMessage = noteMentionTurn
           ? buildPiNoteMentionContextMessage(noteMentionTurn.noteMentions)
+          : null;
+        const documentTurn = input.currentDocumentTurn?.() ?? null;
+        const documentMessage = documentTurn
+          ? buildPiDocumentContextMessage(documentTurn.documents)
           : null;
         const memoryTurn = input.currentMemoryTurn?.();
         if (memoryTurn && input.personalMemory) {
@@ -961,22 +972,22 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
           }
         }
         if (turn?.kind === "ask") {
-          const message = mergePiBeforeAgentStartNoteMentionContext({
+          const message = mergePiBeforeAgentStartContextMessages({
             customType: "echoink-knowledge-ask-resource-v1",
             content: turn.providerResourceText,
             display: false,
             details: knowledgeReferenceEntryDetails(
               turn.references.map((reference) => ({ ...reference }))
             )
-          }, noteMentionMessage);
+          }, noteMentionMessage, documentMessage);
           return {
             ...systemPromptResult,
-            message
+            message: message!
           };
         }
         if (turn?.kind === "maintain") {
           const command = turn.command;
-          const message = mergePiBeforeAgentStartNoteMentionContext({
+          const message = mergePiBeforeAgentStartContextMessages({
             customType: "echoink-knowledge-maintenance-command-v1",
             content: [
                 "当前轮是一次性 Knowledge Maintenance。",
@@ -1001,16 +1012,21 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
               preferenceState: command.preference.state,
               preferenceRevision: command.preference.revision
             })
-          }, noteMentionMessage);
+          }, noteMentionMessage, documentMessage);
           return {
             ...systemPromptResult,
-            message
+            message: message!
           };
         }
-        if (noteMentionMessage) {
+        const attachmentContextMessage = mergePiBeforeAgentStartContextMessages(
+          null,
+          noteMentionMessage,
+          documentMessage
+        );
+        if (attachmentContextMessage) {
           return {
             ...systemPromptResult,
-            message: noteMentionMessage
+            message: attachmentContextMessage
           };
         }
         if (!memoryTurn) {
@@ -1059,32 +1075,44 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
   });
 }
 
-function mergePiBeforeAgentStartNoteMentionContext(
+function mergePiBeforeAgentStartContextMessages(
   message: Readonly<{
     customType: string;
     content: string;
     display: false;
     details: unknown;
-  }>,
-  noteMentionMessage: Extract<AgentMessage, { role: "custom" }> | null
+  }> | null,
+  noteMentionMessage: Extract<AgentMessage, { role: "custom" }> | null,
+  documentMessage: Extract<AgentMessage, { role: "custom" }> | null
 ): Readonly<{
   customType: string;
   content: string;
   display: false;
   details: unknown;
-}> {
-  if (!noteMentionMessage) return message;
-  const details = message.details
-    && typeof message.details === "object"
-    && !Array.isArray(message.details)
-    ? message.details as Readonly<Record<string, unknown>>
+}> | null {
+  const primary = message ?? noteMentionMessage ?? documentMessage;
+  if (!primary) return null;
+  const details = primary.details
+    && typeof primary.details === "object"
+    && !Array.isArray(primary.details)
+    ? primary.details as Readonly<Record<string, unknown>>
     : Object.freeze({});
+  const content = [message, noteMentionMessage, documentMessage]
+    .filter((candidate): candidate is NonNullable<typeof candidate> => Boolean(candidate))
+    .map((candidate) => String(candidate.content))
+    .join("\n\n");
   return Object.freeze({
-    ...message,
-    content: [message.content, String(noteMentionMessage.content)].join("\n\n"),
+    customType: primary.customType,
+    content,
+    display: false as const,
     details: Object.freeze({
       ...details,
-      [PI_NOTE_MENTIONS_CONTEXT_DETAILS_KEY]: noteMentionMessage.details
+      ...(noteMentionMessage && noteMentionMessage !== primary
+        ? { [PI_NOTE_MENTIONS_CONTEXT_DETAILS_KEY]: noteMentionMessage.details }
+        : {}),
+      ...(documentMessage && documentMessage !== primary
+        ? { [PI_DOCUMENT_CONTEXT_DETAILS_KEY]: documentMessage.details }
+        : {})
     })
   });
 }
@@ -1342,17 +1370,29 @@ async function createProductionAgentSession(input: {
 }): Promise<PiNativeAgentSessionFactoryResult> {
   const preparedProvider = await preparePiProductionProvider(input);
   const { configured, binding, controlledConfig, provider } = preparedProvider;
+  const productProviderId = normalizeApiProviderId(
+    configured.provider.providerId,
+    configured.baseUrl,
+    configured.provider.name
+  );
   const controlledStream = new PiProviderProtocolTransport({
     authorityId: binding.authorityId,
     storeSetId: binding.pluginData.rootBindingDigest,
     resolveAuthToken: async () =>
       await preparedProvider.resolveAuthToken(),
+    documentInput: {
+      currentDocuments: () =>
+        input.input.currentDocumentTurnContext?.()?.documents ?? [],
+      capabilityTarget: {
+        providerId: productProviderId,
+        apiProtocol: configured.apiProtocol,
+        baseUrl: configured.baseUrl,
+        modelId: configured.modelRef,
+        adapter: PI_ANTHROPIC_PDF_DOCUMENT_ADAPTER
+      }
+    },
     dispatcher: createConfiguredPiProviderProtocolDispatcher({
-      providerId: normalizeApiProviderId(
-        configured.provider.providerId,
-        configured.baseUrl,
-        configured.provider.name
-      ),
+      providerId: productProviderId,
       runtimeProviderId: configured.providerId,
       apiProtocol: configured.apiProtocol,
       baseUrl: configured.baseUrl
@@ -1600,6 +1640,8 @@ async function createProductionAgentSession(input: {
     currentMemoryTurn: () => input.input.currentMemoryTurnContext?.() ?? null,
     currentNoteMentionTurn: () =>
       input.input.currentNoteMentionTurnContext?.() ?? null,
+    currentDocumentTurn: () =>
+      input.input.currentDocumentTurnContext?.() ?? null,
     currentTaskPlanTurn: () => input.input.currentTaskPlanTurnContext(),
     personalMemory: {
       loadFixedContext: (request) => input.personalMemory.loadFixedContext(request),

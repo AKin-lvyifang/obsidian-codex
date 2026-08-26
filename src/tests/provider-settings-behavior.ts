@@ -101,6 +101,10 @@ import {
   createPiNativeModelFromConfiguration
 } from "../harness/pi-native/pi-native-controlled-provider";
 import {
+  PI_ANTHROPIC_PDF_DOCUMENT_ADAPTER,
+  PI_DOCUMENT_FALLBACK_INPUT_BUDGET_EXCEEDED
+} from "../harness/pi-native/pi-document-context";
+import {
   ProviderPreflightSession,
   providerPreflightApiKeyReady
 } from "../settings/provider-preflight";
@@ -233,6 +237,7 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   runEditorTranslationSelectionTests();
   await assertProviderTextGenerationCompletionContract();
   assertPresetRequestMappings();
+  assertAnthropicProviderContract();
   assertQwenProviderContract();
   await assertQwenTokenPlanTransportContract();
   await assertProviderModelDiscoveryRequestContract();
@@ -240,6 +245,7 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   assertOpenAICodexSseAdapterContract();
   await assertProviderRequestLimitDispatchContract();
   await assertProtocolPayloadLimitContract();
+  await assertAnthropicDocumentTransportContract();
   await assertProviderAuthResolutionFailureContract();
   assertProviderTooltipBehavior();
   assertSavedModelLifecycle();
@@ -6232,6 +6238,35 @@ function assertPresetRequestMappings(): void {
   }
 }
 
+function assertAnthropicProviderContract(): void {
+  const anthropic = getApiProviderPreset("anthropic");
+  assert.deepEqual({
+    group: anthropic.group,
+    runtimeProviderId: anthropic.runtimeProviderId,
+    baseUrl: anthropic.baseUrl,
+    apiProtocol: anthropic.apiProtocol,
+    modelDiscovery: anthropic.modelDiscovery
+  }, {
+    group: "provider",
+    runtimeProviderId: "anthropic",
+    baseUrl: "https://api.anthropic.com",
+    apiProtocol: "anthropic-messages",
+    modelDiscovery: "supported"
+  });
+  assert.deepEqual(anthropic.models.map((model) => model.id), [
+    "claude-fable-5",
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "claude-haiku-4-5",
+    "claude-haiku-4-5-20251001"
+  ]);
+  assert.equal(apiProviderRequestUrl(
+    anthropic.baseUrl,
+    anthropic.apiProtocol
+  ), "https://api.anthropic.com/v1/messages");
+  assert.match(providerBrandSvg("anthropic"), /claudeGrad/u);
+}
+
 function assertQwenProviderContract(): void {
   const qwen = API_PROVIDER_PRESETS.find((preset) => preset.id === "qwen");
   const tokenPlan = API_PROVIDER_PRESETS.find(
@@ -7153,6 +7188,318 @@ async function assertProtocolPayloadLimitContract(): Promise<void> {
   assert.equal(anthropic.max_tokens, 8_192);
 }
 
+async function assertAnthropicDocumentTransportContract(): Promise<void> {
+  const model = createPiProviderModelDefinition({
+    providerId: "anthropic",
+    apiProtocol: "anthropic-messages",
+    baseUrl: "https://api.anthropic.com",
+    modelRef: "claude-sonnet-5",
+    contextWindow: 200_000,
+    maxOutputTokens: 8_192
+  });
+  const bytes = new Uint8Array([1, 2, 3]);
+  const document = Object.freeze({
+    attachment: Object.freeze({
+      type: "file" as const,
+      name: "frozen.pdf",
+      path: "/private/must-not-leak/frozen.pdf",
+      mimeType: "application/pdf",
+      sizeBytes: bytes.byteLength,
+      availability: "available" as const
+    }),
+    kind: "pdf" as const,
+    bytes,
+    sha256: "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81",
+    transport: "native" as const,
+    text: "FROZEN_DOCUMENT_FALLBACK"
+  });
+  const capabilityTarget = {
+    providerId: "anthropic",
+    apiProtocol: "anthropic-messages" as const,
+    baseUrl: "https://api.anthropic.com",
+    modelId: "claude-sonnet-5",
+    adapter: PI_ANTHROPIC_PDF_DOCUMENT_ADAPTER
+  };
+  const context: Context = {
+    messages: [{
+      role: "user",
+      content: "summarize the attached document",
+      timestamp: 1
+    }],
+    tools: []
+  };
+  const provider = {
+    providerId: "anthropic",
+    apiProtocol: "anthropic-messages" as const,
+    authMode: "api-key" as const,
+    baseUrl: "https://api.anthropic.com",
+    modelRef: "claude-sonnet-5"
+  };
+  const streamInput = {
+    runId: "document-transport-run",
+    conversationId: "document-transport-conversation",
+    turnId: "document-transport-turn",
+    correlationId: "document-transport-correlation",
+    provider,
+    model,
+    context,
+    options: {
+      maxTokens: 512,
+      temperature: 0,
+      cacheRetention: "none" as const,
+      maxRetries: 0,
+      timeoutMs: 1_000
+    }
+  };
+
+  let calls = 0;
+  const payloads: unknown[] = [];
+  const contexts: Context[] = [];
+  const fallbackAdapter = providerStreamFixture(async (
+    requestedModel,
+    requestContext,
+    options
+  ) => {
+    calls += 1;
+    contexts.push(structuredClone(requestContext));
+    payloads.push(await fixtureProviderPayload(options, requestedModel));
+    if (calls === 1) {
+      await options?.onResponse?.({ status: 400, headers: {} }, requestedModel);
+      return { status: "error" as const, message: "document blocks are unsupported" };
+    }
+    return { status: "done" as const, toolUse: calls === 2 };
+  });
+  const fallbackTransport = new PiProviderProtocolTransport({
+    authorityId: "document-transport-authority",
+    storeSetId: "document-transport-store",
+    resolveAuthToken: async () => "fixture-document-key",
+    dispatcher: new PiProviderProtocolDispatcher({
+      "anthropic-messages": fallbackAdapter
+    }),
+    documentInput: {
+      currentDocuments: () => [document],
+      capabilityTarget
+    }
+  });
+  const fallbackResult = await (
+    await fallbackTransport.stream(streamInput)
+  ).result();
+  assert.equal(fallbackResult.stopReason, "toolUse");
+  const afterToolResult = await (
+    await fallbackTransport.stream({
+      ...streamInput,
+      context: {
+        ...context,
+        messages: [...context.messages, fallbackResult, {
+          role: "toolResult",
+          toolCallId: "fixture-document-tool-call",
+          toolName: "fixture_document_tool",
+          content: [{ type: "text", text: "fixture tool result" }],
+          isError: false,
+          timestamp: 3
+        }]
+      }
+    })
+  ).result();
+  assert.equal(afterToolResult.stopReason, "stop");
+  assert.equal(calls, 3, "tool continuation adds one text-only Provider request");
+  assert.match(JSON.stringify(payloads[0]), /"type":"document"/u);
+  assert.doesNotMatch(JSON.stringify(payloads[1]), /"type":"document"/u);
+  assert.doesNotMatch(JSON.stringify(payloads[2]), /"type":"document"/u);
+  assert.equal(
+    payloads.filter((payload) => /"type":"document"/u.test(JSON.stringify(payload))).length,
+    1,
+    "one Turn attempts native document input only once across tool loops"
+  );
+  assert.match(JSON.stringify(contexts[1]), /FROZEN_DOCUMENT_FALLBACK/u);
+  assert.match(JSON.stringify(contexts[2]), /FROZEN_DOCUMENT_FALLBACK/u);
+  assert.doesNotMatch(JSON.stringify([payloads, contexts]), /must-not-leak/u);
+
+  for (const failure of [
+    { status: null, message: "fetch failed", emitStart: false, textless: false },
+    { status: 401, message: "document authorization failed", emitStart: false, textless: false },
+    { status: 429, message: "document rate limit", emitStart: false, textless: false },
+    { status: 400, message: "invalid PDF payload", emitStart: false, textless: false },
+    { status: 400, message: "document blocks are unsupported", emitStart: true, textless: false },
+    { status: 400, message: "document blocks are unsupported", emitStart: false, textless: true }
+  ]) {
+    let failureCalls = 0;
+    const adapter = providerStreamFixture(async (requestedModel, _context, options) => {
+      failureCalls += 1;
+      await fixtureProviderPayload(options, requestedModel);
+      if (failure.status !== null) {
+        await options?.onResponse?.({ status: failure.status, headers: {} }, requestedModel);
+      }
+      return {
+        status: "error" as const,
+        message: failure.message,
+        emitStart: failure.emitStart
+      };
+    });
+    const transport = new PiProviderProtocolTransport({
+      authorityId: `document-no-retry-${failure.status ?? "network"}`,
+      storeSetId: "document-no-retry-store",
+      resolveAuthToken: async () => "fixture-document-key",
+      dispatcher: new PiProviderProtocolDispatcher({
+        "anthropic-messages": adapter
+      }),
+      documentInput: {
+        currentDocuments: () => failure.textless
+          ? [Object.freeze({ ...document, text: undefined })]
+          : [document],
+        capabilityTarget
+      }
+    });
+    const result = await (await transport.stream(streamInput)).result();
+    assert.equal(result.stopReason, "error");
+    assert.equal(failureCalls, 1, `${failure.status ?? "network"} must not retry`);
+  }
+
+  let overBudgetCalls = 0;
+  const overBudgetAdapter = providerStreamFixture(async (
+    requestedModel,
+    _requestContext,
+    options
+  ) => {
+    overBudgetCalls += 1;
+    await fixtureProviderPayload(options, requestedModel);
+    await options?.onResponse?.({ status: 400, headers: {} }, requestedModel);
+    return {
+      status: "error" as const,
+      message: "document blocks are unsupported"
+    };
+  });
+  const overBudgetDocument = Object.freeze({
+    ...document,
+    text: "frozen fallback text ".repeat(2_000)
+  });
+  const overBudgetModel = createPiProviderModelDefinition({
+    providerId: "anthropic",
+    apiProtocol: "anthropic-messages",
+    baseUrl: "https://api.anthropic.com",
+    modelRef: "claude-sonnet-5",
+    contextWindow: 1_024,
+    maxOutputTokens: 128
+  });
+  const overBudgetTransport = new PiProviderProtocolTransport({
+    authorityId: "document-over-budget-authority",
+    storeSetId: "document-over-budget-store",
+    resolveAuthToken: async () => "fixture-document-key",
+    dispatcher: new PiProviderProtocolDispatcher({
+      "anthropic-messages": overBudgetAdapter
+    }),
+    documentInput: {
+      currentDocuments: () => [overBudgetDocument],
+      capabilityTarget
+    }
+  });
+  const overBudgetResult = await (
+    await overBudgetTransport.stream({
+      ...streamInput,
+      model: overBudgetModel,
+      options: {
+        ...streamInput.options,
+        maxTokens: 128
+      }
+    })
+  ).result();
+  assert.equal(overBudgetResult.stopReason, "error");
+  assert.equal(
+    overBudgetResult.errorMessage,
+    PI_DOCUMENT_FALLBACK_INPUT_BUDGET_EXCEEDED
+  );
+  assert.equal(
+    overBudgetCalls,
+    1,
+    "fallback context over budget must not dispatch a second request"
+  );
+}
+
+function providerStreamFixture(
+  respond: (
+    model: Model<Api>,
+    context: Context,
+    options: StreamOptions | undefined
+  ) => Promise<Readonly<{
+    status: "done" | "error";
+    message?: string;
+    emitStart?: boolean;
+    toolUse?: boolean;
+  }>>
+): ProviderStreams {
+  const run = (
+    model: Model<Api>,
+    context: Context,
+    options?: StreamOptions
+  ) => {
+    const output = createAssistantMessageEventStream();
+    void (async () => {
+      const response = await respond(model, context, options);
+      const message = fixtureAssistantMessage(
+        model,
+        response.message,
+        response.toolUse === true
+      );
+      if (response.emitStart) output.push({ type: "start", partial: message });
+      if (response.status === "done") {
+        output.push({ type: "done", reason: "stop", message });
+      } else {
+        output.push({ type: "error", reason: "error", error: message });
+      }
+    })();
+    return output;
+  };
+  return { stream: run, streamSimple: run };
+}
+
+async function fixtureProviderPayload(
+  options: StreamOptions | undefined,
+  model: Model<Api>
+): Promise<unknown> {
+  const payload = {
+    model: model.id,
+    messages: [{
+      role: "user",
+      content: [{ type: "text", text: "summarize the attached document" }]
+    }]
+  };
+  return await options?.onPayload?.(payload, model) ?? payload;
+}
+
+function fixtureAssistantMessage(
+  model: Model<Api>,
+  errorMessage?: string,
+  toolUse = false
+): AssistantMessage {
+  return {
+    role: "assistant",
+    content: errorMessage
+      ? []
+      : toolUse
+        ? [{
+            type: "toolCall",
+            id: "fixture-document-tool-call",
+            name: "fixture_document_tool",
+            arguments: {}
+          }]
+        : [{ type: "text", text: "done" }],
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+    usage: {
+      input: 1,
+      output: errorMessage ? 0 : 1,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: errorMessage ? 1 : 2,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+    },
+    stopReason: errorMessage ? "error" : toolUse ? "toolUse" : "stop",
+    ...(errorMessage ? { errorMessage } : {}),
+    timestamp: 1
+  };
+}
+
 async function assertProviderAuthResolutionFailureContract(): Promise<void> {
   const failureCode = async (
     authMode: "api-key" | "oauth"
@@ -7438,6 +7785,7 @@ async function assertProviderPickerGroupingAndFiltering(): Promise<void> {
       "group:登录账户",
       "option:openai-codex",
       "group:供应商",
+      "option:anthropic",
       "option:glm",
       "option:kimi",
       "option:minimax",
@@ -7460,6 +7808,7 @@ async function assertProviderPickerGroupingAndFiltering(): Promise<void> {
     .map((option) => option.getAttribute("data-provider-id"));
   assert.deepEqual(optionIds, [
     "openai-codex",
+    "anthropic",
     "glm",
     "kimi",
     "minimax",

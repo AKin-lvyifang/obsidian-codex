@@ -8,6 +8,8 @@ export type ProviderBrandId = ApiProviderPreset["id"];
  *
  * Source artwork and SHA-256:
  * - openai-codex: neutral bundled code mark (not an OpenAI trademark asset)
+ * - anthropic: local approved asset claude.svg
+ *   85cb7cb0f2cc6df13ebc882af21b2c29200941e062e04a05c83114fbd718b90f
  * - glm: local asset zhipu.svg
  *   289abfd2e0c6dc527323bfb73abdeb3f4121463f963e1c820758d1a1115b93bb
  * - kimi: local asset kimi.svg
@@ -45,6 +47,16 @@ const QWEN_BRAND_SVG = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="htt
 const PROVIDER_BRAND_SVG: Readonly<Record<ProviderBrandId, string>> = {
   "openai-codex": `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
 <path d="M8.5 7L3.5 12L8.5 17M15.5 7L20.5 12L15.5 17M13.5 4L10.5 20" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>`,
+  anthropic: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <defs>
+    <linearGradient id="claudeGrad" x1="4" y1="4" x2="18.5" y2="20" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F59E0B"/>
+      <stop offset="1" stop-color="#EA580C"/>
+    </linearGradient>
+  </defs>
+  <path d="M17 5.5C15.7 4.5 14 4 12.1 4 7.62 4 4 7.62 4 12s3.62 8 8.1 8c1.9 0 3.6-.5 4.9-1.5" fill="none" stroke="url(#claudeGrad)" stroke-linecap="round" stroke-width="3.5"/>
+  <path d="M15.35 7.15 17.9 6.55 17.3 9.1" fill="none" stroke="#F97316" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/>
 </svg>`,
   glm: `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="100" height="100" viewBox="0 0 100 100" fill="none">
 <g  clip-path="url(#clip-path-McxLZ9utckzQazl7Cb0lz)">

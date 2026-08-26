@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   appendFile,
   copyFile,
@@ -16,6 +17,7 @@ import {
   type AgentSession,
   type AgentSessionEvent
 } from "@earendil-works/pi-coding-agent";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type {
   Api,
   AssistantMessage,
@@ -33,6 +35,7 @@ import {
   type PiNativeAgentSessionFactoryInput,
   type PiNativeConversationRuntimeOptions,
   type PiNativeKnowledgeTurnContext,
+  type PiNativeDocumentTurnContext,
   type PiNativeMemoryTurnContext,
   type PiNativeTaskPlanTurnContext
 } from "../../harness/pi-native/pi-native-conversation-runtime";
@@ -116,6 +119,7 @@ export async function runPiNativeConversationRuntimeTests(): Promise<void> {
   await assertSkillPromptAndBindingValidation();
   await assertDurableDraftRequiresExplicitSuccessfulResubmission();
   await assertImagePromptsRequireCapabilityAndPreserveOrder();
+  await assertDocumentSnapshotsAreTurnBoundAndValidatedBeforePrompt();
   await assertVerifiedPrefixRecoveryIsExplicitAndFailClosed();
   await assertExperienceSourceRefsArePointerOnlyAndDeleteAware();
   await assertMemoryTurnIsAvailableBeforeUserEntryPersistence();
@@ -130,6 +134,130 @@ export async function runPiNativeConversationRuntimeTests(): Promise<void> {
   await assertDerivationExcludesIdentityBoundOperationalState();
   await assertDerivedActivationFailureRemainsAVisibleDurableConversation();
   await runPiNativeTaskPlanRuntimeTests();
+}
+
+async function assertDocumentSnapshotsAreTurnBoundAndValidatedBeforePrompt(): Promise<void> {
+  await withFixture(["document-run", "document-replay-run"], async (fixture) => {
+    const conversationId = "document-snapshot-turn";
+    await fixture.runtime.createConversation({
+      conversationId,
+      title: "Document snapshot turn",
+      cwd: fixture.root,
+      createdAt: 1
+    });
+    await fixture.runtime.activateConversation(conversationId);
+    const session = fixture.latestSession();
+    assert.equal(fixture.currentDocumentTurn(), null);
+
+    await assert.rejects(fixture.submit({
+      conversationId,
+      text: "invalid document",
+      submittedAt: 2,
+      documents: [{
+        kind: "pdf",
+        text: "body",
+        bytes: new Uint8Array([1]),
+        sha256: createHash("sha256").update(new Uint8Array([1])).digest("hex"),
+        transport: "native",
+        attachment: {
+          type: "file",
+          name: "oversized.pdf",
+          path: "/private/oversized.pdf",
+          mimeType: "application/pdf",
+          sizeBytes: 20 * 1024 * 1024 + 1,
+          availability: "available"
+        }
+      }]
+    }), /document snapshot is invalid/u);
+    assert.deepEqual(session.promptTexts, []);
+
+    const baselineEntryCount = session.sessionManager.getEntries().length;
+    const largeDocumentBytes = new Uint8Array(Buffer.alloc(16 * 1024 * 1024, 9));
+    const largeDocument = (index: number) => ({
+      kind: "pdf" as const,
+      bytes: largeDocumentBytes,
+      sha256: createHash("sha256").update(largeDocumentBytes).digest("hex"),
+      transport: "native" as const,
+      attachment: {
+        type: "file" as const,
+        name: `large-${index}.pdf`,
+        path: `/private/large-${index}.pdf`,
+        mimeType: "application/pdf",
+        sizeBytes: largeDocumentBytes.byteLength,
+        availability: "available" as const
+      }
+    });
+    await assert.rejects(
+      fixture.submit({
+        conversationId,
+        text: "must fail before user persistence",
+        submittedAt: 3,
+        documents: [largeDocument(1), largeDocument(2)]
+      }),
+      (error: unknown) => error instanceof PiNativeConversationRuntimeError
+        && error.code === "document_request_too_large"
+    );
+    assert.deepEqual(
+      session.promptTexts,
+      [],
+      "32 MiB preflight must run before AgentSession.prompt"
+    );
+    assert.equal(
+      session.sessionManager.getEntries().length,
+      baselineEntryCount,
+      "32 MiB preflight must not persist a Pi user entry"
+    );
+
+    const documentBytes = new Uint8Array(Buffer.alloc(128, 7));
+    const documents = [{
+      kind: "markdown" as const,
+      text: "PRIVATE_DOCUMENT_BODY",
+      bytes: documentBytes,
+      sha256: createHash("sha256").update(documentBytes).digest("hex"),
+      transport: "extracted_text" as const,
+      attachment: {
+        type: "file" as const,
+        name: "notes.md",
+        path: "/private/local/notes.md",
+        mimeType: "text/markdown",
+        sizeBytes: 128,
+        availability: "available" as const
+      }
+    }];
+    const handle = await fixture.submit({
+      conversationId,
+      text: "总结文档",
+      submittedAt: 4,
+      documents
+    });
+    assert.deepEqual(fixture.currentDocumentTurn()?.documents, documents);
+    assert.deepEqual(session.promptTexts, ["总结文档"]);
+    session.finishSuccessful("done");
+    await handle.result;
+    assert.equal(fixture.currentDocumentTurn(), null);
+
+    const replayHandle = await fixture.submit({
+      conversationId,
+      text: "重放冻结文档",
+      submittedAt: 5,
+      documents: [{
+        ...documents[0]!,
+        bytes: new Uint8Array(),
+        transport: "extracted_text"
+      }]
+    });
+    assert.equal(
+      fixture.currentDocumentTurn()?.documents[0]?.bytes.byteLength,
+      0,
+      "reopen/resend may replay frozen text without persisted bytes"
+    );
+    assert.equal(
+      fixture.currentDocumentTurn()?.documents[0]?.text,
+      "PRIVATE_DOCUMENT_BODY"
+    );
+    session.finishSuccessful("replayed");
+    await replayHandle.result;
+  });
 }
 
 async function assertReasoningSelectionFailsClosedBeforePiPrompt(): Promise<void> {
@@ -3322,6 +3450,7 @@ interface RuntimeFixture {
   }>): void;
   currentMemoryTurn(): Readonly<PiNativeMemoryTurnContext> | null;
   currentKnowledgeTurn(): Readonly<PiNativeKnowledgeTurnContext> | null;
+  currentDocumentTurn(): Readonly<PiNativeDocumentTurnContext> | null;
   reportMemoryRecall(input: Parameters<NonNullable<
     PiNativeAgentSessionFactoryInput["reportMemoryRecallProgress"]
   >>[0]): Promise<void>;
@@ -3355,6 +3484,8 @@ async function withFixture(
     (() => Readonly<PiNativeMemoryTurnContext> | null) | null = null;
   let currentKnowledgeTurnReader:
     (() => Readonly<PiNativeKnowledgeTurnContext> | null) | null = null;
+  let currentDocumentTurnReader:
+    (() => Readonly<PiNativeDocumentTurnContext> | null) | null = null;
   let memoryRecallReporter: PiNativeAgentSessionFactoryInput["reportMemoryRecallProgress"] = undefined;
   let askPersonalMemorySourcesReporter:
     PiNativeAgentSessionFactoryInput["reportAskPersonalMemorySources"] = undefined;
@@ -3387,6 +3518,7 @@ async function withFixture(
     createAgentSession: async (input) => {
       currentMemoryTurnReader = input.currentMemoryTurnContext ?? null;
       currentKnowledgeTurnReader = input.currentKnowledgeTurnContext ?? null;
+      currentDocumentTurnReader = input.currentDocumentTurnContext ?? null;
       memoryRecallReporter = input.reportMemoryRecallProgress;
       askPersonalMemorySourcesReporter = input.reportAskPersonalMemorySources;
       if (nextActivationError) {
@@ -3454,6 +3586,7 @@ async function withFixture(
       },
       currentMemoryTurn: () => currentMemoryTurnReader?.() ?? null,
       currentKnowledgeTurn: () => currentKnowledgeTurnReader?.() ?? null,
+      currentDocumentTurn: () => currentDocumentTurnReader?.() ?? null,
       reportMemoryRecall: async (input) => {
         assert.ok(memoryRecallReporter);
         await memoryRecallReporter(input);
@@ -3550,6 +3683,12 @@ class ControlledAgentSession {
 
   get sessionFile(): string | undefined {
     return this.sessionManager.getSessionFile();
+  }
+
+  get messages(): AgentMessage[] {
+    return this.sessionManager.getEntries().flatMap((entry) =>
+      entry.type === "message" ? [entry.message] : []
+    );
   }
 
   asAgentSession(): AgentSession {

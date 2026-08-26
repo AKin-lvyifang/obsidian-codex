@@ -35,6 +35,18 @@ import type {
 import {
   applyEchoInkPiReasoningPayload
 } from "../../settings/pi-model-catalog";
+import type { PiChatPreparedDocument } from "../pi-native/contracts";
+import {
+  applyPiAnthropicDocumentPayload,
+  buildPiDocumentFallbackProviderContext,
+  PI_ANTHROPIC_DOCUMENT_REQUEST_TOO_LARGE,
+  PI_DOCUMENT_FALLBACK_INPUT_BUDGET_EXCEEDED,
+  type PiDocumentCapabilityTarget
+} from "../pi-native/pi-document-context";
+import {
+  calculatePiEffectiveInputBudget,
+  estimatePiContextTokens
+} from "../pi-native/pi-context-budget";
 
 export type PiProviderProtocolAdapters = Readonly<
   Record<ApiProviderProtocol, ProviderStreams>
@@ -141,12 +153,17 @@ export class PiProviderProtocolTransport
 implements ControlledPiStreamPort {
   readonly authorityId: string;
   readonly storeSetId: string;
+  private documentFallbackTurnId: string | null = null;
 
   constructor(private readonly options: {
     authorityId: string;
     storeSetId: string;
     resolveAuthToken(): string | Promise<string>;
     dispatcher?: PiProviderProtocolDispatcher;
+    documentInput?: Readonly<{
+      currentDocuments(): readonly Readonly<PiChatPreparedDocument>[];
+      capabilityTarget: Readonly<PiDocumentCapabilityTarget>;
+    }>;
   }) {
     this.authorityId = options.authorityId;
     this.storeSetId = options.storeSetId;
@@ -155,6 +172,9 @@ implements ControlledPiStreamPort {
   async stream(
     input: ControlledPiStreamInput
   ): Promise<AssistantMessageEventStream> {
+    if (this.documentFallbackTurnId !== input.turnId) {
+      this.documentFallbackTurnId = null;
+    }
     let apiKey: string;
     try {
       apiKey = await this.options.resolveAuthToken();
@@ -177,9 +197,18 @@ implements ControlledPiStreamPort {
         )
         ? dispatcher.stream.bind(dispatcher)
         : dispatcher.streamSimple.bind(dispatcher);
-      const upstream = dispatch({
+      const documents = this.options.documentInput?.currentDocuments() ?? [];
+      const nativeDocuments = documents.filter(
+        (document) => document.transport === "native"
+      );
+      const fallbackLocked = this.documentFallbackTurnId === input.turnId
+        && nativeDocuments.length > 0;
+      const dispatchRequest = (
+        context: Context,
+        injectNativeDocuments: boolean
+      ): AssistantMessageEventStream => dispatch({
         model: input.model,
-        context: input.context,
+        context,
         apiKey,
         options: {
           signal: input.options.signal,
@@ -193,15 +222,68 @@ implements ControlledPiStreamPort {
           cacheRetention: input.options.cacheRetention,
           maxRetries: input.options.maxRetries,
           timeoutMs: input.options.timeoutMs,
+          ...(injectNativeDocuments && this.options.documentInput
+            ? {
+                onPayload: (payload: unknown) =>
+                  applyPiAnthropicDocumentPayload({
+                    payload,
+                    documents: nativeDocuments,
+                    capabilityTarget: this.options.documentInput!.capabilityTarget
+                  })
+              }
+            : {}),
           onResponse: (response) => {
             responseStatus = response.status;
           }
         }
       });
+      let requestContext = input.context;
+      if (fallbackLocked) {
+        if (nativeDocuments.some((document) => !document.text?.trim())) {
+          return failedStream(input.model, "provider_protocol_failed");
+        }
+        requestContext = contextWithPiDocumentFallback(
+          input.context,
+          nativeDocuments
+        );
+        if (!piDocumentFallbackFitsInputBudget(input, requestContext)) {
+          return failedStream(
+            input.model,
+            PI_DOCUMENT_FALLBACK_INPUT_BUDGET_EXCEEDED
+          );
+        }
+      }
+      const upstream = dispatchRequest(
+        requestContext,
+        nativeDocuments.length > 0 && !fallbackLocked
+      );
       return sanitizeProviderStream(
         upstream,
         input.model,
-        () => responseStatus
+        () => responseStatus,
+        nativeDocuments.length > 0 && !fallbackLocked
+          ? (event, status) => {
+              if (!isExplicitDocumentUnsupported(status, event.errorMessage ?? "")) {
+                return null;
+              }
+              if (nativeDocuments.some((document) => !document.text?.trim())) {
+                return null;
+              }
+              this.documentFallbackTurnId = input.turnId;
+              const fallbackContext = contextWithPiDocumentFallback(
+                input.context,
+                nativeDocuments
+              );
+              if (!piDocumentFallbackFitsInputBudget(input, fallbackContext)) {
+                return failedStream(
+                  input.model,
+                  PI_DOCUMENT_FALLBACK_INPUT_BUDGET_EXCEEDED
+                );
+              }
+              responseStatus = null;
+              return dispatchRequest(fallbackContext, false);
+            }
+          : undefined
       );
     } catch (error) {
       return failedStream(
@@ -252,30 +334,49 @@ export function classifyPiProviderConnectionFailure(
 function sanitizeProviderStream(
   upstream: AssistantMessageEventStream,
   model: Model<Api>,
-  responseStatus: () => number | null
+  responseStatus: () => number | null,
+  fallback?: (
+    error: AssistantMessage,
+    status: number | null
+  ) => AssistantMessageEventStream | null
 ): AssistantMessageEventStream {
   const output = createAssistantMessageEventStream();
   void (async () => {
     try {
-      for await (const event of upstream) {
-        if (event.type !== "error") {
-          output.push(event);
-          continue;
-        }
-        output.push({
-          type: "error",
-          reason: event.reason,
-          error: {
-            ...event.error,
-            errorMessage: runtimeProviderFailureCode(
-              responseStatus(),
-              event.error.errorMessage ?? "",
-              event.error,
-              model.contextWindow
-            )
+      let assistantEventObserved = false;
+      const pipe = async (
+        stream: AssistantMessageEventStream,
+        allowFallback: boolean
+      ): Promise<void> => {
+        for await (const event of stream) {
+          if (event.type !== "error") {
+            assistantEventObserved = true;
+            output.push(event);
+            continue;
           }
-        });
-      }
+          if (allowFallback && !assistantEventObserved && fallback) {
+            const retry = fallback(event.error, responseStatus());
+            if (retry) {
+              await pipe(retry, false);
+              return;
+            }
+          }
+          output.push({
+            type: "error",
+            reason: event.reason,
+            error: {
+              ...event.error,
+              errorMessage: runtimeProviderFailureCode(
+                responseStatus(),
+                event.error.errorMessage ?? "",
+                event.error,
+                model.contextWindow
+              )
+            }
+          });
+        }
+      };
+      await pipe(upstream, true);
     } catch (error) {
       output.push({
         type: "error",
@@ -304,6 +405,12 @@ function runtimeProviderFailureCode(
   assistantMessage?: AssistantMessage,
   contextWindow?: number
 ): string {
+  for (const code of [
+    PI_ANTHROPIC_DOCUMENT_REQUEST_TOO_LARGE,
+    PI_DOCUMENT_FALLBACK_INPUT_BUDGET_EXCEEDED
+  ]) {
+    if (message.includes(code)) return code;
+  }
   if (
     (
       assistantMessage
@@ -322,9 +429,71 @@ function thrownProviderFailureCode(
   status: number | null,
   message: string
 ): string {
+  for (const code of [
+    PI_ANTHROPIC_DOCUMENT_REQUEST_TOO_LARGE,
+    PI_DOCUMENT_FALLBACK_INPUT_BUDGET_EXCEEDED
+  ]) {
+    if (message.includes(code)) return code;
+  }
   return isStatusContextOverflow(status, message)
     ? "context_length_exceeded"
     : "provider_network_failed";
+}
+
+function isExplicitDocumentUnsupported(
+  status: number | null,
+  message: string
+): boolean {
+  if (status !== 400 && status !== 415 && status !== 422) return false;
+  const normalized = message.trim().toLowerCase();
+  return /(?:\b(?:pdf|documents?(?:\s+(?:inputs?|types?|blocks?(?:\s+types?)?))?|files?(?:\s+(?:inputs?|types?|blocks?))?|(?:content\s+)?blocks?(?:\s+types?)?(?:\s*[:=]?\s*documents?)?)\b\s+(?:(?:is|are|was|were)\s+)?(?:unsupported|not\s+supported)\b)|(?:\b(?:unsupported|not\s+supported)\b\s+(?:pdf|documents?(?:\s+(?:inputs?|types?|blocks?(?:\s+types?)?))?|files?(?:\s+(?:inputs?|types?|blocks?))?|(?:content\s+)?blocks?(?:\s+types?)?(?:\s*[:=]?\s*documents?)?)\b)/u
+    .test(normalized);
+}
+
+function piDocumentFallbackFitsInputBudget(
+  input: Readonly<ControlledPiStreamInput>,
+  fallbackContext: Readonly<Context>
+): boolean {
+  const maxOutputReserve = Math.min(
+    input.options.maxTokens ?? input.model.maxTokens,
+    input.model.maxTokens
+  );
+  const budget = calculatePiEffectiveInputBudget({
+    contextWindow: input.model.contextWindow,
+    maxOutputReserve
+  });
+  return estimatePiContextTokens(fallbackContext).tokens
+    <= budget.effectiveInputBudget;
+}
+
+function contextWithPiDocumentFallback(
+  context: Readonly<Context>,
+  documents: readonly Readonly<PiChatPreparedDocument>[]
+): Context {
+  const fallback = buildPiDocumentFallbackProviderContext(documents);
+  const messages = structuredClone(context.messages);
+  let promptIndex = messages.length;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role !== "user") continue;
+    const content = message.content;
+    if (
+      typeof content === "string"
+      || content.some((block) => block.type === "text" || block.type === "image")
+    ) {
+      promptIndex = index;
+      break;
+    }
+  }
+  messages.splice(promptIndex, 0, {
+    role: "user",
+    content: fallback,
+    timestamp: Date.now()
+  });
+  return {
+    ...structuredClone(context),
+    messages
+  };
 }
 
 function isStatusContextOverflow(

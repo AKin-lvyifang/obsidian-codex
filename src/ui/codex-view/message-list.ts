@@ -9,7 +9,7 @@ import type {
 } from "../../settings/settings";
 import type { KnowledgeBaseCitation, KnowledgeBaseCitationSummary, KnowledgeWorkflowEvent, KnowledgeWorkflowPhaseId } from "../../knowledge-base/types";
 import type { ProcessFileRef, TokenUsage } from "../../types/app-server";
-import { showItemInFinder } from "../../core/electron";
+import { openPathInElectron, showItemInFinder } from "../../core/electron";
 import { basename, normalizeProcessFileRef } from "../../core/mapping";
 import { parseFileChangeDiff, type ParsedDiffFile } from "../../core/diff-summary";
 import {
@@ -41,11 +41,11 @@ import {
 } from "../../harness/pi-native/pi-chat-ui-projector";
 import {
   attachmentPathIdentity,
-  attachmentPresentationIcon,
-  attachmentPresentationKind,
   createAttachmentResourceResolver,
   type EchoInkAttachmentResourceResolver
 } from "./attachment-resource";
+import { renderFileCard } from "./file-card";
+import { absoluteVaultPath } from "./workspace-utils";
 import type { KnowledgeReference } from "../../knowledge-base/types";
 import {
   knowledgeUsageMessageData,
@@ -2514,26 +2514,15 @@ export class CodexMessageListRenderer {
         };
         continue;
       }
-      const kind = attachmentPresentationKind(attachment);
-      const tile = item.createEl("button", {
-        cls: "codex-message-attachment-tile codex-message-attachment-file-tile",
-        attr: {
-          type: "button",
-          title: resource.displayName,
-          "aria-label": `打开附件：${resource.displayName}`,
-          "data-attachment-kind": kind
+      renderFileCard(item, {
+        attachment,
+        displayName: resource.displayName,
+        variant: "message",
+        availability: resource.availability,
+        onOpen: () => {
+          void this.openAttachment(attachment, resource.resourceUri);
         }
       });
-      const icon = tile.createSpan({
-        cls: "codex-message-attachment-icon",
-        attr: { "aria-hidden": "true" }
-      });
-      setIcon(icon, attachmentPresentationIcon(attachment));
-      tile.onclick = (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        void this.openAttachment(attachment, resource.resourceUri);
-      };
     }
   }
 
@@ -2618,7 +2607,16 @@ export class CodexMessageListRenderer {
       return;
     }
     const ref = normalizeProcessFileRef(attachment.path, env.vaultPath);
-    await this.openProcessFile(ref);
+    if (!ref.openable) {
+      new Notice("这个文件路径无法打开");
+      return;
+    }
+    const absolutePath = ref.absolutePath
+      ?? (ref.kind === "vault"
+        ? absoluteVaultPath(env.vaultPath, ref.path)
+        : ref.kind === "external" ? ref.path : "");
+    if (await openPathInElectron(absolutePath)) return;
+    new Notice(`无法使用系统默认应用打开：${ref.displayPath}`);
   }
 
   private renderThinkingMessage(container: HTMLElement, message: ChatMessage): void {
