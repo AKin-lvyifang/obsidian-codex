@@ -16,8 +16,8 @@ import {
 } from "@earendil-works/pi-ai";
 import {
   buildDeepSeekBody,
-  emitBufferedMessage,
-  parseDeepSeekSseResponse
+  createProviderSseStreamDecoder,
+  type ProviderSseStreamDecoder
 } from "../harness/pi/provider-stream-codec";
 import type {
   ControlledPiStreamInput
@@ -38,13 +38,33 @@ export interface LoopbackProviderResponse {
   readonly body: string;
 }
 
+export interface LoopbackProviderRequest {
+  readonly url: string;
+  readonly method: "GET" | "POST";
+  readonly headers?: Readonly<Record<string, string>>;
+  readonly body?: string;
+  readonly signal?: AbortSignal;
+  readonly timeoutMs?: number;
+  readonly onResponse?: (response: Readonly<{
+    status: number;
+    headers: Readonly<Record<string, string>>;
+  }>) => void | Promise<void>;
+  readonly onChunk?: (chunk: Uint8Array) => void;
+}
+
+export type LoopbackProviderRequestImpl = (
+  input: LoopbackProviderRequest
+) => Promise<LoopbackProviderResponse>;
+
 /**
  * Pi's browser-compatible OpenAI client cannot reach an HTTP loopback server
  * from Obsidian's secure app origin. This adapter keeps Ollama inside the same
  * Pi Provider loop while using a strict, redirect-free Node HTTP hop that can
  * only target localhost/loopback. It is never selected for cloud Providers.
  */
-export function createLoopbackOpenAICompletionsAdapter(): ProviderStreams {
+export function createLoopbackOpenAICompletionsAdapter(
+  requestImpl: LoopbackProviderRequestImpl = requestLoopbackProvider
+): ProviderStreams {
   const start = (
     model: Model<Api>,
     context: Context,
@@ -55,7 +75,8 @@ export function createLoopbackOpenAICompletionsAdapter(): ProviderStreams {
       model,
       context,
       options,
-      output
+      output,
+      requestImpl
     });
     return output;
   };
@@ -87,14 +108,9 @@ export async function loopbackProviderFetch(
   };
 }
 
-export async function requestLoopbackProvider(input: {
-  url: string;
-  method: "GET" | "POST";
-  headers?: Readonly<Record<string, string>>;
-  body?: string;
-  signal?: AbortSignal;
-  timeoutMs?: number;
-}): Promise<LoopbackProviderResponse> {
+export async function requestLoopbackProvider(
+  input: LoopbackProviderRequest
+): Promise<LoopbackProviderResponse> {
   if (!isLoopbackApiProviderUrl(input.url)) {
     throw new Error("loopback_provider_target_invalid");
   }
@@ -143,6 +159,13 @@ export async function requestLoopbackProvider(input: {
     }, (response) => {
       const chunks: Buffer[] = [];
       let received = 0;
+      const status = response.statusCode ?? 0;
+      const headers = normalizeHeaders(response.headers);
+      const streamSuccessfulResponse = input.method === "POST"
+        && status >= 200
+        && status < 300
+        && Boolean(input.onChunk);
+      response.pause();
       response.on("data", (chunk: Buffer | string) => {
         const bytes = Buffer.isBuffer(chunk)
           ? chunk
@@ -152,15 +175,25 @@ export async function requestLoopbackProvider(input: {
           request.destroy(new Error("loopback_provider_response_too_large"));
           return;
         }
-        chunks.push(bytes);
+        if (streamSuccessfulResponse) {
+          try {
+            input.onChunk?.(bytes);
+          } catch (error) {
+            request.destroy(error instanceof Error
+              ? error
+              : new Error("loopback_provider_stream_failed"));
+          }
+        } else {
+          chunks.push(bytes);
+        }
       });
       response.once("end", () => {
         if (settled) return;
         settled = true;
         cleanup();
         resolve(Object.freeze({
-          status: response.statusCode ?? 0,
-          headers: normalizeHeaders(response.headers),
+          status,
+          headers,
           body: Buffer.concat(chunks).toString("utf8")
         }));
       });
@@ -168,6 +201,11 @@ export async function requestLoopbackProvider(input: {
       response.once("aborted", () => fail(
         new Error("loopback_provider_response_aborted")
       ));
+      void Promise.resolve(input.onResponse?.({ status, headers }))
+        .then(() => response.resume())
+        .catch((error) => request.destroy(error instanceof Error
+          ? error
+          : new Error("loopback_provider_response_failed")));
     });
     const onAbort = () => request.destroy(
       new Error("loopback_provider_aborted")
@@ -196,8 +234,13 @@ async function executeLoopbackCompletion(input: {
   context: Context;
   options: LoopbackStreamOptions;
   output: AssistantMessageEventStream;
+  requestImpl: LoopbackProviderRequestImpl;
 }): Promise<void> {
   let status: number | null = null;
+  let decoder: ProviderSseStreamDecoder | null = null;
+  let responseObserved = false;
+  let streamedChunk = false;
+  const streamStartedAt = Date.now();
   try {
     if (
       input.model.api !== "openai-completions"
@@ -216,7 +259,7 @@ async function executeLoopbackCompletion(input: {
       input.model
     );
     if (transformed !== undefined) payload = transformed;
-    const response = await requestLoopbackProvider({
+    const response = await input.requestImpl({
       url: apiProviderRequestUrl(
         input.model.baseUrl,
         "openai-completions"
@@ -227,24 +270,57 @@ async function executeLoopbackCompletion(input: {
         : {},
       body: JSON.stringify(payload),
       signal: input.options.signal,
-      timeoutMs: input.options.timeoutMs
+      timeoutMs: input.options.timeoutMs,
+      onResponse: async (observed) => {
+        if (responseObserved) throw new Error("loopback_provider_response_repeated");
+        responseObserved = true;
+        status = observed.status;
+        await input.options.onResponse?.({
+          status: observed.status,
+          headers: { ...observed.headers }
+        }, input.model);
+        if (observed.status >= 200 && observed.status < 300) {
+          decoder = createProviderSseStreamDecoder({
+            stream: input.output,
+            model: input.model,
+            statusCode: observed.status,
+            headers: observed.headers,
+            timestamp: streamStartedAt
+          });
+        }
+      },
+      onChunk: (chunk) => {
+        if (!decoder) throw new Error("loopback_provider_stream_not_ready");
+        streamedChunk = true;
+        decoder.push(chunk);
+      }
     });
-    status = response.status;
-    await input.options.onResponse?.({
-      status,
-      headers: { ...response.headers }
-    }, input.model);
-    if (status < 200 || status >= 300) {
-      throw new Error(status === 401 || status === 403
+    if (!responseObserved) {
+      responseObserved = true;
+      status = response.status;
+      await input.options.onResponse?.({
+        status,
+        headers: { ...response.headers }
+      }, input.model);
+      if (status >= 200 && status < 300) {
+        decoder = createProviderSseStreamDecoder({
+          stream: input.output,
+          model: input.model,
+          statusCode: status,
+          headers: response.headers,
+          timestamp: streamStartedAt
+        });
+      }
+    }
+    const responseStatus = status ?? response.status;
+    if (responseStatus < 200 || responseStatus >= 300) {
+      throw new Error(responseStatus === 401 || responseStatus === 403
         ? "provider_auth_failed"
         : "provider_http_failed");
     }
-    const message = parseDeepSeekSseResponse({
-      statusCode: response.status,
-      headers: response.headers,
-      body: response.body
-    }, input.model, Date.now());
-    emitBufferedMessage(input.output, message);
+    if (!decoder) throw new Error("loopback_provider_stream_not_ready");
+    if (!streamedChunk && response.body) decoder.push(response.body);
+    decoder.finish();
   } catch (error) {
     input.output.push({
       type: "error",
@@ -253,7 +329,8 @@ async function executeLoopbackCompletion(input: {
         input.model,
         input.options.signal?.aborted,
         status,
-        error
+        error,
+        decoder?.partial
       )
     });
   }
@@ -304,7 +381,8 @@ function loopbackFailureMessage(
   model: Model<Api>,
   aborted: boolean | undefined,
   status: number | null,
-  error: unknown
+  error: unknown,
+  partial?: AssistantMessage
 ): AssistantMessage {
   const message = error instanceof Error ? error.message : "";
   const errorMessage = aborted
@@ -315,28 +393,30 @@ function loopbackFailureMessage(
         ? "provider_protocol_failed"
         : "provider_network_failed";
   return {
-    role: "assistant",
-    content: [],
-    api: model.api,
-    provider: model.provider,
-    model: model.id,
-    usage: {
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-      totalTokens: 0,
-      cost: {
+    ...(partial ?? {
+      role: "assistant",
+      content: [],
+      api: model.api,
+      provider: model.provider,
+      model: model.id,
+      usage: {
         input: 0,
         output: 0,
         cacheRead: 0,
         cacheWrite: 0,
-        total: 0
-      }
-    },
+        totalTokens: 0,
+        cost: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          total: 0
+        }
+      },
+      timestamp: Date.now()
+    }),
     stopReason: aborted ? "aborted" : "error",
-    errorMessage,
-    timestamp: Date.now()
+    errorMessage
   };
 }
 

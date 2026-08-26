@@ -452,7 +452,7 @@ async function assertReasoningSummaryRuntimeLifecycle(): Promise<void> {
       taskEvents.push(structuredClone(event));
     });
     session.beginProviderRequest();
-    session.emitAssistantText("首段公开回答");
+    session.emitProviderReasoning("第一段公开推理");
     const plan = freezeEchoInkTaskPlan({
       schemaVersion: ECHOINK_TASK_PLAN_SCHEMA_VERSION,
       planId: "reasoning-plan",
@@ -472,6 +472,8 @@ async function assertReasoningSummaryRuntimeLifecycle(): Promise<void> {
     session.finishTool("reasoning-task-update", "task_update", {
       details: { source: "echoink-task-plan", plan }
     }, false);
+    session.emitProviderReasoning("工具后的第二段公开推理");
+    session.emitAssistantText("首段公开回答");
     assert.equal(
       reasoningSummariesForRun(session.sessionManager, taskRun.productRunId).length,
       1,
@@ -510,6 +512,32 @@ async function assertReasoningSummaryRuntimeLifecycle(): Promise<void> {
       event.summary.firstAssistantTextAt !== undefined
       && event.summary.activities.some((activity) => activity.kind === "task")
     ), "post-answer Task updates remain visible in the same live snapshot");
+    const providerReasoningEvents = taskEvents.filter((event) =>
+      event.type === "provider_reasoning_start"
+      || event.type === "provider_reasoning_delta"
+      || event.type === "provider_reasoning_end"
+    );
+    assert.deepEqual(
+      providerReasoningEvents.map((event) => event.type),
+      [
+        "provider_reasoning_start",
+        "provider_reasoning_delta",
+        "provider_reasoning_end",
+        "provider_reasoning_start",
+        "provider_reasoning_delta",
+        "provider_reasoning_end"
+      ]
+    );
+    const providerReasoningIds = providerReasoningEvents
+      .filter((event) => event.type === "provider_reasoning_start")
+      .map((event) => event.reasoningId);
+    assert.equal(new Set(providerReasoningIds).size, 2);
+    assert.deepEqual(
+      providerReasoningEvents
+        .filter((event) => event.type === "provider_reasoning_end")
+        .map((event) => event.text),
+      ["第一段公开推理", "工具后的第二段公开推理"]
+    );
 
     const noTextRun = await fixture.submit({
       conversationId,
@@ -3518,6 +3546,7 @@ class ControlledAgentSession {
   private readonly listeners = new Set<(event: AgentSessionEvent) => void>();
   private promptSequence = 0;
   private toolSequence = 0;
+  private providerReasoningSequence = 0;
   private resolvePrompt: (() => void) | null = null;
   private rejectPrompt: ((error: unknown) => void) | null = null;
   private idlePromise: Promise<void> = Promise.resolve();
@@ -3682,6 +3711,47 @@ class ControlledAgentSession {
         type: "text_delta",
         delta,
         contentIndex: 0
+      }
+    } as AgentSessionEvent);
+  }
+
+  emitProviderReasoning(text: string): void {
+    this.providerReasoningSequence += 1;
+    const message: AssistantMessage = {
+      ...assistantMessage(
+        "",
+        300_000 + this.promptSequence + this.providerReasoningSequence
+      ),
+      content: [{ type: "thinking", thinking: text }]
+    };
+    this.emit({ type: "message_start", message });
+    this.emit({
+      type: "message_update",
+      message,
+      assistantMessageEvent: {
+        type: "thinking_start",
+        contentIndex: 0,
+        partial: message
+      }
+    } as AgentSessionEvent);
+    this.emit({
+      type: "message_update",
+      message,
+      assistantMessageEvent: {
+        type: "thinking_delta",
+        contentIndex: 0,
+        delta: text,
+        partial: message
+      }
+    } as AgentSessionEvent);
+    this.emit({
+      type: "message_update",
+      message,
+      assistantMessageEvent: {
+        type: "thinking_end",
+        contentIndex: 0,
+        content: text,
+        partial: message
       }
     } as AgentSessionEvent);
   }

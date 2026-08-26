@@ -1,16 +1,17 @@
 import { Buffer } from "node:buffer";
-import type {
-  Api,
-  AssistantMessage,
-  AssistantMessageEventStream,
-  Context,
-  ImageContent,
-  Message,
-  Model,
-  TextContent,
-  ThinkingContent,
-  ToolCall,
-  Usage
+import {
+  parseStreamingJson,
+  type Api,
+  type AssistantMessage,
+  type AssistantMessageEventStream,
+  type Context,
+  type ImageContent,
+  type Message,
+  type Model,
+  type TextContent,
+  type ThinkingContent,
+  type ToolCall,
+  type Usage
 } from "@earendil-works/pi-ai";
 import type {
   ControlledPiStreamInput
@@ -22,6 +23,351 @@ export interface ProviderSseResponse {
   readonly statusCode: number;
   readonly headers: Readonly<Record<string, string>>;
   readonly body: string;
+}
+
+export interface ProviderSseStreamDecoder {
+  readonly partial: AssistantMessage;
+  push(chunk: Uint8Array | string): void;
+  finish(): AssistantMessage;
+}
+
+/**
+ * Incremental OpenAI-compatible SSE decoder used by the Node-only Provider
+ * transports. It emits Pi events as bytes arrive instead of rebuilding one
+ * buffered AssistantMessage after the HTTP response ends.
+ */
+export function createProviderSseStreamDecoder(input: {
+  stream: AssistantMessageEventStream;
+  model: Model<Api>;
+  statusCode: number;
+  headers: Readonly<Record<string, string>>;
+  timestamp: number;
+}): ProviderSseStreamDecoder {
+  if (
+    input.statusCode < 200
+    || input.statusCode >= 300
+    || !Number.isFinite(input.timestamp)
+    || !/^text\/event-stream(?:;|$)/iu.test(
+      input.headers["content-type"] ?? ""
+    )
+  ) {
+    throw new Error("provider_sse_invalid");
+  }
+  return new OpenAICompatibleSseDecoder(input);
+}
+
+class OpenAICompatibleSseDecoder implements ProviderSseStreamDecoder {
+  readonly partial: AssistantMessage;
+  private readonly decoder = new TextDecoder("utf-8", { fatal: true });
+  private buffer = "";
+  private receivedBytes = 0;
+  private sawDone = false;
+  private finishReason = "";
+  private finished = false;
+  private activeThinkingIndex: number | null = null;
+  private activeTextIndex: number | null = null;
+  private sawToolCall = false;
+  private readonly toolCalls = new Map<number, {
+    contentIndex: number;
+    toolCall: ToolCall;
+    argumentsText: string;
+    ended: boolean;
+  }>();
+
+  constructor(private readonly input: {
+    stream: AssistantMessageEventStream;
+    model: Model<Api>;
+    timestamp: number;
+  }) {
+    this.partial = {
+      role: "assistant",
+      content: [],
+      api: input.model.api,
+      provider: input.model.provider,
+      model: input.model.id,
+      usage: emptyUsage(),
+      stopReason: "stop",
+      timestamp: input.timestamp
+    };
+    input.stream.push({ type: "start", partial: this.partial });
+  }
+
+  push(chunk: Uint8Array | string): void {
+    if (this.finished) throw new Error("provider_sse_already_finished");
+    const bytes = typeof chunk === "string"
+      ? Buffer.from(chunk, "utf8")
+      : chunk;
+    this.receivedBytes += bytes.byteLength;
+    if (this.receivedBytes > MAX_RESPONSE_BYTES) {
+      throw new Error("provider_sse_response_too_large");
+    }
+    this.buffer += this.decoder.decode(bytes, { stream: true });
+    this.drainEvents();
+  }
+
+  finish(): AssistantMessage {
+    if (this.finished) throw new Error("provider_sse_already_finished");
+    this.finished = true;
+    this.buffer += this.decoder.decode();
+    this.drainEvents();
+    if (this.buffer.trim()) throw new Error("provider_sse_incomplete");
+    if (!this.sawDone || !this.finishReason) {
+      throw new Error("provider_sse_incomplete");
+    }
+    this.endThinking();
+    this.endText();
+    this.endToolCalls();
+    this.partial.stopReason = this.sawToolCall
+      ? "toolUse"
+      : this.finishReason === "length"
+        ? "length"
+        : this.finishReason === "stop"
+          ? "stop"
+          : (() => {
+              throw new Error("provider_finish_reason_invalid");
+            })();
+    deepFreeze(this.partial);
+    this.input.stream.push({
+      type: "done",
+      reason: this.partial.stopReason as "stop" | "length" | "toolUse",
+      message: this.partial
+    });
+    return this.partial;
+  }
+
+  private drainEvents(): void {
+    while (true) {
+      const boundary = nextSseEventBoundary(this.buffer);
+      if (!boundary) return;
+      const block = this.buffer.slice(0, boundary.index);
+      this.buffer = this.buffer.slice(boundary.index + boundary.length);
+      this.consumeBlock(block);
+    }
+  }
+
+  private consumeBlock(block: string): void {
+    const data = block
+      .split(/\r\n|\r|\n/u)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).replace(/^ /u, ""))
+      .join("\n");
+    if (!data) return;
+    if (data === "[DONE]") {
+      this.sawDone = true;
+      return;
+    }
+    const chunk = parseRecord(data);
+    if (typeof chunk.id === "string" && chunk.id) {
+      this.partial.responseId ??= chunk.id;
+    }
+    if (typeof chunk.model === "string" && chunk.model) {
+      this.partial.responseModel ??= chunk.model;
+    }
+    if (isPlainRecord(chunk.usage)) {
+      this.partial.usage = parseUsage(chunk.usage);
+    }
+    const choice: unknown = Array.isArray(chunk.choices)
+      ? (chunk.choices as unknown[])[0]
+      : null;
+    if (!isPlainRecord(choice)) return;
+    if (typeof choice.finish_reason === "string" && choice.finish_reason) {
+      this.finishReason = choice.finish_reason;
+    }
+    if (!isPlainRecord(choice.delta)) return;
+    for (const field of [
+      "reasoning_content",
+      "reasoning",
+      "reasoning_text"
+    ] as const) {
+      const value = choice.delta[field];
+      if (typeof value === "string" && value.length > 0) {
+        this.appendThinking(value);
+        break;
+      }
+    }
+    if (typeof choice.delta.content === "string" && choice.delta.content) {
+      this.appendText(choice.delta.content);
+    }
+    if (Array.isArray(choice.delta.tool_calls)) {
+      for (const candidate of choice.delta.tool_calls) {
+        this.appendToolCall(candidate);
+      }
+    }
+  }
+
+  private appendThinking(delta: string): void {
+    this.endText();
+    if (this.toolCalls.size > 0) this.endToolCalls();
+    if (this.activeThinkingIndex === null) {
+      const contentIndex = this.partial.content.length;
+      this.partial.content.push({ type: "thinking", thinking: "" });
+      this.activeThinkingIndex = contentIndex;
+      this.input.stream.push({
+        type: "thinking_start",
+        contentIndex,
+        partial: this.partial
+      });
+    }
+    const contentIndex = this.activeThinkingIndex;
+    const content = this.partial.content[contentIndex];
+    if (!content || content.type !== "thinking") {
+      throw new Error("provider_reasoning_state_invalid");
+    }
+    content.thinking += delta;
+    this.input.stream.push({
+      type: "thinking_delta",
+      contentIndex,
+      delta,
+      partial: this.partial
+    });
+  }
+
+  private appendText(delta: string): void {
+    this.endThinking();
+    if (this.toolCalls.size > 0) this.endToolCalls();
+    if (this.activeTextIndex === null) {
+      const contentIndex = this.partial.content.length;
+      this.partial.content.push({ type: "text", text: "" });
+      this.activeTextIndex = contentIndex;
+      this.input.stream.push({
+        type: "text_start",
+        contentIndex,
+        partial: this.partial
+      });
+    }
+    const contentIndex = this.activeTextIndex;
+    const content = this.partial.content[contentIndex];
+    if (!content || content.type !== "text") {
+      throw new Error("provider_text_state_invalid");
+    }
+    content.text += delta;
+    this.input.stream.push({
+      type: "text_delta",
+      contentIndex,
+      delta,
+      partial: this.partial
+    });
+  }
+
+  private appendToolCall(value: unknown): void {
+    this.endThinking();
+    this.endText();
+    if (
+      !isPlainRecord(value)
+      || !Number.isSafeInteger(value.index)
+      || Number(value.index) < 0
+      || Number(value.index) > 128
+    ) {
+      throw new Error("provider_tool_delta_invalid");
+    }
+    const index = Number(value.index);
+    let state = this.toolCalls.get(index);
+    if (!state) {
+      const toolCall: ToolCall = {
+        type: "toolCall",
+        id: "",
+        name: "",
+        arguments: {}
+      };
+      const contentIndex = this.partial.content.length;
+      this.partial.content.push(toolCall);
+      state = { contentIndex, toolCall, argumentsText: "", ended: false };
+      this.toolCalls.set(index, state);
+      this.sawToolCall = true;
+      this.input.stream.push({
+        type: "toolcall_start",
+        contentIndex,
+        partial: this.partial
+      });
+    }
+    if (state.ended) throw new Error("provider_tool_delta_invalid");
+    if (typeof value.id === "string" && value.id) state.toolCall.id = value.id;
+    if (!isPlainRecord(value.function)) return;
+    if (typeof value.function.name === "string" && value.function.name) {
+      state.toolCall.name += value.function.name;
+    }
+    const delta = typeof value.function.arguments === "string"
+      ? value.function.arguments
+      : "";
+    if (delta) {
+      state.argumentsText += delta;
+      state.toolCall.arguments = parseStreamingJson(state.argumentsText);
+      this.input.stream.push({
+        type: "toolcall_delta",
+        contentIndex: state.contentIndex,
+        delta,
+        partial: this.partial
+      });
+    }
+    if (
+      state.toolCall.id.length > 256
+      || state.toolCall.name.length > 256
+      || state.argumentsText.length > 1_000_000
+    ) {
+      throw new Error("provider_tool_delta_invalid");
+    }
+  }
+
+  private endThinking(): void {
+    if (this.activeThinkingIndex === null) return;
+    const contentIndex = this.activeThinkingIndex;
+    this.activeThinkingIndex = null;
+    const content = this.partial.content[contentIndex];
+    if (!content || content.type !== "thinking") {
+      throw new Error("provider_reasoning_state_invalid");
+    }
+    this.input.stream.push({
+      type: "thinking_end",
+      contentIndex,
+      content: content.thinking,
+      partial: this.partial
+    });
+  }
+
+  private endText(): void {
+    if (this.activeTextIndex === null) return;
+    const contentIndex = this.activeTextIndex;
+    this.activeTextIndex = null;
+    const content = this.partial.content[contentIndex];
+    if (!content || content.type !== "text") {
+      throw new Error("provider_text_state_invalid");
+    }
+    this.input.stream.push({
+      type: "text_end",
+      contentIndex,
+      content: content.text,
+      partial: this.partial
+    });
+  }
+
+  private endToolCalls(): void {
+    for (const [, state] of [...this.toolCalls].sort(
+      ([left], [right]) => left - right
+    )) {
+      if (state.ended) continue;
+      if (!state.toolCall.id || !state.toolCall.name) {
+        throw new Error("provider_tool_delta_invalid");
+      }
+      state.toolCall.arguments = parseRecord(state.argumentsText || "{}");
+      state.ended = true;
+      this.input.stream.push({
+        type: "toolcall_end",
+        contentIndex: state.contentIndex,
+        toolCall: state.toolCall,
+        partial: this.partial
+      });
+    }
+    this.toolCalls.clear();
+  }
+}
+
+function nextSseEventBoundary(
+  value: string
+): { index: number; length: number } | null {
+  const match = /(?:\r\n|\r|\n)(?:\r\n|\r|\n)/u.exec(value);
+  return match?.index === undefined
+    ? null
+    : { index: match.index, length: match[0].length };
 }
 
 export function buildDeepSeekBody(

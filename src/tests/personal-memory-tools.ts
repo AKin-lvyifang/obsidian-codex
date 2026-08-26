@@ -124,6 +124,32 @@ function assertOpenAiCompatibleMemoryToolSchemas(): void {
       evidenceQuote: "请记住：以后先给结论。"
     }
   });
+  const stringRequest = {
+    operation: "create",
+    title: "字符串兼容",
+    content: "只兼容 request 中的普通对象 JSON 字符串。",
+    recallWhen: "Provider 把 request 编码成字符串时",
+    evidenceQuote: "请记住这个字符串兼容测试。"
+  };
+  assert.deepEqual(normalizePiPersonalMemoryToolArguments("memory_write", {
+    request: JSON.stringify(stringRequest)
+  }), { request: stringRequest });
+  for (const invalidRequest of [
+    "not-json",
+    "null",
+    "[]",
+    JSON.stringify("nested-string"),
+    JSON.stringify({ ...stringRequest, extra: true })
+  ]) {
+    assert.throws(() => normalizePiPersonalMemoryToolArguments(
+      "memory_write",
+      { request: invalidRequest }
+    ));
+  }
+  assert.throws(() => normalizePiPersonalMemoryToolArguments(
+    "memory_search",
+    JSON.stringify({ query: "不得扩展到其他 Tool" })
+  ));
   assert.deepEqual(normalizePiPersonalMemoryToolArguments("memory_write", {
     request: {
       operation: "forget",

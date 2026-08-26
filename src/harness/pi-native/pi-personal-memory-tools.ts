@@ -544,7 +544,25 @@ function normalizeRead(input: Readonly<Record<string, unknown>>): Readonly<Memor
 
 function normalizeWrite(input: Readonly<Record<string, unknown>>): Readonly<MemoryWriteToolArguments> {
   requireExactKeys(input, ["request"]);
-  return Object.freeze({ request: normalizeWriteRequest(requireRecord(input.request)) });
+  return Object.freeze({
+    request: normalizeWriteRequest(memoryWriteRequestRecord(input.request))
+  });
+}
+
+function memoryWriteRequestRecord(
+  value: unknown
+): Readonly<Record<string, unknown>> {
+  if (typeof value !== "string") return requireRecord(value);
+  if (!value || value.length > 64 * 1024) {
+    throw new Error("memory_tool_arguments_invalid");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error("memory_tool_arguments_invalid");
+  }
+  return requireRecord(parsed);
 }
 
 function normalizeWriteRequest(

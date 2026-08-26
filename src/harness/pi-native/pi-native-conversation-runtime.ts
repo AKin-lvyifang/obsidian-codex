@@ -439,8 +439,6 @@ interface ActiveProductRun {
   memoryRecall?: PiMemoryRecallObservation;
   providerStartedAt?: number;
   firstAssistantTextSeen: boolean;
-  providerReasoningId: string;
-  providerReasoningText: string;
   providerReasoningBlocks: Map<string, MutableProviderReasoningBlock>;
   reasoningSummary: Readonly<EchoInkReasoningSummarySnapshot>;
   reasoningStartEntryId?: string;
@@ -471,12 +469,11 @@ interface ActiveProductRun {
 interface MutableProviderReasoningBlock {
   readonly messageKey: string;
   readonly contentIndex: number;
+  readonly reasoningId: string;
   readonly startedAt: number;
   text: string;
   exposed: boolean;
   redacted: boolean;
-  aggregateStart?: number;
-  aggregatePrefix?: string;
 }
 
 interface MutablePiKnowledgeObservation {
@@ -1154,8 +1151,6 @@ export class PiNativeConversationRuntime {
       memoryMode,
       noteMentions,
       firstAssistantTextSeen: false,
-      providerReasoningId: stableId("provider-reasoning", productRunId),
-      providerReasoningText: "",
       providerReasoningBlocks: new Map(),
       reasoningSummary: createReasoningSummary({
         conversationId: catalog.conversationId,
@@ -2913,6 +2908,11 @@ export class PiNativeConversationRuntime {
     execution.providerReasoningBlocks.set(key, {
       messageKey: messageKeyValue,
       contentIndex,
+      reasoningId: providerReasoningSegmentId(
+        execution.productRunId,
+        messageKeyValue,
+        contentIndex
+      ),
       startedAt: observedAt,
       text: "",
       exposed: false,
@@ -2943,6 +2943,11 @@ export class PiNativeConversationRuntime {
       block = {
         messageKey: messageKeyValue,
         contentIndex: event.contentIndex,
+        reasoningId: providerReasoningSegmentId(
+          execution.productRunId,
+          messageKeyValue,
+          event.contentIndex
+        ),
         startedAt: observedAt,
         text: "",
         exposed: false,
@@ -2965,30 +2970,24 @@ export class PiNativeConversationRuntime {
     block.text += event.delta;
     if (!block.exposed) {
       if (!block.text.trim()) return;
-      block.aggregateStart = execution.providerReasoningText.length;
-      block.aggregatePrefix = execution.providerReasoningText.trim()
-        ? "\n\n"
-        : "";
-      execution.providerReasoningText += `${block.aggregatePrefix}${block.text}`;
       block.exposed = true;
       await this.emitRuntimeEvent(active, execution, {
         type: "provider_reasoning_start",
         messageKey: messageKeyValue,
-        reasoningId: execution.providerReasoningId
+        reasoningId: block.reasoningId
       }, block.startedAt);
       await this.emitRuntimeEvent(active, execution, {
         type: "provider_reasoning_delta",
         messageKey: messageKeyValue,
-        reasoningId: execution.providerReasoningId,
-        textDelta: `${block.aggregatePrefix}${block.text}`
+        reasoningId: block.reasoningId,
+        textDelta: block.text
       }, observedAt);
       return;
     }
-    execution.providerReasoningText += event.delta;
     await this.emitRuntimeEvent(active, execution, {
       type: "provider_reasoning_delta",
       messageKey: messageKeyValue,
-      reasoningId: execution.providerReasoningId,
+      reasoningId: block.reasoningId,
       textDelta: event.delta
     }, observedAt);
   }
@@ -3014,6 +3013,11 @@ export class PiNativeConversationRuntime {
     const block = execution.providerReasoningBlocks.get(key) ?? {
       messageKey: messageKeyValue,
       contentIndex: event.contentIndex,
+      reasoningId: providerReasoningSegmentId(
+        execution.productRunId,
+        messageKeyValue,
+        event.contentIndex
+      ),
       startedAt: observedAt,
       text: "",
       exposed: false,
@@ -3125,30 +3129,19 @@ export class PiNativeConversationRuntime {
       return;
     }
     if (!block.exposed) {
-      block.aggregateStart = execution.providerReasoningText.length;
-      block.aggregatePrefix = execution.providerReasoningText.trim()
-        ? "\n\n"
-        : "";
       block.exposed = true;
       await this.emitRuntimeEvent(active, execution, {
         type: "provider_reasoning_start",
         messageKey: block.messageKey,
-        reasoningId: execution.providerReasoningId
+        reasoningId: block.reasoningId
       }, block.startedAt);
     }
-    const aggregateStart = block.aggregateStart
-      ?? execution.providerReasoningText.length;
-    const aggregatePrefix = block.aggregatePrefix ?? "";
-    execution.providerReasoningText = `${execution.providerReasoningText.slice(
-      0,
-      aggregateStart
-    )}${aggregatePrefix}${finalText}`;
     execution.providerReasoningBlocks.delete(key);
     await this.emitRuntimeEvent(active, execution, {
       type: "provider_reasoning_end",
       messageKey: block.messageKey,
-      reasoningId: execution.providerReasoningId,
-      text: execution.providerReasoningText,
+      reasoningId: block.reasoningId,
+      text: finalText,
       status
     }, observedAt);
   }
@@ -3162,15 +3155,11 @@ export class PiNativeConversationRuntime {
   ): Promise<void> {
     execution.providerReasoningBlocks.delete(key);
     if (!block.exposed) return;
-    execution.providerReasoningText = execution.providerReasoningText.slice(
-      0,
-      block.aggregateStart ?? execution.providerReasoningText.length
-    );
     await this.emitRuntimeEvent(active, execution, {
       type: "provider_reasoning_end",
       messageKey: block.messageKey,
-      reasoningId: execution.providerReasoningId,
-      text: execution.providerReasoningText,
+      reasoningId: block.reasoningId,
+      text: "",
       status: "interrupted"
     }, observedAt);
   }
@@ -4269,6 +4258,17 @@ function providerReasoningBlockKey(
   contentIndex: number
 ): string {
   return `${messageKeyValue}\0${contentIndex}`;
+}
+
+function providerReasoningSegmentId(
+  productRunId: string,
+  messageKeyValue: string,
+  contentIndex: number
+): string {
+  return stableId(
+    "provider-reasoning",
+    `${productRunId}\0${messageKeyValue}\0${contentIndex}`
+  );
 }
 
 function providerThinkingContentAt(
