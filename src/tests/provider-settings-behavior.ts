@@ -6474,6 +6474,203 @@ async function assertQwenTokenPlanTransportContract(): Promise<void> {
   const streamingHeaders = {
     "content-type": "text/event-stream; charset=utf-8"
   } as const;
+  const runQwenBody = async (
+    body: string,
+    transportComplete = true
+  ): Promise<AssistantMessage> => await createQwenTokenPlanOpenAICompletionsAdapter(
+    async () => ({
+      status: 200,
+      headers: streamingHeaders,
+      body,
+      transportComplete
+    })
+  ).stream({
+    ...structuredClone(qwenCatalogModel),
+    baseUrl: transportInput.baseUrl
+  }, {
+    messages: [{
+      role: "user",
+      content: "测试 SSE 收尾",
+      timestamp: Date.now()
+    }],
+    tools: []
+  }, {
+    apiKey: fixtureKey,
+    reasoning: "high",
+    maxTokens: 64,
+    temperature: 0,
+    cacheRetention: "none",
+    maxRetries: 0,
+    timeoutMs: 1_000
+  }).result();
+  const completionEvent = (
+    content: string,
+    finishReason: string | null
+  ): string => `data: ${JSON.stringify({
+    id: "fixture-clean-eof-response",
+    model: "qwen3.7-plus",
+    choices: [{
+      delta: { content },
+      finish_reason: finishReason
+    }]
+  })}`;
+
+  const unterminatedFinalJson = await runQwenBody(
+    completionEvent("末块完成", "stop")
+  );
+  assert.equal(unterminatedFinalJson.stopReason, "stop");
+  assert.equal(
+    unterminatedFinalJson.content[0]?.type === "text"
+      ? unterminatedFinalJson.content[0].text
+      : "",
+    "末块完成"
+  );
+
+  const unterminatedDone = await runQwenBody([
+    completionEvent("DONE 完成", "stop"),
+    "data: [DONE]"
+  ].join("\n\n"));
+  assert.equal(unterminatedDone.stopReason, "stop");
+
+  const finishReasonWithoutDone = await runQwenBody(
+    `${completionEvent("无需 DONE", "stop")}\n\n`
+  );
+  assert.equal(finishReasonWithoutDone.stopReason, "stop");
+
+  const lengthWithoutDone = await runQwenBody(
+    completionEvent("达到长度", "length")
+  );
+  assert.equal(lengthWithoutDone.stopReason, "length");
+
+  const toolWithoutDone = await runQwenBody(`data: ${JSON.stringify({
+    choices: [{
+      delta: {
+        tool_calls: [{
+          index: 0,
+          id: "fixture-clean-eof-tool",
+          function: {
+            name: "note_read",
+            arguments: "{\"path\":\"Inbox/clean-eof.md\"}"
+          }
+        }]
+      },
+      finish_reason: "tool_calls"
+    }]
+  })}`);
+  assert.equal(toolWithoutDone.stopReason, "toolUse");
+  assert.deepEqual(toolWithoutDone.content[0], {
+    type: "toolCall",
+    id: "fixture-clean-eof-tool",
+    name: "note_read",
+    arguments: { path: "Inbox/clean-eof.md" }
+  });
+
+  const malformedFinalEvent = await runQwenBody("data: []");
+  assert.equal(malformedFinalEvent.stopReason, "error");
+  assert.equal(malformedFinalEvent.errorMessage, "provider_protocol_failed");
+
+  const truncatedFinalEvent = await runQwenBody([
+    `${completionEvent("保留截断前内容", null)}\n`,
+    "data: {\"choices\":["
+  ].join("\n"));
+  assert.equal(truncatedFinalEvent.stopReason, "error");
+  assert.equal(truncatedFinalEvent.errorMessage, "provider_protocol_failed");
+  assert.equal(
+    truncatedFinalEvent.content[0]?.type === "text"
+      ? truncatedFinalEvent.content[0].text
+      : "",
+    "保留截断前内容"
+  );
+
+  const unsupportedFinishReason = await runQwenBody(
+    completionEvent("不支持的结束原因", "content_filter")
+  );
+  assert.equal(unsupportedFinishReason.stopReason, "error");
+  assert.equal(
+    unsupportedFinishReason.errorMessage,
+    "provider_protocol_failed"
+  );
+
+  let incompleteTransportCalls = 0;
+  const incompleteTransport = await createQwenTokenPlanOpenAICompletionsAdapter(
+    async () => {
+      incompleteTransportCalls += 1;
+      return {
+        status: 200,
+        headers: streamingHeaders,
+        body: `${completionEvent("保留不完整传输", "stop")}\n\n`,
+        transportComplete: false
+      };
+    }
+  ).stream({
+    ...structuredClone(qwenCatalogModel),
+    baseUrl: transportInput.baseUrl
+  }, {
+    messages: [{
+      role: "user",
+      content: "测试不完整传输",
+      timestamp: Date.now()
+    }],
+    tools: []
+  }, {
+    apiKey: fixtureKey,
+    reasoning: "high",
+    maxTokens: 64,
+    temperature: 0,
+    cacheRetention: "none",
+    maxRetries: 3,
+    timeoutMs: 1_000
+  }).result();
+  assert.equal(incompleteTransportCalls, 1);
+  assert.equal(incompleteTransport.stopReason, "error");
+  assert.equal(incompleteTransport.errorMessage, "provider_network_failed");
+  assert.equal(
+    incompleteTransport.content[0]?.type === "text"
+      ? incompleteTransport.content[0].text
+      : "",
+    "保留不完整传输"
+  );
+
+  let abortedTransportCalls = 0;
+  const abortedTransport = await createQwenTokenPlanOpenAICompletionsAdapter(
+    async (request) => {
+      abortedTransportCalls += 1;
+      await request.onResponse?.({ status: 200, headers: streamingHeaders });
+      request.onChunk?.(Buffer.from(
+        `${completionEvent("保留中止前内容", null)}\n\n`,
+        "utf8"
+      ));
+      throw new Error("qwen_token_plan_response_aborted");
+    }
+  ).stream({
+    ...structuredClone(qwenCatalogModel),
+    baseUrl: transportInput.baseUrl
+  }, {
+    messages: [{
+      role: "user",
+      content: "测试中止传输",
+      timestamp: Date.now()
+    }],
+    tools: []
+  }, {
+    apiKey: fixtureKey,
+    reasoning: "high",
+    maxTokens: 64,
+    temperature: 0,
+    cacheRetention: "none",
+    maxRetries: 3,
+    timeoutMs: 1_000
+  }).result();
+  assert.equal(abortedTransportCalls, 1);
+  assert.equal(abortedTransport.stopReason, "error");
+  assert.equal(abortedTransport.errorMessage, "provider_network_failed");
+  assert.equal(
+    abortedTransport.content[0]?.type === "text"
+      ? abortedTransport.content[0].text
+      : "",
+    "保留中止前内容"
+  );
+
   const firstReasoningBlock = [
     `data: ${JSON.stringify({
       id: "fixture-incremental-response",

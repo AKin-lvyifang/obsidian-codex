@@ -61,7 +61,6 @@ class OpenAICompatibleSseDecoder implements ProviderSseStreamDecoder {
   private readonly decoder = new TextDecoder("utf-8", { fatal: true });
   private buffer = "";
   private receivedBytes = 0;
-  private sawDone = false;
   private finishReason = "";
   private finished = false;
   private activeThinkingIndex: number | null = null;
@@ -110,8 +109,12 @@ class OpenAICompatibleSseDecoder implements ProviderSseStreamDecoder {
     this.finished = true;
     this.buffer += this.decoder.decode();
     this.drainEvents();
-    if (this.buffer.trim()) throw new Error("provider_sse_incomplete");
-    if (!this.sawDone || !this.finishReason) {
+    if (this.buffer.trim()) {
+      const finalBlock = this.buffer;
+      this.buffer = "";
+      this.consumeBlock(finalBlock);
+    }
+    if (!this.finishReason) {
       throw new Error("provider_sse_incomplete");
     }
     this.endThinking();
@@ -153,7 +156,6 @@ class OpenAICompatibleSseDecoder implements ProviderSseStreamDecoder {
       .join("\n");
     if (!data) return;
     if (data === "[DONE]") {
-      this.sawDone = true;
       return;
     }
     const chunk = parseRecord(data);

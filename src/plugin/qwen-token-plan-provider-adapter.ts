@@ -45,6 +45,7 @@ export interface QwenTokenPlanProviderResponse {
   readonly status: number;
   readonly headers: Readonly<Record<string, string>>;
   readonly body: string;
+  readonly transportComplete?: boolean;
 }
 
 export interface QwenTokenPlanProviderRequest {
@@ -172,7 +173,8 @@ export async function requestQwenTokenPlanProvider(
         resolve(Object.freeze({
           status,
           headers,
-          body: Buffer.concat(chunks).toString("utf8")
+          body: Buffer.concat(chunks).toString("utf8"),
+          transportComplete: response.complete && !response.aborted
         }));
       });
       response.once("error", fail);
@@ -296,6 +298,9 @@ async function executeQwenTokenPlanCompletion(input: {
     }
     if (!decoder) throw new Error("qwen_token_plan_stream_not_ready");
     if (!streamedChunk && response.body) decoder.push(response.body);
+    if (response.transportComplete === false) {
+      throw new Error("qwen_token_plan_response_incomplete");
+    }
     decoder.finish();
   } catch (error) {
     input.output.push({
@@ -403,7 +408,7 @@ function qwenTokenPlanFailureMessage(
           ? "provider_rate_limited"
           : /model_invalid/u.test(message)
             ? "provider_model_invalid"
-            : /protocol|parse|json|sse/iu.test(message)
+            : /protocol|parse|json|sse|finish_reason/iu.test(message)
               ? "provider_protocol_failed"
               : status !== null && status >= 500
                 ? "provider_service_failed"
