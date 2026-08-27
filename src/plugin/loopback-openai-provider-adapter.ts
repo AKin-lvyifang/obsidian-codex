@@ -15,6 +15,9 @@ import {
   type StreamOptions
 } from "@earendil-works/pi-ai";
 import {
+  clampMaxTokensToContext
+} from "@earendil-works/pi-ai/api/simple-options";
+import {
   buildDeepSeekBody,
   createProviderSseStreamDecoder,
   type ProviderSseStreamDecoder
@@ -367,11 +370,15 @@ function loopbackControlledInput(
     options: {
       ...(options.signal ? { signal: options.signal } : {}),
       ...(options.reasoning ? { reasoning: options.reasoning } : {}),
-      maxTokens: boundedInteger(
-        options.maxTokens,
-        1,
-        Math.max(1, model.maxTokens),
-        Math.max(1, model.maxTokens)
+      maxTokens: clampMaxTokensToContext(
+        model,
+        context,
+        boundedInteger(
+          options.maxTokens,
+          1,
+          Math.max(1, model.maxTokens),
+          Math.max(1, model.maxTokens)
+        )
       ),
       temperature: boundedNumber(options.temperature, 0, 2, 0),
       cacheRetention: "none",

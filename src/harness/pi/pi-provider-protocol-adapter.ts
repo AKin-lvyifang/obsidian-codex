@@ -175,14 +175,7 @@ implements ControlledPiStreamPort {
     try {
       const dispatcher = this.options.dispatcher
         ?? new PiProviderProtocolDispatcher();
-      const dispatch = input.options.maxTokens === undefined
-        && (
-          input.model.api === "openai-completions"
-          || input.model.api === "openai-responses"
-        )
-        ? dispatcher.stream.bind(dispatcher)
-        : dispatcher.streamSimple.bind(dispatcher);
-      const upstream = dispatch({
+      const upstream = dispatcher.streamSimple({
         model: input.model,
         context: {
           ...input.context,

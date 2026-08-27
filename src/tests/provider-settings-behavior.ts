@@ -22,6 +22,9 @@ import {
   streamSimple
 } from "@earendil-works/pi-ai/compat";
 import {
+  clampMaxTokensToContext
+} from "@earendil-works/pi-ai/api/simple-options";
+import {
   ModelRuntime,
   SessionManager,
   SettingsManager,
@@ -264,6 +267,7 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   assertOpenAICodexSseAdapterContract();
   await assertProviderRequestLimitDispatchContract();
   await assertProtocolPayloadLimitContract();
+  await assertSpecialProviderPayloadLimitContract();
   await assertProviderAuthResolutionFailureContract();
   assertProviderTooltipBehavior();
   assertSavedModelLifecycle();
@@ -8216,65 +8220,208 @@ async function assertProviderRequestLimitDispatchContract(): Promise<void> {
   await dispatch("anthropic-messages", 8_192);
   assert.deepEqual(
     calls,
-    ["stream", "stream", "streamSimple", "streamSimple"]
+    ["streamSimple", "streamSimple", "streamSimple", "streamSimple"]
   );
 }
 
 async function assertProtocolPayloadLimitContract(): Promise<void> {
   const dispatcher = new PiProviderProtocolDispatcher();
+  const context: Context = {
+    messages: [{
+      role: "user",
+      content: "Capture the context-clamped output limit.",
+      timestamp: 1
+    }],
+    tools: []
+  };
+  const createModel = (
+    apiProtocol: "openai-completions" | "openai-responses" | "anthropic-messages"
+  ): Model<Api> => createPiProviderModelDefinition({
+    providerId: "custom",
+    apiProtocol,
+    baseUrl: "http://127.0.0.1:1/v1",
+    modelRef: "payload-fixture-model",
+    contextWindow: 6_000,
+    maxOutputTokens: 4_096
+  });
   const capture = async (
-    apiProtocol: "openai-completions" | "openai-responses" | "anthropic-messages",
-    maxTokens?: number
+    model: Model<Api>,
+    maxTokens?: number,
+    apiKey = "fixture-payload-key"
   ): Promise<Record<string, unknown>> => {
-    const model = createPiProviderModelDefinition({
-      providerId: "custom",
-      apiProtocol,
-      baseUrl: "http://127.0.0.1:1/v1",
-      modelRef: "payload-fixture-model",
-      contextWindow: 64_000,
-      maxOutputTokens: 8_192
-    });
     let payload: Record<string, unknown> | undefined;
     const onPayload = (value: unknown): never => {
       payload = structuredClone(value) as Record<string, unknown>;
       throw new Error("fixture_payload_captured");
     };
-    const stream = maxTokens === undefined
-      ? dispatcher.stream({
-        model,
-        context: { messages: [], tools: [] },
-        apiKey: "fixture-payload-key",
-        options: {
-          temperature: 0,
-          maxRetries: 0,
-          timeoutMs: 1_000,
-          onPayload
-        }
-      })
-      : dispatcher.streamSimple({
-        model,
-        context: { messages: [], tools: [] },
-        apiKey: "fixture-payload-key",
-        options: {
-          temperature: 0,
-          maxTokens,
-          maxRetries: 0,
-          timeoutMs: 1_000,
-          onPayload
-        }
-      });
+    const stream = dispatcher.streamSimple({
+      model,
+      context,
+      apiKey,
+      options: {
+        temperature: 0,
+        ...(maxTokens === undefined ? {} : { maxTokens }),
+        maxRetries: 0,
+        timeoutMs: 1_000,
+        onPayload
+      }
+    });
     await stream.result();
     assert.ok(payload);
     return payload;
   };
 
-  const chat = await capture("openai-completions");
-  assert.equal(Object.hasOwn(chat, "max_tokens"), false);
+  const chatModel = createModel("openai-completions");
+  const expectedMaximum = clampMaxTokensToContext(
+    chatModel,
+    context,
+    chatModel.maxTokens
+  );
+  assert.ok(expectedMaximum < chatModel.maxTokens);
+  const chat = await capture(chatModel);
+  assert.equal(chat.max_tokens, expectedMaximum);
   assert.equal(Object.hasOwn(chat, "max_completion_tokens"), false);
-  const responses = await capture("openai-responses");
-  assert.equal(Object.hasOwn(responses, "max_output_tokens"), false);
-  const anthropic = await capture("anthropic-messages", 8_192);
-  assert.equal(anthropic.max_tokens, 8_192);
+  const chatLower = await capture(chatModel, 1_024);
+  assert.equal(chatLower.max_tokens, 1_024);
+
+  const completionFieldModel: Model<Api> = {
+    ...structuredClone(chatModel),
+    compat: {
+      ...(structuredClone(chatModel.compat) ?? {}),
+      maxTokensField: "max_completion_tokens"
+    }
+  };
+  const completionField = await capture(completionFieldModel);
+  assert.equal(completionField.max_completion_tokens, expectedMaximum);
+  assert.equal(Object.hasOwn(completionField, "max_tokens"), false);
+
+  const responsesModel = createModel("openai-responses");
+  const responses = await capture(responsesModel);
+  assert.equal(responses.max_output_tokens, expectedMaximum);
+  const responsesLower = await capture(responsesModel, 1_024);
+  assert.equal(responsesLower.max_output_tokens, 1_024);
+
+  const anthropicModel = createModel("anthropic-messages");
+  const anthropic = await capture(anthropicModel);
+  assert.equal(anthropic.max_tokens, expectedMaximum);
+  const anthropicLower = await capture(anthropicModel, 1_024);
+  assert.equal(anthropicLower.max_tokens, 1_024);
+
+  const codexModel = OPENAI_CODEX_MODELS["gpt-5.6-sol"];
+  assert.ok(codexModel);
+  const codex = await capture(
+    codexModel,
+    undefined,
+    fixtureOpenAICodexJwt()
+  );
+  const codexLower = await capture(
+    codexModel,
+    1_024,
+    fixtureOpenAICodexJwt()
+  );
+  for (const payload of [codex, codexLower]) {
+    assert.equal(Object.hasOwn(payload, "max_tokens"), false);
+    assert.equal(Object.hasOwn(payload, "max_completion_tokens"), false);
+    assert.equal(Object.hasOwn(payload, "max_output_tokens"), false);
+  }
+}
+
+async function assertSpecialProviderPayloadLimitContract(): Promise<void> {
+  const catalog = resolveEchoInkPiCatalogModel(
+    "qwen-token-plan-cn",
+    "qwen3.7-plus"
+  );
+  assert.ok(catalog);
+  const context: Context = {
+    messages: [{
+      role: "user",
+      content: "Capture the custom adapter output limit.",
+      timestamp: 1
+    }],
+    tools: []
+  };
+  const qwenModel: Model<Api> = {
+    ...structuredClone(catalog),
+    baseUrl: QWEN_TOKEN_PLAN_API_BASE_URL,
+    contextWindow: 6_000,
+    maxTokens: 4_096
+  };
+  const loopbackModel: Model<Api> = {
+    ...structuredClone(qwenModel),
+    provider: "ollama",
+    id: "fixture-loopback-max-output",
+    baseUrl: "http://127.0.0.1:11434/v1"
+  };
+  const completionBody = (model: string): string => [
+    `data: ${JSON.stringify({
+      id: "fixture-max-output-response",
+      model,
+      choices: [{
+        delta: { content: "OK" },
+        finish_reason: "stop"
+      }]
+    })}`,
+    "data: [DONE]",
+    ""
+  ].join("\n\n");
+
+  const captureQwen = async (
+    maxTokens?: number
+  ): Promise<Record<string, unknown>> => {
+    let payload: Record<string, unknown> | undefined;
+    const adapter = createQwenTokenPlanOpenAICompletionsAdapter(
+      async (request) => {
+        payload = JSON.parse(request.body) as Record<string, unknown>;
+        return {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+          body: completionBody(qwenModel.id)
+        };
+      }
+    );
+    await adapter.streamSimple(qwenModel, context, {
+      apiKey: "fixture-qwen-max-output-key",
+      ...(maxTokens === undefined ? {} : { maxTokens }),
+      maxRetries: 0,
+      timeoutMs: 1_000
+    }).result();
+    assert.ok(payload);
+    return payload;
+  };
+  const captureLoopback = async (
+    maxTokens?: number
+  ): Promise<Record<string, unknown>> => {
+    let payload: Record<string, unknown> | undefined;
+    const adapter = createLoopbackOpenAICompletionsAdapter(
+      async (request) => {
+        assert.ok(request.body);
+        payload = JSON.parse(request.body) as Record<string, unknown>;
+        return {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+          body: completionBody(loopbackModel.id)
+        };
+      }
+    );
+    await adapter.streamSimple(loopbackModel, context, {
+      ...(maxTokens === undefined ? {} : { maxTokens }),
+      maxRetries: 0,
+      timeoutMs: 1_000
+    }).result();
+    assert.ok(payload);
+    return payload;
+  };
+
+  const expectedMaximum = clampMaxTokensToContext(
+    qwenModel,
+    context,
+    qwenModel.maxTokens
+  );
+  assert.ok(expectedMaximum < qwenModel.maxTokens);
+  assert.equal((await captureQwen()).max_tokens, expectedMaximum);
+  assert.equal((await captureQwen(1_024)).max_tokens, 1_024);
+  assert.equal((await captureLoopback()).max_tokens, expectedMaximum);
+  assert.equal((await captureLoopback(1_024)).max_tokens, 1_024);
 }
 
 async function assertProviderAuthResolutionFailureContract(): Promise<void> {
