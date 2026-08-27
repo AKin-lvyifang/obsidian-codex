@@ -213,11 +213,13 @@ const FORGET_REQUEST_SCHEMA = Type.Object({
   reason: Type.String({ minLength: 1, maxLength: 2_000 }),
   evidenceQuote: Type.String({ minLength: 1, maxLength: 2_000 })
 }, { additionalProperties: false });
+const MEMORY_WRITE_REQUEST_JSON_MAX_CHARS = 32_768;
 const MEMORY_WRITE_REQUEST_SCHEMA = Type.Union([
   CREATE_REQUEST_SCHEMA,
   UPDATE_REQUEST_SCHEMA,
   PROFILE_UPDATE_REQUEST_SCHEMA,
-  FORGET_REQUEST_SCHEMA
+  FORGET_REQUEST_SCHEMA,
+  Type.String({ maxLength: MEMORY_WRITE_REQUEST_JSON_MAX_CHARS })
 ]);
 
 export const PI_PERSONAL_MEMORY_TOOL_SCHEMAS: Readonly<Record<PiPersonalMemoryToolId, TSchema>> = Object.freeze({
@@ -529,7 +531,21 @@ function normalizeRead(input: Readonly<Record<string, unknown>>): Readonly<Memor
 
 function normalizeWrite(input: Readonly<Record<string, unknown>>): Readonly<MemoryWriteToolArguments> {
   requireExactKeys(input, ["request"]);
-  return Object.freeze({ request: normalizeWriteRequest(requireRecord(input.request)) });
+  return Object.freeze({ request: normalizeWriteRequest(normalizeWriteRequestInput(input.request)) });
+}
+
+function normalizeWriteRequestInput(value: unknown): Readonly<Record<string, unknown>> {
+  if (typeof value !== "string") return requireRecord(value);
+  if (value.length > MEMORY_WRITE_REQUEST_JSON_MAX_CHARS) {
+    throw new Error("memory_write_request_json_too_large");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error("memory_write_request_json_invalid");
+  }
+  return requireRecord(parsed);
 }
 
 function normalizeWriteRequest(

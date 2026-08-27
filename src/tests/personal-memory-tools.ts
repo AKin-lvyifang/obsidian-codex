@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { Value } from "typebox/value";
 import {
   PI_PERSONAL_MEMORY_TOOL_IDS,
   PI_PERSONAL_MEMORY_TOOL_SCHEMAS,
@@ -48,9 +49,11 @@ function assertOpenAiCompatibleMemoryToolSchemas(): void {
     Readonly<Record<string, unknown>>
   >>;
   assert.deepEqual(Object.keys(writeProperties), ["request"]);
-  const operationVariants = writeProperties.request.anyOf as ReadonlyArray<
+  const requestVariants = writeProperties.request.anyOf as ReadonlyArray<
     Readonly<Record<string, unknown>>
   >;
+  const operationVariants = requestVariants.slice(0, 4);
+  const jsonStringVariant = requestVariants[4]!;
   const operationNames = operationVariants.map((variant) => {
     const properties = variant.properties as Readonly<Record<
       string,
@@ -73,6 +76,8 @@ function assertOpenAiCompatibleMemoryToolSchemas(): void {
     ["operation", "profileKey", "text"],
     ["operation", "targetId", "reason", "evidenceQuote"]
   ]);
+  assert.equal(jsonStringVariant.type, "string");
+  assert.equal(jsonStringVariant.maxLength, 32_768);
   const profileVariant = operationVariants[2]!;
   const profileProperties = profileVariant.properties as Readonly<Record<
     string,
@@ -112,23 +117,50 @@ function assertOpenAiCompatibleMemoryToolSchemas(): void {
   assert.match(String(schemas.memory_search.description ?? ""), /exhausted=false.*nextCursor/iu);
   assert.equal(profileProperties.text.maxLength, 120);
 
+  const createRequest = {
+    operation: "create",
+    kind: "view",
+    title: "沟通偏好",
+    content: "用户希望先给结论。",
+    recallWhen: "需要组织回答时"
+  } as const;
+  const normalizedCreate = {
+    request: {
+      operation: "create",
+      kind: "view",
+      title: "沟通偏好",
+      content: "用户希望先给结论。",
+      recallWhen: "需要组织回答时"
+    }
+  };
+  const writeSchema = PI_PERSONAL_MEMORY_TOOL_SCHEMAS.memory_write;
+  assert.equal(Value.Check(writeSchema, { request: createRequest }), true);
+  assert.equal(Value.Check(writeSchema, { request: JSON.stringify(createRequest) }), true);
   assert.deepEqual(normalizePiPersonalMemoryToolArguments("memory_write", {
-    request: {
-      operation: "create",
-      kind: "view",
-      title: "沟通偏好",
-      content: "用户希望先给结论。",
-      recallWhen: "需要组织回答时"
-    }
-  }), {
-    request: {
-      operation: "create",
-      kind: "view",
-      title: "沟通偏好",
-      content: "用户希望先给结论。",
-      recallWhen: "需要组织回答时"
-    }
-  });
+    request: createRequest
+  }), normalizedCreate);
+  assert.deepEqual(normalizePiPersonalMemoryToolArguments("memory_write", {
+    request: JSON.stringify(createRequest)
+  }), normalizedCreate);
+
+  assert.equal(Value.Check(writeSchema, { request: null }), false);
+  assert.equal(Value.Check(writeSchema, { request: [] }), false);
+  assert.equal(Value.Check(writeSchema, { request: "x".repeat(32_769) }), false);
+  assert.equal(Value.Check(writeSchema, {
+    request: { ...createRequest, unexpected: true }
+  }), false);
+  for (const invalidJsonRequest of [
+    "{",
+    "null",
+    "[]",
+    JSON.stringify(JSON.stringify(createRequest)),
+    JSON.stringify({ ...createRequest, unexpected: true }),
+    "x".repeat(32_769)
+  ]) {
+    assert.throws(() => normalizePiPersonalMemoryToolArguments("memory_write", {
+      request: invalidJsonRequest
+    }));
+  }
   assert.deepEqual(normalizePiPersonalMemoryToolArguments("memory_write", {
     request: {
       operation: "forget",
