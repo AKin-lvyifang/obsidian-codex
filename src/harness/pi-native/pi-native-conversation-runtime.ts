@@ -16,6 +16,7 @@ import {
   type Model,
   type ModelThinkingLevel
 } from "@earendil-works/pi-ai";
+import { safeProviderFailureCode } from "../pi/provider-failure";
 import {
   routeKnowledgeConversationCommand,
   type KnowledgeConversationCommand
@@ -2078,6 +2079,7 @@ export class PiNativeConversationRuntime {
           query: run.requestText,
           recentConversation: Object.freeze(active.sessionManager.getBranch()
             .filter((entry) => entry.type === "message")
+            .filter((entry) => isValidRecentConversationMessage(entry.message))
             .map((entry) => publicMessageText(entry.message).trim())
             .filter(Boolean)
             .slice(-6))
@@ -4462,6 +4464,14 @@ function publicMessageText(message: AgentMessage): string {
     .join("");
 }
 
+function isValidRecentConversationMessage(message: AgentMessage): boolean {
+  if (message.role === "user") return true;
+  return message.role === "assistant"
+    && message.stopReason !== "error"
+    && message.stopReason !== "aborted"
+    && message.stopReason !== "length";
+}
+
 function classifyTerminalState(
   entries: readonly SessionEntry[],
   abortRequested: boolean,
@@ -4471,7 +4481,12 @@ function classifyTerminalState(
   if (abortRequested || assistant?.stopReason === "aborted") {
     return "cancelled";
   }
-  if (promptError || !assistant || assistant.stopReason === "error") {
+  if (
+    promptError
+    || !assistant
+    || assistant.stopReason === "error"
+    || assistant.stopReason === "length"
+  ) {
     return "failed";
   }
   return "completed";
@@ -4953,6 +4968,11 @@ function safeProductRunErrorCode(
   }
   if (promptError instanceof PiSessionDurabilityError) {
     return `pi_session_${promptError.code}`;
+  }
+  const providerFailure = safeProviderFailureCode(assistant?.errorMessage);
+  if (providerFailure) return providerFailure;
+  if (assistant?.stopReason === "length") {
+    return "provider_output_limit_reached";
   }
   return assistant?.stopReason === "error"
     ? "provider_run_failed"

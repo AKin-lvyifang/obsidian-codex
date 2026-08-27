@@ -23,6 +23,10 @@ import type {
   ControlledPiStreamInput
 } from "../harness/pi/production-pi-model-resolver";
 import {
+  preventProviderRetryAfterPartial,
+  safeProviderFailureCode
+} from "../harness/pi/provider-failure";
+import {
   apiProviderRequestUrl,
   isLoopbackApiProviderUrl
 } from "../settings/provider-presets";
@@ -36,6 +40,7 @@ export interface LoopbackProviderResponse {
   readonly status: number;
   readonly headers: Readonly<Record<string, string>>;
   readonly body: string;
+  readonly transportComplete?: boolean;
 }
 
 export interface LoopbackProviderRequest {
@@ -194,7 +199,8 @@ export async function requestLoopbackProvider(
         resolve(Object.freeze({
           status,
           headers,
-          body: Buffer.concat(chunks).toString("utf8")
+          body: Buffer.concat(chunks).toString("utf8"),
+          transportComplete: response.complete && !response.aborted
         }));
       });
       response.once("error", fail);
@@ -320,6 +326,9 @@ async function executeLoopbackCompletion(input: {
     }
     if (!decoder) throw new Error("loopback_provider_stream_not_ready");
     if (!streamedChunk && response.body) decoder.push(response.body);
+    if (response.transportComplete === false) {
+      throw new Error("provider_network_error_http_incomplete");
+    }
     decoder.finish();
   } catch (error) {
     input.output.push({
@@ -385,13 +394,21 @@ function loopbackFailureMessage(
   partial?: AssistantMessage
 ): AssistantMessage {
   const message = error instanceof Error ? error.message : "";
-  const errorMessage = aborted
+  const safeCode = aborted
     ? "controlled_transport_aborted"
-    : status === 401 || status === 403
-      ? "provider_auth_failed"
-      : /parse|json|sse|protocol/iu.test(message)
-        ? "provider_protocol_failed"
-        : "provider_network_failed";
+    : /response_(?:aborted|incomplete)/iu.test(message)
+      ? "provider_network_error_http_incomplete"
+      : status === 429
+        ? "provider_rate_limited"
+        : status !== null && status >= 500
+          ? "provider_service_unavailable"
+    : safeProviderFailureCode(message)
+      ?? (status === 401 || status === 403
+        ? "provider_auth_failed"
+        : /parse|json|sse|protocol|stream_not_ready|response_repeated|target_invalid|model_invalid/iu.test(message)
+          ? "provider_protocol_failed"
+          : "provider_network_error");
+  const errorMessage = preventProviderRetryAfterPartial(safeCode, partial);
   return {
     ...(partial ?? {
       role: "assistant",

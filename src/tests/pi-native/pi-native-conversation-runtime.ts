@@ -106,6 +106,7 @@ export async function runPiNativeConversationRuntimeTests(): Promise<void> {
   await assertReasoningSelectionFailsClosedBeforePiPrompt();
   assertKnowledgeMaintenanceRequiresExplicitCommand();
   await assertProjectionAndCatalogManagementStayAgentSessionFree();
+  await assertFailedAssistantHistoryIsDurableButExcludedFromMemory();
   await assertKnowledgeAskUsesAgentAndReadOnlyTools();
   await assertAskSourceAttributionCapturesOnlyInjectedPrimaryMemory();
   await assertKnowledgeObservationAndProgressArePrivacySafe();
@@ -702,6 +703,94 @@ Promise<void> {
     assert.equal(fixture.sessions.length, 1, "opening must activate its AgentSession");
     await fixture.runtime.switchConversation("history-a", "history-b");
     assert.equal(fixture.sessions.length, 2, "switching must activate the target AgentSession");
+  });
+}
+
+async function assertFailedAssistantHistoryIsDurableButExcludedFromMemory():
+Promise<void> {
+  await withFixture([
+    "failed-history-run",
+    "failed-history-follow-up-run"
+  ], async (fixture) => {
+    const conversationId = "failed-assistant-history-hygiene";
+    await fixture.runtime.createConversation({
+      conversationId,
+      title: "Failed Assistant history hygiene",
+      cwd: fixture.root,
+      createdAt: 1
+    });
+    await fixture.runtime.activateConversation(conversationId);
+    const firstSession = fixture.latestSession();
+    const failedRun = await fixture.submit({
+      conversationId,
+      text: "触发中断前的用户问题",
+      submittedAt: 2
+    });
+    firstSession.finishFailed(
+      "provider_sse_json_invalid",
+      "FAILED_ASSISTANT_PARTIAL_CANARY"
+    );
+    assert.equal((await failedRun.result).terminalState, "failed");
+    assert.equal(
+      (await fixture.productRuns.read(failedRun.productRunId))?.error,
+      "provider_sse_json_invalid",
+      "ProductRun must preserve the precise content-free Provider failure code"
+    );
+    assert.equal(fixture.runtime.releaseProductRun(failedRun.productRunId), true);
+
+    const durableProjection = await fixture.runtime.readProjection(
+      conversationId
+    );
+    const durableFailedAnswer = durableProjection.messages.find((message) =>
+      message.role === "assistant"
+      && message.text === "FAILED_ASSISTANT_PARTIAL_CANARY"
+    );
+    assert.equal(durableFailedAnswer?.status, "failed");
+    assert.equal(
+      durableFailedAnswer?.details,
+      "Provider 返回的流数据格式损坏，回答未完成。"
+    );
+
+    await fixture.runtime.releaseConversation(conversationId);
+    const reopenedProjection = await fixture.runtime.activateConversation(
+      conversationId
+    );
+    const reopenedFailedAnswer = reopenedProjection.messages.find((message) =>
+      message.role === "assistant"
+      && message.text === "FAILED_ASSISTANT_PARTIAL_CANARY"
+    );
+    assert.equal(reopenedFailedAnswer?.status, "failed");
+    assert.equal(reopenedFailedAnswer?.details, durableFailedAnswer?.details);
+
+    const reopenedSession = fixture.latestSession();
+    reopenedSession.sessionManager.appendMessage({
+      ...assistantMessage("ABORTED_ASSISTANT_PARTIAL_CANARY", 400_001),
+      stopReason: "aborted"
+    });
+    reopenedSession.sessionManager.appendMessage({
+      ...assistantMessage("LENGTH_ASSISTANT_PARTIAL_CANARY", 400_002),
+      stopReason: "length"
+    });
+    reopenedSession.sessionManager.appendMessage(
+      assistantMessage("保留的完整 Assistant 历史", 400_003)
+    );
+
+    const followUp = await fixture.submit({
+      conversationId,
+      text: "检查下一轮 Memory 上下文",
+      submittedAt: 3
+    });
+    const recentConversation = reopenedSession
+      .memoryTurnsBeforeUserEntryAppend.at(-1)?.recentConversation ?? [];
+    assert.match(recentConversation.join("\n"), /触发中断前的用户问题/u);
+    assert.match(recentConversation.join("\n"), /保留的完整 Assistant 历史/u);
+    assert.doesNotMatch(
+      recentConversation.join("\n"),
+      /FAILED_ASSISTANT|ABORTED_ASSISTANT|LENGTH_ASSISTANT/u,
+      "Personal Memory recentConversation must exclude every failed partial"
+    );
+    reopenedSession.finishSuccessful("后续回答完成");
+    assert.equal((await followUp.result).terminalState, "completed");
   });
 }
 
@@ -3732,11 +3821,11 @@ class ControlledAgentSession {
     resolve();
   }
 
-  finishFailed(errorMessage: string): void {
+  finishFailed(errorMessage: string, text = ""): void {
     const resolve = this.resolvePrompt;
     assert.ok(resolve, "expected a pending prompt");
     this.sessionManager.appendMessage({
-      ...assistantMessage("", 300_000 + this.promptSequence),
+      ...assistantMessage(text, 300_000 + this.promptSequence),
       stopReason: "error",
       errorMessage
     });

@@ -23,6 +23,10 @@ import type {
   ControlledPiStreamInput
 } from "../harness/pi/production-pi-model-resolver";
 import {
+  preventProviderRetryAfterPartial,
+  safeProviderFailureCode
+} from "../harness/pi/provider-failure";
+import {
   apiProviderRequestUrl,
   isQwenTokenPlanApiProviderUrl,
   QWEN_TOKEN_PLAN_API_BASE_URL
@@ -299,7 +303,7 @@ async function executeQwenTokenPlanCompletion(input: {
     if (!decoder) throw new Error("qwen_token_plan_stream_not_ready");
     if (!streamedChunk && response.body) decoder.push(response.body);
     if (response.transportComplete === false) {
-      throw new Error("qwen_token_plan_response_incomplete");
+      throw new Error("provider_network_error_http_incomplete");
     }
     decoder.finish();
   } catch (error) {
@@ -340,16 +344,12 @@ function qwenTokenPlanControlledInput(
     options: {
       ...(options.signal ? { signal: options.signal } : {}),
       ...(reasoning ? { reasoning } : {}),
-      ...(options.maxTokens === undefined
-        ? {}
-        : {
-          maxTokens: boundedInteger(
-            options.maxTokens,
-            1,
-            Math.max(1, model.maxTokens),
-            Math.max(1, model.maxTokens)
-          )
-        }),
+      maxTokens: boundedInteger(
+        options.maxTokens,
+        1,
+        Math.max(1, model.maxTokens),
+        Math.max(1, model.maxTokens)
+      ),
       temperature: boundedNumber(options.temperature, 0, 2, 0),
       cacheRetention: "none",
       maxRetries: 0,
@@ -386,7 +386,7 @@ function qwenTokenPlanHttpFailureCode(
     return "provider_protocol_failed";
   }
   return status >= 500
-    ? "provider_service_failed"
+    ? "provider_service_unavailable"
     : "provider_http_failed";
 }
 
@@ -398,21 +398,25 @@ function qwenTokenPlanFailureMessage(
   partial?: AssistantMessage
 ): AssistantMessage {
   const message = error instanceof Error ? error.message : "";
-  const errorMessage = aborted
+  const safeCode = aborted
     ? "controlled_transport_aborted"
-    : /context_length_exceeded/u.test(message)
-      ? "context_length_exceeded"
-      : status === 401 || status === 403
-        ? "provider_auth_failed"
-        : status === 429
-          ? "provider_rate_limited"
-          : /model_invalid/u.test(message)
-            ? "provider_model_invalid"
-            : /protocol|parse|json|sse|finish_reason/iu.test(message)
-              ? "provider_protocol_failed"
-              : status !== null && status >= 500
-                ? "provider_service_failed"
-                : "provider_network_failed";
+    : /response_(?:aborted|incomplete)/iu.test(message)
+      ? "provider_network_error_http_incomplete"
+    : safeProviderFailureCode(message)
+      ?? (/context_length_exceeded/u.test(message)
+        ? "context_length_exceeded"
+        : status === 401 || status === 403
+          ? "provider_auth_failed"
+          : status === 429
+            ? "provider_rate_limited"
+            : /model_invalid/u.test(message)
+              ? "provider_model_invalid"
+              : /protocol|parse|json|sse|finish_reason|stream_not_ready|response_repeated|target_invalid/iu.test(message)
+                ? "provider_protocol_failed"
+                : status !== null && status >= 500
+                  ? "provider_service_unavailable"
+                  : "provider_network_error");
+  const errorMessage = preventProviderRetryAfterPartial(safeCode, partial);
   return {
     ...(partial ?? {
       role: "assistant",

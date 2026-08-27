@@ -9,6 +9,7 @@ import type {
   PiTaskPlanTransitionRequest
 } from "../../harness/pi-native/contracts";
 import { PI_IMAGE_INPUT_UNSUPPORTED_MESSAGE } from "../../harness/pi-native/contracts";
+import { providerFailureText } from "../../harness/pi/provider-failure";
 import {
   PiChatUiProjector,
   piEntryIdFromProjectedMessageId,
@@ -788,7 +789,11 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
     view.renderMessagesIfActive(session);
 
     if (settledEvent.terminalState === "failed") {
-      new Notice(settledRun.error || "EchoInk Pi Chat 执行失败。");
+      new Notice(
+        providerFailureText(settledRun.error)
+          ?? settledRun.error
+          ?? "EchoInk Pi Chat 执行失败。"
+      );
     }
     return queuedTurnOutcomeForPiTerminal(settledEvent.terminalState);
   } catch (error) {

@@ -53,6 +53,7 @@ import {
   type EchoInkTurnInteractionRecord
 } from "../../types/conversation-turn";
 import { PI_USER_QUESTION_TOOL_ID } from "./pi-user-question-tool";
+import { providerFailureText } from "../pi/provider-failure";
 
 export type {
   PiChatUiToolApprovalStatus,
@@ -778,6 +779,9 @@ export class PiChatUiProjector {
           itemType: failure.itemType,
           title: failure.itemType === "error" ? failure.title : undefined,
           text: text || failure.text,
+          ...(text && failure.itemType === "error"
+            ? { details: failure.text }
+            : {}),
           status: failure.status,
           providerId: visibleText(message.provider) || undefined,
           modelId: visibleText(message.model) || undefined,
@@ -2041,6 +2045,15 @@ function assistantFailure(message: PiSessionMessageView): {
   readonly text: string;
 } {
   const stopReason = normalizedToken(message.stopReason);
+  if (stopReason === "length") {
+    return {
+      itemType: "error",
+      status: "failed",
+      title: "回答未完成",
+      text: providerFailureText("provider_output_limit_reached")
+        ?? "达到输出上限，回答未完整生成。"
+    };
+  }
   if (stopReason === "error") {
     return {
       itemType: "error",
@@ -2062,9 +2075,7 @@ function assistantFailure(message: PiSessionMessageView): {
 
 function assistantFailureText(errorMessage: unknown): string {
   const safe = visibleText(errorMessage);
-  return safe === "provider_oauth_relogin_required"
-    ? "OpenAI Codex 授权已失效，请在设置中重新登录。"
-    : safe || "Agent 执行失败";
+  return (providerFailureText(safe) ?? safe) || "Agent 执行失败";
 }
 
 function toolCallsFromContent(

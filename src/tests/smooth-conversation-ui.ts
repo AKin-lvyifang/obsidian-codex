@@ -1774,6 +1774,44 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     assert.equal(terminalProgressSchedules, 0,
       "terminal diagnostics with process or empty-answer history never restart progress polling");
 
+    const partialFailureProjection = buildAgentTurnProjection([{
+      id: "terminal-partial-answer",
+      role: "assistant",
+      text: "失败前保留的公开回答 partial",
+      details: "网络连接中断，回答未完成。",
+      status: "failed",
+      runId: "terminal-partial-answer-run",
+      turnId: "terminal-partial-answer-run",
+      createdAt: 1_700_000_001_075,
+      completedAt: 1_700_000_001_080
+    }]);
+    const partialFailureTurn = partialFailureProjection[0]?.kind === "assistantTurn"
+      ? partialFailureProjection[0].turn
+      : null;
+    assert.ok(partialFailureTurn?.finalAnswer);
+    const partialFailureSurface = new FakeElement("div");
+    (terminalRenderer as unknown as {
+      renderAssistantTurn(
+        container: unknown,
+        turn: NonNullable<typeof partialFailureTurn>,
+        showAgentHeader: boolean
+      ): void;
+    }).renderAssistantTurn(partialFailureSurface, partialFailureTurn!, false);
+    assert.match(
+      renderedText(partialFailureSurface),
+      /失败前保留的公开回答 partial/u
+    );
+    assert.match(
+      renderedText(partialFailureSurface),
+      /网络连接中断，回答未完成/u
+    );
+    assert.equal(
+      partialFailureSurface
+        .findAllByClass("codex-assistant-turn-failure-reason").length,
+      1,
+      "a durable partial answer renders one separate concise failure reason"
+    );
+
     await assertInteractionDockContracts();
 
     const emptyRunningAnswer = renderMessage(renderer, {

@@ -839,6 +839,7 @@ export class CodexMessageListRenderer {
           this.renderAgentAnswerContent(answerContent, turn.finalAnswer!);
         });
       }
+      this.renderAssistantFailureReason(answerSection, turn.finalAnswer);
       const wrapper = turnRoot.closest<HTMLElement>(".codex-message-type-assistantTurn");
       wrapper?.toggleClass("codex-message-streaming", turn.finalAnswer.status === "running");
       if (
@@ -1283,6 +1284,24 @@ export class CodexMessageListRenderer {
     renderRichText(env.app, env.component, container, text);
     container.dataset.renderedText = text;
     markAIElementsResponse(container, message.status === "running");
+  }
+
+  private renderAssistantFailureReason(
+    container: HTMLElement,
+    message: ChatMessage
+  ): void {
+    const existing = container.querySelector<HTMLElement>(
+      ":scope > .codex-assistant-turn-failure-reason"
+    );
+    const text = message.status === "failed" ? message.details?.trim() : "";
+    if (!text) {
+      existing?.remove();
+      return;
+    }
+    const reason = existing ?? container.createDiv({
+      cls: "codex-process-detail codex-assistant-turn-failure-reason"
+    });
+    if (reason.textContent !== text) reason.setText(text);
   }
 
   private renderTaskPlanCard(
@@ -1922,6 +1941,7 @@ export class CodexMessageListRenderer {
         attr: { "data-message-content": "true" }
       });
       this.renderAgentAnswerContent(answerContent, answer);
+      this.renderAssistantFailureReason(answerSection, answer);
       if (isTerminalTurnStatus(turn.status)) {
         const footerActions = this.renderAgentFooter(answerSection, answer);
         this.renderPiConversationDeriveAction(footerActions, answer, true);

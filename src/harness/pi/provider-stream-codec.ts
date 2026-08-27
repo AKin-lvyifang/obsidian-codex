@@ -13,6 +13,7 @@ import {
   type ToolCall,
   type Usage
 } from "@earendil-works/pi-ai";
+import { transformMessages } from "@earendil-works/pi-ai/api/transform-messages";
 import type {
   ControlledPiStreamInput
 } from "./production-pi-model-resolver";
@@ -99,35 +100,58 @@ class OpenAICompatibleSseDecoder implements ProviderSseStreamDecoder {
     if (this.receivedBytes > MAX_RESPONSE_BYTES) {
       throw new Error("provider_sse_response_too_large");
     }
-    this.buffer += this.decoder.decode(bytes, { stream: true });
+    try {
+      this.buffer += this.decoder.decode(bytes, { stream: true });
+    } catch {
+      throw new Error("provider_utf8_invalid");
+    }
     this.drainEvents();
   }
 
   finish(): AssistantMessage {
     if (this.finished) throw new Error("provider_sse_already_finished");
     this.finished = true;
-    this.buffer += this.decoder.decode();
+    try {
+      this.buffer += this.decoder.decode();
+    } catch {
+      throw new Error("provider_utf8_invalid");
+    }
     this.drainEvents();
     if (this.buffer.trim()) {
       const finalBlock = this.buffer;
       this.buffer = "";
       this.consumeBlock(finalBlock);
     }
-    if (!this.finishReason) {
-      throw new Error("provider_sse_incomplete");
-    }
     this.endThinking();
     this.endText();
-    this.endToolCalls();
-    this.partial.stopReason = this.finishReason === "tool_calls"
-      ? "toolUse"
-      : this.finishReason === "length"
-        ? "length"
-        : this.finishReason === "stop"
-          ? "stop"
-          : (() => {
-              throw new Error("provider_finish_reason_invalid");
-            })();
+    if (!this.finishReason) throw new Error("provider_finish_reason_missing");
+    if (this.finishReason === "length") {
+      throw new Error("provider_output_limit_reached");
+    }
+    if (this.finishReason === "content_filter") {
+      throw new Error("provider_content_filtered");
+    }
+    if (this.finishReason === "network_error") {
+      throw new Error("provider_network_error");
+    }
+    if (
+      this.finishReason === "tool_calls"
+      || this.finishReason === "function_call"
+    ) {
+      if (!this.partial.content.some((block) => block.type === "toolCall")) {
+        throw new Error("provider_tool_call_missing");
+      }
+      this.endToolCalls();
+      this.partial.stopReason = "toolUse";
+    } else if (
+      this.finishReason === "stop"
+      || this.finishReason === "end"
+    ) {
+      this.discardToolCalls();
+      this.partial.stopReason = "stop";
+    } else {
+      throw new Error("provider_finish_reason_unsupported");
+    }
     deepFreeze(this.partial);
     this.input.stream.push({
       type: "done",
@@ -157,7 +181,12 @@ class OpenAICompatibleSseDecoder implements ProviderSseStreamDecoder {
     if (data === "[DONE]") {
       return;
     }
-    const chunk = parseRecord(data);
+    let chunk: Record<string, unknown>;
+    try {
+      chunk = parseRecord(data);
+    } catch {
+      throw new Error("provider_sse_json_invalid");
+    }
     if (typeof chunk.id === "string" && chunk.id) {
       this.partial.responseId ??= chunk.id;
     }
@@ -359,6 +388,13 @@ class OpenAICompatibleSseDecoder implements ProviderSseStreamDecoder {
     }
     this.toolCalls.clear();
   }
+
+  private discardToolCalls(): void {
+    this.partial.content = this.partial.content.filter(
+      (block) => block.type !== "toolCall"
+    );
+    this.toolCalls.clear();
+  }
 }
 
 function nextSseEventBoundary(
@@ -375,7 +411,7 @@ export function buildDeepSeekBody(
 ): Readonly<Record<string, unknown>> {
   const body: Record<string, unknown> = {
     model: input.provider.modelRef,
-    messages: contextMessages(input.context),
+    messages: contextMessages(input.context, input.model),
     stream: true,
     temperature: input.options.temperature,
     max_tokens: input.options.maxTokens
@@ -405,7 +441,7 @@ export function buildQwenTokenPlanBody(
 ): Readonly<Record<string, unknown>> {
   const body: Record<string, unknown> = {
     model: input.provider.modelRef,
-    messages: contextMessages(input.context),
+    messages: contextMessages(input.context, input.model),
     stream: true,
     stream_options: { include_usage: true },
     temperature: input.options.temperature
@@ -463,15 +499,42 @@ function applyProviderReasoningOptions(
   }
 }
 
-function contextMessages(context: Context): unknown[] {
+function contextMessages(context: Context, model: Model<Api>): unknown[] {
   const result: unknown[] = [];
   if (typeof context.systemPrompt === "string" && context.systemPrompt) {
     result.push({ role: "system", content: context.systemPrompt });
   }
-  for (const message of context.messages) {
+  for (const message of validProviderHistory(context.messages, model)) {
     result.push(...toOpenAICompatibleMessages(message));
   }
   return result;
+}
+
+export function validProviderHistory(
+  messages: readonly Message[],
+  model: Model<Api>
+): Message[] {
+  const transformed = transformMessages([...messages], model);
+  let pendingToolCallIds = new Set<string>();
+  return transformed.filter((message) => {
+    if (message.role === "assistant") {
+      if (message.stopReason === "length") {
+        pendingToolCallIds.clear();
+        return false;
+      }
+      pendingToolCallIds = new Set(message.content
+        .filter((block): block is ToolCall => block.type === "toolCall")
+        .map((block) => block.id));
+      return true;
+    }
+    if (message.role === "toolResult") {
+      if (!pendingToolCallIds.has(message.toolCallId)) return false;
+      pendingToolCallIds.delete(message.toolCallId);
+      return true;
+    }
+    pendingToolCallIds.clear();
+    return true;
+  });
 }
 
 function toOpenAICompatibleMessages(message: Message): unknown[] {
@@ -599,7 +662,6 @@ export function parseDeepSeekSseResponse(
   let responseId: string | undefined;
   let responseModel: string | undefined;
   let usage = emptyUsage();
-  let sawDone = false;
   const toolCalls = new Map<number, {
     id: string;
     name: string;
@@ -617,10 +679,14 @@ export function parseDeepSeekSseResponse(
       .join("\n");
     if (!data) continue;
     if (data === "[DONE]") {
-      sawDone = true;
       continue;
     }
-    const chunk = parseRecord(data);
+    let chunk: Record<string, unknown>;
+    try {
+      chunk = parseRecord(data);
+    } catch {
+      throw new Error("provider_sse_json_invalid");
+    }
     if (typeof chunk.id === "string" && chunk.id) responseId ??= chunk.id;
     if (typeof chunk.model === "string" && chunk.model) {
       responseModel ??= chunk.model;
@@ -650,32 +716,45 @@ export function parseDeepSeekSseResponse(
       }
     }
   }
-  if (!sawDone || !finishReason) {
-    throw new Error("deepseek_sse_incomplete");
+  if (!finishReason) throw new Error("provider_finish_reason_missing");
+  if (finishReason === "length") {
+    throw new Error("provider_output_limit_reached");
+  }
+  if (finishReason === "content_filter") {
+    throw new Error("provider_content_filtered");
+  }
+  if (finishReason === "network_error") {
+    throw new Error("provider_network_error");
+  }
+  const toolUse = finishReason === "tool_calls"
+    || finishReason === "function_call";
+  if (
+    !toolUse
+    && finishReason !== "stop"
+    && finishReason !== "end"
+  ) {
+    throw new Error("provider_finish_reason_unsupported");
+  }
+  if (toolUse && toolCalls.size === 0) {
+    throw new Error("provider_tool_call_missing");
   }
 
   const content: Array<TextContent | ThinkingContent | ToolCall> = [];
   if (reasoning) content.push({ type: "thinking", thinking: reasoning });
   if (text) content.push({ type: "text", text });
-  for (const [, tool] of [...toolCalls.entries()].sort(
-    ([left], [right]) => left - right
-  )) {
-    content.push({
-      type: "toolCall",
-      id: tool.id,
-      name: tool.name,
-      arguments: parseRecord(tool.argumentsText || "{}")
-    });
+  if (toolUse) {
+    for (const [, tool] of [...toolCalls.entries()].sort(
+      ([left], [right]) => left - right
+    )) {
+      content.push({
+        type: "toolCall",
+        id: tool.id,
+        name: tool.name,
+        arguments: parseRecord(tool.argumentsText || "{}")
+      });
+    }
   }
-  const stopReason = toolCalls.size > 0
-    ? "toolUse" as const
-    : finishReason === "length"
-      ? "length" as const
-      : finishReason === "stop"
-        ? "stop" as const
-        : (() => {
-            throw new Error("deepseek_finish_reason_invalid");
-          })();
+  const stopReason = toolUse ? "toolUse" as const : "stop" as const;
   return deepFreeze({
     role: "assistant" as const,
     content,

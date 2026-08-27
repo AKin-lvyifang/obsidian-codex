@@ -88,6 +88,7 @@ export async function runPiNativeTurnRunnerTests(): Promise<void> {
   await imageCapabilityPreflightPreservesCompletedTurn();
   await imageCapabilityFailurePreservesComposerAndAcceptedFailureRecordsMetadata();
   await agentSettlementOnlyFinalizesPiChatTurn();
+  await failedSettlementNoticeMatchesDurableFailureReason();
   await pendingSubmitKeepsRunningConversationResidentAcrossSessionSwitch();
   await disabledOrStaleSkillCannotStartTurn();
   await maintainScopeIsResolvedBeforeProviderSubmit();
@@ -1705,6 +1706,144 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
     messageListRenderer.dispose();
     dom.restore();
   }
+}
+
+async function failedSettlementNoticeMatchesDurableFailureReason():
+Promise<void> {
+  const session = piSessionShell("conversation-turn-runner");
+  session.piSessionId = "pi-session-turn-runner";
+  const item: QueuedTurnItem = {
+    id: "queued-failed-turn-runner",
+    sessionId: session.id,
+    text: "测试失败终态",
+    attachments: [],
+    skill: null,
+    turnOptions: {
+      providerSettingsId: "fixture-provider",
+      runtimeProviderId: "fixture-provider",
+      model: "fixture-model",
+      reasoning: "high",
+      permission: "read-only",
+      mode: "agent",
+      mcpEnabled: false
+    },
+    kind: "chat",
+    createdAt: 2
+  };
+  const runResult = deferred<Readonly<PiProductRunRecord>>();
+  let listener: PiChatRuntimeEventListener | null = null;
+  const failedProjection = (): PiConversationProjection => {
+    const projection = durableProjection(session, "completed");
+    return {
+      ...projection,
+      messages: projection.messages.map((message) =>
+        message.role === "assistant"
+          ? {
+              ...message,
+              text: "失败前保留的 partial",
+              details: "Provider 返回的流数据格式损坏，回答未完成。",
+              status: "failed" as const
+            }
+          : message
+      )
+    };
+  };
+  const plugin = {
+    settings: {
+      memory: { useLongTermMemory: true },
+      sessions: [session],
+      activeSessionId: session.id
+    },
+    getVaultPath: () => "/vault",
+    persistPiNativeSettings: async () => undefined,
+    submitPiChat: async () => ({
+      productRunId: "product-run-turn-runner",
+      conversationId: session.id,
+      piSessionId: session.piSessionId!,
+      userEntryId: "entry-user",
+      result: runResult.promise
+    }),
+    subscribePiRun: (
+      _productRunId: string,
+      next: PiChatRuntimeEventListener
+    ) => {
+      listener = next;
+      return { unsubscribe: () => { listener = null; } };
+    },
+    subscribePiAgentApproval: () => ({ unsubscribe: () => undefined }),
+    readPiConversationProjection: async () => failedProjection(),
+    abortPiConversation: async () => undefined,
+    releasePiProductionRun: () => undefined
+  };
+  let running = false;
+  let activeRunId = "";
+  const view: any = {
+    plugin,
+    get running() { return running; },
+    set running(value: boolean) { running = value; },
+    get activeRunId() { return activeRunId; },
+    set activeRunId(value: string) { activeRunId = value; },
+    activeRunKind: "",
+    activeRunSessionId: "",
+    activeTurnId: "",
+    activeRunNativeExecutionRecordIds: [],
+    turnStartedAt: 0,
+    messagesBottomFollowPaused: false,
+    inputEl: { value: item.text },
+    attachments: [],
+    selectedSkill: null,
+    setPendingInteraction: () => undefined,
+    clearComposerDraft: () => undefined,
+    renderTabs: () => undefined,
+    renderMessages: () => undefined,
+    renderMessagesIfActive: () => undefined,
+    renderToolbar: () => undefined,
+    applyStatus: () => undefined,
+    armTurnWatchdog: () => undefined,
+    clearTurnWatchdog: () => undefined,
+    clearActiveRun: () => { activeRunId = ""; }
+  };
+
+  openTestNoticeMessages.length = 0;
+  const turn = startChatTurn(view, session, item, "composer");
+  await waitFor(() => listener !== null);
+  await emit(listener, runtimeEvent({ type: "agent_settled" }));
+  await emit(listener, runtimeEvent({
+    type: "product_run_settled",
+    terminalState: "failed",
+    assistantEntryId: "entry-assistant"
+  }));
+  runResult.resolve({
+    productRunId: "product-run-turn-runner",
+    conversationId: session.id,
+    piSessionId: session.piSessionId!,
+    userEntryId: "entry-user",
+    assistantEntryId: "entry-assistant",
+    toolCallIds: [],
+    memoryMode: "normal",
+    state: "product_run_settled",
+    terminalState: "failed",
+    activeLeafId: "entry-assistant",
+    agentSettledAt: 7,
+    settledAt: 8,
+    error: "provider_sse_json_invalid",
+    createdAt: 2,
+    updatedAt: 8
+  });
+  assert.equal(await turn, "failed");
+  assert.equal(
+    openTestNoticeMessages.at(-1),
+    "Provider 返回的流数据格式损坏，回答未完成。"
+  );
+  const durableAssistant = session.messages.find((message) =>
+    message.role === "assistant"
+  );
+  assert.equal(durableAssistant?.text, "失败前保留的 partial");
+  assert.equal(
+    durableAssistant?.details,
+    openTestNoticeMessages.at(-1),
+    "top-right Notice and durable answer reason must use the same safe copy"
+  );
 }
 
 async function pendingSubmitKeepsRunningConversationResidentAcrossSessionSwitch():
