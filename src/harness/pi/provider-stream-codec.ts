@@ -65,7 +65,6 @@ class OpenAICompatibleSseDecoder implements ProviderSseStreamDecoder {
   private finished = false;
   private activeThinkingIndex: number | null = null;
   private activeTextIndex: number | null = null;
-  private sawToolCall = false;
   private readonly toolCalls = new Map<number, {
     contentIndex: number;
     toolCall: ToolCall;
@@ -120,7 +119,7 @@ class OpenAICompatibleSseDecoder implements ProviderSseStreamDecoder {
     this.endThinking();
     this.endText();
     this.endToolCalls();
-    this.partial.stopReason = this.sawToolCall
+    this.partial.stopReason = this.finishReason === "tool_calls"
       ? "toolUse"
       : this.finishReason === "length"
         ? "length"
@@ -275,7 +274,6 @@ class OpenAICompatibleSseDecoder implements ProviderSseStreamDecoder {
       this.partial.content.push(toolCall);
       state = { contentIndex, toolCall, argumentsText: "", ended: false };
       this.toolCalls.set(index, state);
-      this.sawToolCall = true;
       this.input.stream.push({
         type: "toolcall_start",
         contentIndex,

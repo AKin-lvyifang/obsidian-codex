@@ -6514,6 +6514,22 @@ async function assertQwenTokenPlanTransportContract(): Promise<void> {
       finish_reason: finishReason
     }]
   })}`;
+  const toolCompletionEvent = (finishReason: string): string =>
+    `data: ${JSON.stringify({
+      choices: [{
+        delta: {
+          tool_calls: [{
+            index: 0,
+            id: "fixture-clean-eof-tool",
+            function: {
+              name: "note_read",
+              arguments: "{\"path\":\"Inbox/clean-eof.md\"}"
+            }
+          }]
+        },
+        finish_reason: finishReason
+      }]
+    })}`;
 
   const unterminatedFinalJson = await runQwenBody(
     completionEvent("末块完成", "stop")
@@ -6542,21 +6558,9 @@ async function assertQwenTokenPlanTransportContract(): Promise<void> {
   );
   assert.equal(lengthWithoutDone.stopReason, "length");
 
-  const toolWithoutDone = await runQwenBody(`data: ${JSON.stringify({
-    choices: [{
-      delta: {
-        tool_calls: [{
-          index: 0,
-          id: "fixture-clean-eof-tool",
-          function: {
-            name: "note_read",
-            arguments: "{\"path\":\"Inbox/clean-eof.md\"}"
-          }
-        }]
-      },
-      finish_reason: "tool_calls"
-    }]
-  })}`);
+  const toolWithoutDone = await runQwenBody(
+    toolCompletionEvent("tool_calls")
+  );
   assert.equal(toolWithoutDone.stopReason, "toolUse");
   assert.deepEqual(toolWithoutDone.content[0], {
     type: "toolCall",
@@ -6564,6 +6568,63 @@ async function assertQwenTokenPlanTransportContract(): Promise<void> {
     name: "note_read",
     arguments: { path: "Inbox/clean-eof.md" }
   });
+
+  const lengthAfterToolCall = await runQwenBody(
+    toolCompletionEvent("length")
+  );
+  assert.equal(lengthAfterToolCall.stopReason, "length");
+  assert.equal(lengthAfterToolCall.content[0]?.type, "toolCall");
+
+  const filteredAfterToolCall = await runQwenBody(
+    toolCompletionEvent("content_filter")
+  );
+  assert.equal(filteredAfterToolCall.stopReason, "error");
+  assert.equal(
+    filteredAfterToolCall.errorMessage,
+    "provider_protocol_failed"
+  );
+  assert.equal(filteredAfterToolCall.content[0]?.type, "toolCall");
+
+  const callbackCleanEof = await createQwenTokenPlanOpenAICompletionsAdapter(
+    async (request) => {
+      await request.onResponse?.({ status: 200, headers: streamingHeaders });
+      request.onChunk?.(Buffer.from(
+        completionEvent("回调末块完成", "stop"),
+        "utf8"
+      ));
+      return {
+        status: 200,
+        headers: streamingHeaders,
+        body: "",
+        transportComplete: true
+      };
+    }
+  ).stream({
+    ...structuredClone(qwenCatalogModel),
+    baseUrl: transportInput.baseUrl
+  }, {
+    messages: [{
+      role: "user",
+      content: "测试回调 clean EOF",
+      timestamp: Date.now()
+    }],
+    tools: []
+  }, {
+    apiKey: fixtureKey,
+    reasoning: "high",
+    maxTokens: 64,
+    temperature: 0,
+    cacheRetention: "none",
+    maxRetries: 0,
+    timeoutMs: 1_000
+  }).result();
+  assert.equal(callbackCleanEof.stopReason, "stop");
+  assert.equal(
+    callbackCleanEof.content[0]?.type === "text"
+      ? callbackCleanEof.content[0].text
+      : "",
+    "回调末块完成"
+  );
 
   const malformedFinalEvent = await runQwenBody("data: []");
   assert.equal(malformedFinalEvent.stopReason, "error");
