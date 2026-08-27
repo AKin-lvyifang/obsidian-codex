@@ -2258,6 +2258,10 @@ async function assertSettingsAccessibleNamesAndOverflow(): Promise<void> {
   mutable.personalMemoryState = identityState;
   tab.display();
   assertSettingControlAccessibleName(tab.containerEl, "设置语言", "select");
+  assert.match(
+    tab.containerEl.textContent,
+    /默认开启.*一级 Memory 仍在对话当轮正常写入和召回.*已有状态与积压保留/u
+  );
   for (const label of [
     "启动时自动打开侧栏",
     "启动时自动打开首页",
@@ -2655,6 +2659,14 @@ function assertSettingsV53MigrationContract(): void {
     assert.equal(DEFAULT_SETTINGS.settingsVersion, 53);
     assert.equal(DEFAULT_SETTINGS.activeApiProviderId, "");
     assert.equal(DEFAULT_SETTINGS.memory.useLongTermMemory, true);
+    assert.equal(DEFAULT_SETTINGS.memory.dreamEnabled, true);
+    assert.equal(normalizeSettingsData(undefined).settings.memory.dreamEnabled, true);
+    assert.equal(normalizeSettingsData({ memory: {} }).settings.memory.dreamEnabled, true);
+    assert.equal(
+      normalizeSettingsData({ memory: { dreamEnabled: false } }).settings.memory.dreamEnabled,
+      false,
+      "an explicitly disabled Dream setting survives normalization on restart"
+    );
     assert.equal(
       normalizeSettingsData(undefined).settings.activeApiProviderId,
       ""
@@ -4271,7 +4283,7 @@ function assertOnboardingTruthContract(): void {
     ...structuredClone(DEFAULT_SETTINGS),
     setup: { tutorialStep: "invalid" }
   }).settings.setup.tutorialStep, "sidebar");
-  assert.equal(settings.memory.dreamEnabled, false);
+  assert.equal(settings.memory.dreamEnabled, true);
 }
 
 function assertFiveStepOnboardingEntrypoints(): void {
