@@ -74,6 +74,14 @@ export interface EchoInkProviderReasoningSnapshot {
   readonly durationMs?: number;
 }
 
+/**
+ * Public reasoning is stored as ordered segments because one ProductRun may
+ * alternate between Provider thinking, Tool calls, and answer text multiple
+ * times. `providerReasoning` below remains a read-only legacy input only.
+ */
+export type EchoInkProviderReasoningSegmentSnapshot =
+  EchoInkProviderReasoningSnapshot;
+
 export interface EchoInkQuestionOption {
   readonly optionId: string;
   readonly label: string;
@@ -194,6 +202,10 @@ export interface EchoInkAssistantTurnSnapshot {
   readonly updatedAt: number;
   readonly completedAt?: number;
   readonly processNodes: readonly Readonly<EchoInkTurnProcessNode>[];
+  readonly providerReasoningSegments?: readonly Readonly<
+    EchoInkProviderReasoningSegmentSnapshot
+  >[];
+  /** Legacy v1 snapshot accepted when reopening older local data. */
   readonly providerReasoning?: Readonly<EchoInkProviderReasoningSnapshot>;
   readonly interactionRecords: readonly Readonly<EchoInkTurnInteractionRecord>[];
   readonly finalAnswerMessageId?: string;
@@ -241,11 +253,31 @@ export function cloneEchoInkAssistantTurn(
     interactionRecords: Object.freeze(
       turn.interactionRecords.map((record) => Object.freeze({ ...record }))
     ),
+    ...(turn.providerReasoningSegments
+      ? {
+          providerReasoningSegments: Object.freeze(
+            turn.providerReasoningSegments.map((segment) =>
+              Object.freeze({ ...segment })
+            )
+          )
+        }
+      : {}),
     ...(turn.providerReasoning
       ? { providerReasoning: Object.freeze({ ...turn.providerReasoning }) }
       : {}),
     ...(turn.summary ? { summary: Object.freeze({ ...turn.summary }) } : {})
   });
+}
+
+export function echoInkProviderReasoningSegments(
+  turn: Readonly<EchoInkAssistantTurnSnapshot>
+): readonly Readonly<EchoInkProviderReasoningSegmentSnapshot>[] {
+  if (turn.providerReasoningSegments?.length) {
+    return turn.providerReasoningSegments;
+  }
+  return turn.providerReasoning
+    ? Object.freeze([turn.providerReasoning])
+    : Object.freeze([]);
 }
 
 export function normalizeEchoInkQuestionPrompts(

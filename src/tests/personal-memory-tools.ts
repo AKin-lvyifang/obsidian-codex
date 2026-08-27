@@ -2,6 +2,15 @@ import assert from "node:assert/strict";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
+  runAgentLoop,
+  type AgentEvent,
+  type AgentTool
+} from "@earendil-works/pi-agent-core";
+import {
+  createAssistantMessageEventStream,
+  type AssistantMessage
+} from "@earendil-works/pi-ai";
+import {
   PI_PERSONAL_MEMORY_TOOL_IDS,
   PI_PERSONAL_MEMORY_TOOL_SCHEMAS,
   PiPersonalMemoryToolSecurity,
@@ -20,6 +29,7 @@ export async function runPersonalMemoryToolContractScenarios(): Promise<void> {
   assertOpenAiCompatibleMemoryToolSchemas();
   await scenarioRuntimeIdentityIsNotModelControlled();
   await scenarioInvalidArgumentsAndMemoryModeErrors();
+  await scenarioPiAgentLoopPreparesValidatesThenExecutesMemoryWrite();
   await scenarioSearchBeforeAutonomousWriteAndEvidenceBinding();
   await scenarioHostRevisionUpdateForgetAndErrors();
   await scenarioProfileUpdateIsIdempotentAndReplacesSource();
@@ -28,6 +38,205 @@ export async function runPersonalMemoryToolContractScenarios(): Promise<void> {
   await scenarioRepositoryDisposeStopsExternalWatchers();
   await scenarioOversizedReadFailsExplicitly();
   console.log("PASS P3 Memory Tool contract scenarios (partial automated coverage)");
+}
+
+async function scenarioPiAgentLoopPreparesValidatesThenExecutesMemoryWrite():
+Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    const entry = {
+      entryId: "user-entry-fixture",
+      text: "请记住这个 Agent Loop 字符串兼容测试。"
+    };
+    const security = createSecurity(fixture, entry, fixture.runtime());
+    const tools = createPiPersonalMemoryToolDefinitions({
+      repository: fixture.repository,
+      security
+    });
+    await executeThroughSecurity(
+      security,
+      tools,
+      "memory_search",
+      "agent-loop-search-before-write",
+      { query: "Agent Loop 字符串兼容" }
+    );
+
+    const writeTool = tools.find((tool) => tool.name === "memory_write");
+    assert.ok(writeTool?.prepareArguments);
+    const order: string[] = [];
+    let prepareCalls = 0;
+    let executeCalls = 0;
+    const wrappedWriteTool: AgentTool = {
+      ...writeTool,
+      prepareArguments: (args) => {
+        prepareCalls += 1;
+        order.push("prepareArguments");
+        return writeTool.prepareArguments!(args);
+      },
+      execute: async (...args) => {
+        executeCalls += 1;
+        order.push("execute");
+        return await writeTool.execute(...args);
+      }
+    };
+    const validEvents = await runMemoryToolCallThroughPiAgentLoop({
+      tool: wrappedWriteTool,
+      toolCallId: "agent-loop-valid-write",
+      arguments: {
+        request: JSON.stringify(createArguments(entry.text).request)
+      },
+      beforeToolCall: async (event, signal) => {
+        order.push("validated");
+        return await security.handleToolCall({
+          toolName: event.toolCall.name,
+          toolCallId: event.toolCall.id,
+          input: event.args
+        } as never, signal);
+      },
+      afterToolCall: async (event) => await security.handleToolResult({
+        toolName: event.toolCall.name,
+        toolCallId: event.toolCall.id,
+        content: event.result.content,
+        details: event.result.details,
+        isError: event.isError
+      } as never)
+    });
+    assert.deepEqual(order, ["prepareArguments", "validated", "execute"]);
+    assert.equal(prepareCalls, 1);
+    assert.equal(executeCalls, 1, "the validated memory_write executes exactly once");
+    assert.equal(lastToolExecution(validEvents)?.isError, false);
+
+    const invalidCases = [
+      { name: "invalid-json", request: "not-json" },
+      { name: "null", request: "null" },
+      { name: "array", request: "[]" },
+      { name: "nested-string", request: JSON.stringify("second string") },
+      {
+        name: "unknown-field",
+        request: JSON.stringify({
+          ...createArguments(entry.text).request,
+          unknownField: true
+        })
+      }
+    ] as const;
+    for (const invalidCase of invalidCases) {
+      let invalidPrepareCalls = 0;
+      let invalidValidatedCalls = 0;
+      let invalidExecuteCalls = 0;
+      const invalidTool: AgentTool = {
+        ...writeTool,
+        prepareArguments: (args) => {
+          invalidPrepareCalls += 1;
+          return writeTool.prepareArguments!(args);
+        },
+        execute: async (...args) => {
+          invalidExecuteCalls += 1;
+          return await writeTool.execute(...args);
+        }
+      };
+      const invalidEvents = await runMemoryToolCallThroughPiAgentLoop({
+        tool: invalidTool,
+        toolCallId: `agent-loop-${invalidCase.name}`,
+        arguments: { request: invalidCase.request },
+        beforeToolCall: async () => {
+          invalidValidatedCalls += 1;
+          return undefined;
+        }
+      });
+      assert.equal(invalidPrepareCalls, 1, `${invalidCase.name} reaches the one preparation pass`);
+      assert.equal(invalidValidatedCalls, 0,
+        `${invalidCase.name} must fail before the post-schema beforeToolCall hook`);
+      assert.equal(invalidExecuteCalls, 0, `${invalidCase.name} must never execute`);
+      assert.equal(lastToolExecution(invalidEvents)?.isError, true);
+    }
+
+    for (const toolName of ["memory_search", "memory_read"] as const) {
+      const tool = tools.find((candidate) => candidate.name === toolName);
+      assert.ok(tool);
+      assert.equal(tool.prepareArguments, undefined);
+      let validatedCalls = 0;
+      let otherExecuteCalls = 0;
+      const wrappedTool: AgentTool = {
+        ...tool,
+        execute: async (...args) => {
+          otherExecuteCalls += 1;
+          return await tool.execute(...args);
+        }
+      };
+      const events = await runMemoryToolCallThroughPiAgentLoop({
+        tool: wrappedTool,
+        toolCallId: `agent-loop-no-compat-${toolName}`,
+        arguments: JSON.stringify(toolName === "memory_search"
+          ? { query: "no compatibility" }
+          : { id: "mem_target" }),
+        beforeToolCall: async () => {
+          validatedCalls += 1;
+          return undefined;
+        }
+      });
+      assert.equal(validatedCalls, 0, `${toolName} string arguments fail schema validation`);
+      assert.equal(otherExecuteCalls, 0, `${toolName} receives no string compatibility`);
+      assert.equal(lastToolExecution(events)?.isError, true);
+    }
+  });
+}
+
+async function runMemoryToolCallThroughPiAgentLoop(input: Readonly<{
+  tool: AgentTool;
+  toolCallId: string;
+  arguments: unknown;
+  beforeToolCall?: NonNullable<Parameters<typeof runAgentLoop>[2]["beforeToolCall"]>;
+  afterToolCall?: NonNullable<Parameters<typeof runAgentLoop>[2]["afterToolCall"]>;
+}>): Promise<AgentEvent[]> {
+  const events: AgentEvent[] = [];
+  const assistantMessage: AssistantMessage = {
+    role: "assistant",
+    content: [{
+      type: "toolCall",
+      id: input.toolCallId,
+      name: input.tool.name,
+      arguments: input.arguments as Record<string, unknown>
+    }],
+    api: "openai-completions",
+    provider: "fixture",
+    model: "fixture-model",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+    },
+    stopReason: "toolUse",
+    timestamp: 2
+  };
+  await runAgentLoop(
+    [{ role: "user", content: "run one tool", timestamp: 1 }],
+    { systemPrompt: "fixture", messages: [], tools: [input.tool] },
+    {
+      model: { provider: "fixture", id: "fixture-model" } as never,
+      convertToLlm: (messages) => messages as never,
+      toolExecution: "sequential",
+      shouldStopAfterTurn: () => true,
+      ...(input.beforeToolCall ? { beforeToolCall: input.beforeToolCall } : {}),
+      ...(input.afterToolCall ? { afterToolCall: input.afterToolCall } : {})
+    },
+    async (event) => { events.push(event); },
+    undefined,
+    () => {
+      const stream = createAssistantMessageEventStream();
+      stream.push({ type: "done", reason: "toolUse", message: assistantMessage });
+      return stream;
+    }
+  );
+  return events;
+}
+
+function lastToolExecution(events: readonly AgentEvent[]):
+Extract<AgentEvent, { type: "tool_execution_end" }> | undefined {
+  return events.findLast((event): event is Extract<AgentEvent, {
+    type: "tool_execution_end";
+  }> => event.type === "tool_execution_end");
 }
 
 function assertOpenAiCompatibleMemoryToolSchemas(): void {
@@ -124,6 +333,32 @@ function assertOpenAiCompatibleMemoryToolSchemas(): void {
       evidenceQuote: "请记住：以后先给结论。"
     }
   });
+  const stringRequest = {
+    operation: "create",
+    title: "字符串兼容",
+    content: "只兼容 request 中的普通对象 JSON 字符串。",
+    recallWhen: "Provider 把 request 编码成字符串时",
+    evidenceQuote: "请记住这个字符串兼容测试。"
+  };
+  assert.deepEqual(normalizePiPersonalMemoryToolArguments("memory_write", {
+    request: JSON.stringify(stringRequest)
+  }), { request: stringRequest });
+  for (const invalidRequest of [
+    "not-json",
+    "null",
+    "[]",
+    JSON.stringify("nested-string"),
+    JSON.stringify({ ...stringRequest, extra: true })
+  ]) {
+    assert.throws(() => normalizePiPersonalMemoryToolArguments(
+      "memory_write",
+      { request: invalidRequest }
+    ));
+  }
+  assert.throws(() => normalizePiPersonalMemoryToolArguments(
+    "memory_search",
+    JSON.stringify({ query: "不得扩展到其他 Tool" })
+  ));
   assert.deepEqual(normalizePiPersonalMemoryToolArguments("memory_write", {
     request: {
       operation: "forget",
@@ -278,6 +513,27 @@ async function scenarioInvalidArgumentsAndMemoryModeErrors(): Promise<void> {
     const entry = { entryId: "user-entry-fixture", text: "请记住这条规则。" };
     const noMemory = createSecurity(fixture, entry, fixture.runtime({ memoryMode: "no_memory" }));
     const tools = createPiPersonalMemoryToolDefinitions({ repository: fixture.repository, security: noMemory });
+    const searchTool = tools.find((tool) => tool.name === "memory_search");
+    const readTool = tools.find((tool) => tool.name === "memory_read");
+    const writeTool = tools.find((tool) => tool.name === "memory_write");
+    assert.equal(searchTool?.prepareArguments, undefined);
+    assert.equal(readTool?.prepareArguments, undefined);
+    assert.ok(writeTool?.prepareArguments);
+    const preparedWrite = writeTool.prepareArguments({
+      request: JSON.stringify(createArguments(entry.text).request)
+    });
+    assert.deepEqual(preparedWrite, createArguments(entry.text));
+    assert.deepEqual(
+      normalizePiPersonalMemoryToolArguments("memory_write", preparedWrite),
+      createArguments(entry.text),
+      "memory_write string compatibility must prepare before the unchanged strict normalizer"
+    );
+    for (const invalidRequest of ["not-json", "null", "[]", JSON.stringify("nested-string")]) {
+      assert.throws(() => writeTool.prepareArguments?.({ request: invalidRequest }));
+    }
+    assert.throws(() => writeTool.prepareArguments?.(
+      JSON.stringify(createArguments(entry.text))
+    ));
     const calls = [
       { toolName: "memory_search", input: { query: "规则" } },
       { toolName: "memory_read", input: { id: "mem_target" } },

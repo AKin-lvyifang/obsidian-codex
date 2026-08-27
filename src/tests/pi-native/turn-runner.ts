@@ -33,10 +33,15 @@ import { buildActiveEchoInkResourceCatalog } from "../../resources/registry";
 import { splitMessageTableRow } from "../../ui/render-message";
 import { copyAnswerMarkdown } from "../../ui/codex-view/answer-copy";
 import {
+  CodexMessageListRenderer,
   personalMemorySourceCountLabel,
   personalMemorySourceEmptyStateLabel,
   piConversationDeriveActionLabel
 } from "../../ui/codex-view/message-list";
+import {
+  renderMessages as renderMessagesThroughController,
+  renderMessagesIfActive as renderMessagesIfActiveThroughController
+} from "../../ui/codex-view/message-controller";
 import {
   activateSession,
   derivePiConversationFromMessage
@@ -50,9 +55,16 @@ import {
   piComposerImageAttachmentsForEntry,
   projectPiImageAttachments
 } from "../../ui/codex-view/pi-conversation-support";
-import { piProjectedEntryMessageId } from "../../harness/pi-native/pi-chat-ui-projector";
+import {
+  piProjectedEntryMessageId,
+  piToolCallIdFromProjectedMessageId
+} from "../../harness/pi-native/pi-chat-ui-projector";
 import { openTestNoticeMessages } from "../obsidian-shim";
 import { addComposerNoteMentionSelection } from "../../ui/codex-view/note-mentions";
+import {
+  FakeElement,
+  createTestContext
+} from "../smooth-conversation-ui";
 
 const PNG_1X1 = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
@@ -76,6 +88,7 @@ export async function runPiNativeTurnRunnerTests(): Promise<void> {
   await imageCapabilityPreflightPreservesCompletedTurn();
   await imageCapabilityFailurePreservesComposerAndAcceptedFailureRecordsMetadata();
   await agentSettlementOnlyFinalizesPiChatTurn();
+  await failedSettlementNoticeMatchesDurableFailureReason();
   await pendingSubmitKeepsRunningConversationResidentAcrossSessionSwitch();
   await disabledOrStaleSkillCannotStartTurn();
   await maintainScopeIsResolvedBeforeProviderSubmit();
@@ -1307,13 +1320,17 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
   let composerCleared = false;
   let submittedRequest: PiChatSubmitRequest | null = null;
   const renderedAssistantStatuses: Array<string | undefined> = [];
+  const renderedIncrementalMessages: ChatMessage[] = [];
+  const settings = structuredClone(DEFAULT_SETTINGS);
+  settings.memory.useLongTermMemory = true;
+  settings.sessions = [session];
+  settings.activeSessionId = session.id;
   const plugin = {
-    settings: {
-      memory: { useLongTermMemory: true },
-      sessions: [session],
-      activeSessionId: session.id
-    },
+    settings,
     getVaultPath: () => "/vault",
+    getEchoInkAgentIdentityView: () => ({ displayName: "EchoInk", avatarUrl: null }),
+    readRawMessageText: async () => "",
+    piAgentApprovalBinding: () => null,
     persistPiNativeSettings: async () => undefined,
     buildRuntimeEchoInkResourceCatalog: async () => [item.skill!],
     submitPiChat: async (request: PiChatSubmitRequest) => {
@@ -1359,9 +1376,15 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
       releasedRunId = productRunId;
     }
   };
+  const dom = installTurnRunnerMessageDom();
+  const messageContext = createTestContext();
+  const messageListRenderer = new CodexMessageListRenderer();
+  const messagesEl = new FakeElement("div");
+  const virtualListEl = new FakeElement("div");
   let running = false;
   let activeRunId = "";
   const view: any = {
+    app: messageContext.app,
     plugin,
     get running() { return running; },
     set running(value: boolean) { running = value; },
@@ -1373,24 +1396,49 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
     activeRunNativeExecutionRecordIds: [],
     turnStartedAt: 0,
     messagesBottomFollowPaused: false,
+    messagesEl,
+    virtualListEl,
+    jumpToLatestEl: new FakeElement("button"),
+    taskPlanDockEl: new FakeElement("div"),
+    interactionDockEl: new FakeElement("div"),
+    messageListRenderer,
+    registerDomEvent: messageContext.component.registerDomEvent,
     inputEl: { value: item.text },
     attachments: item.attachments.map((attachment) => ({ ...attachment })),
     selectedSkill: { ...item.skill! },
     setPendingInteraction: () => undefined,
     clearComposerDraft: () => { composerCleared = true; },
+    ensureSession: () => session,
+    derivePiConversationFromMessage: async () => undefined,
+    handlePiTaskPlanAction: async () => undefined,
+    preparePiTaskPlanModification: () => undefined,
     renderTabs: () => undefined,
-    renderMessagesIfActive: () => {
+    renderMessagesIfActive: (
+      activeSession: StoredSession,
+      updatedMessage?: ChatMessage
+    ) => {
+      if (updatedMessage) {
+        renderedIncrementalMessages.push(structuredClone(updatedMessage));
+      }
       renderedAssistantStatuses.push(
         session.messages.find((message) => message.role === "assistant")?.status
       );
+      renderMessagesIfActiveThroughController(view, activeSession, updatedMessage);
     },
-    renderMessages: () => undefined,
+    renderMessages: () => renderMessagesThroughController(view),
+    scheduleRenderMessages: () => renderMessagesThroughController(view),
+    scheduleMeasureVirtualRows: () => undefined,
+    scheduleKnowledgeBaseRunProgress: () => undefined,
+    isMessagesAtBottom: () => true,
+    renderTaskPlanDock: () => undefined,
+    renderInteractionDock: () => undefined,
     renderToolbar: () => undefined,
     applyStatus: () => undefined,
     armTurnWatchdog: () => undefined,
     clearTurnWatchdog: () => undefined,
     clearActiveRun: () => { activeRunId = ""; }
   };
+  try {
   addComposerNoteMentionSelection(view.inputEl, item.noteMentions![0]!);
 
   let turnResolved = false;
@@ -1483,6 +1531,98 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
   );
 
   await emit(listener, runtimeEvent({
+    type: "provider_reasoning_start",
+    messageKey: "assistant-reasoning-1",
+    reasoningId: "reasoning-turn-runner-1"
+  }));
+  const fullRenderCountAfterReasoningTopology = virtualListEl.emptyCallCount;
+  const reasoningRoot = virtualListEl.findByClass("codex-ai-elements-reasoning");
+  assert.ok(reasoningRoot, "the first real Reasoning event creates the required topology");
+  await emit(listener, runtimeEvent({
+    type: "provider_reasoning_delta",
+    messageKey: "assistant-reasoning-1",
+    reasoningId: "reasoning-turn-runner-1",
+    textDelta: "真实公开推理增量"
+  }));
+  assert.equal(
+    renderedIncrementalMessages.at(-1)?.assistantTurn
+      ?.providerReasoningSegments?.[0]?.text,
+    "真实公开推理增量",
+    "production reasoning delta passes its changed Assistant Turn carrier to the local updater"
+  );
+  assert.equal(virtualListEl.emptyCallCount, fullRenderCountAfterReasoningTopology,
+    "a reasoning delta reaches message-controller and tryUpdateMessage without clearing the virtual list");
+  assert.equal(virtualListEl.findByClass("codex-ai-elements-reasoning"), reasoningRoot,
+    "the Reasoning DOM keeps identity after its first production delta");
+  const reasoningBody = reasoningRoot!.findByClass("codex-ai-elements-reasoning-content");
+  assert.ok(reasoningBody);
+  dom.selectText(reasoningBody!, "真实公开");
+  const selectedBeforeDelta = dom.selectedText();
+  await emit(listener, runtimeEvent({
+    type: "provider_reasoning_delta",
+    messageKey: "assistant-reasoning-1",
+    reasoningId: "reasoning-turn-runner-1",
+    textDelta: "，第二段"
+  }));
+  assert.equal(virtualListEl.emptyCallCount, fullRenderCountAfterReasoningTopology,
+    "later reasoning status and text changes remain local updates");
+  assert.equal(virtualListEl.findByClass("codex-ai-elements-reasoning"), reasoningRoot);
+  assert.equal(dom.selectedText(), selectedBeforeDelta,
+    "a production reasoning delta restores the existing browser Selection");
+  assert.ok(dom.selectionRestoreCalls() >= 1);
+  await emit(listener, runtimeEvent({
+    type: "provider_reasoning_end",
+    messageKey: "assistant-reasoning-1",
+    reasoningId: "reasoning-turn-runner-1",
+    text: "真实公开推理增量，第二段",
+    status: "completed"
+  }));
+  assert.equal(virtualListEl.emptyCallCount, fullRenderCountAfterReasoningTopology,
+    "reasoning end patches status without clearing the virtual list");
+  assert.equal(virtualListEl.findByClass("codex-ai-elements-reasoning"), reasoningRoot,
+    "reasoning end preserves the original disclosure node");
+  assert.equal(dom.selectedText(), selectedBeforeDelta,
+    "reasoning end preserves the restored Selection");
+
+  await emit(listener, runtimeEvent({
+    type: "tool_execution_start",
+    toolCallId: "tool-turn-runner-1",
+    toolName: "vault_search",
+    args: { query: "局部更新" }
+  }));
+  await emit(listener, runtimeEvent({
+    type: "tool_execution_update",
+    toolCallId: "tool-turn-runner-1",
+    toolName: "vault_search",
+    update: { content: "找到结果" }
+  }));
+  await emit(listener, runtimeEvent({
+    type: "tool_execution_end",
+    toolCallId: "tool-turn-runner-1",
+    toolName: "vault_search",
+    result: { content: "找到结果" },
+    isError: false
+  }));
+  assert.deepEqual(
+    renderedIncrementalMessages
+      .filter((message) =>
+        piToolCallIdFromProjectedMessageId(message.id) === "tool-turn-runner-1"
+      )
+      .map((message) => message.status),
+    ["running", "running", "running"],
+    "production Tool status events pass each changed Tool carrier to the local updater"
+  );
+  assert.equal(
+    renderedIncrementalMessages
+      .filter((message) =>
+        piToolCallIdFromProjectedMessageId(message.id) === "tool-turn-runner-1"
+      )
+      .at(-1)?.processOutput,
+    "找到结果",
+    "Tool end carrier includes the latest real output while durable status remains authoritative"
+  );
+
+  await emit(listener, runtimeEvent({
     type: "message_start",
     messageKey: "assistant-1",
     role: "assistant"
@@ -1492,6 +1632,11 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
     messageKey: "assistant-1",
     textDelta: "streaming"
   }));
+  assert.equal(
+    renderedIncrementalMessages.at(-1)?.text,
+    "streaming",
+    "production answer delta passes the changed Assistant message carrier to the local updater"
+  );
   approvalRefreshPending = true;
   assert.ok(approvalListener);
   approvalListener();
@@ -1556,6 +1701,148 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
     renderedAssistantStatuses.slice(0, -1).includes("completed"),
     true,
     "the formal ProductRun event must be the first event allowed to render terminal status"
+  );
+  } finally {
+    messageListRenderer.dispose();
+    dom.restore();
+  }
+}
+
+async function failedSettlementNoticeMatchesDurableFailureReason():
+Promise<void> {
+  const session = piSessionShell("conversation-turn-runner");
+  session.piSessionId = "pi-session-turn-runner";
+  const item: QueuedTurnItem = {
+    id: "queued-failed-turn-runner",
+    sessionId: session.id,
+    text: "测试失败终态",
+    attachments: [],
+    skill: null,
+    turnOptions: {
+      providerSettingsId: "fixture-provider",
+      runtimeProviderId: "fixture-provider",
+      model: "fixture-model",
+      reasoning: "high",
+      permission: "read-only",
+      mode: "agent",
+      mcpEnabled: false
+    },
+    kind: "chat",
+    createdAt: 2
+  };
+  const runResult = deferred<Readonly<PiProductRunRecord>>();
+  let listener: PiChatRuntimeEventListener | null = null;
+  const failedProjection = (): PiConversationProjection => {
+    const projection = durableProjection(session, "completed");
+    return {
+      ...projection,
+      messages: projection.messages.map((message) =>
+        message.role === "assistant"
+          ? {
+              ...message,
+              text: "失败前保留的 partial",
+              details: "Provider 返回的流数据格式损坏，回答未完成。",
+              status: "failed" as const
+            }
+          : message
+      )
+    };
+  };
+  const plugin = {
+    settings: {
+      memory: { useLongTermMemory: true },
+      sessions: [session],
+      activeSessionId: session.id
+    },
+    getVaultPath: () => "/vault",
+    persistPiNativeSettings: async () => undefined,
+    submitPiChat: async () => ({
+      productRunId: "product-run-turn-runner",
+      conversationId: session.id,
+      piSessionId: session.piSessionId!,
+      userEntryId: "entry-user",
+      result: runResult.promise
+    }),
+    subscribePiRun: (
+      _productRunId: string,
+      next: PiChatRuntimeEventListener
+    ) => {
+      listener = next;
+      return { unsubscribe: () => { listener = null; } };
+    },
+    subscribePiAgentApproval: () => ({ unsubscribe: () => undefined }),
+    readPiConversationProjection: async () => failedProjection(),
+    abortPiConversation: async () => undefined,
+    releasePiProductionRun: () => undefined
+  };
+  let running = false;
+  let activeRunId = "";
+  const view: any = {
+    plugin,
+    get running() { return running; },
+    set running(value: boolean) { running = value; },
+    get activeRunId() { return activeRunId; },
+    set activeRunId(value: string) { activeRunId = value; },
+    activeRunKind: "",
+    activeRunSessionId: "",
+    activeTurnId: "",
+    activeRunNativeExecutionRecordIds: [],
+    turnStartedAt: 0,
+    messagesBottomFollowPaused: false,
+    inputEl: { value: item.text },
+    attachments: [],
+    selectedSkill: null,
+    setPendingInteraction: () => undefined,
+    clearComposerDraft: () => undefined,
+    renderTabs: () => undefined,
+    renderMessages: () => undefined,
+    renderMessagesIfActive: () => undefined,
+    renderToolbar: () => undefined,
+    applyStatus: () => undefined,
+    armTurnWatchdog: () => undefined,
+    clearTurnWatchdog: () => undefined,
+    clearActiveRun: () => { activeRunId = ""; }
+  };
+
+  openTestNoticeMessages.length = 0;
+  const turn = startChatTurn(view, session, item, "composer");
+  await waitFor(() => listener !== null);
+  await emit(listener, runtimeEvent({ type: "agent_settled" }));
+  await emit(listener, runtimeEvent({
+    type: "product_run_settled",
+    terminalState: "failed",
+    assistantEntryId: "entry-assistant"
+  }));
+  runResult.resolve({
+    productRunId: "product-run-turn-runner",
+    conversationId: session.id,
+    piSessionId: session.piSessionId!,
+    userEntryId: "entry-user",
+    assistantEntryId: "entry-assistant",
+    toolCallIds: [],
+    memoryMode: "normal",
+    state: "product_run_settled",
+    terminalState: "failed",
+    activeLeafId: "entry-assistant",
+    agentSettledAt: 7,
+    settledAt: 8,
+    error: "provider_sse_json_invalid",
+    createdAt: 2,
+    updatedAt: 8
+  });
+  assert.equal(await turn, "failed");
+  assert.equal(
+    openTestNoticeMessages.at(-1),
+    "Provider 返回的流数据格式损坏，回答未完成。"
+  );
+  const durableAssistant = session.messages.find((message) =>
+    message.role === "assistant"
+  );
+  assert.equal(durableAssistant?.text, "失败前保留的 partial");
+  assert.equal(
+    durableAssistant?.details,
+    openTestNoticeMessages.at(-1),
+    "top-right Notice and durable answer reason must use the same safe copy"
   );
 }
 
@@ -1864,6 +2151,151 @@ function imageFailureView(input: Readonly<{
     clearTurnWatchdog: () => undefined,
     clearActiveRun: () => { activeRunId = ""; }
   };
+}
+
+function installTurnRunnerMessageDom(): Readonly<{
+  selectText(container: FakeElement, text: string): void;
+  selectedText(): string;
+  selectionRestoreCalls(): number;
+  restore(): void;
+}> {
+  const previousDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
+  const previousHTMLElement = Object.getOwnPropertyDescriptor(globalThis, "HTMLElement");
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  let selection: {
+    rangeCount: number;
+    anchorNode: FakeElement;
+    anchorOffset: number;
+    focusNode: FakeElement;
+    focusOffset: number;
+    setBaseAndExtent(
+      anchorNode: FakeElement,
+      anchorOffset: number,
+      focusNode: FakeElement,
+      focusOffset: number
+    ): void;
+    removeAllRanges(): void;
+    addRange(): void;
+  } | null = null;
+  let restoreCalls = 0;
+  const fakeWindow = {
+    NodeFilter: { SHOW_TEXT: 4 },
+    setTimeout: () => 1,
+    clearTimeout: () => undefined,
+    requestAnimationFrame: (callback: (timestamp: number) => void) => {
+      callback(0);
+      return 1;
+    },
+    cancelAnimationFrame: () => undefined
+  };
+  const fakeDocument = {
+    body: new FakeElement("body"),
+    activeElement: null,
+    defaultView: fakeWindow,
+    createElementNS: (_namespace: string, tag: string) => new FakeElement(tag),
+    getSelection: () => selection,
+    createRange: () => {
+      let root: FakeElement | null = null;
+      let endNode: FakeElement | null = null;
+      let endOffset = 0;
+      return {
+        selectNodeContents: (container: FakeElement) => { root = container; },
+        setStart: () => undefined,
+        setEnd: (node: FakeElement, offset: number) => {
+          endNode = node;
+          endOffset = offset;
+        },
+        toString: () => root && endNode
+          ? textThroughPoint(root, endNode, endOffset)
+          : ""
+      };
+    },
+    createTreeWalker: (container: FakeElement) => {
+      const nodes = fakeTextNodes(container);
+      let index = 0;
+      return { nextNode: () => nodes[index++] ?? null };
+    }
+  };
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: fakeDocument
+  });
+  Object.defineProperty(globalThis, "HTMLElement", {
+    configurable: true,
+    value: FakeElement
+  });
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: fakeWindow
+  });
+
+  return {
+    selectText: (container, text) => {
+      const node = fakeTextNodes(container).find((candidate) =>
+        candidate.textContent.includes(text)
+      );
+      assert.ok(node, `selection fixture must find ${text}`);
+      const start = node!.textContent.indexOf(text);
+      selection = {
+        rangeCount: 1,
+        anchorNode: node!,
+        anchorOffset: start,
+        focusNode: node!,
+        focusOffset: start + text.length,
+        setBaseAndExtent(anchorNode, anchorOffset, focusNode, focusOffset) {
+          restoreCalls += 1;
+          this.anchorNode = anchorNode;
+          this.anchorOffset = anchorOffset;
+          this.focusNode = focusNode;
+          this.focusOffset = focusOffset;
+        },
+        removeAllRanges: () => undefined,
+        addRange: () => undefined
+      };
+    },
+    selectedText: () => {
+      if (!selection) return "";
+      if (selection.anchorNode === selection.focusNode) {
+        return selection.anchorNode.textContent.slice(
+          selection.anchorOffset,
+          selection.focusOffset
+        );
+      }
+      return "";
+    },
+    selectionRestoreCalls: () => restoreCalls,
+    restore: () => {
+      if (previousDocument) Object.defineProperty(globalThis, "document", previousDocument);
+      else delete (globalThis as unknown as { document?: unknown }).document;
+      if (previousHTMLElement) Object.defineProperty(globalThis, "HTMLElement", previousHTMLElement);
+      else delete (globalThis as unknown as { HTMLElement?: unknown }).HTMLElement;
+      if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+      else delete (globalThis as unknown as { window?: unknown }).window;
+    }
+  };
+}
+
+function fakeTextNodes(container: FakeElement): FakeElement[] {
+  const nodes: FakeElement[] = [];
+  const visit = (element: FakeElement): void => {
+    if (element.textContent) nodes.push(element);
+    for (const child of element.children) visit(child);
+  };
+  for (const child of container.children) visit(child);
+  return nodes;
+}
+
+function textThroughPoint(
+  container: FakeElement,
+  endNode: FakeElement,
+  endOffset: number
+): string {
+  let text = "";
+  for (const node of fakeTextNodes(container)) {
+    if (node === endNode) return `${text}${node.textContent.slice(0, endOffset)}`;
+    text += node.textContent;
+  }
+  return text;
 }
 
 function runtimeEvent(

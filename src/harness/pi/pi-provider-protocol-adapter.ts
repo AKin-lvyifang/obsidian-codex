@@ -35,6 +35,11 @@ import type {
 import {
   applyEchoInkPiReasoningPayload
 } from "../../settings/pi-model-catalog";
+import {
+  preventProviderRetryAfterPartial,
+  safeProviderFailureCode
+} from "./provider-failure";
+import { validProviderHistory } from "./provider-stream-codec";
 
 export type PiProviderProtocolAdapters = Readonly<
   Record<ApiProviderProtocol, ProviderStreams>
@@ -170,16 +175,12 @@ implements ControlledPiStreamPort {
     try {
       const dispatcher = this.options.dispatcher
         ?? new PiProviderProtocolDispatcher();
-      const dispatch = input.options.maxTokens === undefined
-        && (
-          input.model.api === "openai-completions"
-          || input.model.api === "openai-responses"
-        )
-        ? dispatcher.stream.bind(dispatcher)
-        : dispatcher.streamSimple.bind(dispatcher);
-      const upstream = dispatch({
+      const upstream = dispatcher.streamSimple({
         model: input.model,
-        context: input.context,
+        context: {
+          ...input.context,
+          messages: validProviderHistory(input.context.messages, input.model)
+        },
         apiKey,
         options: {
           signal: input.options.signal,
@@ -240,7 +241,7 @@ export function classifyPiProviderConnectionFailure(
     return "network";
   }
   if (
-    /protocol|parse|invalid response|unexpected.*json|json.*unexpected/u.test(
+    /protocol|parse|invalid response|unexpected.*json|json.*unexpected|provider_(?:finish_reason|sse_json|tool_call|utf8)_/u.test(
       normalized
     )
   ) {
@@ -256,12 +257,16 @@ function sanitizeProviderStream(
 ): AssistantMessageEventStream {
   const output = createAssistantMessageEventStream();
   void (async () => {
+    let partial: AssistantMessage | undefined;
     try {
       for await (const event of upstream) {
         if (event.type !== "error") {
+          if ("partial" in event) partial = event.partial;
+          else if (event.type === "done") partial = event.message;
           output.push(event);
           continue;
         }
+        partial = event.error;
         output.push({
           type: "error",
           reason: event.reason,
@@ -284,8 +289,10 @@ function sanitizeProviderStream(
           model,
           thrownProviderFailureCode(
             responseStatus(),
-            error instanceof Error ? error.message : ""
-          )
+            error instanceof Error ? error.message : "",
+            partial
+          ),
+          partial
         )
       });
     }
@@ -311,20 +318,28 @@ function runtimeProviderFailureCode(
     )
     || isStatusContextOverflow(status, message)
   ) {
-    return "context_length_exceeded";
+    return preventProviderRetryAfterPartial(
+      "context_length_exceeded",
+      assistantMessage
+    );
   }
-  return providerFailureCode(
+  const safeCode = safeProviderFailureCode(message) ?? providerFailureCode(
     classifyPiProviderConnectionFailure(status, message)
   );
+  return preventProviderRetryAfterPartial(safeCode, assistantMessage);
 }
 
 function thrownProviderFailureCode(
   status: number | null,
-  message: string
+  message: string,
+  partial?: AssistantMessage
 ): string {
-  return isStatusContextOverflow(status, message)
+  const safeCode = isStatusContextOverflow(status, message)
     ? "context_length_exceeded"
-    : "provider_network_failed";
+    : safeProviderFailureCode(message) ?? providerFailureCode(
+      classifyPiProviderConnectionFailure(status, message)
+    );
+  return preventProviderRetryAfterPartial(safeCode, partial);
 }
 
 function isStatusContextOverflow(
@@ -379,31 +394,34 @@ function failedStream(
 
 function errorMessage(
   model: Model<Api>,
-  safeCode: string
+  safeCode: string,
+  partial?: AssistantMessage
 ): AssistantMessage {
   return {
-    role: "assistant",
-    content: [],
-    api: model.api,
-    provider: model.provider,
-    model: model.id,
-    usage: {
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-      totalTokens: 0,
-      cost: {
+    ...(partial ?? {
+      role: "assistant",
+      content: [],
+      api: model.api,
+      provider: model.provider,
+      model: model.id,
+      usage: {
         input: 0,
         output: 0,
         cacheRead: 0,
         cacheWrite: 0,
-        total: 0
-      }
-    },
+        totalTokens: 0,
+        cost: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          total: 0
+        }
+      },
+      timestamp: Date.now()
+    }),
     stopReason: "error",
-    errorMessage: safeCode,
-    timestamp: Date.now()
+    errorMessage: safeCode
   };
 }
 
@@ -420,9 +438,9 @@ function providerFailureCode(
     case "rate_limit":
       return "provider_rate_limited";
     case "network":
-      return "provider_network_failed";
+      return "provider_network_error";
     case "provider":
-      return "provider_unavailable";
+      return "provider_service_unavailable";
   }
 }
 

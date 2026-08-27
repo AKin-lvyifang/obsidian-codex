@@ -4,13 +4,15 @@ import {
   type ConversationCopy
 } from "../../settings/i18n";
 import { knowledgeUsageMessageData } from "../../knowledge-base/usage";
-import type {
-  EchoInkAssistantTurnStatus,
-  EchoInkProviderReasoningSnapshot,
-  EchoInkTurnInteractionRecord,
-  EchoInkTurnProcessNode,
-  EchoInkTurnProcessNodeKind,
-  EchoInkTurnProcessNodeStatus
+import {
+  echoInkProviderReasoningSegments,
+  type EchoInkAssistantTurnStatus,
+  type EchoInkProviderReasoningSegmentSnapshot,
+  type EchoInkProviderReasoningSnapshot,
+  type EchoInkTurnInteractionRecord,
+  type EchoInkTurnProcessNode,
+  type EchoInkTurnProcessNodeKind,
+  type EchoInkTurnProcessNodeStatus
 } from "../../types/conversation-turn";
 import type { EchoInkReasoningActivity } from "../../types/reasoning-summary";
 import { stableHashedIdentity } from "../../core/mapping";
@@ -54,6 +56,10 @@ export interface AgentTurnView {
   readonly processMessages: readonly ChatMessage[];
   readonly processIndices: readonly number[];
   readonly processNodes: readonly Readonly<EchoInkTurnProcessNode>[];
+  readonly providerReasoningSegments: readonly Readonly<
+    EchoInkProviderReasoningSegmentSnapshot
+  >[];
+  /** Transitional single-segment view until the Elements renderer consumes all segments. */
   readonly providerReasoning?: Readonly<EchoInkProviderReasoningSnapshot>;
   readonly interactionRecords: readonly Readonly<EchoInkTurnInteractionRecord>[];
   readonly finalAnswer?: ChatMessage;
@@ -255,6 +261,9 @@ function buildAgentTurn(
 ): AgentTurnView {
   const messages = indices.map((index) => allMessages[index]);
   const explicitTurn = latestExplicitTurn(messages);
+  const providerReasoningSegments = explicitTurn
+    ? echoInkProviderReasoningSegments(explicitTurn)
+    : [];
   const finalAnswerIndex = explicitFinalAnswerIndex(allMessages, indices, explicitTurn?.finalAnswerMessageId)
     ?? implicitFinalAnswerIndex(allMessages, indices);
   const finalAnswer = finalAnswerIndex === undefined ? undefined : allMessages[finalAnswerIndex];
@@ -263,19 +272,19 @@ function buildAgentTurn(
   const startedAt = minimumTimestamp([
     explicitTurn?.startedAt,
     ...messages.map((message) => message.createdAt),
-    explicitTurn?.providerReasoning?.startedAt
+    ...providerReasoningSegments.map((segment) => segment.startedAt)
   ]);
   const updatedAt = maximumTimestamp([
     explicitTurn?.updatedAt,
     ...messages.flatMap((message) => [message.createdAt, message.completedAt]),
-    explicitTurn?.providerReasoning?.updatedAt
+    ...providerReasoningSegments.map((segment) => segment.updatedAt)
   ], startedAt);
   const status = explicitTurn?.status ?? statusForMessages(messages, finalAnswer);
   const completedAt = isTerminalTurnStatus(status)
     ? maximumTimestamp([
         explicitTurn?.completedAt,
         ...messages.map((message) => message.completedAt),
-        explicitTurn?.providerReasoning?.completedAt,
+        ...providerReasoningSegments.map((segment) => segment.completedAt),
         updatedAt
       ], updatedAt)
     : undefined;
@@ -306,8 +315,9 @@ function buildAgentTurn(
     processMessages,
     processIndices,
     processNodes,
-    ...(explicitTurn?.providerReasoning
-      ? { providerReasoning: explicitTurn.providerReasoning }
+    providerReasoningSegments,
+    ...(providerReasoningSegments.at(-1)
+      ? { providerReasoning: providerReasoningSegments.at(-1) }
       : {}),
     interactionRecords: mergeInteractionRecords(
       explicitTurn?.interactionRecords ?? [],
@@ -388,8 +398,9 @@ function buildProcessNodes(
   }
 
   const explicitTurn = latestExplicitTurn(messages);
-  if (explicitTurn?.providerReasoning) {
-    const reasoning = explicitTurn.providerReasoning;
+  for (const reasoning of explicitTurn
+    ? echoInkProviderReasoningSegments(explicitTurn)
+    : []) {
     const nodeId = `provider-reasoning:${reasoning.reasoningId}`;
     if (!nodeIds.has(nodeId)) {
       nodes.push({

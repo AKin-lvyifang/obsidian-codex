@@ -102,9 +102,11 @@ export async function runPiNativeConversationRuntimeTests(): Promise<void> {
   await assertUserQuestionUsesCentralFailClosedSecurity();
   assertReasoningSummaryLifecycleSemantics();
   await assertReasoningSummaryRuntimeLifecycle();
+  await assertProviderReasoningUsesPerAssistantMessageClocks();
   await assertReasoningSelectionFailsClosedBeforePiPrompt();
   assertKnowledgeMaintenanceRequiresExplicitCommand();
   await assertProjectionAndCatalogManagementStayAgentSessionFree();
+  await assertFailedAssistantHistoryIsDurableButExcludedFromMemory();
   await assertKnowledgeAskUsesAgentAndReadOnlyTools();
   await assertAskSourceAttributionCapturesOnlyInjectedPrimaryMemory();
   await assertKnowledgeObservationAndProgressArePrivacySafe();
@@ -452,7 +454,7 @@ async function assertReasoningSummaryRuntimeLifecycle(): Promise<void> {
       taskEvents.push(structuredClone(event));
     });
     session.beginProviderRequest();
-    session.emitAssistantText("首段公开回答");
+    session.emitProviderReasoning("第一段公开推理");
     const plan = freezeEchoInkTaskPlan({
       schemaVersion: ECHOINK_TASK_PLAN_SCHEMA_VERSION,
       planId: "reasoning-plan",
@@ -472,6 +474,8 @@ async function assertReasoningSummaryRuntimeLifecycle(): Promise<void> {
     session.finishTool("reasoning-task-update", "task_update", {
       details: { source: "echoink-task-plan", plan }
     }, false);
+    session.emitProviderReasoning("工具后的第二段公开推理");
+    session.emitAssistantText("首段公开回答");
     assert.equal(
       reasoningSummariesForRun(session.sessionManager, taskRun.productRunId).length,
       1,
@@ -510,6 +514,32 @@ async function assertReasoningSummaryRuntimeLifecycle(): Promise<void> {
       event.summary.firstAssistantTextAt !== undefined
       && event.summary.activities.some((activity) => activity.kind === "task")
     ), "post-answer Task updates remain visible in the same live snapshot");
+    const providerReasoningEvents = taskEvents.filter((event) =>
+      event.type === "provider_reasoning_start"
+      || event.type === "provider_reasoning_delta"
+      || event.type === "provider_reasoning_end"
+    );
+    assert.deepEqual(
+      providerReasoningEvents.map((event) => event.type),
+      [
+        "provider_reasoning_start",
+        "provider_reasoning_delta",
+        "provider_reasoning_end",
+        "provider_reasoning_start",
+        "provider_reasoning_delta",
+        "provider_reasoning_end"
+      ]
+    );
+    const providerReasoningIds = providerReasoningEvents
+      .filter((event) => event.type === "provider_reasoning_start")
+      .map((event) => event.reasoningId);
+    assert.equal(new Set(providerReasoningIds).size, 2);
+    assert.deepEqual(
+      providerReasoningEvents
+        .filter((event) => event.type === "provider_reasoning_end")
+        .map((event) => event.text),
+      ["第一段公开推理", "工具后的第二段公开推理"]
+    );
 
     const noTextRun = await fixture.submit({
       conversationId,
@@ -583,6 +613,68 @@ function reasoningSummariesForRun(
   });
 }
 
+async function assertProviderReasoningUsesPerAssistantMessageClocks():
+Promise<void> {
+  let clock = 1_000;
+  await withFixture(["provider-reasoning-clock-run"], async (fixture) => {
+    const conversationId = "provider-reasoning-message-clocks";
+    await fixture.runtime.createConversation({
+      conversationId,
+      title: "Provider reasoning message clocks",
+      cwd: fixture.root,
+      createdAt: 1
+    });
+    await fixture.runtime.activateConversation(conversationId);
+    const run = await fixture.submit({
+      conversationId,
+      text: "验证逐 AssistantMessage 推理计时",
+      submittedAt: 500
+    });
+    const session = fixture.latestSession();
+
+    clock = 9_000;
+    session.emitProviderReasoningBlocks(
+      ["首个公开段", "同一消息的后续公开段"],
+      1_000
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    clock = 18_000;
+    session.emitToolStart("reasoning-clock-tool", "fixture_tool", {});
+    session.emitToolEnd("reasoning-clock-tool", "fixture_tool", {}, false);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    clock = 26_000;
+    session.emitProviderReasoningBlocks(
+      ["Tool 后第二个 AssistantMessage 的首段"],
+      20_000
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    clock = 30_000;
+    session.finishSuccessful("计时完成");
+    await run.result;
+
+    const projection = await fixture.runtime.readProjection(conversationId);
+    const segments = projection.messages
+      .find((message) => message.assistantTurn?.turnId === run.productRunId)
+      ?.assistantTurn?.providerReasoningSegments ?? [];
+    assert.deepEqual(
+      segments.map((segment) => ({
+        text: segment.text,
+        startedAt: segment.startedAt,
+        durationMs: segment.durationMs
+      })),
+      [
+        { text: "首个公开段", startedAt: 1_000, durationMs: 8_000 },
+        { text: "同一消息的后续公开段", startedAt: 9_000, durationMs: 0 },
+        {
+          text: "Tool 后第二个 AssistantMessage 的首段",
+          startedAt: 20_000,
+          durationMs: 6_000
+        }
+      ]
+    );
+  }, { now: () => clock });
+}
+
 async function assertProjectionAndCatalogManagementStayAgentSessionFree():
 Promise<void> {
   await withFixture([], async (fixture) => {
@@ -611,6 +703,94 @@ Promise<void> {
     assert.equal(fixture.sessions.length, 1, "opening must activate its AgentSession");
     await fixture.runtime.switchConversation("history-a", "history-b");
     assert.equal(fixture.sessions.length, 2, "switching must activate the target AgentSession");
+  });
+}
+
+async function assertFailedAssistantHistoryIsDurableButExcludedFromMemory():
+Promise<void> {
+  await withFixture([
+    "failed-history-run",
+    "failed-history-follow-up-run"
+  ], async (fixture) => {
+    const conversationId = "failed-assistant-history-hygiene";
+    await fixture.runtime.createConversation({
+      conversationId,
+      title: "Failed Assistant history hygiene",
+      cwd: fixture.root,
+      createdAt: 1
+    });
+    await fixture.runtime.activateConversation(conversationId);
+    const firstSession = fixture.latestSession();
+    const failedRun = await fixture.submit({
+      conversationId,
+      text: "触发中断前的用户问题",
+      submittedAt: 2
+    });
+    firstSession.finishFailed(
+      "provider_sse_json_invalid",
+      "FAILED_ASSISTANT_PARTIAL_CANARY"
+    );
+    assert.equal((await failedRun.result).terminalState, "failed");
+    assert.equal(
+      (await fixture.productRuns.read(failedRun.productRunId))?.error,
+      "provider_sse_json_invalid",
+      "ProductRun must preserve the precise content-free Provider failure code"
+    );
+    assert.equal(fixture.runtime.releaseProductRun(failedRun.productRunId), true);
+
+    const durableProjection = await fixture.runtime.readProjection(
+      conversationId
+    );
+    const durableFailedAnswer = durableProjection.messages.find((message) =>
+      message.role === "assistant"
+      && message.text === "FAILED_ASSISTANT_PARTIAL_CANARY"
+    );
+    assert.equal(durableFailedAnswer?.status, "failed");
+    assert.equal(
+      durableFailedAnswer?.details,
+      "Provider 返回的流数据格式损坏，回答未完成。"
+    );
+
+    await fixture.runtime.releaseConversation(conversationId);
+    const reopenedProjection = await fixture.runtime.activateConversation(
+      conversationId
+    );
+    const reopenedFailedAnswer = reopenedProjection.messages.find((message) =>
+      message.role === "assistant"
+      && message.text === "FAILED_ASSISTANT_PARTIAL_CANARY"
+    );
+    assert.equal(reopenedFailedAnswer?.status, "failed");
+    assert.equal(reopenedFailedAnswer?.details, durableFailedAnswer?.details);
+
+    const reopenedSession = fixture.latestSession();
+    reopenedSession.sessionManager.appendMessage({
+      ...assistantMessage("ABORTED_ASSISTANT_PARTIAL_CANARY", 400_001),
+      stopReason: "aborted"
+    });
+    reopenedSession.sessionManager.appendMessage({
+      ...assistantMessage("LENGTH_ASSISTANT_PARTIAL_CANARY", 400_002),
+      stopReason: "length"
+    });
+    reopenedSession.sessionManager.appendMessage(
+      assistantMessage("保留的完整 Assistant 历史", 400_003)
+    );
+
+    const followUp = await fixture.submit({
+      conversationId,
+      text: "检查下一轮 Memory 上下文",
+      submittedAt: 3
+    });
+    const recentConversation = reopenedSession
+      .memoryTurnsBeforeUserEntryAppend.at(-1)?.recentConversation ?? [];
+    assert.match(recentConversation.join("\n"), /触发中断前的用户问题/u);
+    assert.match(recentConversation.join("\n"), /保留的完整 Assistant 历史/u);
+    assert.doesNotMatch(
+      recentConversation.join("\n"),
+      /FAILED_ASSISTANT|ABORTED_ASSISTANT|LENGTH_ASSISTANT/u,
+      "Personal Memory recentConversation must exclude every failed partial"
+    );
+    reopenedSession.finishSuccessful("后续回答完成");
+    assert.equal((await followUp.result).terminalState, "completed");
   });
 }
 
@@ -3344,7 +3524,7 @@ async function withFixture(
   assertion: (fixture: RuntimeFixture) => Promise<void>,
   runtimeOptions: Pick<
     PiNativeConversationRuntimeOptions,
-    "hasPendingProductWork" | "knowledge"
+    "hasPendingProductWork" | "knowledge" | "now"
   > = {}
 ): Promise<void> {
   const root = await realpath(await mkdtemp(
@@ -3518,6 +3698,7 @@ class ControlledAgentSession {
   private readonly listeners = new Set<(event: AgentSessionEvent) => void>();
   private promptSequence = 0;
   private toolSequence = 0;
+  private providerReasoningSequence = 0;
   private resolvePrompt: (() => void) | null = null;
   private rejectPrompt: ((error: unknown) => void) | null = null;
   private idlePromise: Promise<void> = Promise.resolve();
@@ -3640,11 +3821,11 @@ class ControlledAgentSession {
     resolve();
   }
 
-  finishFailed(errorMessage: string): void {
+  finishFailed(errorMessage: string, text = ""): void {
     const resolve = this.resolvePrompt;
     assert.ok(resolve, "expected a pending prompt");
     this.sessionManager.appendMessage({
-      ...assistantMessage("", 300_000 + this.promptSequence),
+      ...assistantMessage(text, 300_000 + this.promptSequence),
       stopReason: "error",
       errorMessage
     });
@@ -3684,6 +3865,63 @@ class ControlledAgentSession {
         contentIndex: 0
       }
     } as AgentSessionEvent);
+  }
+
+  emitProviderReasoning(text: string): void {
+    this.providerReasoningSequence += 1;
+    this.emitProviderReasoningBlocks(
+      [text],
+      300_000 + this.promptSequence + this.providerReasoningSequence
+    );
+  }
+
+  emitProviderReasoningBlocks(
+    texts: readonly string[],
+    timestamp: number,
+    beforeEvent: (
+      index: number,
+      phase: "start" | "delta" | "end"
+    ) => void = () => undefined
+  ): void {
+    const message: AssistantMessage = {
+      ...assistantMessage("", timestamp),
+      content: texts.map((thinking) => ({ type: "thinking" as const, thinking }))
+    };
+    this.emit({ type: "message_start", message });
+    texts.forEach((text, contentIndex) => {
+      beforeEvent(contentIndex, "start");
+      this.emit({
+        type: "message_update",
+        message,
+        assistantMessageEvent: {
+          type: "thinking_start",
+          contentIndex,
+          partial: message
+        }
+      } as AgentSessionEvent);
+      beforeEvent(contentIndex, "delta");
+      this.emit({
+        type: "message_update",
+        message,
+        assistantMessageEvent: {
+          type: "thinking_delta",
+          contentIndex,
+          delta: text,
+          partial: message
+        }
+      } as AgentSessionEvent);
+      beforeEvent(contentIndex, "end");
+      this.emit({
+        type: "message_update",
+        message,
+        assistantMessageEvent: {
+          type: "thinking_end",
+          contentIndex,
+          content: text,
+          partial: message
+        }
+      } as AgentSessionEvent);
+    });
   }
 
   beginProviderRequest(): void {

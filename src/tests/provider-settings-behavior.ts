@@ -4,14 +4,32 @@ import { App, TFile, openTestModals } from "obsidian";
 import type {
   Api,
   AssistantMessage,
+  AssistantMessageEvent,
   Context,
   Model,
   ModelThinkingLevel,
   ProviderStreams,
   StreamOptions
 } from "@earendil-works/pi-ai";
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
-import { streamSimple } from "@earendil-works/pi-ai/compat";
+import {
+  InMemoryCredentialStore,
+  InMemoryModelsStore,
+  createAssistantMessageEventStream
+} from "@earendil-works/pi-ai";
+import {
+  isContextOverflow,
+  isRetryableAssistantError,
+  streamSimple
+} from "@earendil-works/pi-ai/compat";
+import {
+  clampMaxTokensToContext
+} from "@earendil-works/pi-ai/api/simple-options";
+import {
+  ModelRuntime,
+  SessionManager,
+  SettingsManager,
+  createAgentSession
+} from "@earendil-works/pi-coding-agent";
 import {
   ANTHROPIC_MODELS
 } from "@earendil-works/pi-ai/providers/anthropic.models";
@@ -90,6 +108,10 @@ import {
   type QwenTokenPlanProviderRequest
 } from "../plugin/qwen-token-plan-provider-adapter";
 import {
+  createLoopbackOpenAICompletionsAdapter,
+  type LoopbackProviderRequest
+} from "../plugin/loopback-openai-provider-adapter";
+import {
   createOpenAICodexSseAdapter,
   PiProviderProtocolDispatcher,
   PiProviderProtocolTransport,
@@ -98,8 +120,12 @@ import {
   createPiProviderModelDefinition
 } from "../harness/pi/production-pi-model-resolver";
 import {
+  createPiNativeControlledProvider,
   createPiNativeModelFromConfiguration
 } from "../harness/pi-native/pi-native-controlled-provider";
+import {
+  ControlledVaultResourceLoader
+} from "../harness/pi-native/controlled-resources";
 import {
   ProviderPreflightSession,
   providerPreflightApiKeyReady
@@ -235,11 +261,13 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   assertPresetRequestMappings();
   assertQwenProviderContract();
   await assertQwenTokenPlanTransportContract();
+  await assertPiAgentSessionPartialAwareRetryContract();
   await assertProviderModelDiscoveryRequestContract();
   assertCustomProtocolContract();
   assertOpenAICodexSseAdapterContract();
   await assertProviderRequestLimitDispatchContract();
   await assertProtocolPayloadLimitContract();
+  await assertSpecialProviderPayloadLimitContract();
   await assertProviderAuthResolutionFailureContract();
   assertProviderTooltipBehavior();
   assertSavedModelLifecycle();
@@ -6417,6 +6445,7 @@ async function assertQwenTokenPlanTransportContract(): Promise<void> {
     const payload = JSON.parse(request.body) as Record<string, unknown>;
     assert.equal(payload.model, "qwen3.7-plus");
     assert.equal(payload.stream, true);
+    assert.equal(typeof payload.max_tokens, "number");
   }
 
   let featureRequest: QwenTokenPlanProviderRequest | null = null;
@@ -6466,6 +6495,544 @@ async function assertQwenTokenPlanTransportContract(): Promise<void> {
     "qwen3.7-plus"
   );
   assert.ok(qwenCatalogModel);
+  const streamingHeaders = {
+    "content-type": "text/event-stream; charset=utf-8"
+  } as const;
+  const runQwenBody = async (
+    body: string,
+    transportComplete = true
+  ): Promise<AssistantMessage> => await createQwenTokenPlanOpenAICompletionsAdapter(
+    async () => ({
+      status: 200,
+      headers: streamingHeaders,
+      body,
+      transportComplete
+    })
+  ).stream({
+    ...structuredClone(qwenCatalogModel),
+    baseUrl: transportInput.baseUrl
+  }, {
+    messages: [{
+      role: "user",
+      content: "测试 SSE 收尾",
+      timestamp: Date.now()
+    }],
+    tools: []
+  }, {
+    apiKey: fixtureKey,
+    reasoning: "high",
+    maxTokens: 64,
+    temperature: 0,
+    cacheRetention: "none",
+    maxRetries: 0,
+    timeoutMs: 1_000
+  }).result();
+  const completionEvent = (
+    content: string,
+    finishReason: string | null
+  ): string => `data: ${JSON.stringify({
+    id: "fixture-clean-eof-response",
+    model: "qwen3.7-plus",
+    choices: [{
+      delta: { content },
+      finish_reason: finishReason
+    }]
+  })}`;
+  const toolCompletionEvent = (finishReason: string): string =>
+    `data: ${JSON.stringify({
+      choices: [{
+        delta: {
+          tool_calls: [{
+            index: 0,
+            id: "fixture-clean-eof-tool",
+            function: {
+              name: "note_read",
+              arguments: "{\"path\":\"Inbox/clean-eof.md\"}"
+            }
+          }]
+        },
+        finish_reason: finishReason
+      }]
+    })}`;
+
+  const unterminatedFinalJson = await runQwenBody(
+    completionEvent("末块完成", "stop")
+  );
+  assert.equal(unterminatedFinalJson.stopReason, "stop");
+  assert.equal(
+    unterminatedFinalJson.content[0]?.type === "text"
+      ? unterminatedFinalJson.content[0].text
+      : "",
+    "末块完成"
+  );
+
+  const unterminatedDone = await runQwenBody([
+    completionEvent("DONE 完成", "stop"),
+    "data: [DONE]"
+  ].join("\n\n"));
+  assert.equal(unterminatedDone.stopReason, "stop");
+
+  const finishReasonWithoutDone = await runQwenBody(
+    `${completionEvent("无需 DONE", "stop")}\n\n`
+  );
+  assert.equal(finishReasonWithoutDone.stopReason, "stop");
+
+  const lengthWithoutDone = await runQwenBody(
+    completionEvent("达到长度", "length")
+  );
+  assert.equal(lengthWithoutDone.stopReason, "error");
+  assert.equal(
+    lengthWithoutDone.errorMessage,
+    "provider_output_limit_reached"
+  );
+
+  const toolWithoutDone = await runQwenBody(
+    toolCompletionEvent("tool_calls")
+  );
+  assert.equal(toolWithoutDone.stopReason, "toolUse");
+  assert.deepEqual(toolWithoutDone.content[0], {
+    type: "toolCall",
+    id: "fixture-clean-eof-tool",
+    name: "note_read",
+    arguments: { path: "Inbox/clean-eof.md" }
+  });
+
+  const lengthAfterToolCall = await runQwenBody(
+    toolCompletionEvent("length")
+  );
+  assert.equal(lengthAfterToolCall.stopReason, "error");
+  assert.equal(
+    lengthAfterToolCall.errorMessage,
+    "provider_output_limit_reached"
+  );
+  assert.equal(lengthAfterToolCall.content[0]?.type, "toolCall");
+
+  const filteredAfterToolCall = await runQwenBody(
+    toolCompletionEvent("content_filter")
+  );
+  assert.equal(filteredAfterToolCall.stopReason, "error");
+  assert.equal(
+    filteredAfterToolCall.errorMessage,
+    "provider_content_filtered"
+  );
+  assert.equal(filteredAfterToolCall.content[0]?.type, "toolCall");
+
+  const callbackCleanEof = await createQwenTokenPlanOpenAICompletionsAdapter(
+    async (request) => {
+      await request.onResponse?.({ status: 200, headers: streamingHeaders });
+      request.onChunk?.(Buffer.from(
+        completionEvent("回调末块完成", "stop"),
+        "utf8"
+      ));
+      return {
+        status: 200,
+        headers: streamingHeaders,
+        body: "",
+        transportComplete: true
+      };
+    }
+  ).stream({
+    ...structuredClone(qwenCatalogModel),
+    baseUrl: transportInput.baseUrl
+  }, {
+    messages: [{
+      role: "user",
+      content: "测试回调 clean EOF",
+      timestamp: Date.now()
+    }],
+    tools: []
+  }, {
+    apiKey: fixtureKey,
+    reasoning: "high",
+    maxTokens: 64,
+    temperature: 0,
+    cacheRetention: "none",
+    maxRetries: 0,
+    timeoutMs: 1_000
+  }).result();
+  assert.equal(callbackCleanEof.stopReason, "stop");
+  assert.equal(
+    callbackCleanEof.content[0]?.type === "text"
+      ? callbackCleanEof.content[0].text
+      : "",
+    "回调末块完成"
+  );
+
+  const malformedFinalEvent = await runQwenBody("data: []");
+  assert.equal(malformedFinalEvent.stopReason, "error");
+  assert.equal(malformedFinalEvent.errorMessage, "provider_sse_json_invalid");
+
+  const truncatedFinalEvent = await runQwenBody([
+    `${completionEvent("保留截断前内容", null)}\n`,
+    "data: {\"choices\":["
+  ].join("\n"));
+  assert.equal(truncatedFinalEvent.stopReason, "error");
+  assert.equal(truncatedFinalEvent.errorMessage, "provider_sse_json_invalid");
+  assert.equal(
+    truncatedFinalEvent.content[0]?.type === "text"
+      ? truncatedFinalEvent.content[0].text
+      : "",
+    "保留截断前内容"
+  );
+
+  const unsupportedFinishReason = await runQwenBody(
+    completionEvent("不支持的结束原因", "fixture_unknown")
+  );
+  assert.equal(unsupportedFinishReason.stopReason, "error");
+  assert.equal(
+    unsupportedFinishReason.errorMessage,
+    "provider_finish_reason_unsupported"
+  );
+
+  const filteredCompletion = await runQwenBody(
+    completionEvent("过滤前内容", "content_filter")
+  );
+  assert.equal(filteredCompletion.stopReason, "error");
+  assert.equal(
+    filteredCompletion.errorMessage,
+    "provider_content_filtered"
+  );
+
+  let incompleteTransportCalls = 0;
+  const incompleteTransport = await createQwenTokenPlanOpenAICompletionsAdapter(
+    async () => {
+      incompleteTransportCalls += 1;
+      return {
+        status: 200,
+        headers: streamingHeaders,
+        body: `${completionEvent("保留不完整传输", "stop")}\n\n`,
+        transportComplete: false
+      };
+    }
+  ).stream({
+    ...structuredClone(qwenCatalogModel),
+    baseUrl: transportInput.baseUrl
+  }, {
+    messages: [{
+      role: "user",
+      content: "测试不完整传输",
+      timestamp: Date.now()
+    }],
+    tools: []
+  }, {
+    apiKey: fixtureKey,
+    reasoning: "high",
+    maxTokens: 64,
+    temperature: 0,
+    cacheRetention: "none",
+    maxRetries: 3,
+    timeoutMs: 1_000
+  }).result();
+  assert.equal(incompleteTransportCalls, 1);
+  assert.equal(incompleteTransport.stopReason, "error");
+  assert.equal(
+    incompleteTransport.errorMessage,
+    "provider_partial_interrupted_network"
+  );
+  assert.equal(
+    incompleteTransport.content[0]?.type === "text"
+      ? incompleteTransport.content[0].text
+      : "",
+    "保留不完整传输"
+  );
+
+  let abortedTransportCalls = 0;
+  const abortedTransport = await createQwenTokenPlanOpenAICompletionsAdapter(
+    async (request) => {
+      abortedTransportCalls += 1;
+      await request.onResponse?.({ status: 200, headers: streamingHeaders });
+      request.onChunk?.(Buffer.from(
+        `${completionEvent("保留中止前内容", null)}\n\n`,
+        "utf8"
+      ));
+      throw new Error("qwen_token_plan_response_aborted");
+    }
+  ).stream({
+    ...structuredClone(qwenCatalogModel),
+    baseUrl: transportInput.baseUrl
+  }, {
+    messages: [{
+      role: "user",
+      content: "测试中止传输",
+      timestamp: Date.now()
+    }],
+    tools: []
+  }, {
+    apiKey: fixtureKey,
+    reasoning: "high",
+    maxTokens: 64,
+    temperature: 0,
+    cacheRetention: "none",
+    maxRetries: 3,
+    timeoutMs: 1_000
+  }).result();
+  assert.equal(abortedTransportCalls, 1);
+  assert.equal(abortedTransport.stopReason, "error");
+  assert.equal(
+    abortedTransport.errorMessage,
+    "provider_partial_interrupted_network"
+  );
+  assert.equal(
+    abortedTransport.content[0]?.type === "text"
+      ? abortedTransport.content[0].text
+      : "",
+    "保留中止前内容"
+  );
+
+  const firstReasoningBlock = [
+    `data: ${JSON.stringify({
+      id: "fixture-incremental-response",
+      model: "qwen3.7-plus",
+      choices: [{
+        delta: { reasoning_content: "推" },
+        finish_reason: null
+      }]
+    })}`,
+    ""
+  ].join("\n\n");
+  const remainingBlocks = [
+    `data: ${JSON.stringify({
+      id: "fixture-incremental-response",
+      model: "qwen3.7-plus",
+      choices: [{
+        delta: { reasoning_content: "理" },
+        finish_reason: null
+      }]
+    })}`,
+    `data: ${JSON.stringify({
+      id: "fixture-incremental-response",
+      model: "qwen3.7-plus",
+      choices: [{ delta: { content: "答" }, finish_reason: null }]
+    })}`,
+    `data: ${JSON.stringify({
+      id: "fixture-incremental-response",
+      model: "qwen3.7-plus",
+      choices: [{ delta: { content: "案" }, finish_reason: "stop" }]
+    })}`,
+    `data: ${JSON.stringify({
+      usage: {
+        prompt_tokens: 4,
+        completion_tokens: 4,
+        total_tokens: 8
+      },
+      choices: []
+    })}`,
+    "data: [DONE]",
+    ""
+  ].join("\n\n");
+  let releaseIncrementalRequest: (() => void) | undefined;
+  const incrementalRequestGate = new Promise<void>((resolve) => {
+    releaseIncrementalRequest = resolve;
+  });
+  let incrementalRequestSettled = false;
+  const incrementalAdapter = createQwenTokenPlanOpenAICompletionsAdapter(
+    async (request) => {
+      await request.onResponse?.({ status: 200, headers: streamingHeaders });
+      const prefix = Buffer.from(firstReasoningBlock, "utf8");
+      const multibyteStart = prefix.indexOf(Buffer.from("推", "utf8"));
+      assert.ok(multibyteStart >= 0);
+      request.onChunk?.(prefix.subarray(0, multibyteStart + 1));
+      request.onChunk?.(prefix.subarray(multibyteStart + 1));
+      await incrementalRequestGate;
+      const rest = Buffer.from(remainingBlocks, "utf8");
+      for (let offset = 0; offset < rest.length; offset += 7) {
+        request.onChunk?.(rest.subarray(offset, offset + 7));
+      }
+      incrementalRequestSettled = true;
+      return { status: 200, headers: streamingHeaders, body: "" };
+    }
+  );
+  const incrementalStream = incrementalAdapter.stream({
+    ...structuredClone(qwenCatalogModel),
+    baseUrl: transportInput.baseUrl
+  }, {
+    messages: [{
+      role: "user",
+      content: "请增量回答",
+      timestamp: Date.now()
+    }],
+    tools: []
+  }, {
+    apiKey: fixtureKey,
+    reasoning: "high",
+    maxTokens: 64,
+    temperature: 0,
+    cacheRetention: "none",
+    maxRetries: 0,
+    timeoutMs: 1_000
+  });
+  const incrementalIterator = incrementalStream[Symbol.asyncIterator]();
+  const incrementalEvents: AssistantMessageEvent[] = [];
+  while (true) {
+    const next = await incrementalIterator.next();
+    assert.equal(next.done, false);
+    incrementalEvents.push(next.value);
+    if (next.value.type === "thinking_delta") break;
+  }
+  assert.equal(
+    incrementalRequestSettled,
+    false,
+    "reasoning delta must be observable before the request finishes"
+  );
+  releaseIncrementalRequest?.();
+  while (true) {
+    const next = await incrementalIterator.next();
+    if (next.done) break;
+    incrementalEvents.push(next.value);
+    if (next.value.type === "done" || next.value.type === "error") break;
+  }
+  const incrementalMessage = await incrementalStream.result();
+  assert.equal(incrementalRequestSettled, true);
+  assert.deepEqual(
+    incrementalEvents
+      .filter((event) => event.type === "thinking_delta")
+      .map((event) => event.type === "thinking_delta" ? event.delta : ""),
+    ["推", "理"]
+  );
+  assert.deepEqual(
+    incrementalEvents
+      .filter((event) => event.type === "text_delta")
+      .map((event) => event.type === "text_delta" ? event.delta : ""),
+    ["答", "案"]
+  );
+  assert.ok(
+    incrementalEvents.findIndex((event) => event.type === "thinking_end")
+      < incrementalEvents.findIndex((event) => event.type === "text_start")
+  );
+  assert.deepEqual(
+    incrementalMessage.content.map((entry) => entry.type),
+    ["thinking", "text"]
+  );
+  assert.equal(incrementalMessage.content[0]?.type === "thinking"
+    ? incrementalMessage.content[0].thinking
+    : "", "推理");
+  assert.equal(incrementalMessage.content[1]?.type === "text"
+    ? incrementalMessage.content[1].text
+    : "", "答案");
+  assert.equal(incrementalMessage.usage.totalTokens, 8);
+
+  const interleavedAdapter = createQwenTokenPlanOpenAICompletionsAdapter(
+    async () => ({
+      status: 200,
+      headers: streamingHeaders,
+      body: [
+        `data: ${JSON.stringify({
+          choices: [{
+            delta: { reasoning_content: "先查" },
+            finish_reason: null
+          }]
+        })}`,
+        `data: ${JSON.stringify({
+          choices: [{
+            delta: {
+              tool_calls: [{
+                index: 0,
+                id: "fixture-interleaved-tool",
+                function: {
+                  name: "note_read",
+                  arguments: "{\"path\":\"Inbox/test.md\"}"
+                }
+              }]
+            },
+            finish_reason: null
+          }]
+        })}`,
+        `data: ${JSON.stringify({
+          choices: [{
+            delta: { reasoning_content: "再答" },
+            finish_reason: null
+          }]
+        })}`,
+        `data: ${JSON.stringify({
+          choices: [{ delta: { content: "完成" }, finish_reason: "stop" }]
+        })}`,
+        "data: [DONE]",
+        ""
+      ].join("\n\n")
+    })
+  );
+  const interleavedStream = interleavedAdapter.stream({
+    ...structuredClone(qwenCatalogModel),
+    baseUrl: transportInput.baseUrl
+  }, {
+    messages: [{
+      role: "user",
+      content: "先查再答",
+      timestamp: Date.now()
+    }],
+    tools: []
+  }, {
+    apiKey: fixtureKey,
+    reasoning: "high",
+    maxTokens: 64,
+    temperature: 0,
+    cacheRetention: "none",
+    maxRetries: 0,
+    timeoutMs: 1_000
+  });
+  const interleavedEvents: AssistantMessageEvent[] = [];
+  for await (const event of interleavedStream) {
+    interleavedEvents.push(event);
+  }
+  const interleavedMessage = await interleavedStream.result();
+  assert.deepEqual(
+    interleavedMessage.content.map((entry) => entry.type),
+    ["thinking", "thinking", "text"]
+  );
+  assert.deepEqual(
+    interleavedEvents
+      .filter((event) => /_(?:start|end)$/u.test(event.type))
+      .map((event) => event.type),
+    [
+      "thinking_start",
+      "thinking_end",
+      "toolcall_start",
+      "toolcall_end",
+      "thinking_start",
+      "thinking_end",
+      "text_start",
+      "text_end"
+    ]
+  );
+
+  let loopbackChunkCount = 0;
+  const loopbackAdapter = createLoopbackOpenAICompletionsAdapter(
+    async (request: LoopbackProviderRequest) => {
+      await request.onResponse?.({ status: 200, headers: streamingHeaders });
+      for (const block of [firstReasoningBlock, remainingBlocks]) {
+        loopbackChunkCount += 1;
+        request.onChunk?.(Buffer.from(block, "utf8"));
+      }
+      return { status: 200, headers: streamingHeaders, body: "" };
+    }
+  );
+  const loopbackMessage = await loopbackAdapter.stream({
+    ...structuredClone(qwenCatalogModel),
+    provider: "ollama",
+    id: "fixture-loopback-model",
+    baseUrl: "http://127.0.0.1:11434/v1"
+  }, {
+    messages: [{
+      role: "user",
+      content: "请增量回答",
+      timestamp: Date.now()
+    }],
+    tools: []
+  }, {
+    apiKey: "",
+    reasoning: "high",
+    maxTokens: 64,
+    temperature: 0,
+    cacheRetention: "none",
+    maxRetries: 0,
+    timeoutMs: 1_000
+  }).result();
+  assert.equal(loopbackChunkCount, 2);
+  assert.deepEqual(
+    loopbackMessage.content.map((entry) => entry.type),
+    ["thinking", "text"]
+  );
+
   const featureMessage = await featureDispatcher.stream({
     model: {
       ...structuredClone(qwenCatalogModel),
@@ -6526,6 +7093,141 @@ async function assertQwenTokenPlanTransportContract(): Promise<void> {
     name: "note_read",
     arguments: { path: "Inbox/test.md" }
   });
+
+  let historyPayload: Record<string, any> | null = null;
+  const historyAdapter = createQwenTokenPlanOpenAICompletionsAdapter(
+    async (request) => {
+      historyPayload = JSON.parse(request.body) as Record<string, any>;
+      return {
+        status: 200,
+        headers: streamingHeaders,
+        body: completionSse("历史已清理")
+      };
+    }
+  );
+  const assistantHistoryMessage = (
+    stopReason: AssistantMessage["stopReason"],
+    content: AssistantMessage["content"],
+    timestamp: number,
+    errorMessage?: string
+  ): AssistantMessage => ({
+    role: "assistant",
+    content,
+    api: qwenCatalogModel.api,
+    provider: qwenCatalogModel.provider,
+    model: qwenCatalogModel.id,
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        total: 0
+      }
+    },
+    stopReason,
+    ...(errorMessage ? { errorMessage } : {}),
+    timestamp
+  });
+  const historyMessages: Context["messages"] = [{
+    role: "user",
+    content: "保留用户历史",
+    timestamp: 1
+  }, assistantHistoryMessage("error", [{
+    type: "text",
+    text: "FAILED_ASSISTANT_CANARY"
+  }, {
+    type: "toolCall",
+    id: "failed-tool-call",
+    name: "note_read",
+    arguments: { path: "FAILED_TOOL_PATH_CANARY" }
+  }], 2, "provider_partial_interrupted_network"), {
+    role: "toolResult",
+    toolCallId: "failed-tool-call",
+    toolName: "note_read",
+    content: [{ type: "text", text: "FAILED_TOOL_RESULT_CANARY" }],
+    isError: false,
+    timestamp: 3
+  }, assistantHistoryMessage("aborted", [{
+    type: "text",
+    text: "ABORTED_ASSISTANT_CANARY"
+  }], 3.5), assistantHistoryMessage("length", [{
+    type: "text",
+    text: "LENGTH_ASSISTANT_CANARY"
+  }, {
+    type: "toolCall",
+    id: "length-tool-call",
+    name: "note_read",
+    arguments: { path: "LENGTH_TOOL_PATH_CANARY" }
+  }], 4), {
+    role: "toolResult",
+    toolCallId: "length-tool-call",
+    toolName: "note_read",
+    content: [{ type: "text", text: "LENGTH_TOOL_RESULT_CANARY" }],
+    isError: false,
+    timestamp: 5
+  }, assistantHistoryMessage("toolUse", [{
+    type: "toolCall",
+    id: "valid-tool-call",
+    name: "note_read",
+    arguments: { path: "VALID_TOOL_PATH_CANARY" }
+  }], 6), {
+    role: "toolResult",
+    toolCallId: "valid-tool-call",
+    toolName: "note_read",
+    content: [{ type: "text", text: "VALID_TOOL_RESULT_CANARY" }],
+    isError: false,
+    timestamp: 7
+  }, {
+    role: "toolResult",
+    toolCallId: "orphan-tool-call",
+    toolName: "note_read",
+    content: [{ type: "text", text: "ORPHAN_TOOL_RESULT_CANARY" }],
+    isError: false,
+    timestamp: 8
+  }, assistantHistoryMessage("toolUse", [{
+    type: "toolCall",
+    id: "synthetic-tool-call",
+    name: "note_read",
+    arguments: { path: "SYNTHETIC_TOOL_PATH_CANARY" }
+  }], 9), {
+    role: "user",
+    content: "当前问题",
+    timestamp: 10
+  }];
+  await historyAdapter.stream({
+    ...structuredClone(qwenCatalogModel),
+    baseUrl: transportInput.baseUrl
+  }, {
+    messages: historyMessages,
+    tools: []
+  }, {
+    apiKey: fixtureKey,
+    maxTokens: 64,
+    temperature: 0,
+    cacheRetention: "none",
+    maxRetries: 0,
+    timeoutMs: 1_000
+  }).result();
+  assert.ok(historyPayload);
+  const projectedHistory = JSON.stringify(historyPayload.messages);
+  assert.doesNotMatch(
+    projectedHistory,
+    /FAILED_|ABORTED_|LENGTH_|ORPHAN_/u,
+    "failed, aborted/length and orphaned Tool history must not reach Provider payloads"
+  );
+  assert.match(projectedHistory, /VALID_TOOL_(?:PATH|RESULT)_CANARY/u);
+  assert.match(projectedHistory, /SYNTHETIC_TOOL_PATH_CANARY/u);
+  assert.match(projectedHistory, /No result provided/u);
+  assert.deepEqual(
+    historyPayload.messages.map((message: { role: string }) => message.role),
+    ["user", "assistant", "tool", "assistant", "tool", "user"]
+  );
 
   const reasoningPayloads: Record<string, any>[] = [];
   const reasoningDispatcher = new PiProviderProtocolDispatcher({
@@ -6780,6 +7482,113 @@ async function assertQwenTokenPlanTransportContract(): Promise<void> {
   });
   assert.deepEqual(malformed, { status: "failed", failure: "protocol" });
 
+  const incomplete = await testProviderConnection({
+    draft,
+    apiKey: fixtureKey,
+    dispatcher: new PiProviderProtocolDispatcher({
+      "openai-completions": createQwenTokenPlanOpenAICompletionsAdapter(
+        async () => ({
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+          body: `data: ${JSON.stringify({
+            choices: [{
+              delta: { content: "未完成" },
+              finish_reason: null
+            }]
+          })}\n\n`
+        })
+      )
+    })
+  });
+  assert.deepEqual(incomplete, { status: "failed", failure: "protocol" });
+  const partialFailureStream = createQwenTokenPlanOpenAICompletionsAdapter(
+    async () => ({
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+      body: `data: ${JSON.stringify({
+        choices: [{
+          delta: { content: "保留部分回答" },
+          finish_reason: null
+        }]
+      })}\n\n`
+    })
+  ).stream({
+    ...structuredClone(qwenCatalogModel),
+    baseUrl: transportInput.baseUrl
+  }, {
+    messages: [{
+      role: "user",
+      content: "测试中断",
+      timestamp: Date.now()
+    }],
+    tools: []
+  }, {
+    apiKey: fixtureKey,
+    reasoning: "high",
+    maxTokens: 64,
+    temperature: 0,
+    cacheRetention: "none",
+    maxRetries: 0,
+    timeoutMs: 1_000
+  });
+  const partialFailure = await partialFailureStream.result();
+  assert.equal(partialFailure.stopReason, "error");
+  assert.equal(
+    partialFailure.errorMessage,
+    "provider_finish_reason_missing"
+  );
+  assert.equal(partialFailure.content[0]?.type === "text"
+    ? partialFailure.content[0].text
+    : "", "保留部分回答");
+
+  const invalidUtf8 = await createQwenTokenPlanOpenAICompletionsAdapter(
+    async (request) => {
+      await request.onResponse?.({ status: 200, headers: streamingHeaders });
+      request.onChunk?.(Uint8Array.from([0xc3, 0x28]));
+      return {
+        status: 200,
+        headers: streamingHeaders,
+        body: "",
+        transportComplete: true
+      };
+    }
+  ).stream({
+    ...structuredClone(qwenCatalogModel),
+    baseUrl: transportInput.baseUrl
+  }, {
+    messages: [{
+      role: "user",
+      content: "测试非法 UTF-8",
+      timestamp: Date.now()
+    }],
+    tools: []
+  }, {
+    apiKey: fixtureKey,
+    reasoning: "high",
+    maxTokens: 64,
+    temperature: 0,
+    cacheRetention: "none",
+    maxRetries: 0,
+    timeoutMs: 1_000
+  }).result();
+  assert.equal(invalidUtf8.stopReason, "error");
+  assert.equal(invalidUtf8.errorMessage, "provider_utf8_invalid");
+
+  const oversized = await testProviderConnection({
+    draft,
+    apiKey: fixtureKey,
+    dispatcher: new PiProviderProtocolDispatcher({
+      "openai-completions": createQwenTokenPlanOpenAICompletionsAdapter(
+        async () => ({
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+          body: "x".repeat(16 * 1024 * 1024 + 1)
+        })
+      )
+    })
+  });
+  assert.deepEqual(oversized, { status: "failed", failure: "protocol" });
+
   const timedOut = await testProviderConnection({
     draft,
     apiKey: fixtureKey,
@@ -6795,7 +7604,326 @@ async function assertQwenTokenPlanTransportContract(): Promise<void> {
     timeoutMs: 5
   });
   assert.deepEqual(timedOut, { status: "failed", failure: "network" });
-  assert.equal(JSON.stringify([malformed, timedOut]).includes(fixtureKey), false);
+  assert.equal(
+    JSON.stringify([malformed, incomplete, oversized, timedOut])
+      .includes(fixtureKey),
+    false
+  );
+}
+
+async function assertPiAgentSessionPartialAwareRetryContract(): Promise<void> {
+  const baseUrl = QWEN_TOKEN_PLAN_API_BASE_URL;
+  const catalogModel = resolveEchoInkPiCatalogModel(
+    "qwen-token-plan-cn",
+    "qwen3.7-plus"
+  );
+  assert.ok(catalogModel);
+  const provider = {
+    providerId: "qwen-token-plan-cn",
+    apiProtocol: "openai-completions" as const,
+    authMode: "api-key" as const,
+    baseUrl,
+    modelRef: catalogModel.id
+  };
+  const model = createPiNativeModelFromConfiguration({
+    catalogModel,
+    provider,
+    configured: {
+      apiProtocol: "openai-completions",
+      contextWindow: catalogModel.contextWindow,
+      maxOutputTokens: catalogModel.maxTokens,
+      reasoning: true,
+      imageInput: false
+    }
+  });
+  const streamingHeaders = {
+    "content-type": "text/event-stream; charset=utf-8"
+  } as const;
+  const successBody = [
+    `data: ${JSON.stringify({
+      choices: [{
+        delta: { content: "重试后成功" },
+        finish_reason: "stop"
+      }]
+    })}`,
+    "data: [DONE]",
+    ""
+  ].join("\n\n");
+
+  const runSession = async (
+    requestImpl: Parameters<
+      typeof createQwenTokenPlanOpenAICompletionsAdapter
+    >[0]
+  ): Promise<AssistantMessage[]> => {
+    const dispatcher = new PiProviderProtocolDispatcher({
+      "openai-completions": createQwenTokenPlanOpenAICompletionsAdapter(
+        requestImpl
+      )
+    });
+    const controlledStream = new PiProviderProtocolTransport({
+      authorityId: "fixture-agent-retry-authority",
+      storeSetId: "fixture-agent-retry-store",
+      resolveAuthToken: async () => "fixture-agent-retry-key",
+      dispatcher
+    });
+    const modelRuntime = await ModelRuntime.create({
+      credentials: new InMemoryCredentialStore(),
+      modelsPath: null,
+      modelsStore: new InMemoryModelsStore(),
+      allowModelNetwork: false
+    });
+    modelRuntime.registerNativeProvider(createPiNativeControlledProvider({
+      config: { read: async () => provider },
+      controlledStream,
+      model,
+      maxTokens: 64,
+      currentExecutionContext: () => ({
+        runId: "fixture-agent-retry-run",
+        conversationId: "fixture-agent-retry-conversation",
+        turnId: "fixture-agent-retry-turn",
+        correlationId: "fixture-agent-retry-correlation"
+      })
+    }));
+    const settingsManager = SettingsManager.inMemory({
+      defaultProvider: model.provider,
+      defaultModel: model.id,
+      defaultThinkingLevel: "high",
+      compaction: { enabled: true },
+      retry: {
+        enabled: true,
+        maxRetries: 2,
+        baseDelayMs: 1,
+        provider: { maxRetries: 0 }
+      },
+      packages: [],
+      extensions: [],
+      skills: [],
+      prompts: [],
+      themes: []
+    });
+    const sessionManager = SessionManager.inMemory(process.cwd());
+    const resourceLoader = new ControlledVaultResourceLoader({
+      vaultRoot: process.cwd(),
+      systemPrompt: "只回复测试结果。"
+    });
+    await resourceLoader.reload();
+    const { session } = await createAgentSession({
+      cwd: process.cwd(),
+      agentDir: process.cwd(),
+      modelRuntime,
+      model,
+      thinkingLevel: "high",
+      noTools: "all",
+      sessionManager,
+      settingsManager,
+      resourceLoader
+    });
+    try {
+      await session.prompt("测试 partial-aware retry");
+      return sessionManager.getBranch()
+        .filter((entry) => entry.type === "message")
+        .map((entry) => entry.message)
+        .filter((message): message is AssistantMessage =>
+          message.role === "assistant"
+        );
+    } finally {
+      session.dispose();
+    }
+  };
+
+  let partialCalls = 0;
+  const partialMessages = await runSession(async (request) => {
+    partialCalls += 1;
+    await request.onResponse?.({ status: 200, headers: streamingHeaders });
+    request.onChunk?.(Buffer.from([
+      `data: ${JSON.stringify({
+        choices: [{
+          delta: { reasoning_content: "公开推理 partial" },
+          finish_reason: null
+        }]
+      })}`,
+      `data: ${JSON.stringify({
+        choices: [{
+          delta: { content: "公开答案 partial" },
+          finish_reason: null
+        }]
+      })}`,
+      `data: ${JSON.stringify({
+        choices: [{
+          delta: {
+            tool_calls: [{
+              index: 0,
+              id: "fixture-partial-tool",
+              function: {
+                name: "note_read",
+                arguments: "{\"path\":"
+              }
+            }]
+          },
+          finish_reason: null
+        }]
+      })}`,
+      ""
+    ].join("\n\n"), "utf8"));
+    throw new Error("qwen_token_plan_response_aborted");
+  });
+  assert.equal(
+    partialCalls,
+    1,
+    "reasoning, answer or Tool partial must make the first failed attempt terminal"
+  );
+  assert.equal(
+    partialMessages.at(-1)?.errorMessage,
+    "provider_partial_interrupted_network"
+  );
+
+  let contextPartialCalls = 0;
+  const contextPartialMessages = await runSession(async (request) => {
+    contextPartialCalls += 1;
+    await request.onResponse?.({ status: 200, headers: streamingHeaders });
+    request.onChunk?.(Buffer.from(
+      `data: ${JSON.stringify({
+        choices: [{
+          delta: { content: "上下文失败前 partial" },
+          finish_reason: null
+        }]
+      })}\n\n`,
+      "utf8"
+    ));
+    throw new Error("context_length_exceeded");
+  });
+  assert.equal(
+    contextPartialCalls,
+    1,
+    "a context overflow after partial must not enter Pi compact-and-retry"
+  );
+  assert.equal(
+    contextPartialMessages.at(-1)?.errorMessage,
+    "provider_partial_interrupted_context"
+  );
+
+  let zeroOutputCalls = 0;
+  const zeroOutputMessages = await runSession(async () => {
+    zeroOutputCalls += 1;
+    if (zeroOutputCalls === 1) throw new Error("Connection error.");
+    return {
+      status: 200,
+      headers: streamingHeaders,
+      body: successBody,
+      transportComplete: true
+    };
+  });
+  assert.equal(
+    zeroOutputCalls,
+    2,
+    "Pi's existing zero-output transient-network retry must remain available"
+  );
+  assert.equal(zeroOutputMessages.at(-1)?.stopReason, "stop");
+
+  const classifierMessage = (errorMessage: string): AssistantMessage => ({
+    role: "assistant",
+    content: [],
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        total: 0
+      }
+    },
+    stopReason: "error",
+    errorMessage,
+    timestamp: 1
+  });
+  for (const code of [
+    "provider_partial_interrupted_context",
+    "provider_partial_interrupted_network",
+    "provider_partial_interrupted_rate",
+    "provider_partial_interrupted_service"
+  ]) {
+    assert.equal(isRetryableAssistantError(classifierMessage(code)), false);
+  }
+  for (const code of [
+    "provider_network_error",
+    "provider_rate_limited",
+    "provider_service_unavailable"
+  ]) {
+    assert.equal(isRetryableAssistantError(classifierMessage(code)), true);
+  }
+  assert.equal(
+    isContextOverflow(
+      classifierMessage("provider_partial_interrupted_context"),
+      model.contextWindow
+    ),
+    false
+  );
+  assert.equal(
+    isContextOverflow(
+      classifierMessage("context_length_exceeded"),
+      model.contextWindow
+    ),
+    true
+  );
+
+  const genericContextStream = () => {
+      const output = createAssistantMessageEventStream();
+      const error = {
+        ...classifierMessage("context_length_exceeded"),
+        content: [{ type: "text" as const, text: "generic partial" }]
+      };
+      output.push({ type: "start", partial: error });
+      output.push({ type: "error", reason: "error", error });
+      return output;
+  };
+  const genericContextAdapter: ProviderStreams = {
+    stream: genericContextStream,
+    streamSimple: genericContextStream
+  };
+  const genericTransport = new PiProviderProtocolTransport({
+    authorityId: "fixture-generic-partial-context-authority",
+    storeSetId: "fixture-generic-partial-context-store",
+    resolveAuthToken: async () => "fixture-generic-partial-context-key",
+    dispatcher: new PiProviderProtocolDispatcher({
+      "openai-completions": genericContextAdapter
+    })
+  });
+  const genericContextResult = await (await genericTransport.stream({
+    runId: "fixture-generic-partial-context-run",
+    conversationId: "fixture-generic-partial-context-conversation",
+    turnId: "fixture-generic-partial-context-turn",
+    correlationId: "fixture-generic-partial-context-correlation",
+    provider,
+    model,
+    context: {
+      messages: [{
+        role: "user",
+        content: "测试通用 sanitizer",
+        timestamp: 1
+      }],
+      tools: []
+    },
+    options: {
+      maxTokens: 64,
+      temperature: 0,
+      cacheRetention: "none",
+      maxRetries: 0,
+      timeoutMs: 1_000
+    }
+  })).result();
+  assert.equal(
+    genericContextResult.errorMessage,
+    "provider_partial_interrupted_context",
+    "the generic Provider sanitizer must close the same compact-and-retry path"
+  );
 }
 
 async function assertProviderModelDiscoveryRequestContract(): Promise<void> {
@@ -7092,65 +8220,208 @@ async function assertProviderRequestLimitDispatchContract(): Promise<void> {
   await dispatch("anthropic-messages", 8_192);
   assert.deepEqual(
     calls,
-    ["stream", "stream", "streamSimple", "streamSimple"]
+    ["streamSimple", "streamSimple", "streamSimple", "streamSimple"]
   );
 }
 
 async function assertProtocolPayloadLimitContract(): Promise<void> {
   const dispatcher = new PiProviderProtocolDispatcher();
+  const context: Context = {
+    messages: [{
+      role: "user",
+      content: "Capture the context-clamped output limit.",
+      timestamp: 1
+    }],
+    tools: []
+  };
+  const createModel = (
+    apiProtocol: "openai-completions" | "openai-responses" | "anthropic-messages"
+  ): Model<Api> => createPiProviderModelDefinition({
+    providerId: "custom",
+    apiProtocol,
+    baseUrl: "http://127.0.0.1:1/v1",
+    modelRef: "payload-fixture-model",
+    contextWindow: 6_000,
+    maxOutputTokens: 4_096
+  });
   const capture = async (
-    apiProtocol: "openai-completions" | "openai-responses" | "anthropic-messages",
-    maxTokens?: number
+    model: Model<Api>,
+    maxTokens?: number,
+    apiKey = "fixture-payload-key"
   ): Promise<Record<string, unknown>> => {
-    const model = createPiProviderModelDefinition({
-      providerId: "custom",
-      apiProtocol,
-      baseUrl: "http://127.0.0.1:1/v1",
-      modelRef: "payload-fixture-model",
-      contextWindow: 64_000,
-      maxOutputTokens: 8_192
-    });
     let payload: Record<string, unknown> | undefined;
     const onPayload = (value: unknown): never => {
       payload = structuredClone(value) as Record<string, unknown>;
       throw new Error("fixture_payload_captured");
     };
-    const stream = maxTokens === undefined
-      ? dispatcher.stream({
-        model,
-        context: { messages: [], tools: [] },
-        apiKey: "fixture-payload-key",
-        options: {
-          temperature: 0,
-          maxRetries: 0,
-          timeoutMs: 1_000,
-          onPayload
-        }
-      })
-      : dispatcher.streamSimple({
-        model,
-        context: { messages: [], tools: [] },
-        apiKey: "fixture-payload-key",
-        options: {
-          temperature: 0,
-          maxTokens,
-          maxRetries: 0,
-          timeoutMs: 1_000,
-          onPayload
-        }
-      });
+    const stream = dispatcher.streamSimple({
+      model,
+      context,
+      apiKey,
+      options: {
+        temperature: 0,
+        ...(maxTokens === undefined ? {} : { maxTokens }),
+        maxRetries: 0,
+        timeoutMs: 1_000,
+        onPayload
+      }
+    });
     await stream.result();
     assert.ok(payload);
     return payload;
   };
 
-  const chat = await capture("openai-completions");
-  assert.equal(Object.hasOwn(chat, "max_tokens"), false);
+  const chatModel = createModel("openai-completions");
+  const expectedMaximum = clampMaxTokensToContext(
+    chatModel,
+    context,
+    chatModel.maxTokens
+  );
+  assert.ok(expectedMaximum < chatModel.maxTokens);
+  const chat = await capture(chatModel);
+  assert.equal(chat.max_tokens, expectedMaximum);
   assert.equal(Object.hasOwn(chat, "max_completion_tokens"), false);
-  const responses = await capture("openai-responses");
-  assert.equal(Object.hasOwn(responses, "max_output_tokens"), false);
-  const anthropic = await capture("anthropic-messages", 8_192);
-  assert.equal(anthropic.max_tokens, 8_192);
+  const chatLower = await capture(chatModel, 1_024);
+  assert.equal(chatLower.max_tokens, 1_024);
+
+  const completionFieldModel: Model<Api> = {
+    ...structuredClone(chatModel),
+    compat: {
+      ...(structuredClone(chatModel.compat) ?? {}),
+      maxTokensField: "max_completion_tokens"
+    }
+  };
+  const completionField = await capture(completionFieldModel);
+  assert.equal(completionField.max_completion_tokens, expectedMaximum);
+  assert.equal(Object.hasOwn(completionField, "max_tokens"), false);
+
+  const responsesModel = createModel("openai-responses");
+  const responses = await capture(responsesModel);
+  assert.equal(responses.max_output_tokens, expectedMaximum);
+  const responsesLower = await capture(responsesModel, 1_024);
+  assert.equal(responsesLower.max_output_tokens, 1_024);
+
+  const anthropicModel = createModel("anthropic-messages");
+  const anthropic = await capture(anthropicModel);
+  assert.equal(anthropic.max_tokens, expectedMaximum);
+  const anthropicLower = await capture(anthropicModel, 1_024);
+  assert.equal(anthropicLower.max_tokens, 1_024);
+
+  const codexModel = OPENAI_CODEX_MODELS["gpt-5.6-sol"];
+  assert.ok(codexModel);
+  const codex = await capture(
+    codexModel,
+    undefined,
+    fixtureOpenAICodexJwt()
+  );
+  const codexLower = await capture(
+    codexModel,
+    1_024,
+    fixtureOpenAICodexJwt()
+  );
+  for (const payload of [codex, codexLower]) {
+    assert.equal(Object.hasOwn(payload, "max_tokens"), false);
+    assert.equal(Object.hasOwn(payload, "max_completion_tokens"), false);
+    assert.equal(Object.hasOwn(payload, "max_output_tokens"), false);
+  }
+}
+
+async function assertSpecialProviderPayloadLimitContract(): Promise<void> {
+  const catalog = resolveEchoInkPiCatalogModel(
+    "qwen-token-plan-cn",
+    "qwen3.7-plus"
+  );
+  assert.ok(catalog);
+  const context: Context = {
+    messages: [{
+      role: "user",
+      content: "Capture the custom adapter output limit.",
+      timestamp: 1
+    }],
+    tools: []
+  };
+  const qwenModel: Model<Api> = {
+    ...structuredClone(catalog),
+    baseUrl: QWEN_TOKEN_PLAN_API_BASE_URL,
+    contextWindow: 6_000,
+    maxTokens: 4_096
+  };
+  const loopbackModel: Model<Api> = {
+    ...structuredClone(qwenModel),
+    provider: "ollama",
+    id: "fixture-loopback-max-output",
+    baseUrl: "http://127.0.0.1:11434/v1"
+  };
+  const completionBody = (model: string): string => [
+    `data: ${JSON.stringify({
+      id: "fixture-max-output-response",
+      model,
+      choices: [{
+        delta: { content: "OK" },
+        finish_reason: "stop"
+      }]
+    })}`,
+    "data: [DONE]",
+    ""
+  ].join("\n\n");
+
+  const captureQwen = async (
+    maxTokens?: number
+  ): Promise<Record<string, unknown>> => {
+    let payload: Record<string, unknown> | undefined;
+    const adapter = createQwenTokenPlanOpenAICompletionsAdapter(
+      async (request) => {
+        payload = JSON.parse(request.body) as Record<string, unknown>;
+        return {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+          body: completionBody(qwenModel.id)
+        };
+      }
+    );
+    await adapter.streamSimple(qwenModel, context, {
+      apiKey: "fixture-qwen-max-output-key",
+      ...(maxTokens === undefined ? {} : { maxTokens }),
+      maxRetries: 0,
+      timeoutMs: 1_000
+    }).result();
+    assert.ok(payload);
+    return payload;
+  };
+  const captureLoopback = async (
+    maxTokens?: number
+  ): Promise<Record<string, unknown>> => {
+    let payload: Record<string, unknown> | undefined;
+    const adapter = createLoopbackOpenAICompletionsAdapter(
+      async (request) => {
+        assert.ok(request.body);
+        payload = JSON.parse(request.body) as Record<string, unknown>;
+        return {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+          body: completionBody(loopbackModel.id)
+        };
+      }
+    );
+    await adapter.streamSimple(loopbackModel, context, {
+      ...(maxTokens === undefined ? {} : { maxTokens }),
+      maxRetries: 0,
+      timeoutMs: 1_000
+    }).result();
+    assert.ok(payload);
+    return payload;
+  };
+
+  const expectedMaximum = clampMaxTokensToContext(
+    qwenModel,
+    context,
+    qwenModel.maxTokens
+  );
+  assert.ok(expectedMaximum < qwenModel.maxTokens);
+  assert.equal((await captureQwen()).max_tokens, expectedMaximum);
+  assert.equal((await captureQwen(1_024)).max_tokens, 1_024);
+  assert.equal((await captureLoopback()).max_tokens, expectedMaximum);
+  assert.equal((await captureLoopback(1_024)).max_tokens, 1_024);
 }
 
 async function assertProviderAuthResolutionFailureContract(): Promise<void> {
