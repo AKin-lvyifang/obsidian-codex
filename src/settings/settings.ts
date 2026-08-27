@@ -489,7 +489,7 @@ export const DEFAULT_SETTINGS: CodexForObsidianSettings = {
   },
   memory: {
     useLongTermMemory: true,
-    dreamEnabled: false,
+    dreamEnabled: true,
     dreamRunsPerDay: 3,
     dreamTokenBudget: 50000
   },
@@ -1509,7 +1509,7 @@ function normalizeMemorySettings(input: unknown): EchoInkMemorySettings {
     : 50000;
   return {
     useLongTermMemory: value?.useLongTermMemory !== false,
-    dreamEnabled: value?.dreamEnabled === true,
+    dreamEnabled: value?.dreamEnabled !== false,
     dreamRunsPerDay: runsPerDay,
     dreamTokenBudget: tokenBudget
   };

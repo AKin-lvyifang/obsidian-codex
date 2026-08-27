@@ -656,8 +656,8 @@ export class CodexSettingTab extends PluginSettingTab {
     applySettingsRow(new Setting(memoryGroup)
       .setName(zh ? "离线记忆整理（做梦）" : "Offline memory consolidation (dreaming)")
       .setDesc(zh
-        ? "开启后，Obsidian 打开期间按定时在后台复盘一级记忆：生成只帮助召回、不代表用户确认的联想线索，并更新用户画像、人格状态与 Agent 画像。"
-        : "While Obsidian is open, periodically reviews primary memories: generates association clues that only aid recall and are not user-confirmed, then updates the user profile, personality state and Agent profile.")
+        ? "默认开启。开启后，Obsidian 打开期间定时处理一级 Memory，生成只帮助召回、不代表用户确认的二级联想，并更新 Dream 派生用户画像、Agent 人格与六维投影。关闭后，一级 Memory 仍在对话当轮正常写入和召回；上述派生状态停止随新记忆更新，已有状态与积压保留，重新开启后继续处理。"
+        : "Enabled by default. While Obsidian is open, it periodically processes primary Memory, creates secondary associations that aid recall without representing user confirmation, and updates the Dream-derived user profile, Agent personality, and six-dimension projection. When disabled, primary Memory still writes and recalls during conversations; derived state stops updating from new memories, while existing state and backlog are preserved and resume after re-enabling.")
       .addToggle((toggle) => {
         labelSettingsToggle(toggle, zh ? "离线记忆整理" : "Memory consolidation");
         toggle.setValue(this.plugin.settings.memory.dreamEnabled).onChange(async (enabled) => {

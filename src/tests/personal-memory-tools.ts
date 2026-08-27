@@ -7,8 +7,7 @@ import {
   PiPersonalMemoryToolSecurity,
   createPiPersonalMemoryToolDefinitions,
   normalizePiPersonalMemoryToolArguments,
-  type MemoryWriteToolArguments,
-  type PersonalMemoryWriteAuthorizationPort
+  type MemoryWriteToolArguments
 } from "../harness/pi-native/pi-personal-memory-tools";
 import { PersonalMemoryRecallHarness } from "../harness/memory/personal-memory-recall-harness";
 import type { PersonalMemoryRuntimeContext } from "../harness/memory/personal-memory-contracts";
@@ -20,7 +19,8 @@ export async function runPersonalMemoryToolContractScenarios(): Promise<void> {
   assertOpenAiCompatibleMemoryToolSchemas();
   await scenarioRuntimeIdentityIsNotModelControlled();
   await scenarioInvalidArgumentsAndMemoryModeErrors();
-  await scenarioSearchBeforeAutonomousWriteAndEvidenceBinding();
+  await scenarioSearchBeforeAutonomousWriteAndCurrentEntryBinding();
+  await scenarioAllPrimaryKindsPersistAcrossReopen();
   await scenarioHostRevisionUpdateForgetAndErrors();
   await scenarioProfileUpdateIsIdempotentAndReplacesSource();
   await scenarioConcurrentWritersUseCas();
@@ -68,9 +68,9 @@ function assertOpenAiCompatibleMemoryToolSchemas(): void {
     false, false, false, false
   ]);
   assert.deepEqual(operationVariants.map((variant) => variant.required), [
-    ["operation", "title", "content", "recallWhen", "evidenceQuote"],
-    ["operation", "targetId", "title", "content", "recallWhen", "reason", "evidenceQuote"],
-    ["operation", "profileKey", "text", "evidenceQuote"],
+    ["operation", "kind", "title", "content", "recallWhen"],
+    ["operation", "targetId", "title", "content", "recallWhen", "reason"],
+    ["operation", "profileKey", "text"],
     ["operation", "targetId", "reason", "evidenceQuote"]
   ]);
   const profileVariant = operationVariants[2]!;
@@ -87,7 +87,6 @@ function assertOpenAiCompatibleMemoryToolSchemas(): void {
     "profile_update.profileKey must expose the complete closed profile taxonomy"
   );
   for (const hiddenHostField of [
-    "kind",
     "basis",
     "contentOrigin",
     "expectedRevision"
@@ -102,6 +101,12 @@ function assertOpenAiCompatibleMemoryToolSchemas(): void {
     string,
     Readonly<Record<string, unknown>>
   >>;
+  const kindVariants = createProperties.kind.anyOf as ReadonlyArray<
+    Readonly<Record<string, unknown>>
+  >;
+  assert.deepEqual(kindVariants.map((variant) => variant.const), [
+    "fact", "view", "decision", "goal", "task", "open_loop", "episode"
+  ]);
   assert.match(String(createProperties.recallWhen.description ?? ""), /未来.*召回/iu);
   assert.match(String(schemas.memory_write.description ?? ""), /先.*memory_search.*同义.*跳过.*变化.*更新/iu);
   assert.match(String(schemas.memory_search.description ?? ""), /exhausted=false.*nextCursor/iu);
@@ -110,18 +115,18 @@ function assertOpenAiCompatibleMemoryToolSchemas(): void {
   assert.deepEqual(normalizePiPersonalMemoryToolArguments("memory_write", {
     request: {
       operation: "create",
+      kind: "view",
       title: "沟通偏好",
       content: "用户希望先给结论。",
-      recallWhen: "需要组织回答时",
-      evidenceQuote: "请记住：以后先给结论。"
+      recallWhen: "需要组织回答时"
     }
   }), {
     request: {
       operation: "create",
+      kind: "view",
       title: "沟通偏好",
       content: "用户希望先给结论。",
-      recallWhen: "需要组织回答时",
-      evidenceQuote: "请记住：以后先给结论。"
+      recallWhen: "需要组织回答时"
     }
   });
   assert.deepEqual(normalizePiPersonalMemoryToolArguments("memory_write", {
@@ -186,7 +191,7 @@ async function scenarioRuntimeIdentityIsNotModelControlled(): Promise<void> {
     vaultId: "forged-vault"
   }));
   assert.throws(() => normalizePiPersonalMemoryToolArguments("memory_write", {
-    request: createArguments("请记住这条规则。").request,
+    request: createArguments().request,
     explicitlyAuthorized: true
   }));
   assert.throws(() => normalizePiPersonalMemoryToolArguments("memory_write", {
@@ -202,7 +207,6 @@ async function scenarioRuntimeIdentityIsNotModelControlled(): Promise<void> {
       targetId: "mem_target",
       title: "新观点",
       content: "新内容",
-      evidenceQuote: "我改变了想法。",
       reason: "用户改变观点"
     }
   }));
@@ -210,8 +214,7 @@ async function scenarioRuntimeIdentityIsNotModelControlled(): Promise<void> {
     request: {
       operation: "profile_update",
       profileKey: "preference.unknown",
-      text: "用户偏好中文",
-      evidenceQuote: "请更新我的资料。"
+      text: "用户偏好中文"
     }
   }));
   const boundedProfileText = "甲".repeat(120);
@@ -220,24 +223,21 @@ async function scenarioRuntimeIdentityIsNotModelControlled(): Promise<void> {
       operation: "profile_update",
       targetId: "mem_existing_profile_fact",
       profileKey: "preference.language",
-      text: boundedProfileText,
-      evidenceQuote: "请更新我的资料。"
+      text: boundedProfileText
     }
   }), {
     request: {
       operation: "profile_update",
       targetId: "mem_existing_profile_fact",
       profileKey: "preference.language",
-      text: boundedProfileText,
-      evidenceQuote: "请更新我的资料。"
+      text: boundedProfileText
     }
   });
   assert.throws(() => normalizePiPersonalMemoryToolArguments("memory_write", {
     request: {
       operation: "profile_update",
       profileKey: "preference.language",
-      text: "甲".repeat(121),
-      evidenceQuote: "请更新我的资料。"
+      text: "甲".repeat(121)
     }
   }));
   assert.throws(() => normalizePiPersonalMemoryToolArguments("memory_write", {
@@ -245,8 +245,7 @@ async function scenarioRuntimeIdentityIsNotModelControlled(): Promise<void> {
       operation: "profile_update",
       profileKey: "preference.language",
       text: "用户偏好中文",
-      content: "旧的 16000/24000 字段路径不得继续存在",
-      evidenceQuote: "请更新我的资料。"
+      content: "旧的 16000/24000 字段路径不得继续存在"
     }
   }));
   assert.throws(() => normalizePiPersonalMemoryToolArguments("memory_write", {
@@ -258,8 +257,14 @@ async function scenarioRuntimeIdentityIsNotModelControlled(): Promise<void> {
   }));
   assert.throws(() => normalizePiPersonalMemoryToolArguments("memory_write", {
     request: {
-      ...createArguments("请记住这条规则。").request,
+      ...createArguments().request,
       targetId: "mem_cross_operation"
+    }
+  }));
+  assert.throws(() => normalizePiPersonalMemoryToolArguments("memory_write", {
+    request: {
+      ...createArguments().request,
+      evidenceQuote: "普通 create 不再接受 evidenceQuote。"
     }
   }));
   assert.throws(() => normalizePiPersonalMemoryToolArguments("memory_write", {
@@ -281,7 +286,7 @@ async function scenarioInvalidArgumentsAndMemoryModeErrors(): Promise<void> {
     const calls = [
       { toolName: "memory_search", input: { query: "规则" } },
       { toolName: "memory_read", input: { id: "mem_target" } },
-      { toolName: "memory_write", input: createArguments(entry.text) }
+      { toolName: "memory_write", input: createArguments() }
     ] as const;
     for (const [index, call] of calls.entries()) {
       const failed = await executeFailureThroughSecurity(
@@ -312,33 +317,21 @@ async function scenarioInvalidArgumentsAndMemoryModeErrors(): Promise<void> {
   });
 }
 
-async function scenarioSearchBeforeAutonomousWriteAndEvidenceBinding(): Promise<void> {
+async function scenarioSearchBeforeAutonomousWriteAndCurrentEntryBinding(): Promise<void> {
   await withPersonalMemoryFixture(async (fixture) => {
     const entry = {
       entryId: "user-entry-fixture",
-      text: "请记住：以后回答工程问题先给结论。"
+      text: "记住这个。"
     };
-    const authorization: PersonalMemoryWriteAuthorizationPort = {
-      async authorize(input) {
-        assert.equal(input.currentUserEntry.entryId, entry.entryId);
-        assert.equal(input.evidenceQuote, entry.text);
-        assert.equal(input.operation, "create");
-        return {
-          basis: "explicit",
-          contentOrigin: "user_statement",
-          explicitlyAuthorized: false
-        };
-      }
-    };
-    const security = createSecurity(fixture, entry, fixture.runtime(), authorization);
+    const security = createSecurity(fixture, entry, fixture.runtime());
     const tools = createPiPersonalMemoryToolDefinitions({ repository: fixture.repository, security });
     const args: MemoryWriteToolArguments = {
       request: {
         operation: "create",
-        title: "回答规则",
-        content: "回答工程问题先给结论。",
-        recallWhen: "准备回答工程问题时",
-        evidenceQuote: entry.text
+        kind: "view",
+        title: "产品观点",
+        content: "用户认为产品应优先解决真实主链，而不是为理论风险扩展范围。",
+        recallWhen: "评估产品实施范围时"
       }
     };
     const beforeSearch = await executeFailureThroughSecurity(
@@ -383,7 +376,7 @@ async function scenarioSearchBeforeAutonomousWriteAndEvidenceBinding(): Promise<
       tools,
       "memory_search",
       "search-before-create",
-      { query: "回答规则" }
+      { query: "产品观点 真实主链" }
     );
     const corrected = await executeThroughSecurity(
       security,
@@ -394,23 +387,39 @@ async function scenarioSearchBeforeAutonomousWriteAndEvidenceBinding(): Promise<
     );
     assert.equal(corrected.isError, false);
     assert.match(corrected.content[0]?.text ?? "", /untrusted-background/u);
+    const createdPayload = memoryResultPayload(corrected);
+    assert.equal(createdPayload.outcome, "created");
+    assert.equal(
+      createdPayload.recordId,
+      (corrected.details.recordIds as readonly string[] | undefined)?.[0]
+    );
+    assert.equal(createdPayload.revision, corrected.details.revision);
 
     const reopened = await fixture.reopen();
-    const found = await reopened.search({ query: "回答 工程 结论" }, fixture.runtime());
+    const found = await reopened.search({ query: "产品 真实 主链" }, fixture.runtime());
     assert.equal(found.items.length, 1);
     const read = await reopened.read(found.items[0]!.id, fixture.runtime());
-    assert.equal(read.record.kind, "fact");
+    assert.equal(read.record.kind, "view");
     assert.equal(read.record.basis, "explicit");
     assert.equal(read.record.contentOrigin, "user_statement");
     assert.match(
       read.record.file,
-      /(?:^|\/)facts\//u,
-      "host-managed fact classification uses the existing facts catalog"
+      /(?:^|\/)views\//u,
+      "a short current-turn confirmation may persist the prior-turn view in the correct catalog"
     );
     const runtime = fixture.runtime();
+    for (const identity of [
+      runtime.vaultId,
+      runtime.conversationId,
+      runtime.piSessionId,
+      runtime.userEntryId,
+      runtime.productRunId
+    ]) {
+      assert.ok(read.record.source.includes(encodeURIComponent(identity)));
+    }
     const recalled = await new PersonalMemoryRecallHarness(reopened).prepareTurnContext({
       memoryMode: "normal",
-      query: "准备回答工程问题",
+      query: "评估产品实施范围",
       tokenBudget: 320,
       vaultId: runtime.vaultId,
       conversationId: runtime.conversationId,
@@ -420,7 +429,7 @@ async function scenarioSearchBeforeAutonomousWriteAndEvidenceBinding(): Promise<
     assert.equal(
       recalled.recall?.candidates.some((candidate) => candidate.id === read.record.id),
       true,
-      "host-managed fact creates remain reachable through the existing recall harness"
+      "the newly written primary view is reachable on the next turn"
     );
 
     const mismatched = createSecurity(fixture, {
@@ -430,38 +439,67 @@ async function scenarioSearchBeforeAutonomousWriteAndEvidenceBinding(): Promise<
     const blocked = await mismatched.handleToolCall({
       toolName: "memory_write",
       toolCallId: "entry-mismatch",
-      input: createArguments(entry.text)
+      input: createArguments()
     } as never, undefined);
     assert.equal(blocked?.reason, "authorization_failed");
+  });
+}
 
-    const absentQuote = createSecurity(fixture, entry, fixture.runtime());
-    const absentQuoteBlocked = await absentQuote.handleToolCall({
-      toolName: "memory_write",
-      toolCallId: "quote-mismatch",
-      input: createArguments("这句话不在当前 Entry。")
-    } as never, undefined);
-    assert.equal(absentQuoteBlocked?.reason, "authorization_failed");
+async function scenarioAllPrimaryKindsPersistAcrossReopen(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    const kinds = [
+      "fact", "view", "decision", "goal", "task", "open_loop", "episode"
+    ] as const;
+    const expectedDirectory = {
+      fact: "facts",
+      view: "views",
+      decision: "decisions",
+      goal: "active",
+      task: "active",
+      open_loop: "active",
+      episode: "episodes"
+    } as const;
+    const entry = { entryId: "user-entry-fixture", text: "把前面的内容记住。" };
+    const security = createSecurity(fixture, entry, fixture.runtime());
+    const tools = createPiPersonalMemoryToolDefinitions({ repository: fixture.repository, security });
+    const ids = new Map<(typeof kinds)[number], string>();
 
-    const deniedByPolicy = createSecurity(fixture, entry, fixture.runtime(), {
-      async authorize() { return null; }
-    });
-    const deniedTools = createPiPersonalMemoryToolDefinitions({
-      repository: fixture.repository,
-      security: deniedByPolicy
-    });
-    await executeThroughSecurity(
-      deniedByPolicy,
-      deniedTools,
-      "memory_search",
-      "search-before-policy-denial",
-      { query: "回答规则" }
-    );
-    const policyBlocked = await deniedByPolicy.handleToolCall({
-      toolName: "memory_write",
-      toolCallId: "real-policy-denial",
-      input: args
-    } as never, undefined);
-    assert.equal(policyBlocked?.reason, "tool_policy_blocked");
+    for (const kind of kinds) {
+      await executeThroughSecurity(
+        security,
+        tools,
+        "memory_search",
+        `search-kind-${kind}`,
+        { query: `聊天七类 ${kind}` }
+      );
+      const result = await executeThroughSecurity(
+        security,
+        tools,
+        "memory_write",
+        `create-kind-${kind}`,
+        memoryWriteArguments({
+          operation: "create",
+          kind,
+          title: `聊天七类 ${kind}`,
+          content: `用户通过聊天创建 ${kind} 类型的长期记忆。`,
+          recallWhen: `验证 ${kind} 类型聊天创建时`
+        })
+      );
+      const payload = memoryResultPayload(result);
+      assert.equal(payload.outcome, "created");
+      assert.equal(
+        payload.recordId,
+        (result.details.recordIds as readonly string[] | undefined)?.[0]
+      );
+      ids.set(kind, String(payload.recordId));
+    }
+
+    const reopened = await fixture.reopen();
+    for (const kind of kinds) {
+      const read = await reopened.read(ids.get(kind)!, fixture.runtime());
+      assert.equal(read.record.kind, kind);
+      assert.match(read.record.file, new RegExp(`(?:^|/)${expectedDirectory[kind]}/`, "u"));
+    }
   });
 }
 
@@ -485,16 +523,45 @@ async function scenarioHostRevisionUpdateForgetAndErrors(): Promise<void> {
       tools,
       "memory_write",
       "create-current",
-      createArguments("请记住这条规则。")
+      createArguments("view")
     );
     const createdId = (createdResult.details.recordIds as readonly string[] | undefined)?.[0];
     assert.ok(createdId);
+    const createdPayload = memoryResultPayload(createdResult);
+    assert.equal(createdPayload.outcome, "created");
+    assert.equal(createdPayload.recordId, createdId);
+    assert.equal(createdPayload.revision, createdResult.details.revision);
     assert.deepEqual(
       (await fixture.repository.readAuditByProductRun(
         fixture.runtime().productRunId
       )).map((event) => ({ type: event.type, toolCallId: event.toolCallId })),
       [{ type: "created", toolCallId: "create-current" }]
     );
+    await executeThroughSecurity(
+      security,
+      tools,
+      "memory_search",
+      "search-before-possible-duplicate",
+      { query: "回答规则" }
+    );
+    const possibleDuplicate = await executeThroughSecurity(
+      security,
+      tools,
+      "memory_write",
+      "possible-duplicate",
+      memoryWriteArguments({
+        operation: "create",
+        kind: "view",
+        title: "回答规则",
+        content: "回答先给结论，并省略全部依据。",
+        recallWhen: "准备回答工程问题时"
+      })
+    );
+    const possibleDuplicatePayload = memoryResultPayload(possibleDuplicate);
+    assert.equal(possibleDuplicatePayload.outcome, "possible_duplicate");
+    assert.equal(possibleDuplicatePayload.recordId, createdId);
+    assert.equal(possibleDuplicatePayload.revision, createdPayload.revision);
+    assert.doesNotMatch(possibleDuplicate.content[0]?.text ?? "", /"outcome":"created"/u);
     const failedRead = await executeFailureThroughSecurity(
       security,
       tools,
@@ -533,14 +600,16 @@ async function scenarioHostRevisionUpdateForgetAndErrors(): Promise<void> {
         title: "回答规则",
         content: "回答时先给结论，再给依据。",
         recallWhen: "准备回答工程问题时",
-        reason: "用户改变了回答偏好",
-        evidenceQuote: "我现在改成先给结论再给依据。"
+        reason: "用户改变了回答偏好"
       })
     );
     const updatedId = (updatedResult.details.recordIds as readonly string[] | undefined)?.[0];
     assert.ok(updatedId);
+    const updatedPayload = memoryResultPayload(updatedResult);
+    assert.equal(updatedPayload.outcome, "updated");
+    assert.equal(updatedPayload.recordId, updatedId);
     const updated = await fixture.repository.read(updatedId, fixture.runtime());
-    assert.equal(updated.record.kind, "fact", "update preserves the host-managed kind");
+    assert.equal(updated.record.kind, "view", "update preserves the existing kind");
     assert.equal(updated.record.supersedes, createdId);
 
     await executeThroughSecurity(
@@ -569,8 +638,7 @@ async function scenarioHostRevisionUpdateForgetAndErrors(): Promise<void> {
         title: "回答规则",
         content: "不应落盘的陈旧更新。",
         recallWhen: "不应生效",
-        reason: "测试陈旧 revision",
-        evidenceQuote: "我现在改成先给结论再给依据。"
+        reason: "测试陈旧 revision"
       })
     );
     assert.equal(stale.details.errorCode, "personal_memory_revision_conflict");
@@ -583,6 +651,17 @@ async function scenarioHostRevisionUpdateForgetAndErrors(): Promise<void> {
       "search-before-forget",
       { query: "回答规则" }
     );
+    const forgetWithoutCurrentEvidence = await security.handleToolCall({
+      toolName: "memory_write",
+      toolCallId: "forget-without-current-evidence",
+      input: memoryWriteArguments({
+        operation: "forget",
+        targetId: updatedId,
+        reason: "不得执行",
+        evidenceQuote: "这句忘记要求不在当前用户 Entry。"
+      })
+    } as never, undefined);
+    assert.equal(forgetWithoutCurrentEvidence?.reason, "authorization_failed");
     const forgotten = await executeThroughSecurity(
       security,
       tools,
@@ -597,6 +676,9 @@ async function scenarioHostRevisionUpdateForgetAndErrors(): Promise<void> {
     );
     assert.equal(forgotten.isError, false);
     assert.deepEqual(forgotten.details.recordIds, [updatedId]);
+    const forgottenPayload = memoryResultPayload(forgotten);
+    assert.equal(forgottenPayload.outcome, "forgotten");
+    assert.equal(forgottenPayload.recordId, updatedId);
 
     await executeThroughSecurity(
       security,
@@ -632,8 +714,7 @@ async function scenarioProfileUpdateIsIdempotentAndReplacesSource(): Promise<voi
     const tools = createPiPersonalMemoryToolDefinitions({ repository: fixture.repository, security });
     const writeProfile = async (
       toolCallId: string,
-      text: string,
-      evidenceQuote: string
+      text: string
     ) => {
       await executeThroughSecurity(
         security,
@@ -650,31 +731,30 @@ async function scenarioProfileUpdateIsIdempotentAndReplacesSource(): Promise<voi
         memoryWriteArguments({
           operation: "profile_update",
           profileKey: "preference.language",
-          text,
-          evidenceQuote
+          text
         })
       );
     };
 
     const created = await writeProfile(
       "profile-create",
-      "用户偏好中文",
-      "请记住我偏好中文。"
+      "用户偏好中文"
     );
     const createdId = (created.details.recordIds as readonly string[])[0]!;
+    assert.equal(memoryResultPayload(created).outcome, "profile_updated");
     const duplicate = await writeProfile(
       "profile-idempotent",
-      "用户偏好中文",
-      "请记住我偏好中文。"
+      "用户偏好中文"
     );
-    assert.match(duplicate.content[0]?.text ?? "", /"status":"idempotent"/u);
+    assert.equal(memoryResultPayload(duplicate).outcome, "already_present");
+    assert.doesNotMatch(duplicate.content[0]?.text ?? "", /"status":"idempotent"/u);
     assert.deepEqual(duplicate.details.recordIds, [createdId]);
 
     const replaced = await writeProfile(
       "profile-replace",
-      "用户偏好英文",
-      "现在更新为我偏好英文。"
+      "用户偏好英文"
     );
+    assert.equal(memoryResultPayload(replaced).outcome, "profile_updated");
     const replacementId = (replaced.details.recordIds as readonly string[])[0]!;
     assert.notEqual(replacementId, createdId);
     const state = await fixture.repository.readUserControlState();
@@ -1008,33 +1088,21 @@ function isRevisionConflict(error: unknown): boolean {
 function createSecurity(
   fixture: Readonly<PersonalMemoryFixture>,
   entry: Readonly<{ entryId: string; text: string }>,
-  runtime: Readonly<PersonalMemoryRuntimeContext>,
-  writeAuthorization: PersonalMemoryWriteAuthorizationPort = {
-    async authorize(input) {
-      return {
-        basis: "explicit",
-        contentOrigin: input.operation === "create"
-          ? "user_statement"
-          : "confirmed_change",
-        explicitlyAuthorized: input.operation === "forget"
-      };
-    }
-  }
+  runtime: Readonly<PersonalMemoryRuntimeContext>
 ): PiPersonalMemoryToolSecurity {
   return new PiPersonalMemoryToolSecurity({
     currentRuntime: () => runtime,
-    currentUserEntry: { current: () => entry },
-    writeAuthorization
+    currentUserEntry: { current: () => entry }
   });
 }
 
-function createArguments(evidenceQuote: string): MemoryWriteToolArguments {
+function createArguments(kind: "fact" | "view" = "fact"): MemoryWriteToolArguments {
   return memoryWriteArguments({
     operation: "create",
+    kind,
     title: "回答规则",
     content: "回答先给结论。",
-    recallWhen: "准备回答工程问题时",
-    evidenceQuote
+    recallWhen: "准备回答工程问题时"
   });
 }
 
@@ -1042,6 +1110,17 @@ function memoryWriteArguments(
   request: MemoryWriteToolArguments["request"]
 ): MemoryWriteToolArguments {
   return Object.freeze({ request: Object.freeze({ ...request }) });
+}
+
+function memoryResultPayload(result: Readonly<{
+  content: Array<{ type: "text"; text: string }>;
+}>): Readonly<Record<string, unknown>> {
+  const match = (result.content[0]?.text ?? "").match(
+    /<echoink_memory_result[^>]*>\n([\s\S]+)\n<\/echoink_memory_result>/u
+  );
+  const json = match?.[1];
+  assert.ok(json, "memory Tool result must contain one complete structured payload");
+  return JSON.parse(json) as Readonly<Record<string, unknown>>;
 }
 
 async function executeThroughSecurity(

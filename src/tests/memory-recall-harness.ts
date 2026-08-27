@@ -743,8 +743,7 @@ async function scenarioSearchToolResultAlwaysContainsCompleteJson(): Promise<voi
     const runtime = fixture.runtime();
     const security = new PiPersonalMemoryToolSecurity({
       currentRuntime: () => runtime,
-      currentUserEntry: { current: () => ({ entryId: runtime.userEntryId, text: "搜索长期 Memory" }) },
-      writeAuthorization: { async authorize() { return null; } }
+      currentUserEntry: { current: () => ({ entryId: runtime.userEntryId, text: "搜索长期 Memory" }) }
     });
     const tools = createPiPersonalMemoryToolDefinitions({ repository: fixture.repository, security });
     const tool = tools.find((candidate) => candidate.name === "memory_search");

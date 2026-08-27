@@ -207,8 +207,7 @@ import { PersonalMemoryRepository } from "../harness/memory/personal-memory-repo
 import {
   PI_PERSONAL_MEMORY_TOOL_IDS,
   PiPersonalMemoryToolSecurity,
-  createPiPersonalMemoryToolDefinitions,
-  type PersonalMemoryWriteAuthorizationPort
+  createPiPersonalMemoryToolDefinitions
 } from "../harness/pi-native/pi-personal-memory-tools";
 import type { CallEchoInkMcpToolInput } from "../resources/mcp-broker-service";
 import type { EchoInkResource } from "../resources/types";
@@ -1492,8 +1491,7 @@ async function createProductionAgentSession(input: {
           text: execution.userEntryText
         });
       }
-    },
-    writeAuthorization: createProductionPersonalMemoryWriteAuthorization()
+    }
   });
   const knowledgeReadSecurity = new PiKnowledgeReadToolSecurity({
     currentRunIdentity: () => input.input.currentToolExecutionContext(),
@@ -1802,26 +1800,6 @@ function providerRuntimeConfig(
     authMode: configured.authMode,
     baseUrl: configured.baseUrl,
     modelRef: configured.modelRef
-  });
-}
-
-function createProductionPersonalMemoryWriteAuthorization(): PersonalMemoryWriteAuthorizationPort {
-  return Object.freeze({
-    async authorize(
-      input: Parameters<PersonalMemoryWriteAuthorizationPort["authorize"]>[0]
-    ) {
-      if (
-        input.currentUserEntry.entryId !== input.runtime.userEntryId
-        || !input.currentUserEntry.text.includes(input.evidenceQuote)
-      ) return null;
-      return Object.freeze({
-        basis: "explicit" as const,
-        contentOrigin: input.operation === "create"
-          ? "user_statement" as const
-          : "confirmed_change" as const,
-        explicitlyAuthorized: input.operation === "forget"
-      });
-    }
   });
 }
 
