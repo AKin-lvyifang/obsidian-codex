@@ -44,6 +44,7 @@ export type PiPersonalMemoryToolSafeErrorCode =
   | "personal_memory_vault_mismatch"
   | "personal_memory_no_memory"
   | "personal_memory_invalid_request"
+  | "personal_memory_current_turn_search_required"
   | "personal_memory_not_found"
   | "personal_memory_revision_conflict"
   | "personal_memory_unsafe_path"
@@ -221,8 +222,8 @@ const MEMORY_WRITE_REQUEST_SCHEMA = Type.Union([
   FORGET_REQUEST_SCHEMA,
   Type.String({ maxLength: MEMORY_WRITE_REQUEST_JSON_MAX_CHARS })
 ]);
-const MEMORY_SEARCH_TOOL_DESCRIPTION = "按查询、类型、范围、状态和日期搜索当前 Vault 的长期 Memory 摘要。两种合法触发：相关历史可能影响当前回答；或准备 create、update、profile_update、forget 前做去重、定位和 revision 获取。任何 memory_write 前都必须完成 memory_search；exhausted=false 时必须携带相同 query/filters 与 nextCursor 继续分页。除此之外不机械搜索。";
-const MEMORY_WRITE_TOOL_DESCRIPTION = "System Prompt 判断内容值得跨轮保存且对象清楚时，先完成 memory_search，再实际调用本 Tool：同义内容已存在就跳过，内容变化时用 update 更新原记录，无相关记录才用 create；普通文字不会落盘，只有真实结构化 Tool 回执才能声称已写入长期 Memory。create 必须选择七类 kind；profile_update 若搜索命中同一用户事实必须传 targetId；forget 响应用户当前明确原话直接忘掉，并逐字填写 evidenceQuote。来源与 revision 由宿主处理。";
+const MEMORY_SEARCH_TOOL_DESCRIPTION = "按查询、类型、范围、状态和日期搜索当前 Vault 的长期 Memory 摘要。两种合法触发：相关历史可能影响当前回答；或准备 create、update、profile_update、forget 前做去重、定位和 revision 获取。任何 memory_write 前都必须在当前用户消息对应的本轮完成 memory_search，历史轮搜索不能替代；exhausted=false 时必须携带相同 query/filters 与 nextCursor 继续分页，直到 exhausted=true。除此之外不机械搜索。";
+const MEMORY_WRITE_TOOL_DESCRIPTION = "System Prompt 判断内容值得跨轮保存且对象清楚时，先在当前用户消息对应的本轮完成 memory_search，再实际调用本 Tool；历史轮搜索不能授权当前轮写入：同义内容已存在就跳过，内容变化时用 update 更新原记录，无相关记录才用 create；普通文字不会落盘，只有真实结构化 Tool 回执才能声称已写入长期 Memory。create 必须选择七类 kind；profile_update 若搜索命中同一用户事实必须传 targetId；forget 响应用户当前明确原话直接忘掉，并逐字填写 evidenceQuote。来源与 revision 由宿主处理。";
 
 export const PI_PERSONAL_MEMORY_TOOL_SCHEMAS: Readonly<Record<PiPersonalMemoryToolId, TSchema>> = Object.freeze({
   memory_search: Type.Object({
@@ -317,7 +318,7 @@ implements PiVaultAdditionalToolSecurityPort {
           this.authorizePreflightFailure(
             event,
             current,
-            "personal_memory_invalid_request",
+            "personal_memory_current_turn_search_required",
             args
           );
           return;
@@ -812,7 +813,9 @@ function memoryToolErrorMessage(code: PiPersonalMemoryToolSafeErrorCode): string
     case "personal_memory_no_memory":
       return "Memory Tool 未完成：长期记忆总开关已关闭。";
     case "personal_memory_invalid_request":
-      return "Memory Tool 未完成：参数无效，或写入前尚未完成 memory_search。";
+      return "Memory Tool 未完成：参数无效。请修正 Tool 参数后再试。";
+    case "personal_memory_current_turn_search_required":
+      return "Memory Tool 未完成：当前用户消息对应的本轮尚未完成 memory_search，历史轮搜索不能替代。请先调用 memory_search；exhausted=false 时使用 nextCursor 继续分页，直到 exhausted=true，再调用 memory_write。补搜前不要直接重试 memory_write。";
     case "personal_memory_not_found":
       return "Memory Tool 未完成：目标 Memory 不存在或已不再可用。";
     case "personal_memory_revision_conflict":

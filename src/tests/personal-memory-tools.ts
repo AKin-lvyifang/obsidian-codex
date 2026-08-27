@@ -403,12 +403,12 @@ async function scenarioProviderVisibleDescriptionsStayAligned(): Promise<void> {
 
     assert.equal(searchDescription, schemas.memory_search.description);
     assert.match(searchDescription, /相关历史可能影响当前回答.*准备 create、update、profile_update、forget 前/iu);
-    assert.match(searchDescription, /任何 memory_write 前都必须完成 memory_search.*exhausted=false.*nextCursor/iu);
+    assert.match(searchDescription, /任何 memory_write 前都必须在当前用户消息对应的本轮完成 memory_search.*历史轮搜索不能替代.*exhausted=false.*nextCursor.*exhausted=true/iu);
     assert.match(searchDescription, /除此之外不机械搜索/iu);
     assert.doesNotMatch(searchDescription, /只在历史会实质影响当前回答时调用/iu);
 
     assert.equal(writeDescription, schemas.memory_write.description);
-    assert.match(writeDescription, /System Prompt 判断内容值得跨轮保存且对象清楚.*先完成 memory_search.*实际调用本 Tool/iu);
+    assert.match(writeDescription, /System Prompt 判断内容值得跨轮保存且对象清楚.*当前用户消息对应的本轮完成 memory_search.*历史轮搜索不能授权当前轮写入/iu);
     assert.match(writeDescription, /普通文字不会落盘.*真实结构化 Tool 回执/iu);
   });
 }
@@ -629,8 +629,58 @@ async function scenarioSearchBeforeAutonomousWriteAndCurrentEntryBinding(): Prom
       "write-before-search",
       args
     );
-    assert.equal(beforeSearch.details.errorCode, "personal_memory_invalid_request");
-    assert.match(beforeSearch.content[0]?.text ?? "", /memory_search/u);
+    assert.equal(
+      beforeSearch.details.errorCode,
+      "personal_memory_current_turn_search_required"
+    );
+    assert.match(
+      beforeSearch.content[0]?.text ?? "",
+      /当前用户消息对应的本轮.*历史轮搜索不能替代.*exhausted=false.*nextCursor.*exhausted=true.*不要直接重试 memory_write/u
+    );
+
+    let activeEntry = entry;
+    let activeRuntime = fixture.runtime({
+      userEntryId: entry.entryId,
+      productRunId: "historical-search-product-run"
+    });
+    const crossTurnSecurity = new PiPersonalMemoryToolSecurity({
+      currentRuntime: () => activeRuntime,
+      currentUserEntry: { current: () => activeEntry }
+    });
+    const crossTurnTools = createPiPersonalMemoryToolDefinitions({
+      repository: fixture.repository,
+      security: crossTurnSecurity
+    });
+    await executeThroughSecurity(
+      crossTurnSecurity,
+      crossTurnTools,
+      "memory_search",
+      "historical-turn-search",
+      { query: "产品观点 真实主链" }
+    );
+    activeEntry = {
+      entryId: "current-turn-user-entry",
+      text: "这是当前轮新的长期事实。"
+    };
+    activeRuntime = fixture.runtime({
+      userEntryId: activeEntry.entryId,
+      productRunId: "current-turn-product-run"
+    });
+    const afterHistoricalSearch = await executeFailureThroughSecurity(
+      crossTurnSecurity,
+      crossTurnTools,
+      "memory_write",
+      "write-after-historical-search",
+      args
+    );
+    assert.equal(
+      afterHistoricalSearch.details.errorCode,
+      "personal_memory_current_turn_search_required"
+    );
+    assert.match(
+      afterHistoricalSearch.content[0]?.text ?? "",
+      /历史轮搜索不能替代/u
+    );
 
     for (const [index, title] of ["无关历史甲", "无关历史乙"].entries()) {
       await fixture.repository.write({
@@ -657,7 +707,10 @@ async function scenarioSearchBeforeAutonomousWriteAndCurrentEntryBinding(): Prom
       "write-after-partial-search",
       args
     );
-    assert.equal(afterPartialSearch.details.errorCode, "personal_memory_invalid_request");
+    assert.equal(
+      afterPartialSearch.details.errorCode,
+      "personal_memory_current_turn_search_required"
+    );
 
     await executeThroughSecurity(
       security,
