@@ -53,7 +53,7 @@ interface TestActivationEvent {
   stopPropagation(): void;
 }
 
-class FakeElement {
+export class FakeElement {
   readonly attributes = new Map<string, string>();
   readonly dataset: Record<string, string> = {};
   readonly listeners = new Map<string, TestEventHandler>();
@@ -62,6 +62,7 @@ class FakeElement {
   className = "";
   clientHeight = 640;
   clientWidth = 420;
+  emptyCallCount = 0;
   checked = false;
   boundingHeight = 0;
   boundingLeft = 0;
@@ -102,6 +103,10 @@ class FakeElement {
 
   get childElementCount(): number {
     return this.children.length;
+  }
+
+  get ownerDocument(): Document {
+    return (globalThis as unknown as { document: Document }).document;
   }
 
   createEl(
@@ -146,6 +151,7 @@ class FakeElement {
   }
 
   empty(): void {
+    this.emptyCallCount += 1;
     for (const child of this.children) child.parent = null;
     this.children = [];
     this.content = [];
@@ -315,23 +321,34 @@ class FakeElement {
       const expected = selector.slice(1);
       return this.id === expected || this.attributes.get("id") === expected;
     }
+    const attribute = selector.match(/^\[([^=\]]+)(?:="([^"]*)")?\]$/u);
+    if (attribute) {
+      const name = attribute[1]!;
+      const expected = attribute[2];
+      const datasetKey = name.startsWith("data-")
+        ? name.slice(5).replace(/-([a-z])/gu, (_match, letter: string) => letter.toUpperCase())
+        : "";
+      const actual = this.attributes.get(name)
+        ?? (datasetKey ? this.dataset[datasetKey] : undefined);
+      return expected === undefined ? actual !== undefined : actual === expected;
+    }
     return this.tag === selector.toLowerCase();
   }
 }
 
-function renderedText(element: FakeElement): string {
+export function renderedText(element: FakeElement): string {
   return element.content
     .map((item) => typeof item === "string" ? item : renderedText(item))
     .join("");
 }
 
-interface TestContext {
+export interface TestContext {
   app: unknown;
   component: unknown;
   openedPaths: string[];
 }
 
-function createTestContext(): TestContext {
+export function createTestContext(): TestContext {
   const files = new Map([
     ["projects/Alpha.md", new TFile("projects/Alpha.md")],
     ["outputs/Result.md", new TFile("outputs/Result.md")],
@@ -2976,6 +2993,16 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       assert.ok(assistantTurnRoot.findByClass(componentClass),
         `${componentClass} stays inside the one Assistant Turn`);
     }
+    assert.equal(
+      assistantTurnRoot.findAllByClass("codex-smooth-ai-reasoning").length,
+      0,
+      "the Assistant Turn does not reuse Smooth reasoning chrome"
+    );
+    assert.equal(
+      assistantTurnRoot.findAllByClass("codex-smooth-ai-loader").length,
+      0,
+      "Reasoning and Tool event subtrees do not reuse Smooth loaders"
+    );
     const turnArtifactSources = assistantTurnRoot.findByClass("codex-ai-elements-artifact-sources")!;
     assert.equal(turnArtifactSources.closest(".codex-assistant-turn-resource"), null,
       "produced artifacts do not repeat the process-node heading in a nested disclosure");
@@ -3038,6 +3065,13 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     );
     assert.equal(providerReasoningDom.length, 2,
       "each Provider reasoning segment owns one independent Reasoning disclosure");
+    assert.equal(
+      providerReasoningDom.flatMap((reasoning) =>
+        reasoning.findAllByClass("codex-smooth-ai-loader")
+      ).length,
+      0,
+      "Reasoning bodies contain only real streamed text and never a Smooth loader"
+    );
     assert.ok(providerReasoningDom.every((reasoning) =>
       reasoning.parent?.hasClass("codex-assistant-turn-spine")
     ), "Provider Reasoning is a direct ChainOfThought child");
@@ -3786,6 +3820,26 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     "durable screenshot thumbnails keep the same compact stable footprint as the composer preview");
   assert.match(styles, /\.codex-message-type-assistantTurn\s*\{[\s\S]*?border:\s*0;[\s\S]*?background:\s*transparent;/u);
   assert.match(styles, /\.codex-assistant-turn-spine::before\s*\{[\s\S]*?width:\s*1px;/u);
+  assert.match(
+    styles,
+    /\.codex-ai-elements-reasoning-content\s*\{[^}]*margin:\s*3px 0 2px calc\(19px \+ var\(--echoink-conversation-space-3\)\);[^}]*border:\s*0;/u,
+    "Reasoning content aligns under the label without drawing a second spine"
+  );
+  assert.match(
+    styles,
+    /\.codex-assistant-turn-reasoning-node\s*\{[^}]*background:\s*transparent;/u,
+    "the Reasoning row does not hide and redraw the ChainOfThought spine"
+  );
+  assert.match(
+    styles,
+    /\.codex-assistant-turn-reasoning-node \.codex-ai-elements-reasoning-icon\s*\{[^}]*background:\s*var\(--background-primary\);/u,
+    "only the Brain icon area masks the spine at the node"
+  );
+  assert.match(
+    styles,
+    /\.codex-ai-elements-reasoning-caret\s*\{[^}]*margin-inline-start:\s*0;/u,
+    "the Reasoning Chevron stays immediately after its label"
+  );
   assert.doesNotMatch(
     styles,
     /\.codex-assistant-turn-node\.is-completed,\s*\.codex-assistant-turn-node\.is-skipped\s*\{[^}]*opacity:/u,
@@ -3813,7 +3867,11 @@ export async function runSmoothConversationUiTests(): Promise<void> {
   assert.match(styles, /\.codex-assistant-turn-action-node > \.codex-action-item-head:focus-visible\s*\{[\s\S]*?outline:\s*2px solid var\(--echoink-conversation-focus\);/u);
   assert.match(styles, /\.codex-assistant-turn-action-node\.is-current \.codex-ai-elements-tool-status\s*\{[\s\S]*?color:\s*var\(--echoink-conversation-status-running\);/u);
   assert.match(styles, /details\.codex-action-item\.codex-ai-elements-tool:not\(\[open\]\)[\s\S]*?border:\s*0;/u);
-  assert.match(styles, /details\.codex-action-item\.codex-ai-elements-tool\[open\][\s\S]*?border:\s*1px solid var\(--background-modifier-border\);/u);
+  assert.match(
+    styles,
+    /details\.codex-action-item\.codex-ai-elements-tool\[open\],[\s\S]*?details\.codex-process\.codex-ai-elements-tool\[open\]\s*\{[^}]*border:\s*0;[^}]*border-radius:\s*0;[^}]*background:\s*transparent;[^}]*box-shadow:\s*none;/u,
+    "expanded Tool subtrees remain cardless"
+  );
   assert.match(styles, /\.codex-action-detail-row,[\s\S]*?grid-template-columns:\s*minmax\(72px, max-content\) minmax\(0, 1fr\);/u);
   assert.match(styles, /\.codex-action-preview-content,[\s\S]*?border:\s*0;[\s\S]*?font-weight:\s*400;[\s\S]*?line-height:\s*var\(--echoink-conversation-line-body\);[\s\S]*?overflow-wrap:\s*anywhere;/u);
   assert.match(styles, /\.codex-action-open-note:focus-visible,[\s\S]*?outline:\s*2px solid var\(--echoink-conversation-focus\);/u);

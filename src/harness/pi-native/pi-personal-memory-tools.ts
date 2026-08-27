@@ -470,6 +470,9 @@ export function createPiPersonalMemoryToolDefinitions(input: Readonly<{
     label: toolLabel(toolId),
     description: toolDescription(toolId),
     parameters: PI_PERSONAL_MEMORY_TOOL_SCHEMAS[toolId],
+    ...(toolId === "memory_write"
+      ? { prepareArguments: preparePiMemoryWriteArgumentsForValidation }
+      : {}),
     executionMode: toolId === "memory_search" || toolId === "memory_read" ? "parallel" : "sequential",
     execute: async (toolCallId, rawArguments, signal) => {
       const authorized = input.security.consume(toolCallId, toolId, rawArguments);
@@ -504,6 +507,19 @@ export function createPiPersonalMemoryToolDefinitions(input: Readonly<{
       }
     }
   })));
+}
+
+export function preparePiMemoryWriteArgumentsForValidation(
+  value: unknown
+): MemoryWriteToolArguments {
+  const input = requireRecord(value);
+  if (typeof input.request !== "string") {
+    return input as unknown as MemoryWriteToolArguments;
+  }
+  return {
+    ...input,
+    request: memoryWriteRequestRecord(input.request)
+  } as MemoryWriteToolArguments;
 }
 
 export function isPiPersonalMemoryToolId(value: string): value is PiPersonalMemoryToolId {

@@ -13,6 +13,8 @@ import {
   PiChatUiProjector,
   piEntryIdFromProjectedMessageId,
   piProjectedEntryMessageId,
+  piRuntimeMessageKeyFromProjectedMessageId,
+  piToolCallIdFromProjectedMessageId,
   type PiChatUiRunState,
   type PiChatUiViewModel
 } from "../../harness/pi-native/pi-chat-ui-projector";
@@ -721,8 +723,13 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
             event,
             vaultPath: view.plugin.getVaultPath()
           });
-          applyPiChatLiveProjection(view, session, liveProjection);
-          view.renderMessagesIfActive(session);
+          const changedMessage = applyPiChatLiveProjection(
+            view,
+            session,
+            liveProjection,
+            event
+          );
+          view.renderMessagesIfActive(session, changedMessage);
           view.renderToolbar();
           view.applyStatus();
 
@@ -930,8 +937,9 @@ function applyPiConversationProjection(
 function applyPiChatLiveProjection(
   view: CodexViewTurnContext,
   session: StoredSession,
-  projection: Readonly<PiChatUiViewModel>
-): void {
+  projection: Readonly<PiChatUiViewModel>,
+  changedEvent?: Readonly<PiChatRuntimeEvent>
+): ChatMessage | undefined {
   session.piSessionId = projection.piSessionId;
   session.messages = projectPiImageAttachments(
     session,
@@ -941,6 +949,63 @@ function applyPiChatLiveProjection(
     session.id,
     projection.pendingInteraction ?? null,
     projection.productRunId
+  );
+  return changedEvent
+    ? changedPiChatMessageForRuntimeEvent(session.messages, changedEvent)
+    : undefined;
+}
+
+function changedPiChatMessageForRuntimeEvent(
+  messages: readonly ChatMessage[],
+  event: Readonly<PiChatRuntimeEvent>
+): ChatMessage | undefined {
+  if (
+    event.type === "provider_reasoning_start"
+    || event.type === "provider_reasoning_delta"
+    || event.type === "provider_reasoning_end"
+  ) {
+    return messages.find((message) =>
+      message.assistantTurn?.turnId === event.productRunId
+      && message.assistantTurn.providerReasoningSegments?.some(
+        (segment) => segment.reasoningId === event.reasoningId
+      )
+    );
+  }
+  if (
+    event.type === "tool_execution_start"
+    || event.type === "tool_execution_update"
+    || event.type === "tool_execution_end"
+  ) {
+    return messages.find((message) =>
+      piToolCallIdFromProjectedMessageId(message.id) === event.toolCallId
+    );
+  }
+  if (event.type === "message_start" || event.type === "message_update") {
+    return messages.find((message) =>
+      piRuntimeMessageKeyFromProjectedMessageId(message.id) === event.messageKey
+    );
+  }
+  if (event.type === "message_end") {
+    return event.entryId
+      ? messages.find((message) =>
+          piEntryIdFromProjectedMessageId(message.id) === event.entryId
+        )
+      : messages.find((message) =>
+          piRuntimeMessageKeyFromProjectedMessageId(message.id) === event.messageKey
+        );
+  }
+  if (event.type === "message_entry_resolved") {
+    return messages.find((message) =>
+      piEntryIdFromProjectedMessageId(message.id) === event.entryId
+    );
+  }
+  if (event.type === "reasoning_summary") {
+    return messages.find((message) =>
+      message.reasoningSummary?.productRunId === event.productRunId
+    );
+  }
+  return messages.find((message) =>
+    message.assistantTurn?.turnId === event.productRunId
   );
 }
 

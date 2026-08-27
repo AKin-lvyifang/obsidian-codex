@@ -440,6 +440,7 @@ interface ActiveProductRun {
   providerStartedAt?: number;
   firstAssistantTextSeen: boolean;
   providerReasoningBlocks: Map<string, MutableProviderReasoningBlock>;
+  providerReasoningExposedMessageKeys: Set<string>;
   reasoningSummary: Readonly<EchoInkReasoningSummarySnapshot>;
   reasoningStartEntryId?: string;
   reasoningTerminalEntryId?: string;
@@ -470,7 +471,8 @@ interface MutableProviderReasoningBlock {
   readonly messageKey: string;
   readonly contentIndex: number;
   readonly reasoningId: string;
-  readonly startedAt: number;
+  startedAt: number;
+  readonly messageTimestamp?: number;
   text: string;
   exposed: boolean;
   redacted: boolean;
@@ -1152,6 +1154,7 @@ export class PiNativeConversationRuntime {
       noteMentions,
       firstAssistantTextSeen: false,
       providerReasoningBlocks: new Map(),
+      providerReasoningExposedMessageKeys: new Set(),
       reasoningSummary: createReasoningSummary({
         conversationId: catalog.conversationId,
         piSessionId: catalog.piSessionId,
@@ -2914,6 +2917,7 @@ export class PiNativeConversationRuntime {
         contentIndex
       ),
       startedAt: observedAt,
+      ...providerReasoningMessageTimestamp(partial, observedAt),
       text: "",
       exposed: false,
       redacted: content?.redacted === true
@@ -2949,6 +2953,7 @@ export class PiNativeConversationRuntime {
           event.contentIndex
         ),
         startedAt: observedAt,
+        ...providerReasoningMessageTimestamp(event.partial, observedAt),
         text: "",
         exposed: false,
         redacted: content?.redacted === true
@@ -2971,6 +2976,7 @@ export class PiNativeConversationRuntime {
     if (!block.exposed) {
       if (!block.text.trim()) return;
       block.exposed = true;
+      beginPublicProviderReasoning(execution, block);
       await this.emitRuntimeEvent(active, execution, {
         type: "provider_reasoning_start",
         messageKey: messageKeyValue,
@@ -3019,6 +3025,7 @@ export class PiNativeConversationRuntime {
         event.contentIndex
       ),
       startedAt: observedAt,
+      ...providerReasoningMessageTimestamp(event.partial, observedAt),
       text: "",
       exposed: false,
       redacted: content?.redacted === true
@@ -3130,6 +3137,7 @@ export class PiNativeConversationRuntime {
     }
     if (!block.exposed) {
       block.exposed = true;
+      beginPublicProviderReasoning(execution, block);
       await this.emitRuntimeEvent(active, execution, {
         type: "provider_reasoning_start",
         messageKey: block.messageKey,
@@ -4269,6 +4277,30 @@ function providerReasoningSegmentId(
     "provider-reasoning",
     `${productRunId}\0${messageKeyValue}\0${contentIndex}`
   );
+}
+
+function providerReasoningMessageTimestamp(
+  message: Pick<AssistantMessage, "timestamp">,
+  observedAt: number
+): Readonly<{ messageTimestamp?: number }> {
+  const timestamp = message.timestamp;
+  return typeof timestamp === "number"
+    && Number.isFinite(timestamp)
+    && timestamp >= 0
+    && timestamp <= observedAt
+    ? { messageTimestamp: timestamp }
+    : {};
+}
+
+function beginPublicProviderReasoning(
+  execution: ActiveProductRun,
+  block: MutableProviderReasoningBlock
+): void {
+  if (execution.providerReasoningExposedMessageKeys.has(block.messageKey)) return;
+  execution.providerReasoningExposedMessageKeys.add(block.messageKey);
+  if (block.messageTimestamp !== undefined) {
+    block.startedAt = block.messageTimestamp;
+  }
 }
 
 function providerThinkingContentAt(

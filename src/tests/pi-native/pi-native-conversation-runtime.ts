@@ -102,6 +102,7 @@ export async function runPiNativeConversationRuntimeTests(): Promise<void> {
   await assertUserQuestionUsesCentralFailClosedSecurity();
   assertReasoningSummaryLifecycleSemantics();
   await assertReasoningSummaryRuntimeLifecycle();
+  await assertProviderReasoningUsesPerAssistantMessageClocks();
   await assertReasoningSelectionFailsClosedBeforePiPrompt();
   assertKnowledgeMaintenanceRequiresExplicitCommand();
   await assertProjectionAndCatalogManagementStayAgentSessionFree();
@@ -609,6 +610,68 @@ function reasoningSummariesForRun(
     );
     return summary?.productRunId === productRunId ? [summary] : [];
   });
+}
+
+async function assertProviderReasoningUsesPerAssistantMessageClocks():
+Promise<void> {
+  let clock = 1_000;
+  await withFixture(["provider-reasoning-clock-run"], async (fixture) => {
+    const conversationId = "provider-reasoning-message-clocks";
+    await fixture.runtime.createConversation({
+      conversationId,
+      title: "Provider reasoning message clocks",
+      cwd: fixture.root,
+      createdAt: 1
+    });
+    await fixture.runtime.activateConversation(conversationId);
+    const run = await fixture.submit({
+      conversationId,
+      text: "验证逐 AssistantMessage 推理计时",
+      submittedAt: 500
+    });
+    const session = fixture.latestSession();
+
+    clock = 9_000;
+    session.emitProviderReasoningBlocks(
+      ["首个公开段", "同一消息的后续公开段"],
+      1_000
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    clock = 18_000;
+    session.emitToolStart("reasoning-clock-tool", "fixture_tool", {});
+    session.emitToolEnd("reasoning-clock-tool", "fixture_tool", {}, false);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    clock = 26_000;
+    session.emitProviderReasoningBlocks(
+      ["Tool 后第二个 AssistantMessage 的首段"],
+      20_000
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    clock = 30_000;
+    session.finishSuccessful("计时完成");
+    await run.result;
+
+    const projection = await fixture.runtime.readProjection(conversationId);
+    const segments = projection.messages
+      .find((message) => message.assistantTurn?.turnId === run.productRunId)
+      ?.assistantTurn?.providerReasoningSegments ?? [];
+    assert.deepEqual(
+      segments.map((segment) => ({
+        text: segment.text,
+        startedAt: segment.startedAt,
+        durationMs: segment.durationMs
+      })),
+      [
+        { text: "首个公开段", startedAt: 1_000, durationMs: 8_000 },
+        { text: "同一消息的后续公开段", startedAt: 9_000, durationMs: 0 },
+        {
+          text: "Tool 后第二个 AssistantMessage 的首段",
+          startedAt: 20_000,
+          durationMs: 6_000
+        }
+      ]
+    );
+  }, { now: () => clock });
 }
 
 async function assertProjectionAndCatalogManagementStayAgentSessionFree():
@@ -3372,7 +3435,7 @@ async function withFixture(
   assertion: (fixture: RuntimeFixture) => Promise<void>,
   runtimeOptions: Pick<
     PiNativeConversationRuntimeOptions,
-    "hasPendingProductWork" | "knowledge"
+    "hasPendingProductWork" | "knowledge" | "now"
   > = {}
 ): Promise<void> {
   const root = await realpath(await mkdtemp(
@@ -3717,43 +3780,59 @@ class ControlledAgentSession {
 
   emitProviderReasoning(text: string): void {
     this.providerReasoningSequence += 1;
+    this.emitProviderReasoningBlocks(
+      [text],
+      300_000 + this.promptSequence + this.providerReasoningSequence
+    );
+  }
+
+  emitProviderReasoningBlocks(
+    texts: readonly string[],
+    timestamp: number,
+    beforeEvent: (
+      index: number,
+      phase: "start" | "delta" | "end"
+    ) => void = () => undefined
+  ): void {
     const message: AssistantMessage = {
-      ...assistantMessage(
-        "",
-        300_000 + this.promptSequence + this.providerReasoningSequence
-      ),
-      content: [{ type: "thinking", thinking: text }]
+      ...assistantMessage("", timestamp),
+      content: texts.map((thinking) => ({ type: "thinking" as const, thinking }))
     };
     this.emit({ type: "message_start", message });
-    this.emit({
-      type: "message_update",
-      message,
-      assistantMessageEvent: {
-        type: "thinking_start",
-        contentIndex: 0,
-        partial: message
-      }
-    } as AgentSessionEvent);
-    this.emit({
-      type: "message_update",
-      message,
-      assistantMessageEvent: {
-        type: "thinking_delta",
-        contentIndex: 0,
-        delta: text,
-        partial: message
-      }
-    } as AgentSessionEvent);
-    this.emit({
-      type: "message_update",
-      message,
-      assistantMessageEvent: {
-        type: "thinking_end",
-        contentIndex: 0,
-        content: text,
-        partial: message
-      }
-    } as AgentSessionEvent);
+    texts.forEach((text, contentIndex) => {
+      beforeEvent(contentIndex, "start");
+      this.emit({
+        type: "message_update",
+        message,
+        assistantMessageEvent: {
+          type: "thinking_start",
+          contentIndex,
+          partial: message
+        }
+      } as AgentSessionEvent);
+      beforeEvent(contentIndex, "delta");
+      this.emit({
+        type: "message_update",
+        message,
+        assistantMessageEvent: {
+          type: "thinking_delta",
+          contentIndex,
+          delta: text,
+          partial: message
+        }
+      } as AgentSessionEvent);
+      beforeEvent(contentIndex, "end");
+      this.emit({
+        type: "message_update",
+        message,
+        assistantMessageEvent: {
+          type: "thinking_end",
+          contentIndex,
+          content: text,
+          partial: message
+        }
+      } as AgentSessionEvent);
+    });
   }
 
   beginProviderRequest(): void {

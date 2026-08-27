@@ -243,7 +243,10 @@ export function attachTurnIdToRun(host: CodexMessageHost, session: StoredSession
 
 export function renderMessagesIfActive(host: CodexMessageHost, session: StoredSession, updatedMessage?: ChatMessage): void {
   if (session.id !== host.plugin.settings.activeSessionId) return;
-  if (updatedMessage && host.messageListRenderer.tryUpdateMessage(updatedMessage)) {
+  if (
+    updatedMessage
+    && host.messageListRenderer.tryUpdateMessage(updatedMessage, session.messages)
+  ) {
     host.renderTaskPlanDock(session);
     host.renderInteractionDock(session);
     return;

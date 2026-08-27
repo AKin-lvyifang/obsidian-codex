@@ -2516,6 +2516,13 @@ export function piToolCallIdFromProjectedMessageId(
   return identity?.kind === "tool" ? identity.value : undefined;
 }
 
+export function piRuntimeMessageKeyFromProjectedMessageId(
+  messageId: string
+): string | undefined {
+  const provisionalMessage = /:provisional-message:([^:]+)$/u.exec(messageId);
+  return provisionalMessage ? decodeIdentity(provisionalMessage[1]) : undefined;
+}
+
 export function piProjectedEntryMessageId(
   piSessionId: string,
   activeLeafId: string | null,

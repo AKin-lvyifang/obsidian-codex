@@ -480,9 +480,10 @@ export class CodexMessageListRenderer {
     return changed;
   }
 
-  tryUpdateMessage(message: ChatMessage): boolean {
+  tryUpdateMessage(message: ChatMessage, messages?: ChatMessage[]): boolean {
     const env = this.env;
     if (!env || message.rawRef || message.citations || message.itemType === "knowledgeBase") return false;
+    if (messages) env.messages = messages;
     const processMessage = isAgentProcessItemType(message.itemType);
     if (!processMessage && message.status !== "running") return false;
     const target = this.findRenderedMessageElement(message.id);
@@ -897,9 +898,6 @@ export class CodexMessageListRenderer {
           renderRichText(env.app, env.component, body, reasoning.text);
         } else {
           body.empty();
-          if (reasoning.status === "running") {
-            renderSmoothAILoader(body, copy.process.receivingPublicReasoning);
-          }
         }
         body.dataset.renderedText = reasoning.text;
       });
@@ -2170,6 +2168,12 @@ export class CodexMessageListRenderer {
     elements.root.dataset.nodeId = node.nodeId;
     elements.root.dataset.nodeStatus = node.status;
     elements.root.dataset.reasoningId = reasoning.reasoningId;
+    const carrier = turn.messages.find((message) =>
+      message.assistantTurn?.providerReasoningSegments?.some((segment) =>
+        segment.reasoningId === reasoning.reasoningId
+      )
+    );
+    if (carrier) elements.root.dataset.messageId = carrier.id;
     elements.body.dataset.renderedText = reasoning.text;
     this.scheduleDisclosureAutoFold(
       `reasoning:${disclosureKey}`,
@@ -2204,8 +2208,6 @@ export class CodexMessageListRenderer {
     };
     if (reasoning.text.trim()) {
       renderRichText(env.app, env.component, elements.body, reasoning.text);
-    } else if (reasoning.status === "running") {
-      renderSmoothAILoader(elements.body, copy.process.receivingPublicReasoning);
     }
   }
 
