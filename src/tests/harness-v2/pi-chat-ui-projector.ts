@@ -40,6 +40,7 @@ export async function runPiChatUiProjectorTests(): Promise<void> {
   assertDurableBranchRebuildsExistingUiCardsAndHidesReasoning();
   assertImageUserEntriesProjectWithoutPayloadDuplication();
   assertHiddenNoteMentionContextProjectsOntoItsUserMessage();
+  assertProviderReasoningSegmentsStayDistinctAndReopen();
   assertLiveEventsMergeUntilTheProductSettlementBoundary();
   assertKnowledgeProgressAndToolPayloadsStayPrivate();
   assertKnowledgeMaintenanceResultCardIsLiveDurableAndStrict();
@@ -50,6 +51,205 @@ export async function runPiChatUiProjectorTests(): Promise<void> {
   assertPhaseTwoWriteTerminalStatesRemainDistinct();
   assertSessionRunAndBranchScopesDoNotCross();
   assertInterruptedReadbackNeverPretendsTheRunCompleted();
+}
+
+function assertProviderReasoningSegmentsStayDistinctAndReopen(): void {
+  const projector = new PiChatUiProjector();
+  let live = projector.createEmpty({
+    piSessionId: "session-provider-reasoning-segments",
+    activeLeafId: "leaf-provider-reasoning-segments",
+    now: 1
+  });
+  live = project(projector, live, runtimeEvent("provider_reasoning_start", 2, {
+    messageKey: "assistant-pass-one",
+    reasoningId: "reasoning-segment-one"
+  }, live.piSessionId, "run-provider-reasoning-segments", live.activeLeafId));
+  live = project(projector, live, runtimeEvent("provider_reasoning_delta", 3, {
+    messageKey: "assistant-pass-one",
+    reasoningId: "reasoning-segment-one",
+    textDelta: "先检查资料"
+  }, live.piSessionId, "run-provider-reasoning-segments", live.activeLeafId));
+  live = project(projector, live, runtimeEvent("provider_reasoning_end", 5, {
+    messageKey: "assistant-pass-one",
+    reasoningId: "reasoning-segment-one",
+    text: "先检查资料",
+    status: "completed"
+  }, live.piSessionId, "run-provider-reasoning-segments", live.activeLeafId));
+  live = project(projector, live, runtimeEvent("provider_reasoning_start", 8, {
+    messageKey: "assistant-pass-two",
+    reasoningId: "reasoning-segment-two"
+  }, live.piSessionId, "run-provider-reasoning-segments", live.activeLeafId));
+  live = project(projector, live, runtimeEvent("provider_reasoning_delta", 9, {
+    messageKey: "assistant-pass-two",
+    reasoningId: "reasoning-segment-two",
+    textDelta: "工具后继续判断"
+  }, live.piSessionId, "run-provider-reasoning-segments", live.activeLeafId));
+  live = project(projector, live, runtimeEvent("provider_reasoning_end", 12, {
+    messageKey: "assistant-pass-two",
+    reasoningId: "reasoning-segment-two",
+    text: "工具后继续判断",
+    status: "completed"
+  }, live.piSessionId, "run-provider-reasoning-segments", live.activeLeafId));
+  const liveTurn = live.messages.find((message) =>
+    message.assistantTurn?.turnId === "run-provider-reasoning-segments"
+  )?.assistantTurn;
+  assert.deepEqual(
+    liveTurn?.providerReasoningSegments?.map((segment) => ({
+      reasoningId: segment.reasoningId,
+      text: segment.text,
+      startedAt: segment.startedAt,
+      completedAt: segment.completedAt,
+      durationMs: segment.durationMs
+    })),
+    [
+      {
+        reasoningId: "reasoning-segment-one",
+        text: "先检查资料",
+        startedAt: 2,
+        completedAt: 5,
+        durationMs: 3
+      },
+      {
+        reasoningId: "reasoning-segment-two",
+        text: "工具后继续判断",
+        startedAt: 8,
+        completedAt: 12,
+        durationMs: 4
+      }
+    ]
+  );
+
+  let legacy = projector.createEmpty({
+    piSessionId: "session-provider-reasoning-legacy",
+    activeLeafId: "leaf-provider-reasoning-legacy",
+    now: 1
+  });
+  legacy.messages.push({
+    id: "legacy-provider-reasoning-carrier",
+    role: "system",
+    itemType: "assistantTurnState",
+    text: "",
+    status: "completed",
+    runId: "run-provider-reasoning-legacy",
+    turnId: "run-provider-reasoning-legacy",
+    createdAt: 1,
+    assistantTurn: {
+      viewVersion: 1,
+      turnId: "run-provider-reasoning-legacy",
+      status: "completed",
+      startedAt: 1,
+      updatedAt: 2,
+      completedAt: 2,
+      processNodes: [],
+      providerReasoning: {
+        reasoningId: "reasoning-legacy",
+        source: "provider_public",
+        status: "completed",
+        text: "旧数据推理",
+        startedAt: 1,
+        updatedAt: 2,
+        completedAt: 2,
+        durationMs: 1
+      },
+      interactionRecords: []
+    }
+  });
+  legacy = project(projector, legacy, runtimeEvent(
+    "provider_reasoning_start",
+    3,
+    {
+      messageKey: "assistant-legacy-next",
+      reasoningId: "reasoning-after-legacy"
+    },
+    legacy.piSessionId,
+    "run-provider-reasoning-legacy",
+    legacy.activeLeafId
+  ));
+  const migratedLegacy = legacy.messages[0]?.assistantTurn;
+  assert.equal(migratedLegacy?.providerReasoning, undefined);
+  assert.deepEqual(
+    migratedLegacy?.providerReasoningSegments?.map(
+      (segment) => segment.reasoningId
+    ),
+    ["reasoning-legacy", "reasoning-after-legacy"]
+  );
+
+  const durableInput = {
+    piSessionId: "session-provider-reasoning-reopen",
+    activeLeafId: "assistant-provider-reasoning-reopen",
+    entries: [
+      messageEntry("user-provider-reasoning-reopen", null, 100, {
+        role: "user",
+        content: "检查后回答",
+        timestamp: 100
+      }),
+      messageEntry(
+        "assistant-provider-reasoning-reopen",
+        "user-provider-reasoning-reopen",
+        200,
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "第一段公开推理" },
+            {
+              type: "toolCall",
+              id: "tool-provider-reasoning-reopen",
+              name: "note_read",
+              arguments: { path: "Inbox/test.md" }
+            },
+            { type: "thinking", thinking: "第二段公开推理" },
+            {
+              type: "toolCall",
+              id: "memory-write-provider-reasoning-reopen",
+              name: "memory_write",
+              arguments: { request: { operation: "create" } }
+            },
+            { type: "text", text: "最终回答" },
+            { type: "thinking", thinking: "REDACTED", redacted: true }
+          ],
+          timestamp: 200,
+          stopReason: "stop"
+        }
+      )
+    ],
+    runState: "completed" as const,
+    productRunId: "run-provider-reasoning-reopen",
+    runIdentities: [{
+      productRunId: "run-provider-reasoning-reopen",
+      userEntryId: "user-provider-reasoning-reopen",
+      assistantEntryId: "assistant-provider-reasoning-reopen",
+      toolCallIds: [
+        "tool-provider-reasoning-reopen",
+        "memory-write-provider-reasoning-reopen"
+      ]
+    }],
+    now: 300
+  };
+  const durable = projector.projectSessionBranch(durableInput);
+  const durableTurn = durable.messages.find((message) =>
+    message.assistantTurn?.turnId === "run-provider-reasoning-reopen"
+  )?.assistantTurn;
+  assert.deepEqual(
+    durableTurn?.providerReasoningSegments?.map((segment) => segment.text),
+    ["第一段公开推理", "第二段公开推理"]
+  );
+  assert.equal(
+    new Set(
+      durableTurn?.providerReasoningSegments?.map(
+        (segment) => segment.reasoningId
+      )
+    ).size,
+    2
+  );
+  assert.doesNotMatch(JSON.stringify(durable), /REDACTED/u);
+  const memoryWriteTool = durable.messages.find((message) =>
+    message.id.endsWith(":tool:memory-write-provider-reasoning-reopen")
+  );
+  assert.equal(memoryWriteTool?.itemType, "dynamicToolCall");
+  assert.equal(memoryWriteTool?.processKind, "tool");
+  assert.equal(memoryWriteTool?.title, "写入个人记忆");
+  const reopened = projector.projectSessionBranch(durableInput);
+  assert.deepEqual(reopened.messages, durable.messages);
 }
 
 function assertHiddenNoteMentionContextProjectsOntoItsUserMessage(): void {
@@ -980,7 +1180,11 @@ function assertDurableBranchRebuildsExistingUiCardsAndHidesReasoning(): void {
     messageEntry("assistant-tool", "user-1", 2, {
       role: "assistant",
       content: [
-        { type: "thinking", thinking: "HIDDEN_REASONING_CANARY" },
+        {
+          type: "thinking",
+          thinking: "HIDDEN_REASONING_CANARY",
+          redacted: true
+        },
         { type: "text", text: "我来查询。" },
         {
           type: "toolCall",
@@ -1028,7 +1232,11 @@ function assertDurableBranchRebuildsExistingUiCardsAndHidesReasoning(): void {
     },
     messageEntry("assistant-error", "branch-summary-1", 7, {
       role: "assistant",
-      content: [{ type: "thinking", thinking: "SECOND_HIDDEN_CANARY" }],
+      content: [{
+        type: "thinking",
+        thinking: "SECOND_HIDDEN_CANARY",
+        redacted: true
+      }],
       stopReason: "error",
       errorMessage: "Provider fixture failure",
       timestamp: 7

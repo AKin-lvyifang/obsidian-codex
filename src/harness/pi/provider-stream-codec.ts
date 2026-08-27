@@ -1,17 +1,19 @@
 import { Buffer } from "node:buffer";
-import type {
-  Api,
-  AssistantMessage,
-  AssistantMessageEventStream,
-  Context,
-  ImageContent,
-  Message,
-  Model,
-  TextContent,
-  ThinkingContent,
-  ToolCall,
-  Usage
+import {
+  parseStreamingJson,
+  type Api,
+  type AssistantMessage,
+  type AssistantMessageEventStream,
+  type Context,
+  type ImageContent,
+  type Message,
+  type Model,
+  type TextContent,
+  type ThinkingContent,
+  type ToolCall,
+  type Usage
 } from "@earendil-works/pi-ai";
+import { transformMessages } from "@earendil-works/pi-ai/api/transform-messages";
 import type {
   ControlledPiStreamInput
 } from "./production-pi-model-resolver";
@@ -24,12 +26,392 @@ export interface ProviderSseResponse {
   readonly body: string;
 }
 
+export interface ProviderSseStreamDecoder {
+  readonly partial: AssistantMessage;
+  push(chunk: Uint8Array | string): void;
+  finish(): AssistantMessage;
+}
+
+/**
+ * Incremental OpenAI-compatible SSE decoder used by the Node-only Provider
+ * transports. It emits Pi events as bytes arrive instead of rebuilding one
+ * buffered AssistantMessage after the HTTP response ends.
+ */
+export function createProviderSseStreamDecoder(input: {
+  stream: AssistantMessageEventStream;
+  model: Model<Api>;
+  statusCode: number;
+  headers: Readonly<Record<string, string>>;
+  timestamp: number;
+}): ProviderSseStreamDecoder {
+  if (
+    input.statusCode < 200
+    || input.statusCode >= 300
+    || !Number.isFinite(input.timestamp)
+    || !/^text\/event-stream(?:;|$)/iu.test(
+      input.headers["content-type"] ?? ""
+    )
+  ) {
+    throw new Error("provider_sse_invalid");
+  }
+  return new OpenAICompatibleSseDecoder(input);
+}
+
+class OpenAICompatibleSseDecoder implements ProviderSseStreamDecoder {
+  readonly partial: AssistantMessage;
+  private readonly decoder = new TextDecoder("utf-8", { fatal: true });
+  private buffer = "";
+  private receivedBytes = 0;
+  private finishReason = "";
+  private finished = false;
+  private activeThinkingIndex: number | null = null;
+  private activeTextIndex: number | null = null;
+  private readonly toolCalls = new Map<number, {
+    contentIndex: number;
+    toolCall: ToolCall;
+    argumentsText: string;
+    ended: boolean;
+  }>();
+
+  constructor(private readonly input: {
+    stream: AssistantMessageEventStream;
+    model: Model<Api>;
+    timestamp: number;
+  }) {
+    this.partial = {
+      role: "assistant",
+      content: [],
+      api: input.model.api,
+      provider: input.model.provider,
+      model: input.model.id,
+      usage: emptyUsage(),
+      stopReason: "stop",
+      timestamp: input.timestamp
+    };
+    input.stream.push({ type: "start", partial: this.partial });
+  }
+
+  push(chunk: Uint8Array | string): void {
+    if (this.finished) throw new Error("provider_sse_already_finished");
+    const bytes = typeof chunk === "string"
+      ? Buffer.from(chunk, "utf8")
+      : chunk;
+    this.receivedBytes += bytes.byteLength;
+    if (this.receivedBytes > MAX_RESPONSE_BYTES) {
+      throw new Error("provider_sse_response_too_large");
+    }
+    try {
+      this.buffer += this.decoder.decode(bytes, { stream: true });
+    } catch {
+      throw new Error("provider_utf8_invalid");
+    }
+    this.drainEvents();
+  }
+
+  finish(): AssistantMessage {
+    if (this.finished) throw new Error("provider_sse_already_finished");
+    this.finished = true;
+    try {
+      this.buffer += this.decoder.decode();
+    } catch {
+      throw new Error("provider_utf8_invalid");
+    }
+    this.drainEvents();
+    if (this.buffer.trim()) {
+      const finalBlock = this.buffer;
+      this.buffer = "";
+      this.consumeBlock(finalBlock);
+    }
+    this.endThinking();
+    this.endText();
+    if (!this.finishReason) throw new Error("provider_finish_reason_missing");
+    if (this.finishReason === "length") {
+      throw new Error("provider_output_limit_reached");
+    }
+    if (this.finishReason === "content_filter") {
+      throw new Error("provider_content_filtered");
+    }
+    if (this.finishReason === "network_error") {
+      throw new Error("provider_network_error");
+    }
+    if (
+      this.finishReason === "tool_calls"
+      || this.finishReason === "function_call"
+    ) {
+      if (!this.partial.content.some((block) => block.type === "toolCall")) {
+        throw new Error("provider_tool_call_missing");
+      }
+      this.endToolCalls();
+      this.partial.stopReason = "toolUse";
+    } else if (
+      this.finishReason === "stop"
+      || this.finishReason === "end"
+    ) {
+      this.discardToolCalls();
+      this.partial.stopReason = "stop";
+    } else {
+      throw new Error("provider_finish_reason_unsupported");
+    }
+    deepFreeze(this.partial);
+    this.input.stream.push({
+      type: "done",
+      reason: this.partial.stopReason as "stop" | "length" | "toolUse",
+      message: this.partial
+    });
+    return this.partial;
+  }
+
+  private drainEvents(): void {
+    while (true) {
+      const boundary = nextSseEventBoundary(this.buffer);
+      if (!boundary) return;
+      const block = this.buffer.slice(0, boundary.index);
+      this.buffer = this.buffer.slice(boundary.index + boundary.length);
+      this.consumeBlock(block);
+    }
+  }
+
+  private consumeBlock(block: string): void {
+    const data = block
+      .split(/\r\n|\r|\n/u)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).replace(/^ /u, ""))
+      .join("\n");
+    if (!data) return;
+    if (data === "[DONE]") {
+      return;
+    }
+    let chunk: Record<string, unknown>;
+    try {
+      chunk = parseRecord(data);
+    } catch {
+      throw new Error("provider_sse_json_invalid");
+    }
+    if (typeof chunk.id === "string" && chunk.id) {
+      this.partial.responseId ??= chunk.id;
+    }
+    if (typeof chunk.model === "string" && chunk.model) {
+      this.partial.responseModel ??= chunk.model;
+    }
+    if (isPlainRecord(chunk.usage)) {
+      this.partial.usage = parseUsage(chunk.usage);
+    }
+    const choice: unknown = Array.isArray(chunk.choices)
+      ? (chunk.choices as unknown[])[0]
+      : null;
+    if (!isPlainRecord(choice)) return;
+    if (typeof choice.finish_reason === "string" && choice.finish_reason) {
+      this.finishReason = choice.finish_reason;
+    }
+    if (!isPlainRecord(choice.delta)) return;
+    for (const field of [
+      "reasoning_content",
+      "reasoning",
+      "reasoning_text"
+    ] as const) {
+      const value = choice.delta[field];
+      if (typeof value === "string" && value.length > 0) {
+        this.appendThinking(value);
+        break;
+      }
+    }
+    if (typeof choice.delta.content === "string" && choice.delta.content) {
+      this.appendText(choice.delta.content);
+    }
+    if (Array.isArray(choice.delta.tool_calls)) {
+      for (const candidate of choice.delta.tool_calls) {
+        this.appendToolCall(candidate);
+      }
+    }
+  }
+
+  private appendThinking(delta: string): void {
+    this.endText();
+    if (this.toolCalls.size > 0) this.endToolCalls();
+    if (this.activeThinkingIndex === null) {
+      const contentIndex = this.partial.content.length;
+      this.partial.content.push({ type: "thinking", thinking: "" });
+      this.activeThinkingIndex = contentIndex;
+      this.input.stream.push({
+        type: "thinking_start",
+        contentIndex,
+        partial: this.partial
+      });
+    }
+    const contentIndex = this.activeThinkingIndex;
+    const content = this.partial.content[contentIndex];
+    if (!content || content.type !== "thinking") {
+      throw new Error("provider_reasoning_state_invalid");
+    }
+    content.thinking += delta;
+    this.input.stream.push({
+      type: "thinking_delta",
+      contentIndex,
+      delta,
+      partial: this.partial
+    });
+  }
+
+  private appendText(delta: string): void {
+    this.endThinking();
+    if (this.toolCalls.size > 0) this.endToolCalls();
+    if (this.activeTextIndex === null) {
+      const contentIndex = this.partial.content.length;
+      this.partial.content.push({ type: "text", text: "" });
+      this.activeTextIndex = contentIndex;
+      this.input.stream.push({
+        type: "text_start",
+        contentIndex,
+        partial: this.partial
+      });
+    }
+    const contentIndex = this.activeTextIndex;
+    const content = this.partial.content[contentIndex];
+    if (!content || content.type !== "text") {
+      throw new Error("provider_text_state_invalid");
+    }
+    content.text += delta;
+    this.input.stream.push({
+      type: "text_delta",
+      contentIndex,
+      delta,
+      partial: this.partial
+    });
+  }
+
+  private appendToolCall(value: unknown): void {
+    this.endThinking();
+    this.endText();
+    if (
+      !isPlainRecord(value)
+      || !Number.isSafeInteger(value.index)
+      || Number(value.index) < 0
+      || Number(value.index) > 128
+    ) {
+      throw new Error("provider_tool_delta_invalid");
+    }
+    const index = Number(value.index);
+    let state = this.toolCalls.get(index);
+    if (!state) {
+      const toolCall: ToolCall = {
+        type: "toolCall",
+        id: "",
+        name: "",
+        arguments: {}
+      };
+      const contentIndex = this.partial.content.length;
+      this.partial.content.push(toolCall);
+      state = { contentIndex, toolCall, argumentsText: "", ended: false };
+      this.toolCalls.set(index, state);
+      this.input.stream.push({
+        type: "toolcall_start",
+        contentIndex,
+        partial: this.partial
+      });
+    }
+    if (state.ended) throw new Error("provider_tool_delta_invalid");
+    if (typeof value.id === "string" && value.id) state.toolCall.id = value.id;
+    if (!isPlainRecord(value.function)) return;
+    if (typeof value.function.name === "string" && value.function.name) {
+      state.toolCall.name += value.function.name;
+    }
+    const delta = typeof value.function.arguments === "string"
+      ? value.function.arguments
+      : "";
+    if (delta) {
+      state.argumentsText += delta;
+      state.toolCall.arguments = parseStreamingJson(state.argumentsText);
+      this.input.stream.push({
+        type: "toolcall_delta",
+        contentIndex: state.contentIndex,
+        delta,
+        partial: this.partial
+      });
+    }
+    if (
+      state.toolCall.id.length > 256
+      || state.toolCall.name.length > 256
+      || state.argumentsText.length > 1_000_000
+    ) {
+      throw new Error("provider_tool_delta_invalid");
+    }
+  }
+
+  private endThinking(): void {
+    if (this.activeThinkingIndex === null) return;
+    const contentIndex = this.activeThinkingIndex;
+    this.activeThinkingIndex = null;
+    const content = this.partial.content[contentIndex];
+    if (!content || content.type !== "thinking") {
+      throw new Error("provider_reasoning_state_invalid");
+    }
+    this.input.stream.push({
+      type: "thinking_end",
+      contentIndex,
+      content: content.thinking,
+      partial: this.partial
+    });
+  }
+
+  private endText(): void {
+    if (this.activeTextIndex === null) return;
+    const contentIndex = this.activeTextIndex;
+    this.activeTextIndex = null;
+    const content = this.partial.content[contentIndex];
+    if (!content || content.type !== "text") {
+      throw new Error("provider_text_state_invalid");
+    }
+    this.input.stream.push({
+      type: "text_end",
+      contentIndex,
+      content: content.text,
+      partial: this.partial
+    });
+  }
+
+  private endToolCalls(): void {
+    for (const [, state] of [...this.toolCalls].sort(
+      ([left], [right]) => left - right
+    )) {
+      if (state.ended) continue;
+      if (!state.toolCall.id || !state.toolCall.name) {
+        throw new Error("provider_tool_delta_invalid");
+      }
+      state.toolCall.arguments = parseRecord(state.argumentsText || "{}");
+      state.ended = true;
+      this.input.stream.push({
+        type: "toolcall_end",
+        contentIndex: state.contentIndex,
+        toolCall: state.toolCall,
+        partial: this.partial
+      });
+    }
+    this.toolCalls.clear();
+  }
+
+  private discardToolCalls(): void {
+    this.partial.content = this.partial.content.filter(
+      (block) => block.type !== "toolCall"
+    );
+    this.toolCalls.clear();
+  }
+}
+
+function nextSseEventBoundary(
+  value: string
+): { index: number; length: number } | null {
+  const match = /(?:\r\n|\r|\n)(?:\r\n|\r|\n)/u.exec(value);
+  return match?.index === undefined
+    ? null
+    : { index: match.index, length: match[0].length };
+}
+
 export function buildDeepSeekBody(
   input: ControlledPiStreamInput
 ): Readonly<Record<string, unknown>> {
   const body: Record<string, unknown> = {
     model: input.provider.modelRef,
-    messages: contextMessages(input.context),
+    messages: contextMessages(input.context, input.model),
     stream: true,
     temperature: input.options.temperature,
     max_tokens: input.options.maxTokens
@@ -59,7 +441,7 @@ export function buildQwenTokenPlanBody(
 ): Readonly<Record<string, unknown>> {
   const body: Record<string, unknown> = {
     model: input.provider.modelRef,
-    messages: contextMessages(input.context),
+    messages: contextMessages(input.context, input.model),
     stream: true,
     stream_options: { include_usage: true },
     temperature: input.options.temperature
@@ -117,15 +499,42 @@ function applyProviderReasoningOptions(
   }
 }
 
-function contextMessages(context: Context): unknown[] {
+function contextMessages(context: Context, model: Model<Api>): unknown[] {
   const result: unknown[] = [];
   if (typeof context.systemPrompt === "string" && context.systemPrompt) {
     result.push({ role: "system", content: context.systemPrompt });
   }
-  for (const message of context.messages) {
+  for (const message of validProviderHistory(context.messages, model)) {
     result.push(...toOpenAICompatibleMessages(message));
   }
   return result;
+}
+
+export function validProviderHistory(
+  messages: readonly Message[],
+  model: Model<Api>
+): Message[] {
+  const transformed = transformMessages([...messages], model);
+  let pendingToolCallIds = new Set<string>();
+  return transformed.filter((message) => {
+    if (message.role === "assistant") {
+      if (message.stopReason === "length") {
+        pendingToolCallIds.clear();
+        return false;
+      }
+      pendingToolCallIds = new Set(message.content
+        .filter((block): block is ToolCall => block.type === "toolCall")
+        .map((block) => block.id));
+      return true;
+    }
+    if (message.role === "toolResult") {
+      if (!pendingToolCallIds.has(message.toolCallId)) return false;
+      pendingToolCallIds.delete(message.toolCallId);
+      return true;
+    }
+    pendingToolCallIds.clear();
+    return true;
+  });
 }
 
 function toOpenAICompatibleMessages(message: Message): unknown[] {
@@ -253,7 +662,6 @@ export function parseDeepSeekSseResponse(
   let responseId: string | undefined;
   let responseModel: string | undefined;
   let usage = emptyUsage();
-  let sawDone = false;
   const toolCalls = new Map<number, {
     id: string;
     name: string;
@@ -271,10 +679,14 @@ export function parseDeepSeekSseResponse(
       .join("\n");
     if (!data) continue;
     if (data === "[DONE]") {
-      sawDone = true;
       continue;
     }
-    const chunk = parseRecord(data);
+    let chunk: Record<string, unknown>;
+    try {
+      chunk = parseRecord(data);
+    } catch {
+      throw new Error("provider_sse_json_invalid");
+    }
     if (typeof chunk.id === "string" && chunk.id) responseId ??= chunk.id;
     if (typeof chunk.model === "string" && chunk.model) {
       responseModel ??= chunk.model;
@@ -304,32 +716,45 @@ export function parseDeepSeekSseResponse(
       }
     }
   }
-  if (!sawDone || !finishReason) {
-    throw new Error("deepseek_sse_incomplete");
+  if (!finishReason) throw new Error("provider_finish_reason_missing");
+  if (finishReason === "length") {
+    throw new Error("provider_output_limit_reached");
+  }
+  if (finishReason === "content_filter") {
+    throw new Error("provider_content_filtered");
+  }
+  if (finishReason === "network_error") {
+    throw new Error("provider_network_error");
+  }
+  const toolUse = finishReason === "tool_calls"
+    || finishReason === "function_call";
+  if (
+    !toolUse
+    && finishReason !== "stop"
+    && finishReason !== "end"
+  ) {
+    throw new Error("provider_finish_reason_unsupported");
+  }
+  if (toolUse && toolCalls.size === 0) {
+    throw new Error("provider_tool_call_missing");
   }
 
   const content: Array<TextContent | ThinkingContent | ToolCall> = [];
   if (reasoning) content.push({ type: "thinking", thinking: reasoning });
   if (text) content.push({ type: "text", text });
-  for (const [, tool] of [...toolCalls.entries()].sort(
-    ([left], [right]) => left - right
-  )) {
-    content.push({
-      type: "toolCall",
-      id: tool.id,
-      name: tool.name,
-      arguments: parseRecord(tool.argumentsText || "{}")
-    });
+  if (toolUse) {
+    for (const [, tool] of [...toolCalls.entries()].sort(
+      ([left], [right]) => left - right
+    )) {
+      content.push({
+        type: "toolCall",
+        id: tool.id,
+        name: tool.name,
+        arguments: parseRecord(tool.argumentsText || "{}")
+      });
+    }
   }
-  const stopReason = toolCalls.size > 0
-    ? "toolUse" as const
-    : finishReason === "length"
-      ? "length" as const
-      : finishReason === "stop"
-        ? "stop" as const
-        : (() => {
-            throw new Error("deepseek_finish_reason_invalid");
-          })();
+  const stopReason = toolUse ? "toolUse" as const : "stop" as const;
   return deepFreeze({
     role: "assistant" as const,
     content,

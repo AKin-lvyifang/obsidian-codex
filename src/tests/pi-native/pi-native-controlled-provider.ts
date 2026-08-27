@@ -80,17 +80,30 @@ async function assertProtocolRequestLimitProjection(): Promise<void> {
 
   for (const protocol of [
     "openai-completions",
-    "openai-responses"
+    "openai-responses",
+    "openai-codex-responses"
   ] as const) {
     const inherited = await capture(protocol);
-    assert.equal(Object.hasOwn(inherited, "maxTokens"), false);
-    const internallyRequested = await capture(protocol, undefined, 1_024);
-    assert.equal(internallyRequested.maxTokens, 1_024);
+    assert.equal(
+      Object.hasOwn(inherited, "maxTokens"),
+      false,
+      "undefined must delegate the default maximum to protocol streamSimple"
+    );
+    if (protocol !== "openai-codex-responses") {
+      const internallyRequested = await capture(protocol, undefined, 1_024);
+      assert.equal(internallyRequested.maxTokens, 1_024);
+    }
   }
   const overridden = await capture("openai-completions", 2_048, 1_024);
   assert.equal(overridden.maxTokens, 1_024);
   const anthropic = await capture("anthropic-messages");
   assert.equal(anthropic.maxTokens, 8_192);
+  const anthropicLower = await capture(
+    "anthropic-messages",
+    undefined,
+    1_024
+  );
+  assert.equal(anthropicLower.maxTokens, 1_024);
 }
 
 function assertCurrentModelImageCapabilityIsCanonical(): void {

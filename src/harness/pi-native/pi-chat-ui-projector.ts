@@ -1,5 +1,6 @@
 import {
   extractProcessFileRefs,
+  stableHashedIdentity,
   summarizeProcessEvent
 } from "../../core/mapping";
 import { buildDiffSummary } from "../../core/diff-summary";
@@ -43,12 +44,16 @@ import {
   ECHOINK_ASSISTANT_TURN_VIEW_VERSION,
   cloneEchoInkAssistantTurn,
   cloneEchoInkTurnInteraction,
+  echoInkProviderReasoningSegments,
   turnInteractionRecordFromSessionEntry,
+  type EchoInkAssistantTurnSnapshot,
   type EchoInkAssistantTurnStatus,
+  type EchoInkProviderReasoningSegmentSnapshot,
   type EchoInkTurnInteraction,
   type EchoInkTurnInteractionRecord
 } from "../../types/conversation-turn";
 import { PI_USER_QUESTION_TOOL_ID } from "./pi-user-question-tool";
+import { providerFailureText } from "../pi/provider-failure";
 
 export type {
   PiChatUiToolApprovalStatus,
@@ -115,6 +120,7 @@ export interface PiSessionContentBlockView {
   readonly text?: string;
   readonly mimeType?: string;
   readonly thinking?: string;
+  readonly redacted?: boolean;
   readonly id?: string;
   readonly toolCallId?: string;
   readonly name?: string;
@@ -263,6 +269,11 @@ interface ToolCallProjection {
   readonly toolCallId: string;
   readonly toolName: string;
   readonly args: unknown;
+}
+
+interface DurableProviderReasoningBlock {
+  readonly contentIndex: number;
+  readonly text: string;
 }
 
 /**
@@ -760,6 +771,7 @@ export class PiChatUiProjector {
       const runId = context.entryRuns.get(entry.id) ?? context.currentRunId;
       const text = textFromContent(message.content);
       const failure = assistantFailure(message);
+      const observedAt = messageTime(message, createdAt);
       if (text || failure.text) {
         upsertMessage(messages, {
           id: entryMessageId(context.scope, entry.id),
@@ -767,13 +779,16 @@ export class PiChatUiProjector {
           itemType: failure.itemType,
           title: failure.itemType === "error" ? failure.title : undefined,
           text: text || failure.text,
+          ...(text && failure.itemType === "error"
+            ? { details: failure.text }
+            : {}),
           status: failure.status,
           providerId: visibleText(message.provider) || undefined,
           modelId: visibleText(message.model) || undefined,
           runId,
           turnId: runId,
-          createdAt: messageTime(message, createdAt),
-          completedAt: messageTime(message, createdAt)
+          createdAt: observedAt,
+          completedAt: observedAt
         });
       }
       for (const toolCall of toolCallsFromContent(message.content)) {
@@ -790,10 +805,28 @@ export class PiChatUiProjector {
           privacySafe: context.privacySafeToolRuns.has(toolCall.toolCallId),
           status: initialPiToolCallStatus(toolCall.toolName),
           runId: toolRunId,
-          createdAt: messageTime(message, createdAt),
+          createdAt: observedAt,
           vaultPath: context.vaultPath
         }));
         pendingTools.add(toolCall.toolCallId);
+      }
+      const reasoningBlocks = providerReasoningBlocksFromContent(
+        message.content
+      );
+      if (reasoningBlocks.length) {
+        projectDurableProviderReasoningSegments({
+          messages,
+          scope: context.scope,
+          entryId: entry.id,
+          runId: runId ?? syntheticRunId(context.scope, entry.id),
+          observedAt,
+          status: failure.status === "failed"
+            ? "failed"
+            : failure.status === "interrupted"
+              ? "interrupted"
+              : "completed",
+          reasoningBlocks
+        });
       }
       return;
     }
@@ -907,29 +940,35 @@ export class PiChatUiProjector {
   ): void {
     const carrier = ensureAssistantTurnCarrier(view, scope, event);
     const turn = carrier.assistantTurn!;
-    const previous = turn.providerReasoning?.reasoningId === event.reasoningId
-      ? turn.providerReasoning
-      : undefined;
+    const segments = [...echoInkProviderReasoningSegments(turn)];
+    const segmentIndex = segments.findIndex(
+      (segment) => segment.reasoningId === event.reasoningId
+    );
+    const previous = segmentIndex >= 0 ? segments[segmentIndex] : undefined;
     const activeSince = previous?.status === "running"
       && previous.activeSince !== undefined
       ? previous.activeSince
       : event.occurredAt;
+    const next = Object.freeze({
+      reasoningId: event.reasoningId,
+      source: "provider_public" as const,
+      status: "running" as const,
+      text: previous?.text ?? "",
+      startedAt: previous?.startedAt ?? event.occurredAt,
+      activeSince,
+      updatedAt: event.occurredAt,
+      ...(previous?.durationMs === undefined
+        ? {}
+        : { durationMs: previous.durationMs })
+    });
+    if (segmentIndex >= 0) segments[segmentIndex] = next;
+    else segments.push(next);
+    const { providerReasoning: _legacyReasoning, ...current } = turn;
     carrier.assistantTurn = {
-      ...turn,
+      ...current,
       status: "running",
       updatedAt: Math.max(turn.updatedAt, event.occurredAt),
-      providerReasoning: Object.freeze({
-        reasoningId: event.reasoningId,
-        source: "provider_public" as const,
-        status: "running" as const,
-        text: previous?.text ?? "",
-        startedAt: previous?.startedAt ?? event.occurredAt,
-        activeSince,
-        updatedAt: event.occurredAt,
-        ...(previous?.durationMs === undefined
-          ? {}
-          : { durationMs: previous.durationMs })
-      })
+      providerReasoningSegments: Object.freeze(segments)
     };
     view.runState = "running";
   }
@@ -944,18 +983,25 @@ export class PiChatUiProjector {
       event.reasoningId
     );
     const turn = carrier?.assistantTurn;
-    const previous = turn?.providerReasoning;
-    if (!carrier || !turn || !previous || !event.textDelta) return;
+    if (!carrier || !turn || !event.textDelta) return;
+    const segments = [...echoInkProviderReasoningSegments(turn)];
+    const segmentIndex = segments.findIndex(
+      (segment) => segment.reasoningId === event.reasoningId
+    );
+    const previous = segments[segmentIndex];
+    if (!previous) return;
+    segments[segmentIndex] = Object.freeze({
+      ...previous,
+      status: "running" as const,
+      text: `${previous.text}${event.textDelta}`,
+      updatedAt: event.occurredAt
+    });
+    const { providerReasoning: _legacyReasoning, ...current } = turn;
     carrier.assistantTurn = {
-      ...turn,
+      ...current,
       status: "running",
       updatedAt: Math.max(turn.updatedAt, event.occurredAt),
-      providerReasoning: Object.freeze({
-        ...previous,
-        status: "running" as const,
-        text: `${previous.text}${event.textDelta}`,
-        updatedAt: event.occurredAt
-      })
+      providerReasoningSegments: Object.freeze(segments)
     };
     view.runState = "running";
   }
@@ -970,14 +1016,23 @@ export class PiChatUiProjector {
       event.reasoningId
     );
     const turn = carrier?.assistantTurn;
-    const previous = turn?.providerReasoning;
-    if (!carrier || !turn || !previous) return;
+    if (!carrier || !turn) return;
+    const segments = [...echoInkProviderReasoningSegments(turn)];
+    const segmentIndex = segments.findIndex(
+      (segment) => segment.reasoningId === event.reasoningId
+    );
+    const previous = segments[segmentIndex];
+    if (!previous) return;
+    const { providerReasoning: _legacyReasoning, ...current } = turn;
     if (!event.text.trim()) {
-      const { providerReasoning: _discarded, ...withoutReasoning } = turn;
+      segments.splice(segmentIndex, 1);
       carrier.assistantTurn = {
-        ...withoutReasoning,
+        ...current,
         status: assistantTurnStatusDuringRun(view),
-        updatedAt: Math.max(turn.updatedAt, event.occurredAt)
+        updatedAt: Math.max(turn.updatedAt, event.occurredAt),
+        ...(segments.length
+          ? { providerReasoningSegments: Object.freeze(segments) }
+          : { providerReasoningSegments: undefined })
       };
       return;
     }
@@ -985,20 +1040,21 @@ export class PiChatUiProjector {
       && previous.activeSince !== undefined
       ? Math.max(0, event.occurredAt - previous.activeSince)
       : 0;
+    segments[segmentIndex] = Object.freeze({
+      reasoningId: event.reasoningId,
+      source: "provider_public" as const,
+      status: event.status,
+      text: event.text,
+      startedAt: previous.startedAt,
+      updatedAt: event.occurredAt,
+      completedAt: event.occurredAt,
+      durationMs: (previous.durationMs ?? 0) + activeDuration
+    });
     carrier.assistantTurn = {
-      ...turn,
+      ...current,
       status: assistantTurnStatusDuringRun(view),
       updatedAt: Math.max(turn.updatedAt, event.occurredAt),
-      providerReasoning: Object.freeze({
-        reasoningId: event.reasoningId,
-        source: "provider_public" as const,
-        status: event.status,
-        text: event.text,
-        startedAt: previous.startedAt,
-        updatedAt: event.occurredAt,
-        completedAt: event.occurredAt,
-        durationMs: (previous.durationMs ?? 0) + activeDuration
-      })
+      providerReasoningSegments: Object.freeze(segments)
     };
   }
 
@@ -1567,7 +1623,9 @@ function findAssistantTurnCarrier(
 ): ChatMessage | undefined {
   return view.messages.find((message) =>
     message.assistantTurn?.turnId === turnId
-    && message.assistantTurn.providerReasoning?.reasoningId === reasoningId
+    && echoInkProviderReasoningSegments(message.assistantTurn).some(
+      (segment) => segment.reasoningId === reasoningId
+    )
   );
 }
 
@@ -1657,12 +1715,13 @@ function toolMessage(input: {
   };
   const summary = summarizeProcessEvent(itemType, payload, input.vaultPath);
   const files = extractProcessFileRefs(payload, input.vaultPath);
+  const exactTitle = exactPiToolDisplayTitle(input.toolName);
   return {
     id: toolMessageId(input.scope, input.toolCallId),
     role: "tool",
     itemType,
     processKind: summary.kind === "other" ? processKind : summary.kind,
-    title: summary.title || input.toolName || "工具",
+    title: exactTitle ?? summary.title ?? input.toolName ?? "工具",
     details: summary.detail || input.toolName || undefined,
     text: processOutput || processInput,
     processInput: processInput || undefined,
@@ -1986,6 +2045,15 @@ function assistantFailure(message: PiSessionMessageView): {
   readonly text: string;
 } {
   const stopReason = normalizedToken(message.stopReason);
+  if (stopReason === "length") {
+    return {
+      itemType: "error",
+      status: "failed",
+      title: "回答未完成",
+      text: providerFailureText("provider_output_limit_reached")
+        ?? "达到输出上限，回答未完整生成。"
+    };
+  }
   if (stopReason === "error") {
     return {
       itemType: "error",
@@ -2007,9 +2075,7 @@ function assistantFailure(message: PiSessionMessageView): {
 
 function assistantFailureText(errorMessage: unknown): string {
   const safe = visibleText(errorMessage);
-  return safe === "provider_oauth_relogin_required"
-    ? "OpenAI Codex 授权已失效，请在设置中重新登录。"
-    : safe || "Agent 执行失败";
+  return (providerFailureText(safe) ?? safe) || "Agent 执行失败";
 }
 
 function toolCallsFromContent(
@@ -2029,6 +2095,100 @@ function toolCallsFromContent(
     });
   }
   return calls;
+}
+
+function providerReasoningBlocksFromContent(
+  content: PiSessionMessageView["content"]
+): DurableProviderReasoningBlock[] {
+  if (!Array.isArray(content)) return [];
+  const blocks = content as readonly PiSessionContentBlockView[];
+  return blocks.flatMap((block, contentIndex) => {
+    if (
+      normalizedToken(block.type) !== "thinking"
+      || block.redacted === true
+      || typeof block.thinking !== "string"
+      || !block.thinking.trim()
+    ) return [];
+    return [{ contentIndex, text: block.thinking }];
+  });
+}
+
+function projectDurableProviderReasoningSegments(input: Readonly<{
+  messages: ChatMessage[];
+  scope: string;
+  entryId: string;
+  runId: string;
+  observedAt: number;
+  status: EchoInkProviderReasoningSegmentSnapshot["status"];
+  reasoningBlocks: readonly DurableProviderReasoningBlock[];
+}>): void {
+  let carrier = input.messages.find((message) =>
+    message.assistantTurn?.turnId === input.runId
+  ) ?? input.messages.find((message) =>
+    message.reasoningSummary?.productRunId === input.runId
+  ) ?? input.messages.find((message) =>
+    message.runId === input.runId && message.role !== "user"
+  );
+  if (!carrier) {
+    carrier = {
+      id: `${input.scope}:assistant-turn-state:${encodeIdentity(input.runId)}`,
+      role: "system",
+      itemType: "assistantTurnState",
+      text: "",
+      status: input.status,
+      runId: input.runId,
+      turnId: input.runId,
+      createdAt: input.observedAt,
+      completedAt: input.observedAt
+    };
+    upsertMessage(input.messages, carrier);
+  }
+  const previous: Readonly<EchoInkAssistantTurnSnapshot> =
+    carrier.assistantTurn ?? Object.freeze({
+    viewVersion: ECHOINK_ASSISTANT_TURN_VIEW_VERSION,
+    turnId: input.runId,
+    status: input.status,
+    startedAt: input.observedAt,
+    updatedAt: input.observedAt,
+    completedAt: input.observedAt,
+    processNodes: Object.freeze([]),
+    interactionRecords: Object.freeze([])
+    });
+  const segments = [...echoInkProviderReasoningSegments(previous)];
+  const reasoningIds = new Set(segments.map((segment) => segment.reasoningId));
+  for (const block of input.reasoningBlocks) {
+    const reasoningId = stableHashedIdentity(
+      "provider-reasoning",
+      `${input.entryId}\0${block.contentIndex}`
+    );
+    if (reasoningIds.has(reasoningId)) continue;
+    reasoningIds.add(reasoningId);
+    segments.push(Object.freeze({
+      reasoningId,
+      source: "provider_public" as const,
+      status: input.status,
+      text: block.text,
+      startedAt: input.observedAt,
+      updatedAt: input.observedAt,
+      completedAt: input.observedAt,
+      durationMs: 0
+    }));
+  }
+  const {
+    providerReasoning: _legacyProviderReasoning,
+    ...current
+  } = previous;
+  carrier.assistantTurn = Object.freeze({
+    ...current,
+    status: input.status,
+    startedAt: Math.min(previous.startedAt, input.observedAt),
+    updatedAt: Math.max(previous.updatedAt, input.observedAt),
+    completedAt: Math.max(
+      previous.completedAt ?? input.observedAt,
+      input.observedAt
+    ),
+    providerReasoningSegments: Object.freeze(segments)
+  });
 }
 
 function toolResultIdsFromEntries(
@@ -2196,11 +2356,18 @@ function toolItemType(toolName: string, args: unknown, result: unknown): string 
     || hinted === "dynamicToolCall"
     || hinted === "mcpToolCall"
   ) return hinted;
+  if (name === "memory_write") return "dynamicToolCall";
   if (/(^|[./_-])mcp([./_-]|$)/u.test(name)) return "mcpToolCall";
   if (/(^|[./_-])(shell|bash|terminal|command|exec|execute|run)([./_-]|$)/u.test(name)) return "commandExecution";
   if (/(^|[./_-])(edit|write|patch|replace|filechange)([./_-]|$)/u.test(name)) return "fileChange";
   if (/(^|[./_-])(agent|spawn|delegate|subagent)([./_-]|$)/u.test(name)) return "collabAgentToolCall";
   return "dynamicToolCall";
+}
+
+function exactPiToolDisplayTitle(toolName: string): string | undefined {
+  return normalizedToolName(toolName) === "memory_write"
+    ? "写入个人记忆"
+    : undefined;
 }
 
 function toolProcessKind(toolName: string, itemType: string): ProcessEventKind {
@@ -2358,6 +2525,13 @@ export function piToolCallIdFromProjectedMessageId(
 ): string | undefined {
   const identity = projectionIdentity(messageId);
   return identity?.kind === "tool" ? identity.value : undefined;
+}
+
+export function piRuntimeMessageKeyFromProjectedMessageId(
+  messageId: string
+): string | undefined {
+  const provisionalMessage = /:provisional-message:([^:]+)$/u.exec(messageId);
+  return provisionalMessage ? decodeIdentity(provisionalMessage[1]) : undefined;
 }
 
 export function piProjectedEntryMessageId(

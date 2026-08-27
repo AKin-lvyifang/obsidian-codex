@@ -458,6 +458,9 @@ export function createPiPersonalMemoryToolDefinitions(input: Readonly<{
     label: toolLabel(toolId),
     description: toolDescription(toolId),
     parameters: PI_PERSONAL_MEMORY_TOOL_SCHEMAS[toolId],
+    ...(toolId === "memory_write"
+      ? { prepareArguments: preparePiMemoryWriteArgumentsForValidation }
+      : {}),
     executionMode: toolId === "memory_search" || toolId === "memory_read" ? "parallel" : "sequential",
     execute: async (toolCallId, rawArguments, signal) => {
       const authorized = input.security.consume(toolCallId, toolId, rawArguments);
@@ -493,6 +496,19 @@ export function createPiPersonalMemoryToolDefinitions(input: Readonly<{
       }
     }
   })));
+}
+
+export function preparePiMemoryWriteArgumentsForValidation(
+  value: unknown
+): MemoryWriteToolArguments {
+  const input = requireRecord(value);
+  if (typeof input.request !== "string") {
+    return input as unknown as MemoryWriteToolArguments;
+  }
+  return {
+    ...input,
+    request: memoryWriteRequestRecord(input.request)
+  } as MemoryWriteToolArguments;
 }
 
 export function isPiPersonalMemoryToolId(value: string): value is PiPersonalMemoryToolId {
@@ -533,10 +549,14 @@ function normalizeRead(input: Readonly<Record<string, unknown>>): Readonly<Memor
 
 function normalizeWrite(input: Readonly<Record<string, unknown>>): Readonly<MemoryWriteToolArguments> {
   requireExactKeys(input, ["request"]);
-  return Object.freeze({ request: normalizeWriteRequest(normalizeWriteRequestInput(input.request)) });
+  return Object.freeze({
+    request: normalizeWriteRequest(memoryWriteRequestRecord(input.request))
+  });
 }
 
-function normalizeWriteRequestInput(value: unknown): Readonly<Record<string, unknown>> {
+function memoryWriteRequestRecord(
+  value: unknown
+): Readonly<Record<string, unknown>> {
   if (typeof value !== "string") return requireRecord(value);
   if (value.length > MEMORY_WRITE_REQUEST_JSON_MAX_CHARS) {
     throw new Error("memory_write_request_json_too_large");
