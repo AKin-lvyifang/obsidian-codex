@@ -48,7 +48,7 @@ const ECHOINK_PI_MODEL_CATALOGS = Object.freeze({
   deepseek: DEEPSEEK_MODELS,
   "qwen-token-plan": QWEN_TOKEN_PLAN_MODELS,
   "qwen-token-plan-cn": QWEN_TOKEN_PLAN_CN_MODELS,
-  // Compatibility-only Provider identities remain readable for old settings.
+  // Legacy OpenAI remains readable; Anthropic is also a current product preset.
   openai: OPENAI_MODELS,
   anthropic: ANTHROPIC_MODELS
 });

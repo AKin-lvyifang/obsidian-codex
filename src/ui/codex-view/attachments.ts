@@ -1,6 +1,8 @@
-import { Notice, type App, type TFile } from "obsidian";
+import { Notice, TFile, type App } from "obsidian";
 import type CodexForObsidianPlugin from "../../main";
 import { extractClipboardImageFiles, saveClipboardImageAttachments } from "../../core/clipboard-images";
+import { openPathInElectron } from "../../core/electron";
+import { normalizeProcessFileRef } from "../../core/mapping";
 import type { StoredAttachment } from "../../settings/settings";
 import type { EchoInkResource } from "../../resources/types";
 import { renderComposerAttachments } from "./composer";
@@ -11,6 +13,10 @@ import {
   composerNoteMentionSelections,
   removeComposerNoteMentionSelection
 } from "./note-mentions";
+import {
+  PI_DOCUMENT_ACCEPT,
+  piDocumentKindForAttachment
+} from "./pi-document-input";
 
 export interface CodexAttachmentHost {
   readonly app: App;
@@ -48,8 +54,28 @@ export function renderAttachmentsView(host: CodexAttachmentHost): void {
     onRemoveAttachment: (attachmentPath) => {
       host.attachments = host.attachments.filter((attachment) => attachment.path !== attachmentPath);
       host.renderAttachments();
+    },
+    onOpenAttachment: (attachment) => {
+      void openComposerAttachment(host, attachment);
     }
   });
+}
+
+export async function openComposerAttachment(
+  host: CodexAttachmentHost,
+  attachment: Readonly<StoredAttachment>
+): Promise<void> {
+  const ref = normalizeProcessFileRef(attachment.path, host.plugin.getVaultPath());
+  if (!ref.openable) {
+    new Notice("这个文件路径无法打开");
+    return;
+  }
+  const absolutePath = ref.absolutePath
+    ?? (ref.kind === "vault"
+      ? absoluteVaultPath(host.plugin.getVaultPath(), ref.path)
+      : ref.kind === "external" ? ref.path : "");
+  if (await openPathInElectron(absolutePath)) return;
+  new Notice(`无法使用系统默认应用打开：${ref.displayPath}`);
 }
 
 export function attachActiveFile(host: CodexAttachmentHost): void {
@@ -85,19 +111,13 @@ export function pickFiles(host: CodexAttachmentHost, imagesOnly: boolean): void 
   const input = document.createElement("input");
   input.type = "file";
   input.multiple = true;
-  if (imagesOnly) input.accept = "image/*";
+  input.accept = imagesOnly
+    ? "image/*"
+    : `image/*,${PI_DOCUMENT_ACCEPT}`;
   input.onchange = () => {
     const files = Array.from(input.files ?? []);
     for (const file of files) {
-      const filePath = (file as File & { path?: string }).path;
-      if (!filePath) continue;
-      host.attachments.push({
-        type: classifyLocalAttachmentType(filePath, file.type),
-        name: file.name,
-        path: filePath,
-        ...(file.type ? { mimeType: file.type } : {}),
-        availability: "available"
-      });
+      appendPiChatFile(host, file);
     }
     host.renderAttachments();
   };
@@ -132,17 +152,33 @@ export function pickKnowledgeBaseFiles(host: CodexAttachmentHost): void {
 export function handleDroppedFiles(host: CodexAttachmentHost, event: DragEvent): void {
   const files = Array.from(event.dataTransfer?.files ?? []);
   for (const file of files) {
-    const filePath = (file as File & { path?: string }).path;
-    if (!filePath) continue;
-    host.attachments.push({
-      type: classifyLocalAttachmentType(filePath, file.type),
-      name: file.name,
-      path: filePath,
-      ...(file.type ? { mimeType: file.type } : {}),
-      availability: "available"
-    });
+    appendPiChatFile(host, file);
   }
   host.renderAttachments();
+}
+
+function appendPiChatFile(host: CodexAttachmentHost, file: File): void {
+  const filePath = (file as File & { path?: string }).path;
+  if (!filePath) {
+    new Notice(`无法读取附件“${file.name || "未命名文件"}”的本地路径。`);
+    return;
+  }
+  const type = classifyLocalAttachmentType(filePath, file.type);
+  const attachment: StoredAttachment = {
+    type,
+    name: file.name,
+    path: filePath,
+    ...(file.type ? { mimeType: file.type } : {}),
+    sizeBytes: file.size,
+    availability: "available"
+  };
+  if (type === "file" && !piDocumentKindForAttachment(attachment)) {
+    new Notice(
+      `不支持附件“${file.name}”。普通 Pi Chat 仅支持 PDF、Word、Markdown、HTML 和图片。`
+    );
+    return;
+  }
+  host.attachments.push(attachment);
 }
 
 export function classifyLocalAttachmentType(

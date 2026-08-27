@@ -1,4 +1,6 @@
 import * as assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { convertToLlm } from "@earendil-works/pi-coding-agent";
 import type { PiChatRuntimeEvent } from "../../harness/pi-native/contracts";
 import { KNOWLEDGE_MAINTENANCE_RESULT_SCHEMA } from "../../knowledge-base/knowledge-maintenance-result";
 import {
@@ -31,6 +33,7 @@ import {
   updateReasoningActivity
 } from "../../harness/pi-native/pi-reasoning-summary";
 import { buildPiNoteMentionContextMessage } from "../../harness/pi-native/pi-note-mentions";
+import { buildPiDocumentContextMessage } from "../../harness/pi-native/pi-document-context";
 
 export async function runPiChatUiProjectorTests(): Promise<void> {
   assertReasoningSummariesProjectStableAndPrivate();
@@ -41,6 +44,7 @@ export async function runPiChatUiProjectorTests(): Promise<void> {
   assertImageUserEntriesProjectWithoutPayloadDuplication();
   assertHiddenNoteMentionContextProjectsOntoItsUserMessage();
   assertProviderReasoningSegmentsStayDistinctAndReopen();
+  assertHiddenDocumentContextProjectsOnlyDisplayMetadata();
   assertLiveEventsMergeUntilTheProductSettlementBoundary();
   assertKnowledgeProgressAndToolPayloadsStayPrivate();
   assertKnowledgeMaintenanceResultCardIsLiveDurableAndStrict();
@@ -250,6 +254,63 @@ function assertProviderReasoningSegmentsStayDistinctAndReopen(): void {
   assert.equal(memoryWriteTool?.title, "写入个人记忆");
   const reopened = projector.projectSessionBranch(durableInput);
   assert.deepEqual(reopened.messages, durable.messages);
+}
+
+function assertHiddenDocumentContextProjectsOnlyDisplayMetadata(): void {
+  const projector = new PiChatUiProjector();
+  const localPath = "/private/local/project-plan.pdf";
+  const privateBody = "PRIVATE_DOCUMENT_BODY";
+  const privateBytes = new Uint8Array(Buffer.from(privateBody, "utf8"));
+  const hidden = buildPiDocumentContextMessage([{
+    kind: "pdf",
+    text: privateBody,
+    bytes: privateBytes,
+    sha256: createHash("sha256").update(privateBytes).digest("hex"),
+    transport: "extracted_text",
+    attachment: {
+      type: "file",
+      name: "project-plan.pdf",
+      path: localPath,
+      mimeType: "application/pdf",
+      sizeBytes: privateBytes.byteLength,
+      availability: "available"
+    }
+  }])!;
+  assert.equal(String(hidden.content).includes(localPath), false);
+  const providerMessages = JSON.stringify(convertToLlm([hidden]));
+  assert.match(providerMessages, /PRIVATE_DOCUMENT_BODY/u);
+  assert.equal(providerMessages.includes(localPath), false,
+    "Pi Provider conversion includes document text but excludes display-only local paths");
+  const projected = projector.projectSessionBranch({
+    piSessionId: "session-document",
+    activeLeafId: "assistant-document",
+    entries: [
+      messageEntry("user-document", null, 1, {
+        role: "user",
+        content: "请总结附件"
+      }),
+      messageEntry("context-document", "user-document", 2, hidden),
+      messageEntry("assistant-document", "context-document", 3, {
+        role: "assistant",
+        content: "公开回答"
+      })
+    ],
+    runState: "completed",
+    productRunId: "run-document",
+    now: 4
+  });
+  const user = projected.messages.find((message) => message.role === "user");
+  assert.deepEqual(user?.attachments, [{
+    type: "file",
+    name: "project-plan.pdf",
+    path: localPath,
+    mimeType: "application/pdf",
+    sizeBytes: privateBytes.byteLength,
+    availability: "available"
+  }]);
+  assert.equal(projected.messages.some((message) =>
+    message.text.includes(privateBody) || message.text.includes(localPath)
+  ), false, "hidden document body and local path never become visible messages");
 }
 
 function assertHiddenNoteMentionContextProjectsOntoItsUserMessage(): void {

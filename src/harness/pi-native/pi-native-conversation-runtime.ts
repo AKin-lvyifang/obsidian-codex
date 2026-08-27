@@ -55,6 +55,7 @@ import type {
   PiChatRuntimeEvent,
   PiChatRuntimeEventListener,
   PiChatNoteMention,
+  PiChatPreparedDocument,
   PiChatSubmitRequest,
   PiChatPreparedImage,
   PiConversationCatalogEntry,
@@ -78,6 +79,10 @@ import type {
 } from "./contracts";
 import { PI_IMAGE_INPUT_UNSUPPORTED_MESSAGE } from "./contracts";
 import { normalizePiChatNoteMentions } from "./pi-note-mentions";
+import {
+  normalizePiChatPreparedDocuments,
+  preflightPiAnthropicDocumentRequest
+} from "./pi-document-context";
 import type { PersonalMemorySourceReference } from "../../settings/settings";
 import { latestPiContextLedger } from "./pi-context-budget";
 import {
@@ -182,6 +187,7 @@ export interface PiNativeAgentSessionFactoryInput {
   currentKnowledgeTurnContext(): Readonly<PiNativeKnowledgeTurnContext> | null;
   currentMemoryTurnContext?(): Readonly<PiNativeMemoryTurnContext> | null;
   currentNoteMentionTurnContext?(): Readonly<PiNativeNoteMentionTurnContext> | null;
+  currentDocumentTurnContext?(): Readonly<PiNativeDocumentTurnContext> | null;
   currentTaskPlanTurnContext(): Readonly<PiNativeTaskPlanTurnContext> | null;
   reportInteractionRequested?(
     interaction: Readonly<EchoInkTurnInteraction>
@@ -216,6 +222,10 @@ export interface PiNativeMemoryTurnContext {
 
 export interface PiNativeNoteMentionTurnContext {
   readonly noteMentions: readonly Readonly<PiChatNoteMention>[];
+}
+
+export interface PiNativeDocumentTurnContext {
+  readonly documents: readonly Readonly<PiChatPreparedDocument>[];
 }
 
 export function knowledgeWorkflowAllowsPersonalMemory(
@@ -374,6 +384,7 @@ export type PiNativeConversationRuntimeErrorCode =
   | "session_recovery_invalid"
   | "agent_session_invalid"
   | "image_input_unsupported"
+  | "document_request_too_large"
   | "reasoning_level_invalid"
   | "product_run_start_failed_after_user_entry"
   | "agent_settled_missing"
@@ -437,6 +448,7 @@ interface ActiveProductRun {
   mode: PiChatMode;
   memoryMode: PiConversationMemoryMode;
   noteMentions: readonly Readonly<PiChatNoteMention>[];
+  documents: readonly Readonly<PiChatPreparedDocument>[];
   memoryRecall?: PiMemoryRecallObservation;
   providerStartedAt?: number;
   firstAssistantTextSeen: boolean;
@@ -1059,6 +1071,7 @@ export class PiNativeConversationRuntime {
     assertValidSkillBinding(request);
     const promptImages = normalizePiChatPreparedImages(request.images);
     const noteMentions = normalizePiChatNoteMentions(request.noteMentions);
+    const documents = normalizePiChatPreparedDocuments(request.documents);
     const mode = normalizePiChatMode(request.mode);
     let catalog = await this.catalog.get(request.conversationId);
     if (!catalog) {
@@ -1117,6 +1130,12 @@ export class PiNativeConversationRuntime {
         "/maintain 不接受图片输入。"
       );
     }
+    if (knowledgeCommand.kind === "maintain" && documents.length) {
+      throw new PiNativeConversationRuntimeError(
+        "agent_session_invalid",
+        "/maintain 不接受普通 Pi 文档上下文。"
+      );
+    }
     if (promptImages.length && !agentSessionSupportsImageInput(active.session)) {
       throw new PiNativeConversationRuntimeError(
         "image_input_unsupported",
@@ -1128,6 +1147,20 @@ export class PiNativeConversationRuntime {
       active.session.model,
       request.reasoning
     );
+    const documentRequestPreflight = preflightPiAnthropicDocumentRequest({
+      documents,
+      images: [
+        ...piInlineImagesInMessages(active.session.messages),
+        ...promptImages
+      ],
+      contextWindow: active.session.model?.contextWindow ?? 0
+    });
+    if (documentRequestPreflight.exceedsLimit) {
+      throw new PiNativeConversationRuntimeError(
+        "document_request_too_large",
+        "文档与图片的原生请求可能超过 Anthropic 32 MiB 限制；本轮未发送，请减少附件后重试。"
+      );
+    }
 
     const productRunId = this.nextId("product-run");
     const memoryMode = request.memoryMode ?? catalog.defaultMemoryMode;
@@ -1153,6 +1186,7 @@ export class PiNativeConversationRuntime {
       mode,
       memoryMode,
       noteMentions,
+      documents,
       firstAssistantTextSeen: false,
       providerReasoningBlocks: new Map(),
       providerReasoningExposedMessageKeys: new Set(),
@@ -2089,6 +2123,12 @@ export class PiNativeConversationRuntime {
         const noteMentions = holder.active?.currentRun?.noteMentions ?? [];
         return noteMentions.length
           ? Object.freeze({ noteMentions })
+          : null;
+      },
+      currentDocumentTurnContext: () => {
+        const documents = holder.active?.currentRun?.documents ?? [];
+        return documents.length
+          ? Object.freeze({ documents })
           : null;
       },
       currentTaskPlanTurnContext: () => {
@@ -5223,6 +5263,33 @@ function normalizePiChatPreparedImages(
       mimeType: content.mimeType
     };
   });
+}
+
+function piInlineImagesInMessages(
+  messages: readonly Readonly<AgentMessage>[]
+): ImageContent[] {
+  const images: ImageContent[] = [];
+  for (const message of messages) {
+    const content = (message as Readonly<{ content?: unknown }>).content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      if (
+        block
+        && typeof block === "object"
+        && (block as { type?: unknown }).type === "image"
+        && typeof (block as { data?: unknown }).data === "string"
+        && isPiInlineImageMimeType((block as { mimeType?: unknown }).mimeType)
+      ) {
+        const image = block as Readonly<ImageContent>;
+        images.push({
+          type: "image",
+          data: image.data,
+          mimeType: image.mimeType
+        });
+      }
+    }
+  }
+  return images;
 }
 
 function isPiInlineImageMimeType(value: unknown): value is ImageContent["mimeType"] {

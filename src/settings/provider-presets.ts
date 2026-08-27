@@ -8,9 +8,8 @@ export const API_PROVIDER_IDS = [
   "qwen-token-plan",
   "ollama",
   "custom",
-  // Compatibility-only identities. They remain readable so an existing
-  // saved configuration is never destroyed by a settings migration, but they
-  // are not rendered as new product presets.
+  // Compatibility-only OpenAI identity remains readable so an existing saved
+  // configuration is never destroyed by a settings migration.
   "openai",
   "anthropic"
 ] as const;
@@ -59,6 +58,7 @@ export interface ApiProviderModelPreset {
 export interface ApiProviderPreset {
   readonly id: Extract<ApiProviderId,
     | "openai-codex"
+    | "anthropic"
     | "glm"
     | "kimi"
     | "minimax"
@@ -116,6 +116,24 @@ export const API_PROVIDER_PRESETS: readonly ApiProviderPreset[] =
         model("gpt-5.6-luna", 272_000, 128_000, true, true, true, "GPT-5.6 Luna"),
         model("gpt-5.6-sol", 272_000, 128_000, true, true, true, "GPT-5.6 Sol"),
         model("gpt-5.6-terra", 272_000, 128_000, true, true, true, "GPT-5.6 Terra")
+      ]
+    }),
+    preset({
+      id: "anthropic",
+      name: "Anthropic / Anthropic",
+      group: "provider",
+      runtimeProviderId: "anthropic",
+      baseUrl: "https://api.anthropic.com",
+      docsUrl: "https://docs.anthropic.com/en/api/getting-started",
+      apiProtocol: "anthropic-messages",
+      apiKeyRequired: true,
+      modelDiscovery: "supported",
+      models: [
+        model("claude-fable-5", 1_000_000, 128_000, true, true, true, "Claude Fable 5"),
+        model("claude-opus-5", 1_000_000, 128_000, true, true, true, "Claude Opus 5"),
+        model("claude-sonnet-5", 1_000_000, 128_000, true, true, true, "Claude Sonnet 5"),
+        model("claude-haiku-4-5", 200_000, 64_000, true, true, true, "Claude Haiku 4.5"),
+        model("claude-haiku-4-5-20251001", 200_000, 64_000, true, true, true, "Claude Haiku 4.5 (2025-10-01)")
       ]
     }),
     preset({

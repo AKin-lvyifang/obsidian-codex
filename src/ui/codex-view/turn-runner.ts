@@ -1,6 +1,7 @@
 import { Notice } from "obsidian";
 import type {
   PiChatPreparedImage,
+  PiChatPreparedDocument,
   PiChatRuntimeEvent,
   PiConversationMemoryMode,
   PiConversationProjection,
@@ -41,12 +42,27 @@ import type { EchoInkResource } from "../../resources/types";
 import type { CodexViewTurnContext, MessageRenderFollowContext, QueuedTurnOutcome, QueuedTurnSource } from "./runner-context";
 import {
   projectPiImageAttachments,
+  recordPiDocumentReplayForEntry,
   recordPiImageAttachmentsForEntry,
   rememberPiConversationProjection,
   selectedPiConversationDraftId
 } from "./pi-conversation-support";
 import { routeKnowledgeConversationCommand } from "../../knowledge-base/commands";
 import { preparePiChatImages } from "./pi-image-input";
+import {
+  PI_ANTHROPIC_PDF_DOCUMENT_ADAPTER,
+  type PiDocumentCapabilityTarget
+} from "../../harness/pi-native/pi-document-context";
+import {
+  buildPiDocumentContext,
+  preparePiChatDocuments,
+  reconcilePiDocumentTransports,
+  type PiChatPreparedDocumentSet
+} from "./pi-document-input";
+import {
+  calculatePiEffectiveInputBudget,
+  estimatePiContextTokens
+} from "../../harness/pi-native/pi-context-budget";
 import {
   cloneEchoInkAssistantTurn
 } from "../../types/conversation-turn";
@@ -118,10 +134,6 @@ export async function enqueueComposerDraft(view: CodexViewTurnContext): Promise<
       new Notice("运行中的 Pi Follow-up 只支持文字；附件或 Skill 请留到下一轮发送。");
       return;
     }
-    if (item.attachments.some((attachment) => attachment.type !== "image")) {
-      new Notice("普通 Pi Chat 只支持图片附件；其他文件请移除后再发送。");
-      return;
-    }
     if (item.noteMentions?.length) {
       if (hasMatchingQueuedComposerTransfer(view, item)) {
         new Notice("这条笔记提及消息已在队列中，等待当前 Pi 任务结束后发送");
@@ -143,7 +155,7 @@ export async function enqueueComposerDraft(view: CodexViewTurnContext): Promise<
       view.turnQueue.enqueue(item);
       view.renderQueue();
       view.renderToolbar();
-      new Notice("图片消息已加入队列，将在当前 Pi 任务结束后发送");
+      new Notice("附件消息已加入队列，将在当前 Pi 任务结束后发送");
       return;
     }
     if (!item.text.trim() || item.skill) {
@@ -408,11 +420,49 @@ export async function createQueuedTurnFromComposer(view: CodexViewTurnContext, o
     );
     return null;
   }
+  let preparedDocuments: readonly Readonly<PiChatPreparedDocument>[] = Object.freeze([]);
+  const documentAttachments = attachments.filter(
+    (attachment) => attachment.type === "file"
+  );
+  const submittedText = text
+    || (noteMentions.length
+      ? "请结合我提及的笔记继续。"
+      : documentAttachments.length
+        ? "请阅读我附加的文档，并根据文档内容回应。"
+        : "");
+  if (
+    documentAttachments.length
+    && routeKnowledgeConversationCommand(submittedText).kind !== "maintain"
+  ) {
+    const provider = view.plugin.settings.apiProviders.find(
+      (candidate) => candidate.id === turnOptions.providerSettingsId
+    );
+    if (!provider) {
+      new Notice("当前 Provider 已不可用，本轮文档没有入队；请重新选择后发送。");
+      return null;
+    }
+    try {
+      const prepared = await preparePiChatDocuments(documentAttachments, {
+        availableInputTokens: availableDocumentInputTokens(
+          view,
+          session,
+          { turnOptions, noteMentions },
+          submittedText
+        ),
+        capabilityTarget: piDocumentCapabilityTarget(provider, turnOptions.model)
+      });
+      preparedDocuments = prepared.documents;
+    } catch (error) {
+      new Notice(normalizePiChatError(error).message);
+      return null;
+    }
+  }
   return {
     id: newId("queued-turn"),
     sessionId: session.id,
     text,
     attachments,
+    ...(preparedDocuments.length ? { preparedDocuments } : {}),
     noteMentions,
     skill,
     turnOptions,
@@ -540,12 +590,29 @@ async function prepareTurnProviderModel(
 
 export async function startChatTurn(view: CodexViewTurnContext, session: StoredSession, item: QueuedTurnItem, source: QueuedTurnSource): Promise<QueuedTurnOutcome> {
   const submittedText = item.text.trim()
-    || (item.noteMentions?.length ? "请结合我提及的笔记继续。" : "");
+    || (item.noteMentions?.length
+      ? "请结合我提及的笔记继续。"
+      : item.attachments.some((attachment) => attachment.type === "file")
+        ? "请阅读我附加的文档，并根据文档内容回应。"
+        : "");
   const knowledgeCommand = routeKnowledgeConversationCommand(submittedText);
   let maintenanceScope: Awaited<
     ReturnType<CodexViewTurnContext["plugin"]["prepareEchoInkKnowledgeMaintenanceScope"]>
   > | undefined;
   let preparedImages: Awaited<ReturnType<typeof preparePiChatImages>> = [];
+  let preparedDocumentSet: Readonly<PiChatPreparedDocumentSet> = Object.freeze({
+    documents: Object.freeze((item.preparedDocuments ?? []).map((document) => Object.freeze({
+      ...document,
+      bytes: new Uint8Array(document.bytes),
+      attachment: Object.freeze({ ...document.attachment })
+    }))),
+    contextText: "",
+    estimatedInputTokens: 0,
+    totalBytes: (item.preparedDocuments ?? []).reduce(
+      (sum, document) => sum + document.attachment.sizeBytes,
+      0
+    )
+  });
   if (knowledgeCommand.kind === "maintain") {
     if (item.turnOptions.mode === "plan") {
       new Notice("/maintain 只在 Agent 模式执行；请先退出 Plan 模式。");
@@ -562,7 +629,60 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
     }
   } else if (item.attachments.length) {
     try {
-      preparedImages = await preparePiChatImages(item.attachments);
+      const imageAttachments = item.attachments.filter(
+        (attachment) => attachment.type === "image"
+      );
+      const documentAttachments = item.attachments.filter(
+        (attachment) => attachment.type === "file"
+      );
+      preparedImages = await preparePiChatImages(imageAttachments);
+      if (documentAttachments.length) {
+        if (
+          preparedDocumentSet.documents.length !== documentAttachments.length
+          || !preparedDocumentsMatchAttachments(
+            preparedDocumentSet.documents,
+            documentAttachments
+          )
+        ) {
+          throw new Error(
+            "文档冻结快照缺失或与附件不一致；为避免读取后来变化的磁盘内容，请保留草稿并重新发送。"
+          );
+        }
+        const provider = view.plugin.settings.apiProviders.find(
+          (candidate) => candidate.id === item.turnOptions.providerSettingsId
+        );
+        if (!provider) {
+          throw new Error(
+            "入队后 Provider 已不可用；冻结快照仍保留，请恢复原 Provider 配置或重新发送。"
+          );
+        }
+        const reconciledDocuments = reconcilePiDocumentTransports(
+          preparedDocumentSet.documents,
+          piDocumentCapabilityTarget(provider, item.turnOptions.model)
+        );
+        const contextText = buildPiDocumentContext(reconciledDocuments);
+        const estimatedInputTokens = estimatePiContextTokens(contextText).tokens;
+        const availableInputTokens = availableDocumentInputTokens(
+          view,
+          session,
+          item,
+          submittedText
+        );
+        if (estimatedInputTokens > availableInputTokens) {
+          throw new Error(
+            `文档冻结文本预计需要 ${estimatedInputTokens} tokens，超过当前模型剩余的 ${availableInputTokens} tokens；请减少文档、新开会话或切换容量更大的模型。`
+          );
+        }
+        preparedDocumentSet = Object.freeze({
+          documents: reconciledDocuments,
+          contextText,
+          estimatedInputTokens,
+          totalBytes: reconciledDocuments.reduce(
+            (sum, document) => sum + document.attachment.sizeBytes,
+            0
+          )
+        });
+      }
     } catch (error) {
       new Notice(normalizePiChatError(error).message);
       return "failed";
@@ -589,7 +709,11 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
     new Notice("所选 Vault Skill 缺少可加载的 contentPath 或名称，本轮没有发送。");
     return "failed";
   }
-  if (!submittedText && !preparedImages.length) return "failed";
+  if (
+    !submittedText
+    && !preparedImages.length
+    && !preparedDocumentSet.documents.length
+  ) return "failed";
   const projector = new PiChatUiProjector();
   let handle: Awaited<
     ReturnType<CodexViewTurnContext["plugin"]["submitPiChat"]>
@@ -632,6 +756,9 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
       ...(item.piDraftId ? { draftId: item.piDraftId } : {}),
       ...(maintenanceScope ? { maintenanceScope } : {}),
       ...(preparedImages.length ? { images: preparedImages } : {}),
+      ...(preparedDocumentSet.documents.length
+        ? { documents: preparedDocumentSet.documents }
+        : {}),
       ...(item.noteMentions?.length ? { noteMentions: item.noteMentions } : {})
     });
     item.piUserEntryAccepted = true;
@@ -641,8 +768,17 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
         handle.userEntryId,
         preparedImages
       );
+    }
+    if (preparedDocumentSet.documents.length) {
+      recordPiDocumentReplayForEntry(
+        session,
+        handle.userEntryId,
+        preparedDocumentSet.documents
+      );
+    }
+    if (preparedImages.length || preparedDocumentSet.documents.length) {
       await view.plugin.persistPiNativeSettings().catch(() => {
-        new Notice("图片已发送，但本地缩略图信息保存失败；重启后可能无法打开原图。");
+        new Notice("附件已发送，但本地重放信息保存失败；重启后可能无法恢复附件。");
       });
     }
     if (source === "queue") {
@@ -658,6 +794,7 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
       handle,
       submittedText,
       preparedImages,
+      preparedDocumentSet.documents,
       item.noteMentions ?? [],
       submittedAt
     );
@@ -800,14 +937,28 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
     if (piUserEntryWasAccepted(error)) {
       item.piUserEntryAccepted = true;
       const acceptedEntryId = piAcceptedUserEntryId(error);
-      if (preparedImages.length && acceptedEntryId) {
-        recordPiImageAttachmentsForEntry(
-          session,
-          acceptedEntryId,
-          preparedImages
-        );
+      if (acceptedEntryId) {
+        if (preparedImages.length) {
+          recordPiImageAttachmentsForEntry(
+            session,
+            acceptedEntryId,
+            preparedImages
+          );
+        }
+        if (preparedDocumentSet.documents.length) {
+          recordPiDocumentReplayForEntry(
+            session,
+            acceptedEntryId,
+            preparedDocumentSet.documents
+          );
+        }
+      }
+      if (
+        acceptedEntryId
+        && (preparedImages.length || preparedDocumentSet.documents.length)
+      ) {
         await view.plugin.persistPiNativeSettings().catch(() => {
-          new Notice("图片已发送，但本地缩略图信息保存失败；重启后可能无法打开原图。");
+          new Notice("附件已发送，但本地重放信息保存失败；重启后可能无法恢复附件。");
         });
       }
       clearComposerAfterPiAcceptance(view, item, source);
@@ -1021,11 +1172,12 @@ function piChatLiveProjectionFromSession(
   >,
   submittedText: string,
   preparedImages: readonly Readonly<PiChatPreparedImage>[],
+  preparedDocuments: readonly Readonly<PiChatPreparedDocument>[],
   noteMentions: readonly Readonly<NonNullable<QueuedTurnItem["noteMentions"]>[number]>[],
   submittedAt: number
 ): PiChatUiViewModel {
   const messages = clonePiChatMessages(session.messages);
-  if (preparedImages.length || noteMentions.length) {
+  if (preparedImages.length || preparedDocuments.length || noteMentions.length) {
     const acceptedUserMessage: ChatMessage = {
       id: piProjectedEntryMessageId(
         handle.piSessionId,
@@ -1037,6 +1189,13 @@ function piChatLiveProjectionFromSession(
       text: submittedText,
       ...(preparedImages.length
         ? { images: preparedImages.map(({ attachment }) => ({ ...attachment })) }
+        : {}),
+      ...(preparedDocuments.length
+        ? {
+            attachments: preparedDocuments.map(({ attachment }) => ({
+              ...attachment
+            }))
+          }
         : {}),
       ...(noteMentions.length
         ? {
@@ -1243,7 +1402,68 @@ function attachmentListsMatch(
         && attachment.type === candidate.type
         && attachment.name === candidate.name
         && attachment.path === candidate.path
-        && attachment.mimeType === candidate.mimeType;
+        && attachment.mimeType === candidate.mimeType
+        && attachment.sizeBytes === candidate.sizeBytes;
+    });
+}
+
+function availableDocumentInputTokens(
+  view: CodexViewTurnContext,
+  session: Readonly<StoredSession>,
+  item: Pick<QueuedTurnItem, "turnOptions" | "noteMentions">,
+  submittedText: string
+): number {
+  const provider = view.plugin.settings.apiProviders.find(
+    (candidate) => candidate.id === item.turnOptions.providerSettingsId
+  );
+  const model = provider
+    ? getApiProviderModel(provider, item.turnOptions.model)
+    : null;
+  if (!provider || !model) return 0;
+  const effective = calculatePiEffectiveInputBudget({
+    contextWindow: model.contextWindow,
+    maxOutputReserve: Math.min(model.maxOutputTokens, model.modelMaxTokens)
+  });
+  const ledger = session.contextLedger;
+  const baseline = ledger
+    && ledger.model.provider === item.turnOptions.runtimeProviderId
+    && ledger.model.id === item.turnOptions.model
+    && ledger.budget.contextWindow === model.contextWindow
+    ? ledger.remainingInputTokens
+    : effective.effectiveInputBudget - Math.max(
+      4_096,
+      Math.floor(effective.effectiveInputBudget * 0.15)
+    );
+  const currentTurnTokens = estimatePiContextTokens({
+    text: submittedText,
+    noteMentions: item.noteMentions?.map((mention) => mention.content) ?? []
+  }).tokens;
+  return Math.max(0, baseline - currentTurnTokens);
+}
+
+function piDocumentCapabilityTarget(
+  provider: Readonly<ApiProviderConfig>,
+  modelId: string
+): Readonly<PiDocumentCapabilityTarget> {
+  return Object.freeze({
+    providerId: provider.providerId ?? "",
+    apiProtocol: provider.apiProtocol,
+    baseUrl: provider.baseUrl,
+    modelId,
+    adapter: PI_ANTHROPIC_PDF_DOCUMENT_ADAPTER
+  });
+}
+
+function preparedDocumentsMatchAttachments(
+  documents: readonly Readonly<PiChatPreparedDocument>[],
+  attachments: readonly Readonly<StoredAttachment>[]
+): boolean {
+  return documents.length === attachments.length
+    && documents.every((document, index) => {
+      const attachment = attachments[index];
+      return attachment?.type === "file"
+        && document.attachment.path === attachment.path
+        && document.attachment.name === attachment.name.trim();
     });
 }
 

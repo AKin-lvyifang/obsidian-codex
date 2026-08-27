@@ -6,6 +6,10 @@ import {
 import { buildDiffSummary } from "../../core/diff-summary";
 import type { ChatMessage, StoredAttachment } from "../../settings/settings";
 import { noteMentionReferencesFromPiContext } from "./pi-note-mentions";
+import {
+  documentAttachmentsFromPiContext,
+  PI_DOCUMENT_FALLBACK_INPUT_BUDGET_EXCEEDED
+} from "./pi-document-context";
 import type { KnowledgeReference } from "../../knowledge-base/types";
 import type { KnowledgeBaseMaintainReportPayload } from "../../knowledge-base/maintain-report-card";
 import {
@@ -679,8 +683,17 @@ export class PiChatUiProjector {
         entry.customType,
         entry.details
       );
-      if (noteMentions.length) {
-        attachNoteMentionsToLatestUserMessage(messages, noteMentions);
+      const documentAttachments = documentAttachmentsFromPiContext(
+        entry.customType,
+        entry.details
+      );
+      if (noteMentions.length || documentAttachments.length) {
+        if (noteMentions.length) {
+          attachNoteMentionsToLatestUserMessage(messages, noteMentions);
+        }
+        if (documentAttachments.length) {
+          attachDocumentsToLatestUserMessage(messages, documentAttachments);
+        }
         return;
       }
     }
@@ -893,8 +906,17 @@ export class PiChatUiProjector {
         message.customType,
         message.details
       );
-      if (noteMentions.length) {
-        attachNoteMentionsToLatestUserMessage(messages, noteMentions);
+      const documentAttachments = documentAttachmentsFromPiContext(
+        message.customType,
+        message.details
+      );
+      if (noteMentions.length || documentAttachments.length) {
+        if (noteMentions.length) {
+          attachNoteMentionsToLatestUserMessage(messages, noteMentions);
+        }
+        if (documentAttachments.length) {
+          attachDocumentsToLatestUserMessage(messages, documentAttachments);
+        }
         return;
       }
     }
@@ -2075,6 +2097,9 @@ function assistantFailure(message: PiSessionMessageView): {
 
 function assistantFailureText(errorMessage: unknown): string {
   const safe = visibleText(errorMessage);
+  if (safe === PI_DOCUMENT_FALLBACK_INPUT_BUDGET_EXCEEDED) {
+    return "Provider 不支持该原生文档输入，且冻结文本超过当前模型的输入容量；未发起第二次请求。请减少文档、新开会话或切换容量更大的模型。";
+  }
   return (providerFailureText(safe) ?? safe) || "Agent 执行失败";
 }
 
@@ -2905,6 +2930,24 @@ function attachNoteMentionsToLatestUserMessage(
     const message = messages[index];
     if (message?.role !== "user") continue;
     message.noteMentions = noteMentions.map((mention) => ({ ...mention }));
+    return;
+  }
+}
+
+function attachDocumentsToLatestUserMessage(
+  messages: ChatMessage[],
+  documents: readonly Readonly<StoredAttachment>[]
+): void {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role !== "user") continue;
+    const merged = new Map<string, StoredAttachment>();
+    for (const attachment of [...(message.attachments ?? []), ...documents]) {
+      const identity = attachment.path.trim();
+      if (!identity || merged.has(identity)) continue;
+      merged.set(identity, { ...attachment, type: "file" });
+    }
+    message.attachments = [...merged.values()];
     return;
   }
 }

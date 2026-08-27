@@ -19,11 +19,8 @@ import { composerPrimaryActionForState, composerStateForRuntimeState } from "../
 import { handleKnowledgeCommandMenuKeyDown } from "../knowledge-command-menu";
 import type { QueuedTurnItem } from "../turn-queue";
 import { renderAnimateIcon } from "../animate-icon";
-import {
-  attachmentPresentationIcon,
-  attachmentPresentationKind,
-  type EchoInkAttachmentResourceResolver
-} from "./attachment-resource";
+import type { EchoInkAttachmentResourceResolver } from "./attachment-resource";
+import { renderFileCard } from "./file-card";
 import {
   markAIElementsAttachmentItem,
   markAIElementsAttachments
@@ -157,6 +154,7 @@ export interface ComposerAttachmentsCallbacks {
   onRemoveSkill: () => void;
   onRemoveNoteMention: (vaultRelativePath: string) => void;
   onRemoveAttachment: (path: string) => void;
+  onOpenAttachment: (attachment: Readonly<StoredAttachment>) => void;
 }
 
 export function shouldShowComposerPlanIndicator(selectedMode: UiMode): boolean {
@@ -1000,31 +998,15 @@ export function renderComposerAttachments(container: HTMLElement, state: Compose
       remove.onclick = () => callbacks.onRemoveAttachment(item.path);
       continue;
     }
-    const kind = attachmentPresentationKind(item);
-    const tile = list.createDiv({
-      cls: "codex-attachment-file-tile",
-      attr: {
-        title: displayName,
-        "aria-label": `文件：${displayName}`,
-        "data-attachment-kind": kind
-      }
+    const card = renderFileCard(list, {
+      attachment: item,
+      displayName,
+      variant: "compact",
+      availability: resource.availability,
+      onOpen: () => callbacks.onOpenAttachment(item),
+      onRemove: () => callbacks.onRemoveAttachment(item.path)
     });
-    markAIElementsAttachmentItem(tile, "document");
-    const icon = tile.createSpan({
-      cls: "codex-attachment-file-icon",
-      attr: { "aria-hidden": "true" }
-    });
-    setIcon(icon, attachmentPresentationIcon(item));
-    const remove = tile.createEl("button", {
-      cls: "codex-attachment-file-remove",
-      attr: {
-        type: "button",
-        "aria-label": `移除文件：${displayName}`,
-        title: `移除 ${displayName}`
-      }
-    });
-    setIcon(remove, "x");
-    remove.onclick = () => callbacks.onRemoveAttachment(item.path);
+    markAIElementsAttachmentItem(card, "document");
   }
 }
 

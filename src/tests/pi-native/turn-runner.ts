@@ -10,6 +10,7 @@ import type {
   PiProductRunRecord
 } from "../../harness/pi-native/contracts";
 import { PI_IMAGE_INPUT_UNSUPPORTED_MESSAGE } from "../../harness/pi-native/contracts";
+import { PI_ANTHROPIC_PDF_DOCUMENT_ADAPTER } from "../../harness/pi-native/pi-document-context";
 import {
   activateApiProviderModel,
   createApiProviderConfig,
@@ -65,6 +66,7 @@ import {
   FakeElement,
   createTestContext
 } from "../smooth-conversation-ui";
+import { preparePiChatDocuments } from "../../ui/codex-view/pi-document-input";
 
 const PNG_1X1 = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
@@ -87,12 +89,114 @@ export async function runPiNativeTurnRunnerTests(): Promise<void> {
   await inFlightComposerImageTransferCannotDuplicate();
   await imageCapabilityPreflightPreservesCompletedTurn();
   await imageCapabilityFailurePreservesComposerAndAcceptedFailureRecordsMetadata();
+  await queuedNativeDocumentCapabilityLossUsesFrozenTextOnly();
   await agentSettlementOnlyFinalizesPiChatTurn();
   await failedSettlementNoticeMatchesDurableFailureReason();
   await pendingSubmitKeepsRunningConversationResidentAcrossSessionSwitch();
   await disabledOrStaleSkillCannotStartTurn();
   await maintainScopeIsResolvedBeforeProviderSubmit();
   await queuedTurnsKeepExactProviderModelAndRetainUnavailableHead();
+}
+
+async function queuedNativeDocumentCapabilityLossUsesFrozenTextOnly(): Promise<void> {
+  const session = piSessionShell("conversation-document-capability-loss");
+  const settings = structuredClone(DEFAULT_SETTINGS);
+  const provider = createApiProviderConfig("custom", "document-fallback-provider");
+  provider.baseUrl = "https://document-fallback.example/v1";
+  provider.apiKey = "fixture-document-fallback-key";
+  provider.models = [createApiProviderModelConfig("custom", "fallback-model")];
+  provider.defaultModelId = "fallback-model";
+  settings.apiProviders = [provider];
+  settings.sessions = [session];
+  settings.activeSessionId = session.id;
+
+  const attachment = {
+    type: "file" as const,
+    name: "frozen.pdf",
+    path: "/missing/must-not-be-reread/frozen.pdf",
+    mimeType: "application/pdf"
+  };
+  const preparedDocument = Object.freeze({
+    attachment: Object.freeze({
+      ...attachment,
+      sizeBytes: 3,
+      availability: "available" as const
+    }),
+    kind: "pdf" as const,
+    bytes: new Uint8Array([1, 2, 3]),
+    sha256: "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81",
+    transport: "native" as const,
+    text: "FROZEN_EXTRACTED_TEXT"
+  });
+  const item: QueuedTurnItem = {
+    id: "queued-document-capability-loss",
+    sessionId: session.id,
+    text: "read the frozen document",
+    attachments: [attachment],
+    preparedDocuments: [preparedDocument],
+    skill: null,
+    turnOptions: {
+      providerSettingsId: provider.id,
+      runtimeProviderId: provider.runtimeProviderId,
+      model: "fallback-model",
+      reasoning: "none",
+      permission: "read-only",
+      mode: "agent",
+      mcpEnabled: false
+    },
+    kind: "chat",
+    createdAt: 2
+  };
+
+  let submitted: PiChatSubmitRequest | null = null;
+  let submitCalls = 0;
+  openTestNoticeMessages.length = 0;
+  const view = documentRequestCaptureView({
+    settings,
+    onSubmit: async (request) => {
+      submitCalls += 1;
+      submitted = request;
+      throw new Error("stop after document request capture");
+    }
+  });
+
+  assert.equal(await startChatTurn(view, session, item, "queue"), "failed");
+  assert.equal(
+    submitCalls,
+    1,
+    openTestNoticeMessages.at(-1)
+      ?? "frozen fallback text must still reach Pi submit"
+  );
+  assert.equal(submitted?.documents?.[0]?.transport, "extracted_text");
+  assert.equal(submitted?.documents?.[0]?.text, "FROZEN_EXTRACTED_TEXT");
+  assert.deepEqual(submitted?.documents?.[0]?.bytes, new Uint8Array([1, 2, 3]));
+  assert.equal(
+    item.preparedDocuments?.[0]?.transport,
+    "native",
+    "runtime reconciliation must not mutate the queued snapshot"
+  );
+
+  submitted = null;
+  submitCalls = 0;
+  openTestNoticeMessages.length = 0;
+  const textlessItem: QueuedTurnItem = {
+    ...item,
+    id: "queued-textless-document-capability-loss",
+    preparedDocuments: [Object.freeze({
+      ...preparedDocument,
+      text: undefined
+    })]
+  };
+  assert.equal(
+    await startChatTurn(view, session, textlessItem, "queue"),
+    "failed"
+  );
+  assert.equal(submitCalls, 0, "textless fallback must fail before Pi submit");
+  assert.equal(submitted, null);
+  assert.match(
+    openTestNoticeMessages.at(-1) ?? "",
+    /冻结快照没有可提取文字/u
+  );
 }
 
 async function queuedTurnsKeepExactProviderModelAndRetainUnavailableHead(): Promise<void> {
@@ -374,6 +478,30 @@ function imageMetadataProjectsAndCopiesByPiEntryIdentity(): void {
         }
       ]
     },
+    piDocumentReplay: {
+      [entryId]: [{
+        name: "恢复文档.md",
+        mimeType: "text/markdown",
+        sizeBytes: 512,
+        kind: "markdown",
+        sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        text: "FROZEN_REPLAY_TEXT"
+      }, {
+        name: "恢复文档.md",
+        mimeType: "text/markdown",
+        sizeBytes: 512,
+        kind: "markdown",
+        sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        text: "SECOND_FROZEN_REPLAY_TEXT"
+      }, {
+        name: "扫描件.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 1024,
+        kind: "pdf",
+        sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        text: null
+      }]
+    },
     createdAt: 1,
     updatedAt: 1
   };
@@ -397,8 +525,33 @@ function imageMetadataProjectsAndCopiesByPiEntryIdentity(): void {
     }],
     createdAt: 2
   };
+  source.messages = [{
+    ...fallbackMessage,
+    attachments: [{
+      type: "file",
+      name: "恢复文档.md",
+      path: "/missing/retry-document.md",
+      mimeType: "text/markdown",
+      sizeBytes: 512,
+      availability: "available"
+    }, {
+      type: "file",
+      name: "恢复文档.md",
+      path: "/missing/second-same-name-document.md",
+      mimeType: "text/markdown",
+      sizeBytes: 512,
+      availability: "available"
+    }, {
+      type: "file",
+      name: "扫描件.pdf",
+      path: "/still-present-but-changed/scan.pdf",
+      mimeType: "application/pdf",
+      sizeBytes: 1024,
+      availability: "available"
+    }]
+  }];
 
-  const projected = projectPiImageAttachments(source, [fallbackMessage]);
+  const projected = projectPiImageAttachments(source, source.messages);
   assert.equal(projected.length, 1, "missing local files must not drop the user message");
   assert.deepEqual(projected[0]?.images, [{
     type: "image",
@@ -427,6 +580,7 @@ function imageMetadataProjectsAndCopiesByPiEntryIdentity(): void {
   };
   copyPiImageAttachmentsForProjection(source, derived, projected);
   assert.deepEqual(derived.piImageAttachments, source.piImageAttachments);
+  assert.deepEqual(derived.piDocumentReplay, source.piDocumentReplay);
   assert.deepEqual(piComposerImageAttachmentsForEntry(source, entryId), [
     {
       type: "image",
@@ -441,6 +595,54 @@ function imageMetadataProjectsAndCopiesByPiEntryIdentity(): void {
       path: "/missing/ordered-two.jpg",
       mimeType: "image/jpeg",
       availability: "unavailable"
+    },
+    {
+      type: "file",
+      name: "恢复文档.md",
+      path: "/missing/retry-document.md",
+      mimeType: "text/markdown",
+      sizeBytes: 512,
+      availability: "unavailable",
+      documentReplay: {
+        name: "恢复文档.md",
+        mimeType: "text/markdown",
+        sizeBytes: 512,
+        kind: "markdown",
+        sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        text: "FROZEN_REPLAY_TEXT"
+      }
+    },
+    {
+      type: "file",
+      name: "恢复文档.md",
+      path: "/missing/second-same-name-document.md",
+      mimeType: "text/markdown",
+      sizeBytes: 512,
+      availability: "unavailable",
+      documentReplay: {
+        name: "恢复文档.md",
+        mimeType: "text/markdown",
+        sizeBytes: 512,
+        kind: "markdown",
+        sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        text: "SECOND_FROZEN_REPLAY_TEXT"
+      }
+    },
+    {
+      type: "file",
+      name: "扫描件.pdf",
+      path: "/still-present-but-changed/scan.pdf",
+      mimeType: "application/pdf",
+      sizeBytes: 1024,
+      availability: "unavailable",
+      documentReplay: {
+        name: "扫描件.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 1024,
+        kind: "pdf",
+        sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        text: null
+      }
     }
   ]);
 }
@@ -1277,6 +1479,14 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
         "src/knowledge-base/assets/guide/memory-personality-v1.webp"
       ),
       mimeType: "image/webp"
+    }, {
+      type: "file",
+      name: "sample.md",
+      path: path.resolve(
+        process.cwd(),
+        "src/tests/fixtures/document-attachments/sample.md"
+      ),
+      mimeType: "text/markdown"
     }],
     noteMentions: [{
       vaultRelativePath: "projects/项目复盘.md",
@@ -1296,7 +1506,7 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
     turnOptions: {
       providerSettingsId: "fixture-provider",
       runtimeProviderId: "fixture-provider",
-      model: "",
+      model: "fixture-model",
       reasoning: "high",
       permission: "read-only",
       mode: "agent",
@@ -1305,6 +1515,19 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
     kind: "chat",
     createdAt: 2
   };
+  item.preparedDocuments = (await preparePiChatDocuments(
+    item.attachments.filter((attachment) => attachment.type === "file"),
+    {
+      availableInputTokens: 100_000,
+      capabilityTarget: {
+        providerId: "custom",
+        apiProtocol: "openai-completions",
+        baseUrl: "https://fixture.example/v1",
+        modelId: "fixture-model",
+        adapter: PI_ANTHROPIC_PDF_DOCUMENT_ADAPTER
+      }
+    }
+  )).documents;
   const runResult = deferred<Readonly<PiProductRunRecord>>();
   let listener: PiChatRuntimeEventListener | null = null;
   let approvalListener: (() => void) | null = null;
@@ -1325,6 +1548,21 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
   settings.memory.useLongTermMemory = true;
   settings.sessions = [session];
   settings.activeSessionId = session.id;
+  const fixtureProvider = createApiProviderConfig("custom", "fixture-provider");
+  const fixtureModel = createApiProviderModelConfig(
+    "custom",
+    "fixture-model",
+    "fixture-provider"
+  );
+  fixtureProvider.runtimeProviderId = "fixture-provider";
+  fixtureProvider.apiProtocol = "openai-completions";
+  fixtureProvider.baseUrl = "https://fixture.example/v1";
+  fixtureModel.contextWindow = 128_000;
+  fixtureModel.modelMaxTokens = 8_192;
+  fixtureModel.maxOutputTokens = 8_192;
+  fixtureProvider.models = [fixtureModel];
+  fixtureProvider.defaultModelId = fixtureModel.id;
+  settings.apiProviders = [fixtureProvider];
   const plugin = {
     settings,
     getVaultPath: () => "/vault",
@@ -1456,6 +1694,17 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
   assert.equal(submittedRequest?.skillName, "review");
   assert.equal(submittedRequest?.memoryMode, "normal");
   assert.equal(submittedRequest?.images?.length, 1);
+  assert.equal(submittedRequest?.documents?.length, 1);
+  assert.match(submittedRequest?.documents?.[0]?.text ?? "", /Markdown 文档正文/u);
+  assert.match(
+    session.piDocumentReplay?.["entry-user"]?.[0]?.text ?? "",
+    /Markdown 文档正文/u
+  );
+  assert.equal(
+    JSON.stringify(session.piDocumentReplay).includes(item.attachments[1]!.path),
+    false,
+    "private replay metadata must persist neither paths nor bytes"
+  );
   assert.deepEqual(submittedRequest?.noteMentions, item.noteMentions);
   assert.equal(projectionReads, 0);
   const liveUserMessage = session.messages.find((message) =>
@@ -1472,6 +1721,14 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
   assert.deepEqual(liveUserMessage?.noteMentions, [{
     vaultRelativePath: "projects/项目复盘.md",
     fileName: "项目复盘.md"
+  }]);
+  assert.deepEqual(liveUserMessage?.attachments, [{
+    type: "file",
+    name: "sample.md",
+    path: item.attachments[1]!.path,
+    mimeType: "text/markdown",
+    sizeBytes: submittedRequest?.documents?.[0]?.attachment.sizeBytes,
+    availability: "available"
   }]);
   assert.equal(JSON.stringify(liveUserMessage).includes("PRIVATE_WHOLE_NOTE_BODY"), false,
     "live ChatMessage keeps note metadata only");
@@ -2296,6 +2553,44 @@ function textThroughPoint(
     text += node.textContent;
   }
   return text;
+}
+
+function documentRequestCaptureView(input: Readonly<{
+  settings: typeof DEFAULT_SETTINGS;
+  onSubmit(request: PiChatSubmitRequest): Promise<never>;
+}>): any {
+  let running = false;
+  let activeRunId = "";
+  return {
+    plugin: {
+      settings: input.settings,
+      getVaultPath: () => "/vault",
+      submitPiChat: input.onSubmit,
+      readPiConversationProjection: async () => {
+        throw new Error("no ProductRun projection for rejected submit");
+      },
+      abortPiConversation: async () => undefined,
+      releasePiProductionRun: () => undefined
+    },
+    get running() { return running; },
+    set running(value: boolean) { running = value; },
+    get activeRunId() { return activeRunId; },
+    set activeRunId(value: string) { activeRunId = value; },
+    activeRunKind: "",
+    activeRunSessionId: "",
+    activeTurnId: "",
+    turnStartedAt: 0,
+    messagesBottomFollowPaused: false,
+    renderTabs: () => undefined,
+    renderMessages: () => undefined,
+    renderMessagesIfActive: () => undefined,
+    renderToolbar: () => undefined,
+    applyStatus: () => undefined,
+    clearComposerDraft: () => undefined,
+    armTurnWatchdog: () => undefined,
+    clearTurnWatchdog: () => undefined,
+    clearActiveRun: () => { activeRunId = ""; }
+  };
 }
 
 function runtimeEvent(

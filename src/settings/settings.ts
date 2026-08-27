@@ -54,8 +54,12 @@ export interface StoredAttachment {
   path: string;
   /** Local display metadata only; image payloads remain exclusively in Pi Session. */
   mimeType?: string;
+  /** Local display metadata; document bytes are never persisted here. */
+  sizeBytes?: number;
   /** Derived at projection time and never persisted as transcript truth. */
   availability?: "available" | "unavailable";
+  /** Composer-only private replay data; message projections must never copy it. */
+  documentReplay?: Readonly<StoredPiDocumentReplayMetadata>;
 }
 
 export interface StoredPiImageAttachmentMetadata {
@@ -74,6 +78,20 @@ export interface NoteMentionReference {
 
 export type StoredPiImageAttachmentsByEntry = Readonly<
   Record<string, readonly Readonly<StoredPiImageAttachmentMetadata>[]>
+>;
+
+export interface StoredPiDocumentReplayMetadata {
+  readonly name: string;
+  readonly mimeType: string;
+  readonly sizeBytes: number;
+  readonly kind: "pdf" | "word" | "markdown" | "html";
+  readonly sha256: string;
+  /** Null is a durable tombstone: persisted bytes are unavailable and this Turn had no extracted text. */
+  readonly text: string | null;
+}
+
+export type StoredPiDocumentReplayByEntry = Readonly<
+  Record<string, readonly Readonly<StoredPiDocumentReplayMetadata>[]>
 >;
 
 /** Minimal display metadata for a primary Personal Memory injected this turn. */
@@ -206,6 +224,8 @@ export type StoredSession = EchoInkConversationSessionShell<
 > & {
   /** Local-only metadata keyed by the durable Pi user Entry identity. */
   piImageAttachments?: StoredPiImageAttachmentsByEntry;
+  /** Private extracted-text replay snapshots; never bytes, Base64, or local paths. */
+  piDocumentReplay?: StoredPiDocumentReplayByEntry;
 };
 
 export type SettingsTab = "general" | "providers" | "resources" | "knowledgeBase" | "review";
@@ -1614,6 +1634,9 @@ function normalizeStoredSessions(value: unknown): StoredSession[] {
       const piImageAttachments = bodyAuthority === "pi_session_only"
         ? sanitizeStoredPiImageAttachments(session.piImageAttachments)
         : undefined;
+      const piDocumentReplay = bodyAuthority === "pi_session_only"
+        ? sanitizeStoredPiDocumentReplay(session.piDocumentReplay)
+        : undefined;
       return {
         id,
         title: normalizeText(session.title, "新会话"),
@@ -1625,6 +1648,7 @@ function normalizeStoredSessions(value: unknown): StoredSession[] {
         tokenUsage: session.tokenUsage as TokenUsage,
         contextLedger,
         ...(piImageAttachments ? { piImageAttachments } : {}),
+        ...(piDocumentReplay ? { piDocumentReplay } : {}),
         createdAt: normalizeNonNegativeNumber(session.createdAt),
         updatedAt: normalizeNonNegativeNumber(session.updatedAt)
       };
@@ -1678,6 +1702,64 @@ export function sanitizeStoredPiImageAttachments(
     if (attachments.length) {
       entries.push([entryId, Object.freeze(attachments)]);
     }
+  }
+  return entries.length
+    ? Object.freeze(Object.fromEntries(entries))
+    : undefined;
+}
+
+export function sanitizeStoredPiDocumentReplay(
+  value: unknown
+): StoredPiDocumentReplayByEntry | undefined {
+  const source = settingsRecord(value);
+  if (!source) return undefined;
+  const entries: Array<[
+    string,
+    readonly Readonly<StoredPiDocumentReplayMetadata>[]
+  ]> = [];
+  for (const [rawEntryId, rawDocuments] of Object.entries(source)) {
+    const entryId = rawEntryId.trim();
+    if (!entryId || !Array.isArray(rawDocuments)) continue;
+    const documents = rawDocuments
+      .map((raw): StoredPiDocumentReplayMetadata | null => {
+        const item = settingsRecord(raw);
+        if (!item) return null;
+        const name = normalizeOptionalText(item.name);
+        const mimeType = normalizeOptionalText(item.mimeType).toLowerCase();
+        const sizeBytes = item.sizeBytes;
+        const kind = item.kind;
+        const sha256 = normalizeOptionalText(item.sha256).toLowerCase();
+        const text = typeof item.text === "string"
+          ? item.text.replace(/\u0000/gu, "").trim()
+          : item.text === null
+            ? null
+            : undefined;
+        if (
+          !name
+          || !mimeType
+          || !Number.isSafeInteger(sizeBytes)
+          || (sizeBytes as number) < 1
+          || (sizeBytes as number) > 20 * 1024 * 1024
+          || (kind !== "pdf" && kind !== "word" && kind !== "markdown" && kind !== "html")
+          || !/^[a-f0-9]{64}$/u.test(sha256)
+          || text === undefined
+          || (text === null && (kind !== "pdf" || mimeType !== "application/pdf"))
+          || (typeof text === "string" && (
+            !text
+            || new TextEncoder().encode(text).byteLength > 20 * 1024 * 1024
+          ))
+        ) return null;
+        return Object.freeze({
+          name,
+          mimeType,
+          sizeBytes: sizeBytes as number,
+          kind,
+          sha256,
+          text
+        });
+      })
+      .filter((item): item is StoredPiDocumentReplayMetadata => Boolean(item));
+    if (documents.length) entries.push([entryId, Object.freeze(documents)]);
   }
   return entries.length
     ? Object.freeze(Object.fromEntries(entries))

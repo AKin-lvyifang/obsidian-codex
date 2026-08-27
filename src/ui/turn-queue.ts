@@ -2,6 +2,7 @@ import type { TurnOptions } from "./turn-options";
 import type { EchoInkResource } from "../resources/types";
 import type { StoredAttachment } from "../settings/settings";
 import type { NoteMentionSnapshot } from "./codex-view/note-mentions";
+import type { PiChatPreparedDocument } from "../harness/pi-native/contracts";
 
 export type QueuedTurnKind = "chat";
 export type QueueSettlement = "continue" | "paused" | "idle";
@@ -11,6 +12,8 @@ export interface QueuedTurnItem {
   sessionId: string;
   text: string;
   attachments: StoredAttachment[];
+  /** Document bytes/text/transport frozen before this turn enters the queue. */
+  preparedDocuments?: readonly Readonly<PiChatPreparedDocument>[];
   /** Whole-note bodies frozen when the Composer draft is sent or queued. */
   noteMentions?: readonly Readonly<NoteMentionSnapshot>[];
   skill: EchoInkResource | null;
@@ -190,6 +193,15 @@ function cloneQueuedTurnItem(item: QueuedTurnItem): QueuedTurnItem {
   return {
     ...item,
     attachments: item.attachments.map((attachment) => ({ ...attachment })),
+    ...(item.preparedDocuments
+      ? {
+          preparedDocuments: item.preparedDocuments.map((document) => ({
+            ...document,
+            bytes: new Uint8Array(document.bytes),
+            attachment: { ...document.attachment }
+          }))
+        }
+      : {}),
     ...(item.noteMentions
       ? { noteMentions: item.noteMentions.map((mention) => ({ ...mention })) }
       : {}),

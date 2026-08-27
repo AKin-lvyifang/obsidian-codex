@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import type CodexForObsidianPlugin from "../../main";
 import type {
+  PiChatPreparedDocument,
   PiChatPreparedImage,
   PiConversationDraftRecord,
   PiConversationProjection,
@@ -8,9 +9,11 @@ import type {
 } from "../../harness/pi-native/contracts";
 import { piEntryIdFromProjectedMessageId } from "../../harness/pi-native/pi-chat-ui-projector";
 import {
+  sanitizeStoredPiDocumentReplay,
   sanitizeStoredPiImageAttachments,
   type ChatMessage,
   type StoredAttachment,
+  type StoredPiDocumentReplayMetadata,
   type StoredPiImageAttachmentMetadata,
   type StoredSession
 } from "../../settings/settings";
@@ -151,6 +154,31 @@ export function recordPiImageAttachmentsForEntry(
   if (normalized) session.piImageAttachments = normalized;
 }
 
+export function recordPiDocumentReplayForEntry(
+  session: StoredSession,
+  entryIdValue: string,
+  documents: readonly Readonly<PiChatPreparedDocument>[]
+): void {
+  const entryId = entryIdValue.trim();
+  if (!entryId || !documents.length) return;
+  const replay = documents.map((document) => {
+    const text = document.text?.trim() || null;
+    return Object.freeze({
+      name: document.attachment.name,
+      mimeType: document.attachment.mimeType,
+      sizeBytes: document.attachment.sizeBytes,
+      kind: document.kind,
+      sha256: document.sha256,
+      text
+    });
+  });
+  const normalized = sanitizeStoredPiDocumentReplay({
+    ...(session.piDocumentReplay ?? {}),
+    [entryId]: replay
+  });
+  if (normalized) session.piDocumentReplay = normalized;
+}
+
 export function projectPiImageAttachments(
   session: Readonly<StoredSession>,
   messages: readonly Readonly<ChatMessage>[]
@@ -191,14 +219,31 @@ export function copyPiImageAttachmentsForProjection(
   const normalized = sanitizeStoredPiImageAttachments(copied);
   if (normalized) target.piImageAttachments = normalized;
   else delete target.piImageAttachments;
+
+  const documentReplay: Record<
+    string,
+    readonly StoredPiDocumentReplayMetadata[]
+  > = {};
+  for (const message of messages) {
+    if (message.role !== "user" || !message.attachments?.length) continue;
+    const entryId = piEntryIdFromProjectedMessageId(message.id);
+    const replay = entryId ? source.piDocumentReplay?.[entryId] : undefined;
+    if (entryId && replay?.length) {
+      documentReplay[entryId] = replay.map((document) => ({ ...document }));
+    }
+  }
+  const normalizedReplay = sanitizeStoredPiDocumentReplay(documentReplay);
+  if (normalizedReplay) target.piDocumentReplay = normalizedReplay;
+  else delete target.piDocumentReplay;
 }
 
 export function piComposerImageAttachmentsForEntry(
   session: Readonly<StoredSession>,
   entryIdValue: string
 ): StoredAttachment[] {
-  const metadata = session.piImageAttachments?.[entryIdValue.trim()] ?? [];
-  return metadata.map((attachment, index) => {
+  const entryId = entryIdValue.trim();
+  const metadata = session.piImageAttachments?.[entryId] ?? [];
+  const images = metadata.map((attachment, index) => {
     const projected: StoredAttachment = {
       type: "image",
       name: attachment.name,
@@ -211,6 +256,41 @@ export function piComposerImageAttachmentsForEntry(
       name: attachmentDisplayName(projected, index)
     };
   });
+  // Existing Branch/resend callers use this attachment-restoration seam.
+  // Append durable document cards without changing the image metadata map.
+  return [...images, ...piComposerDocumentAttachmentsForEntry(session, entryId)];
+}
+
+export function piComposerDocumentAttachmentsForEntry(
+  session: Readonly<StoredSession>,
+  entryIdValue: string
+): StoredAttachment[] {
+  const entryId = entryIdValue.trim();
+  if (!entryId) return [];
+  const message = session.messages.find((candidate) =>
+    candidate.role === "user"
+    && piEntryIdFromProjectedMessageId(candidate.id) === entryId
+  );
+  const replay = session.piDocumentReplay?.[entryId] ?? [];
+  return (message?.attachments ?? [])
+    .filter((attachment) => attachment.type === "file")
+    .map((attachment, index) => ({
+      ...attachment,
+      availability: localAttachmentAvailability(attachment.path),
+      ...documentReplayForAttachment(replay[index], attachment)
+    }));
+}
+
+function documentReplayForAttachment(
+  replay: Readonly<StoredPiDocumentReplayMetadata> | undefined,
+  attachment: Readonly<StoredAttachment>
+): Pick<StoredAttachment, "documentReplay"> | Record<string, never> {
+  return replay
+    && replay.name === attachment.name
+    && replay.mimeType === attachment.mimeType
+    && replay.sizeBytes === attachment.sizeBytes
+    ? { documentReplay: { ...replay } }
+    : {};
 }
 
 function localPiImageAttachment(

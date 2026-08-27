@@ -329,6 +329,8 @@ export interface PiChatSubmitRequest {
   submittedAt: number;
   /** Ordered Pi-ready image content paired with local-only display metadata. */
   images?: readonly Readonly<PiChatPreparedImage>[];
+  /** Ordered locally extracted document snapshots frozen for this submitted turn. */
+  documents?: readonly Readonly<PiChatPreparedDocument>[];
   /** Ordered whole-note snapshots frozen for this exact submitted turn. */
   noteMentions?: readonly Readonly<PiChatNoteMention>[];
   /** The composer mode captured for this exact queued turn. */
@@ -362,6 +364,26 @@ export interface PiChatPreparedImage {
     /** MIME detected from the local source, not a second model payload. */
     mimeType: string;
   }>;
+}
+
+export interface PiChatPreparedDocument {
+  readonly attachment: Readonly<{
+    type: "file";
+    name: string;
+    path: string;
+    mimeType: string;
+    sizeBytes: number;
+    availability: "available" | "unavailable";
+  }>;
+  readonly kind: "pdf" | "word" | "markdown" | "html";
+  /** Immutable byte snapshot copied before this turn is sent or enqueued. */
+  readonly bytes: Readonly<Uint8Array>;
+  /** Lowercase SHA-256 of bytes, used to prove queue and replay identity. */
+  readonly sha256: string;
+  /** Frozen transport selected from the exact product capability matrix. */
+  readonly transport: "native" | "extracted_text";
+  /** Local fallback text. Required for extracted_text; optional for native PDF. */
+  readonly text?: string;
 }
 
 export type PiKnowledgeMaintenanceScope = Readonly<
