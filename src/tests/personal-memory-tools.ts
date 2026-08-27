@@ -18,6 +18,7 @@ import { withPersonalMemoryFixture, type PersonalMemoryFixture } from "./persona
 
 export async function runPersonalMemoryToolContractScenarios(): Promise<void> {
   assertOpenAiCompatibleMemoryToolSchemas();
+  await scenarioProviderVisibleDescriptionsStayAligned();
   await scenarioRuntimeIdentityIsNotModelControlled();
   await scenarioInvalidArgumentsAndMemoryModeErrors();
   await scenarioSearchBeforeAutonomousWriteAndCurrentEntryBinding();
@@ -175,6 +176,31 @@ function assertOpenAiCompatibleMemoryToolSchemas(): void {
       reason: "用户明确要求忘掉",
       evidenceQuote: "忘掉我以前偏好表格这件事。"
     }
+  });
+}
+
+async function scenarioProviderVisibleDescriptionsStayAligned(): Promise<void> {
+  await withPersonalMemoryFixture(async (fixture) => {
+    const entry = { entryId: "user-entry-fixture", text: "核对 Memory Tool 描述" };
+    const security = createSecurity(fixture, entry, fixture.runtime());
+    const tools = createPiPersonalMemoryToolDefinitions({ repository: fixture.repository, security });
+    const descriptions = Object.fromEntries(tools.map((tool) => [tool.name, tool.description]));
+    const searchDescription = descriptions.memory_search ?? "";
+    const writeDescription = descriptions.memory_write ?? "";
+    const schemas = PI_PERSONAL_MEMORY_TOOL_SCHEMAS as unknown as Readonly<Record<
+      (typeof PI_PERSONAL_MEMORY_TOOL_IDS)[number],
+      Readonly<Record<string, unknown>>
+    >>;
+
+    assert.equal(searchDescription, schemas.memory_search.description);
+    assert.match(searchDescription, /相关历史可能影响当前回答.*准备 create、update、profile_update、forget 前/iu);
+    assert.match(searchDescription, /任何 memory_write 前都必须完成 memory_search.*exhausted=false.*nextCursor/iu);
+    assert.match(searchDescription, /除此之外不机械搜索/iu);
+    assert.doesNotMatch(searchDescription, /只在历史会实质影响当前回答时调用/iu);
+
+    assert.equal(writeDescription, schemas.memory_write.description);
+    assert.match(writeDescription, /System Prompt 判断内容值得跨轮保存且对象清楚.*先完成 memory_search.*实际调用本 Tool/iu);
+    assert.match(writeDescription, /普通文字不会落盘.*真实结构化 Tool 回执/iu);
   });
 }
 

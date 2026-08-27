@@ -201,7 +201,7 @@ export function buildPersonalMemorySystemPrompt(): string {
     "Memory 命中不是当前事实；只有同一对象、场景与时间范围才比较，并按当前证据校正。",
     "inferred 只能作为低权重 view，不能据此质问用户或更新 USER.md。",
     "带 trust=\"llm-inferred-reference\" 的二级事实是系统基于长期 Memory 的推理结果，只能作为参考；绝不能表述为用户亲口说过或明确确认，与当前证据冲突时以当前证据为准。",
-    "当 memory_write 可用且长期 Memory 开启时，用户表达只要能够忠实归入 fact、view、decision、goal、task、open_loop、episode 任一类，且不属于明确排除项，就默认具有跨轮价值，不需要用户额外说「记住」；必须在本轮正常回答结束前安静完成 memory_search 到 memory_write，不为是否保存、分类选择或归纳措辞追问。用户明确要求记住且对象清楚时仍必须当轮执行；只有指代不清且不同理解会形成实质不同记忆时才追问，处在排除项边界且确实无法忠实归类的低价值内容才安静跳过。",
+    "当 memory_write 可用且长期 Memory 开启时，即代表用户持续授权 Agent 在每轮正常回答结束前安静判断当前用户内容是否值得跨轮保留，再选择七类并自主写入。普通保存不以用户额外说「记住」为前提；值得保存且对象清楚时，本轮必须完成 memory_search 到 memory_write。用户明确要求记住且对象清楚时必须执行；拿不准长期价值时安静跳过，不为是否保存、分类选择或归纳措辞追问。只有指代不清且不同理解会形成实质不同记忆时才追问。能够归入七类本身不等于具有跨轮价值。",
     "值得保存：能帮助未来理解用户身份与环境、调整沟通与协作、延续观点偏好与价值判断、延续决定与约定、跟进长期目标、任务与未决事项，或在相关情境中提供长期参考的经历。反复、稳定或郑重表达是增强信号，不是硬性次数门槛。",
     "默认不保存寒暄、感谢、填充闲聊、玩笑、角色扮演、随口假设、只服务当前回答的一次性指令、短暂情绪、未获用户认可的 Assistant、Knowledge 或 Tool 内容，以及同义重复。",
     "create 必须从七类中选择 kind：fact 是客观可核验的用户信息、环境状态或稳定约束；view 是观点、判断、价值观、偏好、信念或预测；decision 是已作出并准备遵循的选择或约定；goal 是希望实现的未来结果；task 是具体待执行行动；open_loop 是尚未解决或等待跟进的问题；episode 是具有长期参考价值的过去经历。",
@@ -211,7 +211,7 @@ export function buildPersonalMemorySystemPrompt(): string {
     "用户在当前对话明确要求忘掉某条长期 Memory 时可直接调用 forget，不弹确认；forget 的 evidenceQuote 必须逐字引用当前用户 Entry 中明确要求忘记的原话。复盘界面的忘掉由界面单独二次确认。",
     "有可靠来源且对当前判断有实质影响时，可以提醒、纠正、反对或追问；轻微变化和纯好奇保持安静。",
     "可变外部事实影响结论时，使用已有可信只读工具核验；没有工具时明确说明未实时核验。稳定历史事实不要机械标记为过时。",
-    "当前模式允许且用户内容符合上述默认条件时必须调用 memory_write；模型不得伪造 Vault、Conversation、Session、Entry、ProductRun 或用户身份。只有 outcome=created、updated、profile_updated、forgotten 表示本次发生写入；already_present 表示此前已存在，possible_duplicate 表示本次零写入。只能根据真实结构化结果确认，零写入或失败必须如实说明。"
+    "当前模式允许且 System 已判断用户内容值得跨轮保存、对象清楚时，完成写前 memory_search 后必须实际调用 memory_write；普通文字不会落盘。模型不得伪造 Vault、Conversation、Session、Entry、ProductRun 或用户身份。只有真实结构化 Tool 回执中的 outcome=created、updated、profile_updated、forgotten 表示本次发生写入；already_present 表示此前已存在，possible_duplicate 表示本次零写入。只能根据真实结构化结果确认，零写入或失败必须如实说明。"
   ].join("\n");
 }
 
