@@ -25,7 +25,6 @@ import { openImageOverlay, renderPreformattedVaultNoteText, renderRichText } fro
 import { buildActionTimeline, isActionTimelineItem, type ActionGroupKind, type ActionItemViewModel } from "./action-timeline";
 import {
   buildAgentTurnProjection,
-  formatAgentTurnDuration,
   formatAgentTurnSummary,
   isAgentAnswerMessage,
   isAgentProcessItemType,
@@ -372,8 +371,6 @@ export class CodexMessageListRenderer {
   private rawTextCache = new Map<string, string>();
   private openProcessItems = new Map<string, boolean>();
   private openActionItemDetails = new Map<string, boolean>();
-  private openCompletedTurns = new Map<string, boolean>();
-  private assistantTurnDisclosureStates = new Map<string, ReasoningDisclosureState>();
   private openKnowledgeBaseCitations = new Map<string, boolean>();
   private openKnowledgeBaseReportSections = new Map<string, boolean>();
   private openTaskPlans = new Map<string, boolean>();
@@ -791,6 +788,7 @@ export class CodexMessageListRenderer {
 
     const knownNodes: HTMLElement[] = [
       ...Array.from(turnRoot.querySelectorAll<HTMLElement>(".codex-assistant-turn-node")),
+      ...Array.from(turnRoot.querySelectorAll<HTMLElement>(".codex-assistant-turn-reasoning-node")),
       ...Array.from(turnRoot.querySelectorAll<HTMLElement>(".codex-assistant-turn-action-node"))
     ];
     for (const node of turn.processNodes) {
@@ -809,15 +807,13 @@ export class CodexMessageListRenderer {
       }
     }
 
-    const chain = turnRoot.querySelector<HTMLDetailsElement>(".codex-ai-elements-chain-of-thought");
+    const chain = turnRoot.querySelector<HTMLElement>(".codex-ai-elements-chain-of-thought");
     if (chain) {
       applyAIElementsStatus(
         chain,
         aiElementsStatus(isTerminalTurnStatus(turn.status) ? turn.status : "running")
       );
       chain.setAttribute("data-turn-status", turn.status);
-      const summaryCopy = chain.querySelector<HTMLElement>(".codex-assistant-turn-summary-copy");
-      summaryCopy?.setText(formatAgentTurnSummary(turn, env.settingsLanguage));
     }
 
     for (const reasoning of turn.providerReasoningSegments) {
@@ -889,6 +885,7 @@ export class CodexMessageListRenderer {
     const label = root.querySelector<HTMLElement>(".codex-ai-elements-reasoning-label");
     const body = root.querySelector<HTMLElement>(".codex-ai-elements-reasoning-content");
     if (!summary || !body) return;
+    label?.toggleClass("is-shimmering", reasoning.status === "running");
     label?.setText(reasoning.status === "running"
       ? copy.process.publicReasoningRunning
       : reasoning.durationMs === undefined
@@ -935,6 +932,7 @@ export class CodexMessageListRenderer {
           setIcon(caret, (row as HTMLDetailsElement).open ? "chevron-up" : "chevron-down");
         }
       }
+      this.applyAssistantTurnActionSemantics(row, item);
       if (expandable && (row as HTMLDetailsElement).open) {
         const body = row.querySelector<HTMLElement>(".codex-action-item-details-body");
         if (body) {
@@ -961,7 +959,7 @@ export class CodexMessageListRenderer {
       const icon = renderAIElementsToolStatus(summary, message.status);
       icon.addClass("codex-structured-icon");
       icon.addClass("codex-process-icon");
-      setIcon(icon, iconForProcessMessage(message));
+      setSemanticIcon(icon, iconForProcessMessage(message));
       const main = summary.createDiv({ cls: "codex-process-main" });
       if (message.itemType === "fileChange" && message.diffSummary?.files.length) {
         this.renderProcessEditSummary(main, message);
@@ -1967,139 +1965,67 @@ export class CodexMessageListRenderer {
     container: HTMLElement,
     turn: AgentTurnView
   ): void {
-    const env = this.requireEnv();
-    const copy = this.copy();
-    const stateKey = `${env.sessionId}\0${turn.key}`;
     const disclosureStatus = isTerminalTurnStatus(turn.status) ? turn.status : "running";
-    const disclosure = nextReasoningDisclosureState(
-      this.assistantTurnDisclosureStates.get(stateKey),
-      disclosureStatus
-    );
-    this.assistantTurnDisclosureStates.set(stateKey, disclosure);
-
-    const bodyId = stableDomId(`codex-assistant-turn-process-${stateKey}`);
     const elements = createAIElementsChainOfThought(container, {
-      bodyId,
-      open: disclosure.open,
       status: aiElementsStatus(disclosureStatus)
     });
-    const details = elements.root;
-    details.addClass("codex-assistant-turn-process");
-    details.addClass(`is-${turn.status}`);
-    details.setAttribute("data-turn-status", turn.status);
-    const summary = elements.summary;
-    summary.addClass("codex-assistant-turn-process-summary");
-    this.renderAssistantTurnSectionLabel(
-      summary,
-      copy.sections.process
-    );
-    summary.createSpan({
-      cls: "codex-assistant-turn-summary-copy",
-      text: formatAgentTurnSummary(turn, env.settingsLanguage)
-    });
-    const caret = summary.createSpan({
-      cls: "codex-assistant-turn-summary-caret",
-      attr: { "aria-hidden": "true" }
-    });
-    setIcon(caret, details.open ? "chevron-up" : "chevron-down");
-    this.scheduleDisclosureAutoFold(
-      `chain:${stateKey}`,
-      stateKey,
-      this.assistantTurnDisclosureStates,
-      details,
-      summary
-    );
-
-    let pendingUserDisclosureIntent = false;
-    summary.onclick = (event) => {
-      if (event.isTrusted) pendingUserDisclosureIntent = true;
-    };
-    summary.onkeydown = (event) => {
-      if (
-        event.isTrusted
-        && (event.key === "Enter" || event.key === " " || event.code === "Space")
-      ) pendingUserDisclosureIntent = true;
-    };
-    details.ontoggle = () => {
-      const current = this.assistantTurnDisclosureStates.get(stateKey) ?? disclosure;
-      if (pendingUserDisclosureIntent) {
-        this.cancelDisclosureAutoFold(`chain:${stateKey}`);
-        this.assistantTurnDisclosureStates.set(stateKey, Object.freeze({
-          ...current,
-          open: details.open,
-          manual: true
-        }));
-      }
-      pendingUserDisclosureIntent = false;
-      summary.setAttribute("aria-expanded", String(details.open));
-      caret.empty();
-      setIcon(caret, details.open ? "chevron-up" : "chevron-down");
-      env.onScheduleMeasure();
-    };
-
+    const root = elements.root;
+    root.addClass("codex-assistant-turn-process");
+    root.addClass(`is-${turn.status}`);
+    root.setAttribute("data-turn-status", turn.status);
     const body = elements.body;
     body.addClass("codex-assistant-turn-process-body");
-    const spine = body.createDiv({ cls: "codex-assistant-turn-spine" });
-    for (let index = 0; index < turn.processNodes.length;) {
-      const node = turn.processNodes[index];
-      if (!actionMessageForProcessNode(turn, node)) {
-        this.renderAssistantTurnProcessNode(spine, turn, node);
-        index += 1;
-        continue;
+    body.addClass("codex-assistant-turn-spine");
+    for (const node of turn.processNodes) {
+      if (actionMessageForProcessNode(turn, node)) {
+        this.renderAssistantTurnActionNode(body, turn, node);
+      } else {
+        this.renderAssistantTurnProcessNode(body, turn, node);
       }
-      const actionNodes: Readonly<EchoInkTurnProcessNode>[] = [];
-      while (
-        index < turn.processNodes.length
-        && actionMessageForProcessNode(turn, turn.processNodes[index])
-      ) {
-        actionNodes.push(turn.processNodes[index]);
-        index += 1;
-      }
-      this.renderAssistantTurnActionLedger(spine, turn, actionNodes);
     }
   }
 
-  private renderAssistantTurnActionLedger(
+  private renderAssistantTurnActionNode(
     container: HTMLElement,
     turn: AgentTurnView,
-    nodes: readonly Readonly<EchoInkTurnProcessNode>[]
+    node: Readonly<EchoInkTurnProcessNode>
   ): void {
-    const messages: ChatMessage[] = [];
-    const nodesByMessageId = new Map<string, Readonly<EchoInkTurnProcessNode>>();
-    for (const node of nodes) {
-      const message = actionMessageForProcessNode(turn, node);
-      if (!message || nodesByMessageId.has(message.id)) continue;
-      messages.push(message);
-      nodesByMessageId.set(message.id, node);
-    }
-    const timeline = buildActionTimeline(messages, this.requireEnv().settingsLanguage);
-    const items = timeline.groups.flatMap((group) => group.items);
-    if (!items.length) {
-      for (const node of nodes) this.renderAssistantTurnProcessNode(container, turn, node);
+    const message = actionMessageForProcessNode(turn, node);
+    if (!message) {
+      this.renderAssistantTurnProcessNode(container, turn, node);
       return;
     }
-
-    const ledger = container.createDiv({
-      cls: `codex-assistant-turn-action-ledger is-${timeline.runStatus}`,
-      attr: {
-        "data-action-count": String(timeline.totalCount),
-        "data-action-status": timeline.runStatus,
-        "aria-label": this.copy().sections.tools
-      }
-    });
-    for (const item of items) {
-      const node = nodesByMessageId.get(item.source.id);
-      const row = this.renderActionItem(ledger, item, {
-        standalone: false,
-        showApprovalCard: false
-      });
-      row.addClass("codex-assistant-turn-action-node");
-      if (!node) continue;
-      row.dataset.nodeId = node.nodeId;
-      row.dataset.messageId = item.source.id;
-      row.dataset.nodeStatus = node.status;
-      row.toggleClass("is-current", node.nodeId === turn.currentNodeId);
+    const item = buildActionTimeline([message], this.requireEnv().settingsLanguage)
+      .groups[0]?.items[0];
+    if (!item) {
+      this.renderAssistantTurnProcessNode(container, turn, node);
+      return;
     }
+    const row = this.renderActionItem(container, item, {
+      standalone: false,
+      showApprovalCard: false
+    });
+    row.addClass("codex-assistant-turn-action-node");
+    this.applyAssistantTurnActionSemantics(row, item);
+    row.addClass(`is-${node.status}`);
+    row.dataset.nodeId = node.nodeId;
+    row.dataset.messageId = item.source.id;
+    row.dataset.nodeStatus = node.status;
+    row.toggleClass("is-current", node.nodeId === turn.currentNodeId);
+  }
+
+  private applyAssistantTurnActionSemantics(
+    row: HTMLElement,
+    item: ActionItemViewModel
+  ): void {
+    if (!row.hasClass("codex-assistant-turn-action-node")) return;
+    row.querySelector<HTMLElement>(".codex-action-item-prefix")?.remove();
+    row.querySelector<HTMLElement>(".codex-action-item-state")?.remove();
+    if (item.status !== "failed") return;
+    row.querySelector<HTMLElement>(".codex-action-item-main")?.createSpan({
+      cls: "codex-action-item-state",
+      text: labelForStatus(item.status, this.requireEnv().settingsLanguage)
+    });
   }
 
   private renderAssistantTurnProcessNode(
@@ -2107,7 +2033,10 @@ export class CodexMessageListRenderer {
     turn: AgentTurnView,
     node: Readonly<EchoInkTurnProcessNode>
   ): void {
-    const copy = this.copy();
+    if (node.kind === "reasoning" && node.nodeId.startsWith("provider-reasoning:")) {
+      this.renderProviderReasoningNode(container, turn, node);
+      return;
+    }
     const row = container.createDiv({
       cls: `codex-assistant-turn-node is-${node.status} is-${node.kind}`
     });
@@ -2115,28 +2044,21 @@ export class CodexMessageListRenderer {
     row.toggleClass("is-current", node.nodeId === turn.currentNodeId);
     if (node.sourceMessageId) row.dataset.messageId = node.sourceMessageId;
 
-    const marker = row.createSpan({
-      cls: "codex-assistant-turn-node-marker",
-      attr: {
-        "aria-hidden": "true",
-        title: copy.process.nodeStatus(node.status)
-      }
+    const icon = row.createSpan({
+      cls: "codex-assistant-turn-node-icon",
+      attr: { "aria-hidden": "true" }
     });
-    setIcon(marker, assistantTurnNodeStatusIcon(node.status));
+    setSemanticIcon(icon, assistantTurnNodeIcon(node));
 
     const content = row.createDiv({ cls: "codex-assistant-turn-node-content" });
     const heading = content.createDiv({ cls: "codex-assistant-turn-node-heading" });
-    this.renderAssistantTurnSectionLabel(
-      heading,
-      sectionLabelForProcessNode(node, copy)
-    );
     const title = heading.createSpan({
       cls: "codex-assistant-turn-node-title",
       text: node.title,
       attr: { title: node.title }
     });
     if (node.status === "running") {
-      title.setAttribute("aria-label", `${node.title}, ${copy.process.nodeStatus(node.status)}`);
+      title.setAttribute("aria-label", `${node.title}, ${this.copy().process.nodeStatus(node.status)}`);
     }
     if (node.summary) {
       heading.createSpan({
@@ -2154,10 +2076,6 @@ export class CodexMessageListRenderer {
     turn: AgentTurnView,
     node: Readonly<EchoInkTurnProcessNode>
   ): void {
-    if (node.kind === "reasoning" && node.nodeId.startsWith("provider-reasoning:")) {
-      this.renderProviderReasoningNode(container, turn, node);
-      return;
-    }
     const source = node.sourceMessageId
       ? turn.messages.find((message) => message.id === node.sourceMessageId)
       : undefined;
@@ -2246,6 +2164,11 @@ export class CodexMessageListRenderer {
           ? copy.process.publicReasoningCompleted
           : copy.process.publicReasoningDuration(formatCompactDuration(reasoning.durationMs))
     });
+    elements.root.addClass("codex-assistant-turn-reasoning-node");
+    elements.root.addClass(`is-${node.status}`);
+    elements.root.toggleClass("is-current", node.nodeId === turn.currentNodeId);
+    elements.root.dataset.nodeId = node.nodeId;
+    elements.root.dataset.nodeStatus = node.status;
     elements.root.dataset.reasoningId = reasoning.reasoningId;
     elements.body.dataset.renderedText = reasoning.text;
     this.scheduleDisclosureAutoFold(
@@ -2400,33 +2323,14 @@ export class CodexMessageListRenderer {
 
   private renderCompletedTurnProcess(container: HTMLElement, turn: CompletedAgentTurn, showAgentHeader: boolean): void {
     const stateId = `${turn.key}:${turn.finalAnswer.id}`;
-    const open = this.openCompletedTurns.get(stateId) ?? (turn.failed || turn.requiresAttention);
     const wrapper = container.createDiv({ cls: "codex-message codex-message-tool codex-message-type-turnProcess" });
     markAIElementsMessage(wrapper, "tool");
     if (showAgentHeader) this.renderAgentHeader(wrapper, { message: turn.finalAnswer, statusLabel: "", compact: true });
-    const bodyId = stableDomId(`codex-turn-process-${stateId}`);
     const chain = createAIElementsChainOfThought(wrapper, {
-      bodyId,
-      open,
       status: aiElementsStatus(turn.failed ? "failed" : turn.requiresAttention ? "blocked" : "completed")
     });
     const region = chain.root;
     region.addClass("codex-turn-process");
-    const summary = chain.summary;
-    summary.addClass("codex-turn-process-summary");
-    summary.createSpan({
-      cls: "codex-turn-process-title",
-      text: formatAgentTurnDuration(turn.durationMs, this.requireEnv().settingsLanguage)
-    });
-    const caret = summary.createSpan({ cls: "codex-turn-process-caret" });
-    setIcon(caret, open ? "chevron-down" : "chevron-right");
-    region.ontoggle = () => {
-      this.openCompletedTurns.set(stateId, region.open);
-      summary.setAttribute("aria-expanded", String(region.open));
-      caret.empty();
-      setIcon(caret, region.open ? "chevron-down" : "chevron-right");
-      this.requireEnv().onScheduleMeasure();
-    };
     const body = chain.body;
     body.addClass("codex-turn-process-body");
     for (const message of turn.processMessages) this.renderTurnProcessMessage(body, message);
@@ -2530,7 +2434,7 @@ export class CodexMessageListRenderer {
   private renderActionItemHead(head: HTMLElement, item: ActionItemViewModel): void {
     const icon = renderAIElementsToolStatus(head, item.status);
     icon.addClass("codex-action-item-icon");
-    setIcon(icon, iconForActionKind(item.kind, item.status));
+    setSemanticIcon(icon, iconForActionKind(item.kind));
     const main = head.createDiv({ cls: "codex-action-item-main" });
     this.renderActionItemTitle(main, item);
     this.renderActionItemStats(head, item);
@@ -2539,12 +2443,6 @@ export class CodexMessageListRenderer {
   private renderActionItemTitle(container: HTMLElement, item: ActionItemViewModel): void {
     const prefix = actionVerb(item, this.requireEnv().settingsLanguage);
     container.createSpan({ cls: "codex-action-item-prefix", text: `${prefix} ` });
-    if (typeof item.durationMs === "number") {
-      container.createSpan({
-        cls: "codex-action-item-duration",
-        text: `${formatActionDuration(item.durationMs)} `
-      });
-    }
     if (item.kind === "edit" && item.source.diffSummary?.files.length) {
       const file = item.source.diffSummary.files[0];
       const ref = findProcessFileRef(item.source.files ?? [], file.path) ?? normalizeProcessFileRef(file.path, this.requireEnv().vaultPath);
@@ -2555,16 +2453,20 @@ export class CodexMessageListRenderer {
           text: this.copy().action.moreFiles(item.source.diffSummary.files.length)
         });
       }
-      return;
-    }
-    if (item.file) {
+    } else if (item.file) {
       this.renderProcessFileTextLink(container, item.file, item.file.name || item.file.displayPath, "codex-action-item-file");
-      return;
+    } else {
+      container.createSpan({
+        cls: "codex-action-item-title",
+        text: actionItemTarget(item, this.requireEnv().settingsLanguage) || item.title
+      });
     }
-    container.createSpan({
-      cls: "codex-action-item-title",
-      text: actionItemTarget(item, this.requireEnv().settingsLanguage) || item.title
-    });
+    if (typeof item.durationMs === "number") {
+      container.createSpan({
+        cls: "codex-action-item-duration",
+        text: formatActionDuration(item.durationMs)
+      });
+    }
   }
 
   private renderActionItemStats(container: HTMLElement, item: ActionItemViewModel): void {
@@ -2998,19 +2900,21 @@ export class CodexMessageListRenderer {
     const env = this.requireEnv();
     const copy = this.copy();
     const bodyId = stableDomId(`codex-thinking-${message.id}`);
-    const chain = createAIElementsChainOfThought(container, {
+    const reasoning = createAIElementsReasoning(container, {
       bodyId,
       open: message.status === "running",
-      status: aiElementsStatus(message.status)
+      status: aiElementsStatus(message.status),
+      summary: message.status === "running" ? copy.message.thinking : copy.message.thinkingComplete
     });
-    const shell = chain.root;
+    const shell = reasoning.root;
     shell.addClass("codex-thinking-shell");
-    chain.summary.createSpan({
-      cls: "codex-thinking-summary",
-      text: message.status === "running" ? copy.message.thinking : copy.message.thinkingComplete
-    });
+    reasoning.summary.addClass("codex-thinking-summary");
+    shell.ontoggle = () => {
+      reasoning.summary.setAttribute("aria-expanded", String(shell.open));
+      env.onScheduleMeasure();
+    };
     if (message.status === "running") {
-      const row = chain.body.createDiv({ cls: "codex-thinking-live" });
+      const row = reasoning.body.createDiv({ cls: "codex-thinking-live" });
       renderSmoothAILoader(row, message.text || copy.message.organizingContext);
       row.createSpan({
         cls: "codex-agent-live-copy",
@@ -3019,7 +2923,7 @@ export class CodexMessageListRenderer {
       env.onScheduleRunProgress();
       return;
     }
-    chain.body.createEl("em", {
+    reasoning.body.createEl("em", {
       cls: "codex-response-footer",
       text: message.text || copy.message.thinkingComplete
     });
@@ -3062,7 +2966,7 @@ export class CodexMessageListRenderer {
     const icon = renderAIElementsToolStatus(summary, message.status);
     icon.addClass("codex-structured-icon");
     icon.addClass("codex-process-icon");
-    setIcon(icon, iconForProcessMessage(message));
+    setSemanticIcon(icon, iconForProcessMessage(message));
     const main = summary.createDiv({ cls: "codex-process-main" });
     if (message.itemType === "fileChange" && message.diffSummary?.files.length) {
       this.renderProcessEditSummary(main, message);
@@ -3677,21 +3581,6 @@ function completedTurnRowId(turn: CompletedAgentTurn): string {
   return `turnProcess:${turn.key}:${turn.finalAnswer.id}`;
 }
 
-function sectionLabelForProcessNode(
-  node: Readonly<EchoInkTurnProcessNode>,
-  copy: ConversationCopy
-): string {
-  if (node.kind === "reasoning") return copy.sections.reasoning;
-  if (
-    node.kind === "retrieval"
-    || node.kind === "tool"
-    || node.kind === "task"
-    || node.kind === "artifact"
-    || node.kind === "diff"
-  ) return copy.sections.tools;
-  return copy.sections.process;
-}
-
 function actionMessageForProcessNode(
   turn: AgentTurnView,
   node: Readonly<EchoInkTurnProcessNode>
@@ -3709,15 +3598,15 @@ function actionMessageForProcessNode(
   return source && isActionTimelineItem(source) ? source : undefined;
 }
 
-function assistantTurnNodeStatusIcon(
-  status: Readonly<EchoInkTurnProcessNode>["status"]
+function assistantTurnNodeIcon(
+  node: Readonly<EchoInkTurnProcessNode>
 ): string {
-  if (status === "running") return "loader-circle";
-  if (status === "completed") return "check";
-  if (status === "failed") return "triangle-alert";
-  if (status === "cancelled") return "circle-slash";
-  if (status === "skipped") return "minus";
-  return "circle";
+  if (node.kind === "reasoning") return "brain";
+  if (node.kind === "retrieval") return "search";
+  if (node.kind === "tool") return "wrench";
+  if (node.kind === "artifact") return "image";
+  if (node.kind === "diff") return "file-diff";
+  return "dot";
 }
 
 function formatCompactDuration(durationMs: number): string {
@@ -3840,21 +3729,24 @@ export function actionVerb(
   );
 }
 
-function iconForActionKind(kind: ActionGroupKind, status?: string): string {
-  if (status === "failed" || status === "uncertain" || status === "recovery-blocked") return "triangle-alert";
-  if (status === "denied" || status === "canceled") return "circle-slash";
+function iconForActionKind(kind: ActionGroupKind): string {
   const icons: Record<ActionGroupKind, string> = {
-    read: "book-open",
+    read: "dot",
     search: "search",
-    command: "terminal",
-    edit: "file-pen",
-    tool: "blocks",
-    agent: "bot",
-    plan: "list-checks",
-    verify: "badge-check",
-    system: "minimize-2"
+    command: "wrench",
+    edit: "file-diff",
+    tool: "wrench",
+    agent: "wrench",
+    plan: "dot",
+    verify: "wrench",
+    system: "dot"
   };
-  return icons[kind] ?? "circle";
+  return icons[kind] ?? "dot";
+}
+
+function setSemanticIcon(container: HTMLElement, icon: string): void {
+  container.dataset.icon = icon;
+  setIcon(container, icon);
 }
 
 function stableDomId(value: string): string {
@@ -3885,11 +3777,11 @@ function shellTranscript(text: string): string {
 function iconForProcessMessage(message: ChatMessage): string {
   const processIcons: Record<string, string> = {
     search: "search",
-    view: "book-open",
-    edit: "pencil",
-    run: "terminal",
-    command: "terminal",
-    tool: "blocks"
+    view: "dot",
+    edit: "file-diff",
+    run: "wrench",
+    command: "wrench",
+    tool: "wrench"
   };
   const processIcon = processIcons[message.processKind ?? ""];
   if (processIcon) return processIcon;
@@ -3898,14 +3790,14 @@ function iconForProcessMessage(message: ChatMessage): string {
 
 function iconForItemType(itemType?: string): string {
   const icons: Record<string, string> = {
-    plan: "list-checks",
-    commandExecution: "terminal",
+    plan: "dot",
+    commandExecution: "wrench",
     fileChange: "file-diff",
-    mcpToolCall: "blocks",
-    dynamicToolCall: "blocks",
-    collabAgentToolCall: "blocks"
+    mcpToolCall: "wrench",
+    dynamicToolCall: "wrench",
+    collabAgentToolCall: "wrench"
   };
-  return icons[itemType ?? ""] ?? "chevron-right";
+  return icons[itemType ?? ""] ?? "dot";
 }
 
 function titleForItemType(

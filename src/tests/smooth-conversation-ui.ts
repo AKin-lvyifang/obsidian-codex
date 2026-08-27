@@ -1890,9 +1890,10 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       1,
       "legacy reasoningSummary creates one Process node, not fake Provider Reasoning"
     );
-    assert.match(
-      conversationVirtualList.findByClass("codex-assistant-turn-summary-copy")?.textContent ?? "",
-      /正在处理 · 正在思考/u
+    assert.equal(
+      conversationVirtualList.findAllByClass("codex-assistant-turn-summary-copy").length,
+      0,
+      "ChainOfThought does not add a second process title or summary disclosure"
     );
     assert.equal(
       conversationVirtualList.findAllByClass("codex-ai-elements-reasoning").length,
@@ -2936,15 +2937,11 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     assert.equal(assistantTurnRoot.attributes.get("data-bubble"), "false");
     assert.equal(assistantTurnSurface.findAllByClass("codex-message-type-assistantTurn").length, 1);
     assert.equal(assistantTurnRoot.findAllByClass("codex-assistant-turn-spine").length, 1);
-    assert.equal(
-      assistantTurnRoot.findByClass("codex-assistant-turn-process")?.open,
-      false,
-      "a terminal process spine is collapsed to one summary row"
-    );
-    assert.equal(
-      assistantTurnRoot.findByClass("codex-assistant-turn-summary-copy")?.textContent,
-      "处理完成 · 7 个步骤 · 2 个工具 · 8s"
-    );
+    const chainOfThought = assistantTurnRoot.findByClass("codex-ai-elements-chain-of-thought")!;
+    assert.equal(chainOfThought.tag, "div",
+      "ChainOfThought is a static event spine, not a second disclosure");
+    assert.equal(chainOfThought.findAllByClass("codex-ai-elements-chain-of-thought-trigger").length, 0,
+      "ChainOfThought has no repeated title, duration summary, or Chevron");
     assert.equal(
       assistantTurnRoot.findAllByClass("codex-assistant-turn-node").some((node) => node.hasClass("is-current")),
       false,
@@ -2962,8 +2959,10 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       assistantTurnRoot.findAllByClass("codex-assistant-turn-section-secondary")
         .map((label) => label.textContent)
     );
-    assert.deepEqual(primaryLabels, new Set(["处理过程", "模型推理", "执行动作", "最终回答"]));
+    assert.deepEqual(primaryLabels, new Set(["最终回答"]));
     assert.deepEqual(secondaryLabels, new Set());
+    assert.doesNotMatch(renderedText(assistantTurnRoot), /处理过程|模型推理|执行动作/u,
+      "event rows omit repeated category prefixes");
 
     for (const componentClass of [
       "codex-ai-elements-chain-of-thought",
@@ -2990,8 +2989,8 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     const unifiedLedgers = assistantTurnRoot.findAllByClass(
       "codex-assistant-turn-action-ledger"
     );
-    assert.equal(unifiedLedgers.length, 2,
-      "Task and Sources keep the two chronological Action ledger groups separated");
+    assert.equal(unifiedLedgers.length, 0,
+      "Tool rows are direct ChainOfThought children without a grouping ledger");
     assert.equal(
       assistantTurnRoot.findAllByClass("codex-assistant-turn-action-ledger-summary").length,
       0,
@@ -3009,7 +3008,19 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       "an Action row is not wrapped in a second titled process node");
     assert.ok(unifiedActions.every((action) =>
       action.findAllByClass("codex-ai-elements-tool-status").length === 1
-    ), "each collapsed Action owns one status icon");
+    ), "each collapsed Action owns one semantic icon");
+    assert.equal(assistantTurnRoot.findAllByClass("codex-action-item-prefix").length, 0,
+      "semantic icons replace repeated action verb prefixes");
+    assert.equal(
+      unifiedActions.find((action) => action.dataset.messageId === "tool-separated")
+        ?.findByClass("codex-ai-elements-tool-status")?.dataset.icon,
+      "search"
+    );
+    assert.equal(
+      unifiedActions.find((action) => action.dataset.messageId === "diff-separated")
+        ?.findByClass("codex-ai-elements-tool-status")?.dataset.icon,
+      "file-diff"
+    );
     assert.equal(assistantTurnRoot.findAllByClass("codex-action-item-time").length, 0,
       "message clock time is never presented as Tool duration");
     assert.equal(assistantTurnRoot.findAllByClass("codex-action-item-detail").length, 0,
@@ -3027,6 +3038,35 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     );
     assert.equal(providerReasoningDom.length, 2,
       "each Provider reasoning segment owns one independent Reasoning disclosure");
+    assert.ok(providerReasoningDom.every((reasoning) =>
+      reasoning.parent?.hasClass("codex-assistant-turn-spine")
+    ), "Provider Reasoning is a direct ChainOfThought child");
+    assert.ok(providerReasoningDom.every((reasoning) =>
+      reasoning.closest(".codex-assistant-turn-node") === null
+    ), "Provider Reasoning bypasses the legacy process-node wrapper");
+    assert.equal(assistantTurnRoot.findAllByClass("codex-assistant-turn-node-marker").length, 0,
+      "the old status ring and completion check are absent");
+    const firstReasoningTrigger = providerReasoningDom[0]
+      .findByClass("codex-ai-elements-reasoning-trigger")!;
+    assert.deepEqual(
+      firstReasoningTrigger.children.map((child) => child.className),
+      [
+        "codex-ai-elements-reasoning-icon",
+        "codex-ai-elements-reasoning-label",
+        "codex-ai-elements-reasoning-caret"
+      ],
+      "Reasoning Trigger follows Brain, status or duration, then Chevron"
+    );
+    assert.equal(firstReasoningTrigger.children[0]?.dataset.icon, "brain");
+    assert.equal(firstReasoningTrigger.children[2]?.dataset.icon, "chevron-down");
+    assert.deepEqual(
+      new Set(
+        assistantTurnRoot.findAllByClass("codex-assistant-turn-node-icon")
+          .map((icon) => icon.dataset.icon)
+      ),
+      new Set(["dot", "search", "image"]),
+      "ordinary Steps retain only the frozen semantic Dot, Search, and Image icons"
+    );
     const providerReasoningText = providerReasoningDom.map((element) => renderedText(element)).join("\n");
     assert.match(renderedText(providerReasoningDom[0]), new RegExp(siblingCanaries.publicReasoning, "u"));
     assert.doesNotMatch(renderedText(providerReasoningDom[0]), new RegExp(siblingCanaries.publicReasoningAfterTool, "u"));
@@ -3087,6 +3127,13 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       "the Tool row keeps its DOM identity across a status update"
     );
     assert.equal(toolRowBefore.attributes.get("data-tool-status"), "running");
+    assert.equal(toolRowBefore.findAllByClass("codex-action-item-prefix").length, 0,
+      "a local Tool status patch does not restore the removed action prefix");
+    assert.equal(
+      toolRowBefore.findByClass("codex-ai-elements-tool-status")?.dataset.icon,
+      "search",
+      "a local Tool status patch preserves its semantic icon"
+    );
 
     const visibleTurnCanaries = [
       siblingCanaries.answer,
@@ -3509,7 +3556,8 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     assert.match(renderedText(searchAction), /查询EchoInk/u);
     assert.match(renderedText(searchAction), /1 条结果/u);
     assert.match(renderedText(searchAction), /projects\/EchoInk\.mdmatched/u);
-    assert.match(renderedText(createAction), /已创建/u);
+    assert.doesNotMatch(renderedText(createAction), /已创建/u,
+      "the file-diff icon replaces the repeated create verb prefix");
     assert.match(renderedText(createAction), /目标outputs\/Result\.md/u);
     const createPreviewText = createAction.findByClass("codex-action-preview-content")?.textContent ?? "";
     assert.match(createPreviewText, /line 1[\s\S]*line 6[\s\S]*…/u);
@@ -3521,7 +3569,8 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     assert.match(renderedText(moveAction), /原路径Old\.md新路径New\.md/u);
     assert.match(renderedText(deleteAction), /Trash\.md已移到 Obsidian 回收站，可恢复/u);
     assert.match(renderedText(commandAction), /终端\$ npm run typecheck[\s\S]*typecheck passed/u);
-    assert.match(renderedText(unknownAction), /已调用[\s\S]*third_party_create_everything/u);
+    assert.match(renderedText(unknownAction), /third_party_create_everything/u);
+    assert.doesNotMatch(renderedText(unknownAction), /已调用/u);
     assert.match(renderedText(unknownAction), /参数摘要pathUnknown\.md结果done/u);
     assert.match(renderedText(semanticFailure), /失败原因明确失败原因/u);
     const userFacingText = renderedText(userFacingRoot);
@@ -3618,15 +3667,15 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     }).renderAssistantTurn(englishSurface, englishTurn!, false);
     const englishRoot = englishSurface.findByClass("codex-message-type-assistantTurn")!;
     assert.equal(
-      englishRoot.findByClass("codex-assistant-turn-summary-copy")?.textContent,
-      "Completed · 7 steps · 2 tools · 8s"
+      englishRoot.findAllByClass("codex-assistant-turn-summary-copy").length,
+      0
     );
     assert.deepEqual(
       new Set(
         englishRoot.findAllByClass("codex-assistant-turn-section-primary")
           .map((label) => label.textContent)
       ),
-      new Set(["Process", "Reasoning", "Tools & Sources", "Final Answer"])
+      new Set(["Final Answer"])
     );
     assert.deepEqual(
       new Set(
@@ -3641,7 +3690,8 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       "English source chrome uses the Turn's single-source count"
     );
     assert.match(renderedText(englishRoot), /Public reasoning · 2s/u);
-    assert.match(renderedText(englishRoot), /Searched/u);
+    assert.doesNotMatch(renderedText(englishRoot), /Searched/u,
+      "English ChainOfThought rows also omit action verb prefixes");
     assert.equal(
       englishRoot.findAllByClass("codex-action-item")
         .find((action) => action.dataset.messageId === "tool-separated")
@@ -3661,11 +3711,8 @@ export async function runSmoothConversationUiTests(): Promise<void> {
         .some((head) => head.attributes.get("title") === "View file changes"),
       "English action details expose English accessible chrome"
     );
-    assert.ok(
-      englishRoot.findAllByClass("codex-assistant-turn-node-marker")
-        .every((marker) => marker.attributes.get("title") === "Completed"),
-      "English terminal node status ARIA stays English"
-    );
+    assert.equal(englishRoot.findAllByClass("codex-assistant-turn-node-marker").length, 0,
+      "English history also omits the status ring and completion check");
     for (const action of englishRoot.findAllByClass("codex-action-item-expandable")) {
       action.open = true;
       action.ontoggle?.({ isTrusted: false });
@@ -3744,17 +3791,13 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     /\.codex-assistant-turn-node\.is-completed,\s*\.codex-assistant-turn-node\.is-skipped\s*\{[^}]*opacity:/u,
     "completed process nodes retain full text contrast instead of dimming the whole row"
   );
-  assert.match(
-    styles,
-    /\.codex-assistant-turn-node\.is-completed \.codex-assistant-turn-node-marker\s*\{[^}]*--echoink-conversation-status-success/u,
-    "completed process nodes use a static state color"
-  );
-  assert.match(styles, /@media \(prefers-reduced-motion:\s*no-preference\)[\s\S]*?\.codex-assistant-turn-node\.is-current[\s\S]*?codex-assistant-turn-current/u);
-  assert.match(styles, /@media \(prefers-reduced-motion:\s*reduce\)[\s\S]*?\.codex-assistant-turn-node\.is-current[\s\S]*?animation:\s*none;/u);
+  assert.match(styles, /\.codex-assistant-turn-node-icon\s*\{[\s\S]*?border:\s*0;[\s\S]*?border-radius:\s*0;/u,
+    "ordinary Step icons have no circular status marker chrome");
   assert.match(styles, /\.codex-assistant-turn-section-secondary\s*\{[\s\S]*?font-weight:\s*400;/u);
   assert.match(styles, /\.codex-assistant-turn-section-label\s*\{[\s\S]*?font-size:\s*var\(--echoink-conversation-font-label-primary\);/u);
   assert.match(styles, /\.codex-assistant-turn-section-secondary\s*\{[\s\S]*?font-size:\s*var\(--echoink-conversation-font-label-secondary\);/u);
-  assert.match(styles, /\.codex-assistant-turn-summary-copy\s*\{[\s\S]*?font-variant-numeric:\s*tabular-nums;[\s\S]*?text-wrap:\s*pretty;/u);
+  assert.doesNotMatch(styles, /\.codex-assistant-turn-summary-copy\s*\{/u,
+    "the removed outer process summary has no visual layer");
   assert.match(styles, /\.codex-assistant-turn-answer\s*\{[\s\S]*?max-width:\s*min\(72ch, 100%\);[\s\S]*?overflow-wrap:\s*anywhere;/u);
   assert.doesNotMatch(styles, /\.codex-assistant-turn-action-ledger-summary/u,
     "the removed repeated Tool quantity has no leftover visual layer");
@@ -3763,10 +3806,10 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     /\.codex-assistant-turn-action-node\.is-success(?:\[open\])?\s*\{[^}]*opacity:/u,
     "completed Tool headers retain full row contrast"
   );
-  assert.match(styles, /\.codex-assistant-turn-action-ledger \.codex-action-item-main\s*\{[\s\S]*?flex-wrap:\s*wrap;[\s\S]*?font-size:\s*var\(--echoink-conversation-font-status\);[\s\S]*?font-weight:\s*400;[\s\S]*?line-height:\s*var\(--echoink-conversation-line-status\);/u);
-  assert.match(styles, /\.codex-assistant-turn-action-ledger \.codex-action-item-prefix\s*\{[\s\S]*?font-weight:\s*400;/u);
-  assert.match(styles, /\.codex-assistant-turn-action-ledger \.codex-action-item-duration,[\s\S]*?font-variant-numeric:\s*tabular-nums;/u);
-  assert.match(styles, /\.codex-assistant-turn-action-ledger[\s\S]*?\.codex-process-file-text\.codex-action-item-file\s*\{[\s\S]*?overflow-wrap:\s*anywhere;[\s\S]*?text-overflow:\s*clip;[\s\S]*?white-space:\s*normal;/u);
+  assert.match(styles, /\.codex-assistant-turn \.codex-assistant-turn-action-node \.codex-action-item-main\s*\{[\s\S]*?flex-wrap:\s*wrap;[\s\S]*?font-size:\s*var\(--echoink-conversation-font-status\);[\s\S]*?font-weight:\s*400;[\s\S]*?line-height:\s*var\(--echoink-conversation-line-status\);/u);
+  assert.doesNotMatch(styles, /\.codex-assistant-turn-action-ledger \.codex-action-item-prefix\s*\{/u);
+  assert.match(styles, /\.codex-assistant-turn \.codex-assistant-turn-action-node \.codex-action-item-duration,[\s\S]*?font-variant-numeric:\s*tabular-nums;/u);
+  assert.match(styles, /\.codex-assistant-turn \.codex-assistant-turn-action-node[\s\S]*?\.codex-process-file-text\.codex-action-item-file\s*\{[\s\S]*?overflow-wrap:\s*anywhere;[\s\S]*?text-overflow:\s*clip;[\s\S]*?white-space:\s*normal;/u);
   assert.match(styles, /\.codex-assistant-turn-action-node > \.codex-action-item-head:focus-visible\s*\{[\s\S]*?outline:\s*2px solid var\(--echoink-conversation-focus\);/u);
   assert.match(styles, /\.codex-assistant-turn-action-node\.is-current \.codex-ai-elements-tool-status\s*\{[\s\S]*?color:\s*var\(--echoink-conversation-status-running\);/u);
   assert.match(styles, /details\.codex-action-item\.codex-ai-elements-tool:not\(\[open\]\)[\s\S]*?border:\s*0;/u);
@@ -3781,8 +3824,8 @@ export async function runSmoothConversationUiTests(): Promise<void> {
   assert.match(styles, /\.codex-assistant-turn-action-node\[open\] \.codex-smooth-ai-artifact,[\s\S]*?\.codex-assistant-turn-resource\[open\] \.codex-diff-files\s*\{[\s\S]*?border:\s*0;/u);
   assert.match(styles, /\.codex-ai-elements-chain-of-thought,[\s\S]*?border:\s*0;[\s\S]*?background:\s*transparent;[\s\S]*?box-shadow:\s*none;/u);
   assert.match(styles, /\.codex-action-item\.codex-ai-elements-tool,[\s\S]*?border:\s*0;[\s\S]*?background:\s*transparent;[\s\S]*?box-shadow:\s*none;/u);
-  assert.match(styles, /@media \(prefers-reduced-motion:\s*no-preference\)[\s\S]*?\.codex-assistant-turn-action-node\.is-current[\s\S]*?codex-ai-elements-reasoning-pulse/u);
-  assert.match(styles, /@media \(prefers-reduced-motion:\s*reduce\)[\s\S]*?\.codex-assistant-turn-action-node\.is-current[\s\S]*?animation:\s*none;/u);
+  assert.match(styles, /@keyframes codex-ai-elements-reasoning-shimmer/u);
+  assert.match(styles, /\.codex-ai-elements-reasoning-label\.is-shimmering\s*\{[\s\S]*?background-clip:\s*text;[\s\S]*?animation:\s*codex-ai-elements-reasoning-shimmer/u);
   assert.match(styles, /\.codex-assistant-turn-resource\s*\{[\s\S]*?border:\s*0;/u);
   assert.match(styles, /\.codex-assistant-turn-resource\[open\]\s*\{[\s\S]*?border:\s*1px solid var\(--background-modifier-border\);/u);
   assert.match(styles, /\.codex-interaction-progress\s*\{[\s\S]*?font-variant-numeric:\s*tabular-nums;/u);

@@ -1,3 +1,5 @@
+import { setIcon } from "obsidian";
+
 export type AIElementsStatus = "pending" | "running" | "success" | "error";
 
 export interface AIElementsDisclosure {
@@ -9,6 +11,11 @@ export interface AIElementsDisclosure {
 export interface AIElementsSourcesList {
   readonly root: HTMLElement;
   readonly list: HTMLElement;
+}
+
+export interface AIElementsContainer {
+  readonly body: HTMLElement;
+  readonly root: HTMLElement;
 }
 
 export function markAIElementsMessage(
@@ -44,18 +51,18 @@ export function markAIElementsResponse(
 export function createAIElementsChainOfThought(
   container: HTMLElement,
   options: Readonly<{
-    bodyId: string;
-    open: boolean;
     status: AIElementsStatus;
   }>
-): AIElementsDisclosure {
-  return createDisclosure(container, {
-    ...options,
-    pattern: "chain-of-thought",
-    rootClass: "codex-ai-elements-chain-of-thought",
-    triggerClass: "codex-ai-elements-chain-of-thought-trigger",
-    contentClass: "codex-ai-elements-chain-of-thought-content"
+): AIElementsContainer {
+  const root = container.createDiv({
+    cls: "codex-ai-elements-chain-of-thought",
+    attr: { "data-ai-elements-pattern": "chain-of-thought" }
   });
+  applyAIElementsStatus(root, options.status);
+  const body = root.createDiv({
+    cls: "codex-ai-elements-chain-of-thought-content"
+  });
+  return { body, root };
 }
 
 export function createAIElementsReasoning(
@@ -74,14 +81,22 @@ export function createAIElementsReasoning(
     triggerClass: "codex-ai-elements-reasoning-trigger",
     contentClass: "codex-ai-elements-reasoning-content"
   });
+  const icon = elements.summary.createSpan({
+    cls: "codex-ai-elements-reasoning-icon",
+    attr: { "aria-hidden": "true" }
+  });
+  icon.dataset.icon = "brain";
+  setIcon(icon, "brain");
   elements.summary.createSpan({
+    cls: `codex-ai-elements-reasoning-label${options.status === "running" ? " is-shimmering" : ""}`,
+    text: options.summary
+  });
+  const caret = elements.summary.createSpan({
     cls: "codex-ai-elements-reasoning-caret",
     attr: { "aria-hidden": "true" }
   });
-  elements.summary.createSpan({
-    cls: "codex-ai-elements-reasoning-label",
-    text: options.summary
-  });
+  caret.dataset.icon = "chevron-down";
+  setIcon(caret, "chevron-down");
   return elements;
 }
 
