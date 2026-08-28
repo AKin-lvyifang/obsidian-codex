@@ -893,14 +893,18 @@ export class CodexMessageListRenderer {
       : reasoning.durationMs === undefined
         ? copy.process.publicReasoningCompleted
         : copy.process.publicReasoningDuration(formatCompactDuration(reasoning.durationMs)));
-    if (body.dataset.renderedText !== reasoning.text) {
+    const displayText = userVisibleProviderReasoningText(
+      reasoning.text,
+      assistantTurnHasPersonalMemoryContext(turn)
+    );
+    if (body.dataset.renderedText !== displayText) {
       preserveTextSelectionDuringMutation(body, () => {
-        if (reasoning.text.trim()) {
-          renderRichText(env.app, env.component, body, reasoning.text);
+        if (displayText.trim()) {
+          renderRichText(env.app, env.component, body, displayText);
         } else {
           body.empty();
         }
-        body.dataset.renderedText = reasoning.text;
+        body.dataset.renderedText = displayText;
       });
     }
     this.scheduleDisclosureAutoFold(
@@ -2194,7 +2198,11 @@ export class CodexMessageListRenderer {
       )
     );
     if (carrier) elements.root.dataset.messageId = carrier.id;
-    elements.body.dataset.renderedText = reasoning.text;
+    const displayText = userVisibleProviderReasoningText(
+      reasoning.text,
+      assistantTurnHasPersonalMemoryContext(turn)
+    );
+    elements.body.dataset.renderedText = displayText;
     this.scheduleDisclosureAutoFold(
       `reasoning:${disclosureKey}`,
       disclosureKey,
@@ -2226,8 +2234,8 @@ export class CodexMessageListRenderer {
       elements.summary.setAttribute("aria-expanded", String(elements.root.open));
       env.onScheduleMeasure();
     };
-    if (reasoning.text.trim()) {
-      renderRichText(env.app, env.component, elements.body, reasoning.text);
+    if (displayText.trim()) {
+      renderRichText(env.app, env.component, elements.body, displayText);
     }
   }
 
@@ -3454,6 +3462,95 @@ export class CodexMessageListRenderer {
       if (!valid.has(key)) this.virtualRowHeights.delete(key);
     }
   }
+}
+
+/**
+ * Provider reasoning remains verbatim in the durable Pi transcript and the
+ * internal view model. Only the user-facing Reasoning DOM receives this copy:
+ * models need opaque Memory handles to call Tools, but users should see the
+ * decision in plain language rather than implementation identifiers.
+ */
+const PERSONAL_MEMORY_TOOL_CARD_TITLES = new Set([
+  "正在检查已有记忆",
+  "已完成已有记忆检查",
+  "检查已有记忆",
+  "正在读取相关记忆",
+  "已读取相关记忆",
+  "读取相关记忆",
+  "正在整理个人记忆",
+  "已完成个人记忆处理",
+  "写入个人记忆"
+]);
+
+function containsPersonalMemoryInternalSignal(text: string): boolean {
+  return /\bmem_[0-9a-f]{4,64}\b|\bmemory_(?:search|read|write)\b|\bprofile_update(?:d)?\b|\bshared-user\/memory\/|\bpersonal_memory_[a-z0-9_]+\b|\bechoink_memory_result\b|\bschema\s*[:=]\s*["']?echoink\.memory(?:\.v\d+)?|\bpi:\/\//iu.test(text);
+}
+
+function assistantTurnHasPersonalMemoryContext(turn: AgentTurnView): boolean {
+  return turn.providerReasoningSegments.some((segment) =>
+    containsPersonalMemoryInternalSignal(segment.text)
+  ) || turn.messages.some((message) =>
+    PERSONAL_MEMORY_TOOL_CARD_TITLES.has(message.title ?? "")
+  );
+}
+
+export function userVisibleProviderReasoningText(
+  text: string,
+  personalMemoryContext = containsPersonalMemoryInternalSignal(text)
+): string {
+  if (!personalMemoryContext) return text;
+  const memoryKindLabel: Readonly<Record<string, string>> = {
+    fact: "事实",
+    view: "观点",
+    decision: "决定",
+    goal: "目标",
+    task: "待办",
+    open_loop: "未决事项",
+    episode: "经历"
+  };
+  const memoryOutcomeLabel: Readonly<Record<string, string>> = {
+    created: "已记住",
+    updated: "已更新",
+    profile_updated: "已更新用户信息",
+    forgotten: "已忘记",
+    already_present: "原来已经记过",
+    possible_duplicate: "可能与已有记忆重复",
+    current: "当前有效"
+  };
+
+  return text
+    .replace(/(?:原记录|旧记录|已有记录)\s*mem_[0-9a-f]{4,64}\b/giu, "原有记忆")
+    .replace(/(?:新记录|更新后的记录)\s*mem_[0-9a-f]{4,64}\b/giu, "更新后的记忆")
+    .replace(/\bshared-user\/memory\/[\w./-]+/giu, "内部记忆位置")
+    .replace(/\bmem_[0-9a-f]{4,64}\b/giu, "相关记忆")
+    .replace(/\bcall_[a-z0-9_-]{4,128}\b/giu, "本次操作")
+    .replace(/\bmemory_search\b/giu, "检查已有长期记忆")
+    .replace(/\bmemory_read\b/giu, "读取长期记忆")
+    .replace(/\bmemory_write\b/giu, "更新长期记忆")
+    .replace(
+      /\b(?:outcome|operation|status)\s*[:=]\s*["']?(created|updated|profile_updated|forgotten|already_present|possible_duplicate|current)["']?/giu,
+      (_match, outcome: string) => `记忆结果：${memoryOutcomeLabel[outcome.toLowerCase()] ?? outcome}`
+    )
+    .replace(/\bprofile_updated\b/giu, "已更新用户信息")
+    .replace(/\bprofile_update\b/giu, "更新用户信息")
+    .replace(/\balready_present\b/giu, "原来已经记过")
+    .replace(/\bpossible_duplicate\b/giu, "可能与已有记忆重复")
+    .replace(
+      /\b(?:authorization_failed|current_turn_search_required|personal_memory_[a-z0-9_]+)\b/giu,
+      "记忆操作未完成"
+    )
+    .replace(/\bexpectedRevision\b/giu, "当前记忆版本")
+    .replace(/\brevision\s*(?:[:=]\s*)?\d+(?:\s*[–—-]\s*\d+)?\b/giu, "当前记忆版本")
+    .replace(/\brevision\b/giu, "记忆版本")
+    .replace(/\b(?:targetId|recordId)\b/gu, "对应记忆")
+    .replace(/\bprofileKey\b/gu, "用户信息类别")
+    .replace(/\bschema\s*[:=]\s*["']?echoink\.memory(?:\.v\d+)?["']?/giu, "记忆格式")
+    .replace(/\bechoink_memory_result\b/giu, "记忆结果")
+    .replace(/\bpi:\/\/[\w%./?=&:+-]+/giu, "对话来源")
+    .replace(
+      /\bkind\s*[:=]\s*(fact|view|decision|goal|task|open_loop|episode)\b/giu,
+      (_match, kind: string) => `记忆类型：${memoryKindLabel[kind.toLowerCase()] ?? kind}`
+    );
 }
 
 export const isProcessItemType = isAgentProcessItemType;

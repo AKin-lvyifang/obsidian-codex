@@ -44,6 +44,7 @@ export async function runPiChatUiProjectorTests(): Promise<void> {
   assertImageUserEntriesProjectWithoutPayloadDuplication();
   assertHiddenNoteMentionContextProjectsOntoItsUserMessage();
   assertProviderReasoningSegmentsStayDistinctAndReopen();
+  assertPersonalMemoryToolCardsStayUserFacing();
   assertPersonalMemoryFailuresStayUserFacing();
   assertControlledTransportAbortUsesFriendlyCopy();
   assertHiddenDocumentContextProjectsOnlyDisplayMetadata();
@@ -254,8 +255,194 @@ function assertProviderReasoningSegmentsStayDistinctAndReopen(): void {
   assert.equal(memoryWriteTool?.itemType, "dynamicToolCall");
   assert.equal(memoryWriteTool?.processKind, "tool");
   assert.equal(memoryWriteTool?.title, "写入个人记忆");
+  assert.equal(memoryWriteTool?.status, "failed");
+  assert.equal(
+    memoryWriteTool?.text,
+    "这次记忆操作没有完成，长期记忆未发生变化。"
+  );
+  assert.equal(memoryWriteTool?.processOutput, memoryWriteTool?.text);
   const reopened = projector.projectSessionBranch(durableInput);
   assert.deepEqual(reopened.messages, durable.messages);
+}
+
+function assertPersonalMemoryToolCardsStayUserFacing(): void {
+  const cases = [
+    {
+      toolName: "memory_search",
+      toolCallId: "safe-live-search",
+      processKind: "search",
+      runningTitle: "正在检查已有记忆",
+      runningText: "正在检查是否已有相关记忆。",
+      completedTitle: "已完成已有记忆检查",
+      completedText: "已有记忆检查完成。"
+    },
+    {
+      toolName: "memory_read",
+      toolCallId: "safe-live-read",
+      processKind: "view",
+      runningTitle: "正在读取相关记忆",
+      runningText: "正在读取与当前对话相关的记忆。",
+      completedTitle: "已读取相关记忆",
+      completedText: "相关记忆读取完成。"
+    },
+    {
+      toolName: "memory_write",
+      toolCallId: "safe-live-write",
+      processKind: "tool",
+      runningTitle: "正在整理个人记忆",
+      runningText: "正在整理值得长期保留的信息。",
+      completedTitle: "已完成个人记忆处理",
+      completedText: "个人记忆处理完成。"
+    }
+  ] as const;
+  const assertSafeCard = (
+    card: PiChatUiViewModel["messages"][number],
+    expected: Readonly<{
+      processKind: string;
+      title: string;
+      text: string;
+      status: string;
+      processOutput?: string;
+    }>
+  ) => {
+    assert.equal(card.processKind, expected.processKind);
+    assert.equal(card.title, expected.title);
+    assert.equal(card.text, expected.text);
+    assert.equal(card.status, expected.status);
+    assert.equal(card.processInput, undefined);
+    assert.equal(card.processInputAvailability, "empty");
+    assert.equal(card.processOutput, expected.processOutput);
+    assert.equal(card.details, undefined);
+    assert.equal(card.files, undefined);
+    assert.doesNotMatch(
+      JSON.stringify(card),
+      /memory_(?:search|read|write)|mem_[a-z0-9]+|revision|MEMORY_(?:ARGS|RESULT)_CANARY|\/private\/memory|source:\/\//iu
+    );
+  };
+
+  const projector = new PiChatUiProjector();
+  let live = projector.createEmpty({
+    piSessionId: "session-memory-safe-live",
+    activeLeafId: "assistant-memory-safe-live",
+    now: 1
+  });
+  for (const [index, testCase] of cases.entries()) {
+    live = project(projector, live, runtimeEvent("tool_execution_start", index * 2 + 2, {
+      toolCallId: testCase.toolCallId,
+      toolName: testCase.toolName,
+      args: {
+        rawCanary: "MEMORY_ARGS_CANARY",
+        id: "mem_args_canary",
+        path: "/private/memory/args.md",
+        uri: "source://memory-args"
+      }
+    }, "session-memory-safe-live", "run-memory-safe-live"));
+    assertSafeCard(toolByCall(live, testCase.toolCallId), {
+      processKind: testCase.processKind,
+      title: testCase.runningTitle,
+      text: testCase.runningText,
+      status: "running"
+    });
+
+    live = project(projector, live, runtimeEvent("tool_execution_end", index * 2 + 3, {
+      toolCallId: testCase.toolCallId,
+      toolName: testCase.toolName,
+      result: {
+        content: [{ type: "text", text: "MEMORY_RESULT_CANARY" }],
+        details: {
+          source: "echoink-personal-memory",
+          status: "completed",
+          toolId: testCase.toolName,
+          revision: 991_337,
+          recordIds: ["mem_result_canary"],
+          path: "/private/memory/result.md",
+          uri: "source://memory-result"
+        },
+        isError: false
+      },
+      isError: false
+    }, "session-memory-safe-live", "run-memory-safe-live"));
+    assertSafeCard(toolByCall(live, testCase.toolCallId), {
+      processKind: testCase.processKind,
+      title: testCase.completedTitle,
+      text: testCase.completedText,
+      status: "completed",
+      processOutput: testCase.completedText
+    });
+  }
+
+  const durableEntries: PiSessionBranchEntryView[] = [];
+  let parentId: string | null = null;
+  for (const [index, testCase] of cases.entries()) {
+    const assistantEntryId = `assistant-${testCase.toolCallId}`;
+    const toolEntryId = `result-${testCase.toolCallId}`;
+    durableEntries.push(messageEntry(assistantEntryId, parentId, index * 2 + 1, {
+      role: "assistant",
+      content: [{
+        type: "toolCall",
+        id: testCase.toolCallId,
+        name: testCase.toolName,
+        arguments: {
+          rawCanary: "MEMORY_ARGS_CANARY",
+          id: "mem_args_canary",
+          path: "/private/memory/args.md",
+          uri: "source://memory-args"
+        }
+      }],
+      stopReason: "toolUse",
+      timestamp: index * 2 + 1
+    }));
+    durableEntries.push(messageEntry(toolEntryId, assistantEntryId, index * 2 + 2, {
+      role: "toolResult",
+      toolCallId: testCase.toolCallId,
+      toolName: testCase.toolName,
+      content: [{ type: "text", text: "MEMORY_RESULT_CANARY" }],
+      details: {
+        source: "echoink-personal-memory",
+        status: "completed",
+        toolId: testCase.toolName,
+        revision: 991_337,
+        recordIds: ["mem_result_canary"],
+        path: "/private/memory/result.md",
+        uri: "source://memory-result"
+      },
+      isError: false,
+      timestamp: index * 2 + 2
+    }));
+    parentId = toolEntryId;
+  }
+  assert.match(JSON.stringify(durableEntries), /MEMORY_ARGS_CANARY/u);
+  assert.match(JSON.stringify(durableEntries), /MEMORY_RESULT_CANARY/u);
+
+  const durableInput = {
+    piSessionId: "session-memory-safe-durable",
+    activeLeafId: parentId,
+    entries: durableEntries,
+    runState: "completed" as const,
+    productRunId: "run-memory-safe-durable",
+    runIdentities: [{
+      productRunId: "run-memory-safe-durable",
+      userEntryId: "user-memory-safe-durable",
+      toolCallIds: cases.map((testCase) => testCase.toolCallId)
+    }],
+    now: 10
+  };
+  const durable = new PiChatUiProjector().projectSessionBranch(durableInput);
+  for (const testCase of cases) {
+    assertSafeCard(toolByCall(durable, testCase.toolCallId), {
+      processKind: testCase.processKind,
+      title: testCase.completedTitle,
+      text: testCase.completedText,
+      status: "completed",
+      processOutput: testCase.completedText
+    });
+  }
+  const reopened = new PiChatUiProjector().projectSessionBranch(durableInput);
+  assert.deepEqual(
+    reopened.messages,
+    durable.messages,
+    "reopen keeps every Memory Tool card user-facing and free of raw payloads"
+  );
 }
 
 function assertPersonalMemoryFailuresStayUserFacing(): void {

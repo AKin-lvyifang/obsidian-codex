@@ -11,7 +11,8 @@ import { renderRichText } from "../ui/render-message";
 import {
   CodexMessageListRenderer,
   nextReasoningDisclosureState,
-  preserveTextSelectionDuringMutation
+  preserveTextSelectionDuringMutation,
+  userVisibleProviderReasoningText
 } from "../ui/codex-view/message-list";
 import { buildAgentTurnProjection } from "../ui/codex-view/agent-turn-process";
 import { buildActionTimeline } from "../ui/codex-view/action-timeline";
@@ -2267,6 +2268,36 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       publicReasoningAfterTool: "PUBLIC_PROVIDER_REASONING_AFTER_TOOL_DOM_CANARY",
       privateReasoning: "PRIVATE_REASONING_DOM_CANARY"
     } as const;
+    const isolatedInternalReasoning = [
+      "revision 29",
+      "recordId",
+      "targetId",
+      "call_abcd",
+      "kind=goal"
+    ].join(" ");
+    const ordinaryTechnicalReasoning = "检查 Git revision 29、recordId、targetId、call_abcd 和 kind=task 的代码语义";
+    assert.equal(
+      userVisibleProviderReasoningText(ordinaryTechnicalReasoning),
+      ordinaryTechnicalReasoning,
+      "Memory display copy does not rewrite similarly formatted fields in ordinary technical reasoning"
+    );
+    const internalMemoryReasoning = [
+      "原记录 mem_8a45",
+      "新记录 mem_0123456789abcdef0123456789abcdef",
+      "call_0123456789abcdef0123456789abcdef",
+      "memory_search",
+      "memory_read",
+      "memory_write",
+      "outcome=profile_updated",
+      "revision 28",
+      "targetId",
+      "profileKey",
+      "schema=echoink.memory.v1",
+      "shared-user/memory/active/mem_0123456789abcdef0123456789abcdef.md",
+      "pi://conversation/session/entry",
+      "kind=open_loop",
+      "Repository Harness ProductRun view task goal"
+    ].join(" ");
     const reasoningSibling = {
       ...structuredRunning,
       id: "reasoning-separated",
@@ -2302,7 +2333,7 @@ export async function runSmoothConversationUiTests(): Promise<void> {
           reasoningId: "provider-reasoning-separated-before-tool",
           source: "provider_public",
           status: "completed",
-          text: siblingCanaries.publicReasoning,
+          text: `${siblingCanaries.publicReasoning} ${isolatedInternalReasoning}`,
           startedAt: 2,
           updatedAt: 4,
           completedAt: 4,
@@ -2311,7 +2342,7 @@ export async function runSmoothConversationUiTests(): Promise<void> {
           reasoningId: "provider-reasoning-separated-after-tool",
           source: "provider_public",
           status: "completed",
-          text: siblingCanaries.publicReasoningAfterTool,
+          text: `${siblingCanaries.publicReasoningAfterTool} ${internalMemoryReasoning}`,
           startedAt: 8,
           updatedAt: 9,
           completedAt: 9,
@@ -3171,16 +3202,45 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     );
     const providerReasoningText = providerReasoningDom.map((element) => renderedText(element)).join("\n");
     assert.match(renderedText(providerReasoningDom[0]), new RegExp(siblingCanaries.publicReasoning, "u"));
+    assert.doesNotMatch(
+      renderedText(providerReasoningDom[0]),
+      /revision\s*29|recordId|targetId|call_abcd|kind\s*=\s*goal/iu,
+      "isolated internal fields are hidden without relying on a Memory Tool name or Memory record ID in the same segment"
+    );
+    assert.match(
+      renderedText(providerReasoningDom[0]),
+      /当前记忆版本.*对应记忆.*对应记忆.*本次操作.*记忆类型：目标/su
+    );
     assert.doesNotMatch(renderedText(providerReasoningDom[0]), new RegExp(siblingCanaries.publicReasoningAfterTool, "u"));
     assert.match(renderedText(providerReasoningDom[1]), new RegExp(siblingCanaries.publicReasoningAfterTool, "u"));
     assert.doesNotMatch(renderedText(providerReasoningDom[1]), new RegExp(siblingCanaries.publicReasoning, "u"));
+    assert.doesNotMatch(
+      providerReasoningText,
+      /mem_[0-9a-f]{4,64}|call_[a-z0-9_-]{4,128}|memory_(?:search|read|write)|profile_updated|revision\s*28|targetId|profileKey|schema\s*=\s*echoink\.memory\.v1|shared-user\/memory\/|pi:\/\/|kind\s*=\s*open_loop/iu,
+      "user-visible Provider Reasoning hides Personal Memory implementation fields"
+    );
+    assert.match(
+      providerReasoningText,
+      /原有记忆.*更新后的记忆.*本次操作.*检查已有长期记忆.*读取长期记忆.*更新长期记忆.*记忆结果：已更新用户信息.*当前记忆版本.*对应记忆.*用户信息类别.*记忆格式.*内部记忆位置.*对话来源.*记忆类型：未决事项/su,
+      "user-visible Provider Reasoning keeps the model's meaning in plain language"
+    );
+    assert.match(
+      providerReasoningText,
+      /Repository Harness ProductRun view task goal/u,
+      "ordinary technical words are not rewritten merely because the same Reasoning also mentions Memory"
+    );
+    assert.match(
+      reasoningSibling.assistantTurn?.providerReasoningSegments?.[1]?.text ?? "",
+      /mem_8a45.*memory_search.*outcome=profile_updated.*schema=echoink\.memory\.v1.*kind=open_loop.*Repository Harness ProductRun view task goal/su,
+      "the internal Reasoning view model keeps the Provider text verbatim"
+    );
 
     const localUpdater = renderer as unknown as {
       env: { messages: ChatMessage[] };
       tryUpdateAssistantTurnMessage(row: unknown, message: ChatMessage): boolean;
     };
     const secondReasoningRoot = providerReasoningDom[1];
-    const reasoningDelta = " SECOND_REASONING_DELTA";
+    const reasoningDelta = " SECOND_REASONING_DELTA memory_read mem_fedc";
     const updatedReasoningSibling: ChatMessage = {
       ...reasoningSibling,
       assistantTurn: {
@@ -3203,7 +3263,18 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     );
     assert.equal(assistantTurnRoot.findAllByClass("codex-ai-elements-reasoning")[1], secondReasoningRoot,
       "the Reasoning disclosure keeps its DOM identity across a delta");
-    assert.match(renderedText(secondReasoningRoot), new RegExp(reasoningDelta.trim(), "u"));
+    assert.match(renderedText(secondReasoningRoot), /SECOND_REASONING_DELTA/u);
+    assert.match(renderedText(secondReasoningRoot), /读取长期记忆.*相关记忆/su);
+    assert.doesNotMatch(
+      renderedText(secondReasoningRoot),
+      /memory_read|mem_fedc/u,
+      "a live Provider Reasoning patch also hides internal Memory fields"
+    );
+    assert.doesNotMatch(
+      secondReasoningRoot.findByClass("codex-ai-elements-reasoning-content")?.dataset.renderedText ?? "",
+      /memory_read|mem_fedc/u,
+      "the Reasoning DOM cache stores only user-facing text"
+    );
 
     const answerContentBefore = assistantTurnRoot.findByClass("codex-assistant-turn-answer")!;
     const updatedAnswer: ChatMessage = {

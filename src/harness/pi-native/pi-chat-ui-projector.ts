@@ -1699,6 +1699,37 @@ function toolMessage(input: {
   readonly completedAt?: number;
   readonly vaultPath: string;
 }): ChatMessage {
+  const personalMemoryCopy = personalMemoryToolCopy(
+    input.toolName,
+    input.status,
+    input.result
+  );
+  if (personalMemoryCopy) {
+    return {
+      id: toolMessageId(input.scope, input.toolCallId),
+      role: "tool",
+      itemType: "dynamicToolCall",
+      processKind: personalMemoryCopy.processKind,
+      title: personalMemoryCopy.title,
+      details: undefined,
+      text: personalMemoryCopy.text,
+      processInput: undefined,
+      processOutput: personalMemoryCopy.processOutput,
+      processContentAvailability: personalMemoryCopy.processOutput
+        ? "provided"
+        : "unavailable",
+      processInputAvailability: "empty",
+      processOutputAvailability: personalMemoryCopy.processOutput
+        ? "provided"
+        : "unavailable",
+      files: undefined,
+      status: input.status,
+      runId: input.runId,
+      turnId: input.runId,
+      createdAt: input.createdAt,
+      completedAt: input.completedAt
+    };
+  }
   const privateCopy = input.privacySafe
     ? privacySafeKnowledgeToolCopy(input.toolName, input.status)
     : null;
@@ -2055,10 +2086,32 @@ function settleUnfinishedDurableTools(
   for (const toolCallId of pendingTools) {
     const message = findByIdentity(messages, "tool", toolCallId);
     if (!message || !runtimeMessageStillActive(message.status)) continue;
+    const personalMemoryToolName = personalMemoryToolNameFromCard(message);
     message.status = runState === "cancelled" || runState === "interrupted"
       ? "cancelled"
       : "failed";
     message.completedAt = message.createdAt;
+    if (personalMemoryToolName) {
+      const copy = personalMemoryToolCopy(
+        personalMemoryToolName,
+        message.status,
+        undefined
+      )!;
+      message.title = copy.title;
+      message.text = copy.text;
+      message.processOutput = copy.processOutput;
+      message.processContentAvailability = copy.processOutput
+        ? "provided"
+        : "unavailable";
+      message.processInputAvailability = "empty";
+      message.processOutputAvailability = copy.processOutput
+        ? "provided"
+        : "unavailable";
+      delete message.processInput;
+      delete message.details;
+      delete message.files;
+      continue;
+    }
     if (!message.text) message.text = "工具调用在结果提交前中断";
   }
 }
@@ -2397,6 +2450,90 @@ function exactPiToolDisplayTitle(toolName: string): string | undefined {
   return normalizedToolName(toolName) === "memory_write"
     ? "写入个人记忆"
     : undefined;
+}
+
+function personalMemoryToolCopy(
+  toolName: string,
+  status: string,
+  result: unknown
+): Readonly<{
+  processKind: ProcessEventKind;
+  title: string;
+  text: string;
+  processOutput?: string;
+}> | null {
+  const name = normalizedToolName(toolName);
+  if (!["memory_search", "memory_read", "memory_write"].includes(name)) {
+    return null;
+  }
+  const inProgress = status === "running"
+    || status === "waiting_approval"
+    || status === "approved"
+    || status === "verifying";
+  const interrupted = status === "interrupted" || status === "cancelled";
+  const failureText = personalMemoryToolFailureText(toolName, result);
+  const copy = name === "memory_search"
+    ? {
+        processKind: "search" as const,
+        runningTitle: "正在检查已有记忆",
+        completedTitle: "已完成已有记忆检查",
+        terminalTitle: "检查已有记忆",
+        runningText: "正在检查是否已有相关记忆。",
+        completedText: "已有记忆检查完成。",
+        failedText: "已有记忆检查没有完成。"
+      }
+    : name === "memory_read"
+      ? {
+          processKind: "view" as const,
+          runningTitle: "正在读取相关记忆",
+          completedTitle: "已读取相关记忆",
+          terminalTitle: "读取相关记忆",
+          runningText: "正在读取与当前对话相关的记忆。",
+          completedText: "相关记忆读取完成。",
+          failedText: "相关记忆读取没有完成。"
+        }
+      : {
+          processKind: "tool" as const,
+          runningTitle: "正在整理个人记忆",
+          completedTitle: "已完成个人记忆处理",
+          terminalTitle: "写入个人记忆",
+          runningText: "正在整理值得长期保留的信息。",
+          completedText: "个人记忆处理完成。",
+          failedText: "这次记忆操作没有完成，长期记忆未发生变化。"
+        };
+  const terminalText = failureText
+    ?? (interrupted ? "这次记忆操作已停止。" : copy.failedText);
+  const text = inProgress
+    ? copy.runningText
+    : status === "completed"
+      ? copy.completedText
+      : terminalText;
+  return {
+    processKind: copy.processKind,
+    title: inProgress
+      ? copy.runningTitle
+      : status === "completed"
+        ? copy.completedTitle
+        : copy.terminalTitle,
+    text,
+    ...(inProgress ? {} : { processOutput: text })
+  };
+}
+
+function personalMemoryToolNameFromCard(
+  message: Readonly<ChatMessage>
+): "memory_search" | "memory_read" | "memory_write" | null {
+  const title = message.title ?? "";
+  if (["正在检查已有记忆", "已完成已有记忆检查", "检查已有记忆"].includes(title)) {
+    return "memory_search";
+  }
+  if (["正在读取相关记忆", "已读取相关记忆", "读取相关记忆"].includes(title)) {
+    return "memory_read";
+  }
+  if (["正在整理个人记忆", "已完成个人记忆处理", "写入个人记忆"].includes(title)) {
+    return "memory_write";
+  }
+  return null;
 }
 
 function personalMemoryToolFailureText(
