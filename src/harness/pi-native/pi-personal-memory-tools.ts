@@ -222,8 +222,8 @@ const MEMORY_WRITE_REQUEST_SCHEMA = Type.Union([
   FORGET_REQUEST_SCHEMA,
   Type.String({ maxLength: MEMORY_WRITE_REQUEST_JSON_MAX_CHARS })
 ]);
-const MEMORY_SEARCH_TOOL_DESCRIPTION = "按查询、类型、范围、状态和日期搜索当前 Vault 的长期 Memory 摘要。两种合法触发：相关历史可能影响当前回答；或准备 create、update、profile_update、forget 前做去重、定位和 revision 获取。任何 memory_write 前都必须在当前用户消息对应的本轮完成 memory_search，历史轮搜索不能替代；exhausted=false 时必须携带相同 query/filters 与 nextCursor 继续分页，直到 exhausted=true。除此之外不机械搜索。";
-const MEMORY_WRITE_TOOL_DESCRIPTION = "System Prompt 判断内容值得跨轮保存且对象清楚时，先在当前用户消息对应的本轮完成 memory_search，再实际调用本 Tool；历史轮搜索不能授权当前轮写入：同义内容已存在就跳过，内容变化时用 update 更新原记录，无相关记录才用 create；普通文字不会落盘，只有真实结构化 Tool 回执才能声称已写入长期 Memory。create 必须选择七类 kind；profile_update 若搜索命中同一用户事实必须传 targetId；forget 响应用户当前明确原话直接忘掉，并逐字填写 evidenceQuote。来源与 revision 由宿主处理。";
+const MEMORY_SEARCH_TOOL_DESCRIPTION = "按查询、类型、范围、状态和日期搜索当前 Vault 的长期 Memory 摘要。两种合法触发：相关历史可能影响当前回答；或准备 create、update、profile_update、forget 前做去重、定位和 revision 获取。当前用户消息对应的本轮首次 memory_write 前必须完成一次 memory_search，历史轮搜索不能替代；exhausted=false 时必须携带相同 query/filters 与 nextCursor 继续分页，直到 exhausted=true。同轮写入成功后可继续写入其余已判断 Memory，不必机械重复搜索；写入失败或 revision 冲突后必须重新搜索。除此之外不机械搜索。";
+const MEMORY_WRITE_TOOL_DESCRIPTION = "System Prompt 判断内容值得跨轮保存且对象清楚时，先在当前用户消息对应的本轮首次写入前完成一次 memory_search，再实际调用本 Tool；历史轮搜索不能授权当前轮写入：同义内容已存在就跳过，内容变化时用 update 更新原记录，无相关记录才用 create；同轮写入成功后可继续写入其余已判断 Memory，写入失败或 revision 冲突后重新搜索。普通文字不会落盘，只有真实结构化 Tool 回执才能声称已写入长期 Memory。create 必须选择七类 kind；profile_update 若搜索命中同一用户事实必须传 targetId；forget 响应用户当前明确原话直接忘掉，并逐字填写 evidenceQuote。来源与 revision 由宿主处理。";
 
 export const PI_PERSONAL_MEMORY_TOOL_SCHEMAS: Readonly<Record<PiPersonalMemoryToolId, TSchema>> = Object.freeze({
   memory_search: Type.Object({
@@ -257,7 +257,7 @@ implements PiVaultAdditionalToolSecurityPort {
   readonly toolNames = PI_PERSONAL_MEMORY_TOOL_IDS;
   private readonly calls = new Map<string, AuthorizedMemoryToolCall>();
   private readonly seenToolCallIds = new Set<string>();
-  private readonly completedSearches = new Map<string, Readonly<{ revision: number }>>();
+  private readonly writeSessions = new Map<string, Readonly<{ revision: number }>>();
 
   constructor(private readonly options: Readonly<{
     currentRuntime(): Readonly<PersonalMemoryRuntimeContext>;
@@ -281,7 +281,7 @@ implements PiVaultAdditionalToolSecurityPort {
     }
     if (current.userEntryId !== currentUserEntry.entryId) return block("authorization_failed");
     if (event.toolName === "memory_search") {
-      this.completedSearches.delete(runtimeSearchKey(current));
+      this.writeSessions.delete(runtimeWriteSessionKey(current));
     }
 
     let args: Readonly<PiPersonalMemoryToolArgumentsById[PiPersonalMemoryToolId]>;
@@ -312,9 +312,9 @@ implements PiVaultAdditionalToolSecurityPort {
         ) {
           return block("authorization_failed");
         }
-        const searchKey = runtimeSearchKey(current);
-        const completedSearch = this.completedSearches.get(searchKey);
-        if (!completedSearch) {
+        const sessionKey = runtimeWriteSessionKey(current);
+        const writeSession = this.writeSessions.get(sessionKey);
+        if (!writeSession) {
           this.authorizePreflightFailure(
             event,
             current,
@@ -323,13 +323,15 @@ implements PiVaultAdditionalToolSecurityPort {
           );
           return;
         }
-        this.completedSearches.delete(searchKey);
+        // Reserve the session for this sequential write. Only a trusted successful
+        // result renews it; every execution failure therefore fails closed.
+        this.writeSessions.delete(sessionKey);
         if (writeRequest.operation === "forget") {
           runtime = Object.freeze({ ...current, explicitlyAuthorized: true });
         }
         authorizedArguments = authorizedWriteArguments(
           writeRequest,
-          completedSearch.revision
+          writeSession.revision
         );
       } else {
         authorizedArguments = args as Readonly<
@@ -431,14 +433,13 @@ implements PiVaultAdditionalToolSecurityPort {
         "authorization"
       );
     }
-    if (
-      call.toolId === "memory_search"
-      && !call.errorCode
-      && isCompletedSearchResult(call.result)
-    ) {
-      this.completedSearches.set(runtimeSearchKey(call.runtime), Object.freeze({
-        revision: call.result.revision
-      }));
+    if (!call.errorCode) {
+      const sessionKey = runtimeWriteSessionKey(call.runtime);
+      if (call.toolId === "memory_search" && isCompletedSearchResult(call.result)) {
+        this.writeSessions.set(sessionKey, Object.freeze({ revision: call.result.revision }));
+      } else if (call.toolId === "memory_write" && isCompletedWriteResult(call.result)) {
+        this.writeSessions.set(sessionKey, Object.freeze({ revision: call.result.revision }));
+      }
     }
     return correctedResult(
       event.toolCallId,
@@ -815,7 +816,7 @@ function memoryToolErrorMessage(code: PiPersonalMemoryToolSafeErrorCode): string
     case "personal_memory_invalid_request":
       return "Memory Tool 未完成：参数无效。请修正 Tool 参数后再试。";
     case "personal_memory_current_turn_search_required":
-      return "Memory Tool 未完成：当前用户消息对应的本轮尚未完成 memory_search，历史轮搜索不能替代。请先调用 memory_search；exhausted=false 时使用 nextCursor 继续分页，直到 exhausted=true，再调用 memory_write。补搜前不要直接重试 memory_write。";
+      return "Memory Tool 未完成：当前用户消息对应的本轮没有可用的完整 memory_search；历史轮搜索不能替代，写入失败后的旧搜索也已失效。请先调用 memory_search；exhausted=false 时使用 nextCursor 继续分页，直到 exhausted=true，再调用 memory_write。补搜前不要直接重试 memory_write。";
     case "personal_memory_not_found":
       return "Memory Tool 未完成：目标 Memory 不存在或已不再可用。";
     case "personal_memory_revision_conflict":
@@ -844,7 +845,7 @@ function normalizeRuntime(value: Readonly<PersonalMemoryRuntimeContext>): Readon
   return Object.freeze(runtime);
 }
 
-function runtimeSearchKey(runtime: Readonly<PersonalMemoryRuntimeContext>): string {
+function runtimeWriteSessionKey(runtime: Readonly<PersonalMemoryRuntimeContext>): string {
   return [
     runtime.vaultId,
     runtime.conversationId,
@@ -863,6 +864,22 @@ function isCompletedSearchResult(
     && Number.isSafeInteger(result.revision)
     && result.revision >= 0
     && result.exhausted === true;
+}
+
+function isCompletedWriteResult(
+  value: unknown
+): value is Readonly<{ revision: number; outcome: MemoryWriteToolOutcome; recordId: string }> {
+  if (!value || typeof value !== "object") return false;
+  const result = value as { revision?: unknown; outcome?: unknown; recordId?: unknown };
+  return typeof result.revision === "number"
+    && Number.isSafeInteger(result.revision)
+    && result.revision >= 0
+    && typeof result.recordId === "string"
+    && result.recordId.length > 0
+    && [
+      "created", "updated", "profile_updated", "forgotten",
+      "already_present", "possible_duplicate"
+    ].includes(result.outcome as MemoryWriteToolOutcome);
 }
 
 function requireRecord(value: unknown): Readonly<Record<string, unknown>> {

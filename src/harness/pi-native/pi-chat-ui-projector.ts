@@ -1728,7 +1728,10 @@ function toolMessage(input: {
   const itemType = toolItemType(input.toolName, input.args, input.result);
   const processKind = toolProcessKind(input.toolName, itemType);
   const processInput = displayUnknown(input.args);
-  const processOutput = input.resultText ?? displayUnknown(input.result);
+  const processOutput = personalMemoryToolFailureText(
+    input.toolName,
+    input.result
+  ) ?? input.resultText ?? displayUnknown(input.result);
   const payload = {
     tool: input.toolName,
     input: input.args,
@@ -2085,11 +2088,12 @@ function assistantFailure(message: PiSessionMessageView): {
     };
   }
   if (stopReason === "aborted" || stopReason === "cancelled" || stopReason === "canceled") {
+    const errorMessage = visibleText(message.errorMessage);
     return {
       itemType: "error",
       status: "interrupted",
       title: "回答已停止",
-      text: visibleText(message.errorMessage) || "已停止生成"
+      text: errorMessage ? assistantFailureText(errorMessage) : "已停止生成"
     };
   }
   return { itemType: "assistant", status: "completed", text: "" };
@@ -2393,6 +2397,43 @@ function exactPiToolDisplayTitle(toolName: string): string | undefined {
   return normalizedToolName(toolName) === "memory_write"
     ? "写入个人记忆"
     : undefined;
+}
+
+function personalMemoryToolFailureText(
+  toolName: string,
+  result: unknown
+): string | undefined {
+  if (!["memory_search", "memory_read", "memory_write"].includes(
+    normalizedToolName(toolName)
+  )) return undefined;
+  const outer = plainObject(result);
+  const details = plainObject(outer?.details) ?? outer;
+  switch (visibleText(details?.errorCode)) {
+    case "personal_memory_no_memory":
+      return "长期记忆开关已关闭，本次操作没有执行。";
+    case "personal_memory_invalid_request":
+      return "这次记忆操作未通过检查，没有执行。";
+    case "personal_memory_current_turn_search_required":
+      return "写入未完成：本轮还没有先检查是否已有相同记忆。";
+    case "personal_memory_not_found":
+      return "没有找到要处理的长期记忆，本次操作没有执行。";
+    case "personal_memory_revision_conflict":
+      return "长期记忆刚刚发生了变化，本次操作没有执行。";
+    case "personal_memory_vault_mismatch":
+      return "当前请求与正在使用的资料库不一致，本次操作没有执行。";
+    case "personal_memory_unsafe_path":
+      return "记忆存储位置未通过安全检查，本次操作已停止。";
+    case "personal_memory_result_too_large":
+      return "返回内容过多，请缩小范围后重试。";
+    case "personal_memory_authorization_failed":
+      return "这次记忆操作未通过系统校验，没有执行。";
+    case "operation_cancelled":
+      return "这次记忆操作已取消。";
+    case "personal_memory_failed":
+      return "这次记忆操作没有完成，长期记忆未发生变化。";
+    default:
+      return undefined;
+  }
 }
 
 function toolProcessKind(toolName: string, itemType: string): ProcessEventKind {

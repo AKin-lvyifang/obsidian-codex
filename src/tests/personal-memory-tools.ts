@@ -396,6 +396,11 @@ async function scenarioProviderVisibleDescriptionsStayAligned(): Promise<void> {
     const descriptions = Object.fromEntries(tools.map((tool) => [tool.name, tool.description]));
     const searchDescription = descriptions.memory_search ?? "";
     const writeDescription = descriptions.memory_write ?? "";
+    assert.equal(
+      tools.find((tool) => tool.name === "memory_write")?.executionMode,
+      "sequential",
+      "renewable write sessions require every memory_write result before the next write"
+    );
     const schemas = PI_PERSONAL_MEMORY_TOOL_SCHEMAS as unknown as Readonly<Record<
       (typeof PI_PERSONAL_MEMORY_TOOL_IDS)[number],
       Readonly<Record<string, unknown>>
@@ -403,12 +408,12 @@ async function scenarioProviderVisibleDescriptionsStayAligned(): Promise<void> {
 
     assert.equal(searchDescription, schemas.memory_search.description);
     assert.match(searchDescription, /相关历史可能影响当前回答.*准备 create、update、profile_update、forget 前/iu);
-    assert.match(searchDescription, /任何 memory_write 前都必须在当前用户消息对应的本轮完成 memory_search.*历史轮搜索不能替代.*exhausted=false.*nextCursor.*exhausted=true/iu);
+    assert.match(searchDescription, /本轮首次 memory_write 前必须完成一次 memory_search.*历史轮搜索不能替代.*exhausted=false.*nextCursor.*exhausted=true.*同轮写入成功后可继续写入.*不必机械重复搜索.*写入失败或 revision 冲突后必须重新搜索/iu);
     assert.match(searchDescription, /除此之外不机械搜索/iu);
     assert.doesNotMatch(searchDescription, /只在历史会实质影响当前回答时调用/iu);
 
     assert.equal(writeDescription, schemas.memory_write.description);
-    assert.match(writeDescription, /System Prompt 判断内容值得跨轮保存且对象清楚.*当前用户消息对应的本轮完成 memory_search.*历史轮搜索不能授权当前轮写入/iu);
+    assert.match(writeDescription, /System Prompt 判断内容值得跨轮保存且对象清楚.*本轮首次写入前完成一次 memory_search.*历史轮搜索不能授权当前轮写入.*同轮写入成功后可继续写入.*写入失败或 revision 冲突后重新搜索/iu);
     assert.match(writeDescription, /普通文字不会落盘.*真实结构化 Tool 回执/iu);
   });
 }
@@ -736,6 +741,57 @@ async function scenarioSearchBeforeAutonomousWriteAndCurrentEntryBinding(): Prom
     );
     assert.equal(createdPayload.revision, corrected.details.revision);
 
+    const alreadyPresent = await executeThroughSecurity(
+      security,
+      tools,
+      "memory_write",
+      "idempotent-after-created-without-new-search",
+      args
+    );
+    const alreadyPresentPayload = memoryResultPayload(alreadyPresent);
+    assert.equal(alreadyPresentPayload.outcome, "already_present");
+    assert.equal(alreadyPresentPayload.revision, createdPayload.revision);
+
+    const possibleDuplicateArgs = memoryWriteArguments({
+      operation: "create",
+      kind: "view",
+      title: "产品观点",
+      content: "这段不同正文与已有产品观点使用同一稳定标题，不应自动重复写入。",
+      recallWhen: "评估产品路线时"
+    });
+    const possibleDuplicate = await executeThroughSecurity(
+      security,
+      tools,
+      "memory_write",
+      "possible-duplicate-after-idempotent-without-new-search",
+      possibleDuplicateArgs
+    );
+    const possibleDuplicatePayload = memoryResultPayload(possibleDuplicate);
+    assert.equal(possibleDuplicatePayload.outcome, "possible_duplicate");
+    assert.equal(possibleDuplicatePayload.revision, createdPayload.revision);
+
+    const chainedArgs = memoryWriteArguments({
+      operation: "create",
+      kind: "task",
+      title: "同轮续签写入",
+      content: "同一用户消息中的第二条独立长期 Memory 可以直接继续写入。",
+      recallWhen: "验证同轮多条 Memory 写入时"
+    });
+    const chained = await executeThroughSecurity(
+      security,
+      tools,
+      "memory_write",
+      "second-create-without-new-search",
+      chainedArgs
+    );
+    const chainedPayload = memoryResultPayload(chained);
+    assert.equal(chainedPayload.outcome, "created");
+    assert.equal(
+      chainedPayload.revision,
+      (createdPayload.revision as number) + 1,
+      "a successful write renews the current runtime write session at its real revision"
+    );
+
     const reopened = await fixture.reopen();
     const found = await reopened.search({ query: "产品 真实 主链" }, fixture.runtime());
     assert.equal(found.items.length, 1);
@@ -771,6 +827,52 @@ async function scenarioSearchBeforeAutonomousWriteAndCurrentEntryBinding(): Prom
       recalled.recall?.candidates.some((candidate) => candidate.id === read.record.id),
       true,
       "the newly written primary view is reachable on the next turn"
+    );
+    const chainedRead = await reopened.read(chainedPayload.recordId as string, fixture.runtime());
+    assert.equal(chainedRead.record.kind, "task");
+
+    await reopened.write({
+      operation: "create",
+      kind: "fact",
+      title: "外部并发推进 revision",
+      content: "另一写入者在当前 Agent 的连续写入之间推进了 Repository revision。",
+      recallWhen: "验证同轮写入会话的 CAS 时",
+      basis: "explicit",
+      contentOrigin: "user_statement"
+    }, fixture.runtime({ productRunId: "external-writer-product-run" }));
+    const afterExternalChange = await executeFailureThroughSecurity(
+      security,
+      tools,
+      "memory_write",
+      "renewed-session-revision-conflict",
+      memoryWriteArguments({
+        operation: "create",
+        kind: "goal",
+        title: "冲突后不得写入",
+        content: "陈旧写入会话不能覆盖外部变化。",
+        recallWhen: "验证冲突处理时"
+      })
+    );
+    assert.equal(
+      afterExternalChange.details.errorCode,
+      "personal_memory_revision_conflict"
+    );
+    const afterFailedWrite = await executeFailureThroughSecurity(
+      security,
+      tools,
+      "memory_write",
+      "write-after-conflict-without-new-search",
+      memoryWriteArguments({
+        operation: "create",
+        kind: "goal",
+        title: "冲突后仍不得直写",
+        content: "写入失败后必须先重新搜索。",
+        recallWhen: "验证失败失效时"
+      })
+    );
+    assert.equal(
+      afterFailedWrite.details.errorCode,
+      "personal_memory_current_turn_search_required"
     );
 
     const mismatched = createSecurity(fixture, {

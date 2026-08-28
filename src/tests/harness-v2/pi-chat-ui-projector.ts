@@ -44,6 +44,8 @@ export async function runPiChatUiProjectorTests(): Promise<void> {
   assertImageUserEntriesProjectWithoutPayloadDuplication();
   assertHiddenNoteMentionContextProjectsOntoItsUserMessage();
   assertProviderReasoningSegmentsStayDistinctAndReopen();
+  assertPersonalMemoryFailuresStayUserFacing();
+  assertControlledTransportAbortUsesFriendlyCopy();
   assertHiddenDocumentContextProjectsOnlyDisplayMetadata();
   assertLiveEventsMergeUntilTheProductSettlementBoundary();
   assertKnowledgeProgressAndToolPayloadsStayPrivate();
@@ -254,6 +256,136 @@ function assertProviderReasoningSegmentsStayDistinctAndReopen(): void {
   assert.equal(memoryWriteTool?.title, "写入个人记忆");
   const reopened = projector.projectSessionBranch(durableInput);
   assert.deepEqual(reopened.messages, durable.messages);
+}
+
+function assertPersonalMemoryFailuresStayUserFacing(): void {
+  const projector = new PiChatUiProjector();
+  let live = projector.createEmpty({
+    piSessionId: "session-memory-failure-live",
+    activeLeafId: "assistant-memory-failure-live",
+    now: 1
+  });
+  live = project(projector, live, runtimeEvent("tool_execution_start", 2, {
+    toolCallId: "memory-write-failure-live",
+    toolName: "memory_write",
+    args: { request: { operation: "create", kind: "fact" } }
+  }, "session-memory-failure-live", "run-memory-failure-live"));
+  live = project(projector, live, runtimeEvent("tool_execution_end", 3, {
+    toolCallId: "memory-write-failure-live",
+    toolName: "memory_write",
+    result: {
+      content: [{
+        type: "text",
+        text: "请先调用 memory_search；exhausted=false 时使用 nextCursor 继续分页。"
+      }],
+      details: {
+        source: "echoink-personal-memory",
+        status: "failed",
+        errorCode: "personal_memory_current_turn_search_required"
+      },
+      isError: true
+    },
+    isError: true
+  }, "session-memory-failure-live", "run-memory-failure-live"));
+  const liveCard = onlyTool(live);
+  assert.equal(liveCard.title, "写入个人记忆");
+  assert.equal(liveCard.status, "failed");
+  assert.equal(
+    liveCard.processOutput,
+    "写入未完成：本轮还没有先检查是否已有相同记忆。"
+  );
+  assert.equal(liveCard.text, liveCard.processOutput);
+  assert.doesNotMatch(
+    JSON.stringify(liveCard),
+    /memory_search|exhausted|nextCursor/u
+  );
+
+  const durableInput = {
+    piSessionId: "session-memory-failure-durable",
+    activeLeafId: "tool-memory-failure-durable",
+    entries: [
+      messageEntry("assistant-memory-failure-durable", null, 1, {
+        role: "assistant" as const,
+        content: [{
+          type: "toolCall" as const,
+          id: "memory-write-failure-durable",
+          name: "memory_write",
+          arguments: { request: { operation: "create", kind: "fact" } }
+        }],
+        stopReason: "toolUse",
+        timestamp: 1
+      }),
+      messageEntry(
+        "tool-memory-failure-durable",
+        "assistant-memory-failure-durable",
+        2,
+        {
+          role: "toolResult" as const,
+          toolCallId: "memory-write-failure-durable",
+          toolName: "memory_write",
+          content: [{
+            type: "text" as const,
+            text: "参数无效，或写入前尚未完成 memory_search。"
+          }],
+          details: {
+            source: "echoink-personal-memory",
+            status: "failed",
+            errorCode: "personal_memory_invalid_request"
+          },
+          isError: true,
+          timestamp: 2
+        }
+      )
+    ],
+    runState: "failed" as const,
+    productRunId: "run-memory-failure-durable",
+    runIdentities: [{
+      productRunId: "run-memory-failure-durable",
+      userEntryId: "user-memory-failure-durable",
+      assistantEntryId: "assistant-memory-failure-durable",
+      toolCallIds: ["memory-write-failure-durable"]
+    }],
+    now: 3
+  };
+  const durable = projector.projectSessionBranch(durableInput);
+  const durableCard = onlyTool(durable);
+  assert.equal(durableCard.processOutput, "这次记忆操作未通过检查，没有执行。");
+  assert.equal(durableCard.text, durableCard.processOutput);
+  assert.doesNotMatch(
+    JSON.stringify(durableCard),
+    /memory_search|exhausted|nextCursor/u
+  );
+  assert.deepEqual(
+    projector.projectSessionBranch(durableInput).messages,
+    durable.messages,
+    "reopen keeps the same user-facing Memory failure copy"
+  );
+}
+
+function assertControlledTransportAbortUsesFriendlyCopy(): void {
+  const projector = new PiChatUiProjector();
+  for (const stopReason of ["aborted", "cancelled"] as const) {
+    const view = projector.projectSessionBranch({
+      piSessionId: `session-${stopReason}`,
+      activeLeafId: `assistant-${stopReason}`,
+      entries: [messageEntry(`assistant-${stopReason}`, null, 1, {
+        role: "assistant",
+        content: [],
+        stopReason,
+        errorMessage: "controlled_transport_aborted",
+        timestamp: 1
+      })],
+      runState: "interrupted",
+      productRunId: `run-${stopReason}`,
+      now: 2
+    });
+    const error = view.messages.find((message) =>
+      message.role === "assistant" && message.itemType === "error"
+    );
+    assert.equal(error?.title, "回答已停止");
+    assert.equal(error?.text, "已停止生成。");
+    assert.doesNotMatch(JSON.stringify(error), /controlled_transport_aborted/u);
+  }
 }
 
 function assertHiddenDocumentContextProjectsOnlyDisplayMetadata(): void {
