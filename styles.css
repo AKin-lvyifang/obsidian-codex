@@ -16558,7 +16558,57 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
   }
 }
 
+.codex-ai-elements-shimmer {
+  --codex-ai-elements-shimmer-spread: 3.5em;
+  color: var(--echoink-conversation-status-muted);
+}
+
+@keyframes codex-ai-elements-shimmer-sweep {
+  from {
+    background-position: 100% center, 0 0;
+  }
+
+  to {
+    background-position: 0% center, 0 0;
+  }
+}
+
+@keyframes codex-ai-elements-shimmer-breathe {
+  0%,
+  100% {
+    opacity: 0.76;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
 @media (prefers-reduced-motion: no-preference) {
+  .codex-ai-elements-shimmer {
+    color: transparent;
+    background-image:
+      linear-gradient(
+        90deg,
+        transparent calc(50% - var(--codex-ai-elements-shimmer-spread)),
+        var(--text-normal),
+        transparent calc(50% + var(--codex-ai-elements-shimmer-spread))
+      ),
+      linear-gradient(
+        var(--echoink-conversation-status-muted),
+        var(--echoink-conversation-status-muted)
+      );
+    background-position: 100% center, 0 0;
+    background-repeat: no-repeat, no-repeat;
+    background-size: 250% 100%, auto;
+    background-clip: text;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation:
+      codex-ai-elements-shimmer-sweep 2s linear infinite,
+      codex-ai-elements-shimmer-breathe 2.8s ease-in-out infinite;
+  }
+
   .codex-ai-elements-reasoning-label.is-shimmering {
     color: transparent;
     background: linear-gradient(
@@ -17112,6 +17162,14 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .codex-ai-elements-shimmer {
+    color: inherit;
+    background: none;
+    opacity: 1;
+    -webkit-text-fill-color: currentColor;
+    animation: none;
+  }
+
   .codex-smooth-ai-reasoning-caret {
     transition: none;
   }

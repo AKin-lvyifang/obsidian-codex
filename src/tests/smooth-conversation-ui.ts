@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { Platform, TFile } from "obsidian";
 import type { ChatMessage, SettingsLanguage, StoredSession } from "../settings/settings";
-import { settingsCopy } from "../settings/i18n";
+import { conversationCopy, settingsCopy } from "../settings/i18n";
 import { extractProcessFileRefs, stableHashedIdentity } from "../core/mapping";
 import { PiChatUiProjector } from "../harness/pi-native/pi-chat-ui-projector";
 import { PiAgentApprovalBroker } from "../plugin/pi-agent-approval-broker";
@@ -1845,14 +1845,101 @@ export async function runSmoothConversationUiTests(): Promise<void> {
 
     await assertInteractionDockContracts();
 
-    const emptyRunningAnswer = renderMessage(renderer, {
+    const zhConversationCopy = conversationCopy("zh-CN");
+    assert.equal(zhConversationCopy.process.publicReasoningRunning, "思考中");
+    assert.equal(zhConversationCopy.process.publicReasoningCompleted, "思考完成");
+    assert.equal(zhConversationCopy.process.publicReasoningDuration("12s"), "思考了 12 秒");
+    assert.equal(zhConversationCopy.process.providerReasoningRunning, "思考中");
+    assert.equal(zhConversationCopy.process.providerReasoningEnded, "思考完成");
+    assert.equal(zhConversationCopy.process.providerReasoningDuration("1m 02s"), "思考了 1 分 2 秒");
+    assert.equal(zhConversationCopy.message.thinking, "思考中");
+
+    const expectedWaitingCopies: Readonly<Record<string, readonly string[]>> = {
+      executor: ["正在直奔问题核心", "正在快速收拢结论", "正在风风火火推进", "正在整理行动要点"],
+      advisor: ["正在核对关键前提", "正在逐项梳理依据", "正在检查逻辑细节", "正在推敲稳妥结论"],
+      butler: ["正在按序整理回复", "正在仔细核对细节", "正在沉稳组织答案", "正在为你梳理要点"],
+      companion: ["正在顺着你的问题想", "正在和你一起梳理", "正在细心理清思路", "正在把答案理得更顺"],
+      steward: ["正在统筹回复结构", "正在把复杂问题理清", "正在核对有没有遗漏", "正在将要点一一归位"],
+      enthusiast: ["正在让思路跑起来", "正在带着劲头推进", "正在试试不同办法", "正在把想法串起来"],
+      creative: ["正在展开更多可能", "正在换几个角度想", "正在把灵感串起来", "正在收拢创意回答"],
+      pragmatist: ["正在筛选可行方案", "正在去掉多余废话", "正在把话说清楚", "正在核对落地细节"]
+    };
+    for (const [templateId, expected] of Object.entries(expectedWaitingCopies)) {
+      assert.deepEqual(
+        zhConversationCopy.message.generatingReplyCopies(templateId),
+        expected,
+        `${templateId} uses its own waiting copy set`
+      );
+    }
+    const expectedFallbackWaitingCopies = [
+      "正在理解你的问题",
+      "正在整理关键信息",
+      "正在组织回复",
+      "正在检查答案"
+    ];
+    assert.deepEqual(
+      zhConversationCopy.message.generatingReplyCopies(null),
+      expectedFallbackWaitingCopies
+    );
+    assert.deepEqual(
+      zhConversationCopy.message.generatingReplyCopies("unknown-template"),
+      expectedFallbackWaitingCopies
+    );
+
+    const rendererEnv = (renderer as unknown as {
+      env: {
+        agentIdentity?: { displayName: string; avatarUrl: string | null; personalityTemplateId?: string | null };
+        onScheduleRunProgress: () => void;
+      };
+    }).env;
+    rendererEnv.agentIdentity = {
+      displayName: "EchoInk",
+      avatarUrl: null,
+      personalityTemplateId: "executor"
+    };
+    let waitingProgressSchedules = 0;
+    rendererEnv.onScheduleRunProgress = () => { waitingProgressSchedules += 1; };
+    const waitingCreatedAt = 1_700_000_001_100;
+    const emptyRunningMessage: ChatMessage = {
       id: "answer-running-empty",
       role: "assistant",
       text: "",
       status: "running",
-      createdAt: 1_700_000_001_100
-    }, { showAgentFooter: false, showAgentHeader: false });
+      createdAt: waitingCreatedAt
+    };
+    const originalDateNow = Date.now;
+    Date.now = () => waitingCreatedAt;
+    const emptyRunningAnswer = renderMessage(
+      renderer,
+      emptyRunningMessage,
+      { showAgentFooter: false, showAgentHeader: false }
+    );
     assert.ok(emptyRunningAnswer.findByClass("codex-smooth-ai-loader"));
+    const waitingLoader = emptyRunningAnswer.findByClass("codex-smooth-ai-loader")!;
+    const waitingLabel = waitingLoader.findByClass("codex-smooth-ai-loader-label")!;
+    assert.equal(waitingLoader.attributes.get("aria-label"), "正在生成回复");
+    assert.equal(waitingLoader.attributes.get("role"), "status");
+    assert.equal(waitingLabel.attributes.get("aria-hidden"), "true");
+    assert.equal(waitingLabel.attributes.get("data-ai-elements-pattern"), "shimmer");
+    assert.ok(waitingLabel.hasClass("codex-ai-elements-shimmer"));
+    assert.equal(waitingLabel.textContent, "正在直奔问题核心");
+    assert.equal(waitingProgressSchedules, 1);
+    const waitingContent = emptyRunningAnswer.findByClass("codex-ai-elements-message-content")!;
+    const emptyCallsBeforeRotation = waitingContent.emptyCallCount;
+    Date.now = () => waitingCreatedAt + 1_800;
+    (renderer as unknown as {
+      renderAgentAnswerContent(container: HTMLElement, message: ChatMessage): void;
+    }).renderAgentAnswerContent(waitingContent as unknown as HTMLElement, emptyRunningMessage);
+    assert.equal(
+      waitingContent.findByClass("codex-smooth-ai-loader"),
+      waitingLoader,
+      "copy rotation keeps one stable status node for assistive technology"
+    );
+    assert.equal(waitingContent.emptyCallCount, emptyCallsBeforeRotation);
+    assert.equal(waitingLabel.textContent, "正在快速收拢结论");
+    assert.equal(waitingLoader.attributes.get("aria-label"), "正在生成回复");
+    assert.equal(waitingProgressSchedules, 2);
+    Date.now = originalDateNow;
     assert.equal(emptyRunningAnswer.findAllByClass("codex-ai-elements-response").length, 0,
       "empty running answer stays a truthful loader before the first delta");
 
@@ -1869,6 +1956,18 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     );
     assert.equal(streamingAnswer.findAllByClass("codex-smooth-ai-loader").length, 0,
       "first text delta replaces the answer loader rather than coexisting with it");
+    assert.equal(waitingProgressSchedules, 2,
+      "the first non-empty answer delta stops waiting-copy scheduling");
+
+    const completedEmptyAnswer = renderMessage(renderer, {
+      ...emptyRunningMessage,
+      id: "answer-completed-empty",
+      status: "completed"
+    }, { showAgentFooter: false, showAgentHeader: false });
+    assert.equal(completedEmptyAnswer.findAllByClass("codex-smooth-ai-loader").length, 0);
+    assert.equal(waitingProgressSchedules, 2,
+      "terminal empty answers never restart waiting-copy scheduling");
+    rendererEnv.onScheduleRunProgress = () => undefined;
 
     const reasoningMessage = renderMessage(renderer, {
       id: "reasoning-1",
@@ -1887,7 +1986,7 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       id: "pi:session:reasoning:run-structured",
       role: "assistant",
       itemType: "reasoning",
-      title: "正在思考",
+      title: "思考中",
       text: "",
       status: "running",
       reasoningSummary: {
@@ -1915,10 +2014,10 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     assert.equal(runningReasoningRoot?.open, true);
     assert.equal(
       runningReasoning.findByClass("codex-ai-elements-reasoning-label")?.textContent,
-      "正在思考"
+      "思考中"
     );
     assert.equal(
-      renderedText(runningReasoning).match(/正在思考/gu)?.length,
+      renderedText(runningReasoning).match(/思考中/gu)?.length,
       1,
       "empty structured activity renders exactly one truthful summary label"
     );
@@ -1972,7 +2071,7 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     );
     assert.equal(
       conversationVirtualList.findAllByClass("codex-assistant-turn-node-title")
-        .filter((title) => title.textContent === "正在思考").length,
+        .filter((title) => title.textContent === "思考中").length,
       1,
       "legacy reasoningSummary creates one Process node, not fake Provider Reasoning"
     );
@@ -1987,9 +2086,11 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     );
     assert.equal(conversationVirtualList.findAllByClass("codex-smooth-ai-loader").length, 2,
       "each active Assistant Turn owns at most one generating-answer Loader");
-    assert.equal(
-      renderedText(conversationVirtualList).match(/正在生成回复/gu)?.length,
-      2
+    assert.ok(
+      conversationVirtualList
+        .findAllByClass("codex-smooth-ai-loader")
+        .every((loader) => loader.attributes.get("aria-label") === "正在生成回复"),
+      "each visual personality copy keeps one stable accessible loading label"
     );
     suppressionRenderer.render({
       app: context.app as never,
@@ -3862,7 +3963,7 @@ export async function runSmoothConversationUiTests(): Promise<void> {
         .some((label) => label.textContent === "Used 1 document"),
       "English source chrome uses the Turn's single-source count"
     );
-    assert.match(renderedText(englishRoot), /Public reasoning · 2s/u);
+    assert.match(renderedText(englishRoot), /Thought for 2s/u);
     assert.doesNotMatch(renderedText(englishRoot), /Searched/u,
       "English ChainOfThought rows also omit action verb prefixes");
     assert.equal(
@@ -4024,6 +4125,10 @@ export async function runSmoothConversationUiTests(): Promise<void> {
   assert.match(styles, /\.codex-action-item\.codex-ai-elements-tool,[\s\S]*?border:\s*0;[\s\S]*?background:\s*transparent;[\s\S]*?box-shadow:\s*none;/u);
   assert.match(styles, /@keyframes codex-ai-elements-reasoning-shimmer/u);
   assert.match(styles, /\.codex-ai-elements-reasoning-label\.is-shimmering\s*\{[\s\S]*?background-clip:\s*text;[\s\S]*?animation:\s*codex-ai-elements-reasoning-shimmer/u);
+  assert.match(styles, /@keyframes codex-ai-elements-shimmer-sweep/u);
+  assert.match(styles, /@keyframes codex-ai-elements-shimmer-breathe/u);
+  assert.match(styles, /\.codex-ai-elements-shimmer\s*\{[\s\S]*?background-clip:\s*text;[\s\S]*?codex-ai-elements-shimmer-sweep 2s linear infinite,[\s\S]*?codex-ai-elements-shimmer-breathe 2\.8s ease-in-out infinite;/u);
+  assert.match(styles, /@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\.codex-ai-elements-shimmer\s*\{[^}]*animation:\s*none;/u);
   assert.match(styles, /\.codex-assistant-turn-resource\s*\{[\s\S]*?border:\s*0;/u);
   assert.match(styles, /\.codex-assistant-turn-resource\[open\]\s*\{[\s\S]*?border:\s*1px solid var\(--background-modifier-border\);/u);
   assert.match(styles, /\.codex-interaction-progress\s*\{[\s\S]*?font-variant-numeric:\s*tabular-nums;/u);
@@ -4058,6 +4163,7 @@ export async function runSmoothConversationUiTests(): Promise<void> {
   assert.match(notices, /Vercel AI Elements[\s\S]*?`Task`[\s\S]*?task\.tsx/u);
   assert.match(notices, /Vercel AI Elements[\s\S]*?`Question`[\s\S]*?`Confirmation`[\s\S]*?`Attachments`/u);
   assert.match(notices, /question\.tsx[\s\S]*?confirmation\.tsx[\s\S]*?attachments\.tsx/u);
+  assert.match(notices, /Vercel AI Elements[\s\S]*?`Shimmer`[\s\S]*?shimmer\.tsx/u);
   assert.match(notices, /Copyright 2023 Vercel, Inc\.[\s\S]*?Apache License, Version 2\.0/u);
   assert.match(notices, /## AnimateIcons[\s\S]*?`Send Horizontal`[\s\S]*?`Circle Stop`/u);
   assert.match(notices, /send-horizontal-icon\.tsx[\s\S]*?circle-stop-icon\.tsx/u);

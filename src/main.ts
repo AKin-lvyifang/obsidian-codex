@@ -927,19 +927,24 @@ export default class CodexForObsidianPlugin extends Plugin {
   }
 
   /**
-   * 同步读取当前 Agent 身份展示快照（消息头名称 + 头像）。数据来自
-   * CognitiveSystem 已预热的身份缓存；系统未初始化完成时返回默认
-   * EchoInk / bot 图标，绝不在消息渲染时读磁盘。
+   * 同步读取当前 Agent 展示快照（消息头名称、头像与等待态人格）。数据
+   * 来自 CognitiveSystem 已预热的缓存；系统未初始化完成时返回默认
+   * EchoInk / bot 图标与无模板状态，绝不在消息渲染时读磁盘。
    */
   getEchoInkAgentIdentityView(): AgentIdentityView {
     const system = this.cognitiveSystem;
     if (!system) {
-      return Object.freeze({ displayName: DEFAULT_AGENT_DISPLAY_NAME, avatarUrl: null });
+      return Object.freeze({
+        displayName: DEFAULT_AGENT_DISPLAY_NAME,
+        avatarUrl: null,
+        personalityTemplateId: null
+      });
     }
     const identity = system.currentAgentIdentity();
     return Object.freeze({
       displayName: identity.displayName,
-      avatarUrl: resolveAgentAvatarUrl(identity.avatar)
+      avatarUrl: resolveAgentAvatarUrl(identity.avatar),
+      personalityTemplateId: system.currentPersonalityTemplateId()
     });
   }
   async updateEchoInkPersonalMemoryProfile(

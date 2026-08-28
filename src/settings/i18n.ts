@@ -702,6 +702,7 @@ export interface ConversationCopy {
   readonly message: Readonly<{
     preparingReply: string;
     generatingReply: string;
+    generatingReplyCopies: (personalityTemplateId?: string | null) => readonly string[];
     organizingContext: string;
     thinkingLiveCopies: readonly string[];
     thinking: string;
@@ -849,6 +850,60 @@ function enToolActionVerb(
   return labels.completed;
 }
 
+const ZH_GENERATING_REPLY_COPIES: Readonly<Record<string, readonly string[]>> = {
+  executor: ["正在直奔问题核心", "正在快速收拢结论", "正在风风火火推进", "正在整理行动要点"],
+  advisor: ["正在核对关键前提", "正在逐项梳理依据", "正在检查逻辑细节", "正在推敲稳妥结论"],
+  butler: ["正在按序整理回复", "正在仔细核对细节", "正在沉稳组织答案", "正在为你梳理要点"],
+  companion: ["正在顺着你的问题想", "正在和你一起梳理", "正在细心理清思路", "正在把答案理得更顺"],
+  steward: ["正在统筹回复结构", "正在把复杂问题理清", "正在核对有没有遗漏", "正在将要点一一归位"],
+  enthusiast: ["正在让思路跑起来", "正在带着劲头推进", "正在试试不同办法", "正在把想法串起来"],
+  creative: ["正在展开更多可能", "正在换几个角度想", "正在把灵感串起来", "正在收拢创意回答"],
+  pragmatist: ["正在筛选可行方案", "正在去掉多余废话", "正在把话说清楚", "正在核对落地细节"]
+};
+
+const ZH_GENERATING_REPLY_FALLBACK = [
+  "正在理解你的问题",
+  "正在整理关键信息",
+  "正在组织回复",
+  "正在检查答案"
+] as const;
+
+const EN_GENERATING_REPLY_COPIES: Readonly<Record<string, readonly string[]>> = {
+  executor: ["Going straight to the point", "Closing in on the answer", "Moving fast on this", "Lining up the next steps"],
+  advisor: ["Checking the key assumptions", "Reviewing the evidence", "Testing the logic", "Shaping a careful answer"],
+  butler: ["Arranging the reply in order", "Checking the finer details", "Composing a measured answer", "Organizing the key points"],
+  companion: ["Thinking this through with you", "Following your train of thought", "Gently untangling the idea", "Smoothing out the answer"],
+  steward: ["Organizing the reply", "Untangling the complexity", "Checking for anything missed", "Putting each point in place"],
+  enthusiast: ["Getting the ideas moving", "Building momentum", "Trying a few approaches", "Connecting the dots"],
+  creative: ["Opening up more possibilities", "Looking from a few angles", "Connecting the sparks", "Shaping the creative answer"],
+  pragmatist: ["Filtering for what works", "Cutting the extra words", "Making the answer clear", "Checking the practical details"]
+};
+
+const EN_GENERATING_REPLY_FALLBACK = [
+  "Understanding your question",
+  "Organizing the key information",
+  "Composing the reply",
+  "Checking the answer"
+] as const;
+
+function generatingReplyCopies(
+  copies: Readonly<Record<string, readonly string[]>>,
+  fallback: readonly string[],
+  personalityTemplateId?: string | null
+): readonly string[] {
+  const templateId = personalityTemplateId?.trim();
+  return templateId ? copies[templateId] ?? fallback : fallback;
+}
+
+function formatZhDuration(duration: string): string {
+  const units: Readonly<Record<string, string>> = { h: "小时", m: "分", s: "秒" };
+  return duration
+    .replace(/(\d+)(h|m|s)/gu, (_match, amount: string, unit: string) =>
+      `${Number.parseInt(amount, 10)} ${units[unit] ?? unit}`)
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
 const ZH_CONVERSATION_COPY: ConversationCopy = {
   sections: {
     process: "处理过程",
@@ -872,9 +927,9 @@ const ZH_CONVERSATION_COPY: ConversationCopy = {
   },
   process: {
     reasoningTitle: "模型推理",
-    providerReasoningRunning: "Provider 正在返回公开推理",
-    providerReasoningEnded: "Provider 公开推理已结束",
-    providerReasoningDuration: (duration) => `公开推理 ${duration}`,
+    providerReasoningRunning: "思考中",
+    providerReasoningEnded: "思考完成",
+    providerReasoningDuration: (duration) => `思考了 ${formatZhDuration(duration)}`,
     questionAnswered: "用户已回答",
     interactionOutcome: (outcome) => outcome === "approved"
       ? "用户已批准"
@@ -933,10 +988,10 @@ const ZH_CONVERSATION_COPY: ConversationCopy = {
       failed: "失败",
       cancelled: "已取消"
     } as Record<string, string>)[stage] ?? stage,
-    publicReasoningRunning: "公开推理进行中",
-    publicReasoningCompleted: "公开推理已完成",
-    publicReasoningDuration: (duration) => `公开推理 · ${duration}`,
-    receivingPublicReasoning: "正在接收 Provider 公开推理",
+    publicReasoningRunning: "思考中",
+    publicReasoningCompleted: "思考完成",
+    publicReasoningDuration: (duration) => `思考了 ${formatZhDuration(duration)}`,
+    receivingPublicReasoning: "思考中",
     taskAria: (title, completed, total) => `任务 ${title}，${completed}/${total} 已完成`,
     taskProgress: (completed, total) => `${completed}/${total} 已完成`,
     nodeStatus: (status) => ({
@@ -1212,9 +1267,14 @@ const ZH_CONVERSATION_COPY: ConversationCopy = {
   message: {
     preparingReply: "正在准备回复",
     generatingReply: "正在生成回复",
+    generatingReplyCopies: (personalityTemplateId) => generatingReplyCopies(
+      ZH_GENERATING_REPLY_COPIES,
+      ZH_GENERATING_REPLY_FALLBACK,
+      personalityTemplateId
+    ),
     organizingContext: "正在整理上下文",
     thinkingLiveCopies: ["先把问题看明白", "等模型接上话", "把上下文放到手边"],
-    thinking: "正在思考",
+    thinking: "思考中",
     thinkingProcess: "思考过程",
     thinkingComplete: "思考完成",
     deriveConversation: "从这条回复新建会话",
@@ -1258,9 +1318,9 @@ const EN_CONVERSATION_COPY: ConversationCopy = {
   },
   process: {
     reasoningTitle: "Reasoning",
-    providerReasoningRunning: "Provider is returning public reasoning",
-    providerReasoningEnded: "Provider public reasoning finished",
-    providerReasoningDuration: (duration) => `Public reasoning ${duration}`,
+    providerReasoningRunning: "Thinking",
+    providerReasoningEnded: "Thinking complete",
+    providerReasoningDuration: (duration) => `Thought for ${duration}`,
     questionAnswered: "User answered",
     interactionOutcome: (outcome) => outcome === "approved"
       ? "User approved"
@@ -1319,10 +1379,10 @@ const EN_CONVERSATION_COPY: ConversationCopy = {
       failed: "Failed",
       cancelled: "Cancelled"
     } as Record<string, string>)[stage] ?? stage,
-    publicReasoningRunning: "Public reasoning in progress",
-    publicReasoningCompleted: "Public reasoning completed",
-    publicReasoningDuration: (duration) => `Public reasoning · ${duration}`,
-    receivingPublicReasoning: "Receiving Provider public reasoning",
+    publicReasoningRunning: "Thinking",
+    publicReasoningCompleted: "Thinking complete",
+    publicReasoningDuration: (duration) => `Thought for ${duration}`,
+    receivingPublicReasoning: "Thinking",
     taskAria: (title, completed, total) => `Task ${title}, ${completed} of ${total} completed`,
     taskProgress: (completed, total) => `${completed}/${total} completed`,
     nodeStatus: (status) => ({
@@ -1597,6 +1657,11 @@ const EN_CONVERSATION_COPY: ConversationCopy = {
   message: {
     preparingReply: "Preparing reply",
     generatingReply: "Generating reply",
+    generatingReplyCopies: (personalityTemplateId) => generatingReplyCopies(
+      EN_GENERATING_REPLY_COPIES,
+      EN_GENERATING_REPLY_FALLBACK,
+      personalityTemplateId
+    ),
     organizingContext: "Organizing context",
     thinkingLiveCopies: ["Reading the question", "Connecting to the model", "Bringing context together"],
     thinking: "Thinking",

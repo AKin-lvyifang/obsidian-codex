@@ -162,6 +162,7 @@ export class CognitiveSystem {
   readonly engine: DreamEngine;
   readonly scheduler: DreamScheduler;
   private readonly now: () => number;
+  private personalityTemplateId: string | null;
 
   private constructor(options: CognitiveSystemOptions, parts: Readonly<{
     personalityStore: PersonalityStateStore;
@@ -171,6 +172,7 @@ export class CognitiveSystem {
     agentIdentityStore: AgentIdentityStateStore;
     engine: DreamEngine;
     scheduler: DreamScheduler;
+    personalityTemplateId: string | null;
   }>) {
     this.repository = options.repository;
     this.now = options.now ?? Date.now;
@@ -181,6 +183,7 @@ export class CognitiveSystem {
     this.agentIdentityStore = parts.agentIdentityStore;
     this.engine = parts.engine;
     this.scheduler = parts.scheduler;
+    this.personalityTemplateId = parts.personalityTemplateId;
   }
 
   /** 设置页展开时需要重新读取做梦投影后的 AGENT.md / USER.md。 */
@@ -273,6 +276,10 @@ export class CognitiveSystem {
       }
     }
 
+    // 同步 UI 只读取这个启动时快照；后续模板事务成功后原地更新，消息
+    // 渲染期间不再异步读人格文件，也不把模板复制进 plugin settings。
+    const personalityTemplateId = (await personalityStore.read())?.templateId ?? null;
+
     const engine = new DreamEngine({
       repository: new RepositoryDreamPort(options.repository),
       personalityStore,
@@ -291,7 +298,8 @@ export class CognitiveSystem {
       secondaryStore,
       agentIdentityStore,
       engine,
-      scheduler: null as unknown as DreamScheduler
+      scheduler: null as unknown as DreamScheduler,
+      personalityTemplateId
     });
 
     const scheduler = new DreamScheduler({
@@ -331,7 +339,14 @@ export class CognitiveSystem {
   }
 
   async readPersonalityState(): Promise<PersonalityState> {
-    return (await this.personalityStore.read()) ?? emptyPersonalityShape(this.now());
+    const state = (await this.personalityStore.read()) ?? emptyPersonalityShape(this.now());
+    this.personalityTemplateId = state.templateId;
+    return state;
+  }
+
+  /** create 时已预热、模板事务成功后同步更新，供消息等待态即时读取。 */
+  currentPersonalityTemplateId(): string | null {
+    return this.personalityTemplateId;
   }
 
   async renderPersonalitySummary(language: "zh" | "en"): Promise<string> {
@@ -486,6 +501,7 @@ export class CognitiveSystem {
     if (nextIdentity !== currentIdentity) {
       this.agentIdentityStore.updateCache(nextIdentity);
     }
+    this.personalityTemplateId = next.templateId;
     return Object.freeze({
       revision: resultRevision,
       state: next,

@@ -216,6 +216,7 @@ async function scenarioTemplateSelectionPersistsWithoutProvider(): Promise<void>
       llmCalls += 1;
       return { call: async () => { throw new Error("provider must not be called"); } };
     });
+    assert.equal(system.currentPersonalityTemplateId(), null);
 
     const before = await readJson(fixture.repository.layout.manifest);
     const result = await system.selectPersonalityTemplate("executor", {
@@ -236,7 +237,11 @@ async function scenarioTemplateSelectionPersistsWithoutProvider(): Promise<void>
     assert.equal(after.revision, (before.revision as number) + 1);
     const scores = currentPersonalityScores(result.state);
     assert.equal(scores.sharpness, template.scores.sharpness);
+    assert.equal(system.currentPersonalityTemplateId(), "executor",
+      "successful selection updates the synchronous UI snapshot immediately");
     const systemAgain = await createSystem(fixture, () => null);
+    assert.equal(systemAgain.currentPersonalityTemplateId(), "executor",
+      "create preheats the persisted template for synchronous UI reads");
     const reread = await systemAgain.readPersonalityState();
     assert.equal(reread.templateId, "executor");
   });

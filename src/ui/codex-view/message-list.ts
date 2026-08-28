@@ -115,10 +115,11 @@ export interface MessageListRenderOptions {
   preserveScroll?: boolean;
 }
 
-/** 只读展示快照：当前 Agent 名称 + 头像 URL（null = 默认 bot 图标）。 */
+/** 只读展示快照：当前 Agent 名称、头像与等待态人格。 */
 export interface AgentIdentityView {
   readonly displayName: string;
   readonly avatarUrl: string | null;
+  readonly personalityTemplateId?: string | null;
 }
 
 export interface MessageApprovalDecisionBinding {
@@ -1280,9 +1281,31 @@ export class CodexMessageListRenderer {
     const env = this.requireEnv();
     const text = displayTextForMessage(message);
     if (message.status === "running" && !text.trim()) {
-      container.empty();
+      const copy = this.copy();
+      const visualLabel = rotatingChoice(
+        copy.message.generatingReplyCopies(env.agentIdentity?.personalityTemplateId),
+        message.createdAt
+      );
+      const existingLoader = container.querySelector<HTMLElement>(
+        ".codex-smooth-ai-loader"
+      );
+      if (existingLoader) {
+        existingLoader
+          .querySelector<HTMLElement>(".codex-smooth-ai-loader-label")
+          ?.setText(visualLabel);
+      } else {
+        container.empty();
+        const loader = renderSmoothAILoader(container, visualLabel, {
+          accessibleLabel: copy.message.generatingReply,
+          labelClass: "codex-ai-elements-shimmer",
+          visualLabelAriaHidden: true
+        });
+        loader
+          .querySelector<HTMLElement>(".codex-smooth-ai-loader-label")
+          ?.setAttribute("data-ai-elements-pattern", "shimmer");
+      }
       container.dataset.renderedText = text;
-      renderSmoothAILoader(container, this.copy().message.generatingReply);
+      env.onScheduleRunProgress();
       return;
     }
     renderRichText(env.app, env.component, container, text);

@@ -25,6 +25,12 @@ interface SmoothReasoningOptions {
   summary: string;
 }
 
+export interface SmoothAILoaderOptions {
+  accessibleLabel?: string;
+  labelClass?: string;
+  visualLabelAriaHidden?: boolean;
+}
+
 export interface SmoothReasoningElements {
   body: HTMLElement;
   root: HTMLDetailsElement;
@@ -368,8 +374,13 @@ export function createAIElementsDocumentSources(
   return { body, root, summary };
 }
 
-export function renderSmoothAILoader(container: HTMLElement, label: string): HTMLElement {
-  const accessibleLabel = label.trim() || "正在加载";
+export function renderSmoothAILoader(
+  container: HTMLElement,
+  label: string,
+  options: SmoothAILoaderOptions = {}
+): HTMLElement {
+  const visualLabel = label.trim();
+  const accessibleLabel = options.accessibleLabel?.trim() || visualLabel || "正在加载";
   const root = container.createSpan({
     cls: "codex-smooth-ai-loader",
     attr: {
@@ -379,7 +390,16 @@ export function renderSmoothAILoader(container: HTMLElement, label: string): HTM
       role: "status"
     }
   });
-  if (label.trim()) root.createSpan({ cls: "codex-smooth-ai-loader-label", text: label });
+  if (visualLabel) {
+    const labelClass = options.labelClass?.trim();
+    root.createSpan({
+      cls: `codex-smooth-ai-loader-label${labelClass ? ` ${labelClass}` : ""}`,
+      text: label,
+      ...(options.visualLabelAriaHidden
+        ? { attr: { "aria-hidden": "true" } }
+        : {})
+    });
+  }
   const dots = root.createSpan({
     cls: "codex-smooth-ai-loader-dots",
     attr: { "aria-hidden": "true" }
