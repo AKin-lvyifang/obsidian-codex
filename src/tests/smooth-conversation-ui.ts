@@ -10,8 +10,10 @@ import { PiTurnInteractionBroker } from "../plugin/pi-turn-interaction-broker";
 import { renderRichText } from "../ui/render-message";
 import {
   CodexMessageListRenderer,
+  isReasoningScrollNearBottom,
   nextReasoningDisclosureState,
   preserveTextSelectionDuringMutation,
+  REASONING_SCROLL_BOTTOM_EPSILON_PX,
   userVisibleProviderReasoningText
 } from "../ui/codex-view/message-list";
 import { buildAgentTurnProjection } from "../ui/codex-view/agent-turn-process";
@@ -861,6 +863,18 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     autoFoldHandled: true,
     lastStatus: "interrupted"
   }, "a restored terminal snapshot starts folded with auto-fold already handled");
+  assert.equal(isReasoningScrollNearBottom(0, 280, 180), true,
+    "naturally sized Reasoning content remains in follow mode before it overflows");
+  assert.equal(
+    isReasoningScrollNearBottom(535, 280, 840),
+    false,
+    "Reasoning pauses follow when the reader is beyond the near-bottom threshold"
+  );
+  assert.equal(
+    isReasoningScrollNearBottom(536, 280, 840),
+    true,
+    `Reasoning resumes follow within ${REASONING_SCROLL_BOTTOM_EPSILON_PX}px of the bottom`
+  );
   const chineseHost = new FakeElement("div");
   const chinese = renderSmoothBlurOutUp(
     chineseHost as unknown as HTMLElement,
@@ -3341,6 +3355,12 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       tryUpdateAssistantTurnMessage(row: unknown, message: ChatMessage): boolean;
     };
     const secondReasoningRoot = providerReasoningDom[1];
+    const secondReasoningBody = secondReasoningRoot.findByClass(
+      "codex-ai-elements-reasoning-content"
+    )!;
+    secondReasoningBody.clientHeight = 280;
+    secondReasoningBody.scrollHeight = 840;
+    secondReasoningBody.scrollTop = 560;
     const reasoningDelta = " SECOND_REASONING_DELTA memory_read mem_fedc";
     const updatedReasoningSibling: ChatMessage = {
       ...reasoningSibling,
@@ -3376,6 +3396,53 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       /memory_read|mem_fedc/u,
       "the Reasoning DOM cache stores only user-facing text"
     );
+    assert.equal(secondReasoningBody.scrollTop, secondReasoningBody.scrollHeight,
+      "a Reasoning delta keeps following while the reader is at the bottom");
+
+    secondReasoningBody.scrollHeight = 960;
+    secondReasoningBody.scrollTop = 240;
+    const manualReviewReasoningSibling: ChatMessage = {
+      ...updatedReasoningSibling,
+      assistantTurn: {
+        ...updatedReasoningSibling.assistantTurn!,
+        updatedAt: 12,
+        providerReasoningSegments: updatedReasoningSibling.assistantTurn!.providerReasoningSegments!.map(
+          (segment, index) => index === 1
+            ? { ...segment, text: `${segment.text} MANUAL_REVIEW_DELTA`, updatedAt: 12 }
+            : segment
+        )
+      }
+    };
+    locallyUpdatedMessages[1] = manualReviewReasoningSibling;
+    localUpdater.env.messages = locallyUpdatedMessages;
+    assert.equal(
+      localUpdater.tryUpdateAssistantTurnMessage(assistantTurnSurface, manualReviewReasoningSibling),
+      true
+    );
+    assert.equal(secondReasoningBody.scrollTop, 240,
+      "a Reasoning delta preserves the reader's manual scroll position");
+
+    secondReasoningBody.scrollTop = secondReasoningBody.scrollHeight - secondReasoningBody.clientHeight;
+    const resumedFollowReasoningSibling: ChatMessage = {
+      ...manualReviewReasoningSibling,
+      assistantTurn: {
+        ...manualReviewReasoningSibling.assistantTurn!,
+        updatedAt: 13,
+        providerReasoningSegments: manualReviewReasoningSibling.assistantTurn!.providerReasoningSegments!.map(
+          (segment, index) => index === 1
+            ? { ...segment, text: `${segment.text} RESUMED_FOLLOW_DELTA`, updatedAt: 13 }
+            : segment
+        )
+      }
+    };
+    locallyUpdatedMessages[1] = resumedFollowReasoningSibling;
+    localUpdater.env.messages = locallyUpdatedMessages;
+    assert.equal(
+      localUpdater.tryUpdateAssistantTurnMessage(assistantTurnSurface, resumedFollowReasoningSibling),
+      true
+    );
+    assert.equal(secondReasoningBody.scrollTop, secondReasoningBody.scrollHeight,
+      "returning to the Reasoning bottom restores follow on the next delta");
 
     const answerContentBefore = assistantTurnRoot.findByClass("codex-assistant-turn-answer")!;
     const updatedAnswer: ChatMessage = {
@@ -4071,6 +4138,17 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     /\.codex-assistant-turn-reasoning-node\s*\{[^}]*background:\s*transparent;/u,
     "the Reasoning row does not hide and redraw the ChainOfThought spine"
   );
+  const reasoningScrollRule = styles.match(
+    /\.codex-assistant-turn-reasoning-node \.codex-ai-elements-reasoning-content\s*\{([^}]*)\}/u
+  )?.[1] ?? "";
+  assert.match(reasoningScrollRule, /max-height:\s*min\(36vh, 280px\);/u,
+    "Reasoning grows naturally until its responsive viewport cap");
+  assert.match(reasoningScrollRule, /overflow-y:\s*auto;/u,
+    "overflow stays inside the Reasoning body instead of growing the Assistant Turn");
+  assert.match(reasoningScrollRule, /scrollbar-gutter:\s*stable;/u,
+    "Reasoning reserves a stable scrollbar slot before overflow begins");
+  assert.doesNotMatch(reasoningScrollRule, /(?:^|;)\s*(?:height|min-height)\s*:/u,
+    "Reasoning has no fixed or minimum height that could create an empty frame");
   assert.match(
     styles,
     /\.codex-assistant-turn-reasoning-node \.codex-ai-elements-reasoning-icon\s*\{[^}]*background:\s*var\(--background-primary\);/u,

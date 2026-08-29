@@ -199,6 +199,7 @@ const VIRTUAL_RERENDER_BURST_LIMIT = 24;
 const VIRTUAL_RERENDER_WINDOW_MS = 1000;
 const AGENT_LIVE_COPY_INTERVAL_MS = 1800;
 export const REASONING_AUTO_FOLD_DELAY_MS = 1000;
+export const REASONING_SCROLL_BOTTOM_EPSILON_PX = 24;
 
 export interface KnowledgeBaseRunProgressState {
   totalCells: number;
@@ -270,6 +271,15 @@ export function scrollTopForMessageListBottom(contentHeight: number, viewportHei
 
 export function shouldPinMessageListBottom(options: MessageListRenderOptions, nearBottom: boolean): boolean {
   return Boolean(options.forceBottom) || (!options.fromScroll && !options.preserveScroll && nearBottom);
+}
+
+export function isReasoningScrollNearBottom(
+  scrollTop: number,
+  clientHeight: number,
+  scrollHeight: number
+): boolean {
+  return scrollHeight - Math.max(0, clientHeight) - Math.max(0, scrollTop)
+    <= REASONING_SCROLL_BOTTOM_EPSILON_PX;
 }
 
 export function piConversationDeriveActionLabel(
@@ -899,6 +909,12 @@ export class CodexMessageListRenderer {
       assistantTurnHasPersonalMemoryContext(turn)
     );
     if (body.dataset.renderedText !== displayText) {
+      const previousScrollTop = body.scrollTop;
+      const shouldFollowLatest = isReasoningScrollNearBottom(
+        previousScrollTop,
+        body.clientHeight,
+        body.scrollHeight
+      );
       preserveTextSelectionDuringMutation(body, () => {
         if (displayText.trim()) {
           renderRichText(env.app, env.component, body, displayText);
@@ -907,6 +923,7 @@ export class CodexMessageListRenderer {
         }
         body.dataset.renderedText = displayText;
       });
+      body.scrollTop = shouldFollowLatest ? body.scrollHeight : previousScrollTop;
     }
     this.scheduleDisclosureAutoFold(
       `reasoning:${disclosureKey}`,
@@ -2259,6 +2276,9 @@ export class CodexMessageListRenderer {
     };
     if (displayText.trim()) {
       renderRichText(env.app, env.component, elements.body, displayText);
+      if (reasoning.status === "running") {
+        elements.body.scrollTop = elements.body.scrollHeight;
+      }
     }
   }
 

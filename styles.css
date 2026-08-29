@@ -17394,6 +17394,12 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
   padding: 0;
 }
 
+.codex-assistant-turn-reasoning-node .codex-ai-elements-reasoning-content {
+  max-height: min(36vh, 280px);
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
 .codex-assistant-turn-reasoning-node .codex-ai-elements-reasoning-icon {
   width: 19px;
   height: 19px;
