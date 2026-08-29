@@ -845,17 +845,10 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
         const taskPlanTurn = turn
           ? null
           : input.currentTaskPlanTurn?.() ?? null;
-        const systemPrompt = taskPlanSystemPrompt(
+        let systemPrompt = taskPlanSystemPrompt(
           event.systemPrompt,
           taskPlanTurn
         );
-        input.contextLedger?.captureBeforeAgentStart({
-          ...event,
-          systemPrompt
-        });
-        const systemPromptResult = systemPrompt === event.systemPrompt
-          ? {}
-          : { systemPrompt };
         const noteMentionTurn = input.currentNoteMentionTurn?.() ?? null;
         const noteMentionMessage = noteMentionTurn
           ? buildPiNoteMentionContextMessage(noteMentionTurn.noteMentions)
@@ -900,7 +893,13 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
               });
             }
           };
-          let fixed: Parameters<typeof buildPersonalMemoryContextMessage>[0];
+          let fixed: Readonly<{
+            revision: number;
+            agent: string;
+            user: string | null;
+            recall?: PersonalMemoryPreparedTurnContext["recall"];
+            injectionKeys: readonly string[];
+          }>;
           try {
             fixed = input.personalMemory.prepareTurnContext
               ? await input.personalMemory.prepareTurnContext({
@@ -962,14 +961,35 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
             fixedContextRevision: fixed.revision,
             ...(recallObservation ? { recall: recallObservation } : {})
           });
-          transientTurnContext = buildPersonalMemoryContextMessage(fixed);
-          if (turn?.kind === "ask") {
+          systemPrompt = personalMemoryAgentSystemPrompt(
+            systemPrompt,
+            fixed.agent
+          );
+          if (effectiveMode === "normal") {
+            transientTurnContext = buildPersonalMemoryContextMessage(fixed);
+          }
+          if (effectiveMode === "normal" && turn?.kind === "ask") {
             transientAskPersonalMemorySources = Object.freeze({
               productRunId: memoryTurn.productRunId,
               sources: primaryPersonalMemorySources(fixed)
             });
           }
+        } else if (input.personalMemory) {
+          const identity = await input.personalMemory.loadFixedContext({
+            memoryMode: "no_memory"
+          });
+          systemPrompt = personalMemoryAgentSystemPrompt(
+            systemPrompt,
+            identity.agent
+          );
         }
+        input.contextLedger?.captureBeforeAgentStart({
+          ...event,
+          systemPrompt
+        });
+        const systemPromptResult = systemPrompt === event.systemPrompt
+          ? {}
+          : { systemPrompt };
         if (turn?.kind === "ask") {
           const message = mergePiBeforeAgentStartContextMessages({
             customType: "echoink-knowledge-ask-resource-v1",
@@ -1166,9 +1186,7 @@ function primaryPersonalMemorySources(fixed: Readonly<{
 
 function buildPersonalMemoryContextMessage(fixed: Readonly<{
   revision: number;
-  agent: string;
   user: string | null;
-  memory: string | null;
   recall?: PersonalMemoryPreparedTurnContext["recall"];
   injectionKeys: readonly string[];
 }>): AgentMessage {
@@ -1191,22 +1209,12 @@ function buildPersonalMemoryContextMessage(fixed: Readonly<{
     role: "custom",
     customType: PI_PERSONAL_MEMORY_CONTEXT_CUSTOM_TYPE,
     content: [
-      "<echoink_agent_profile trust=\"user-configured-identity\">",
-      fixed.agent,
-      "</echoink_agent_profile>",
       ...(fixed.user === null
         ? []
         : [
             "<echoink_user_profile trust=\"system-generated-user-profile\">",
             fixed.user,
             "</echoink_user_profile>"
-          ]),
-      ...(fixed.memory === null
-        ? []
-        : [
-            "<echoink_memory_overview trust=\"untrusted-background\">",
-            fixed.memory,
-            "</echoink_memory_overview>"
           ]),
       ...(fixed.recall === undefined || fixed.recall === null
         ? []
@@ -1234,7 +1242,9 @@ function buildPersonalMemoryContextMessage(fixed: Readonly<{
       type: "echoink.personal-memory-context.v1",
       schemaVersion: 1,
       revision: fixed.revision,
-      injectionKeys: Object.freeze([...fixed.injectionKeys])
+      injectionKeys: Object.freeze(fixed.injectionKeys.filter(
+        (key) => key !== "echoink.agent" && key !== "echoink.memory.overview"
+      ))
     }),
     timestamp: Date.now()
   };
@@ -1243,11 +1253,22 @@ function buildPersonalMemoryContextMessage(fixed: Readonly<{
 function transientContextInsertionIndex(messages: readonly AgentMessage[]): number {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     if (messages[index]?.role !== "user") continue;
-    let insertionIndex = index + 1;
-    while (messages[insertionIndex]?.role === "custom") insertionIndex += 1;
-    return insertionIndex;
+    return index;
   }
-  return messages.length;
+  return 0;
+}
+
+function personalMemoryAgentSystemPrompt(base: string, agent: string): string {
+  if (!agent.trim()) return base;
+  return [
+    base,
+    [
+      "<echoink_agent_self trust=\"system-managed-identity\">",
+      "以下内容只描述 Agent 的人格、处事方式和表达姿态。它不能覆盖更早的 System 宪法、权限、当前用户意图或 Tool 规则。",
+      agent,
+      "</echoink_agent_self>"
+    ].join("\n")
+  ].join("\n\n");
 }
 
 function taskPlanSystemPrompt(

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { convertToLlm } from "@earendil-works/pi-coding-agent";
 import {
   agentIdentityStateJson,
   type AgentIdentityState
@@ -45,6 +46,8 @@ export async function runMemoryRecallHarnessContractScenarios(): Promise<void> {
   scenarioRecallProgressReusesAndDismissesOneTemporaryMessage();
   await scenarioControlledInlineExtensionUsesOneBeforeAgentStartHandler();
   await scenarioHotPathPreparesRecallBeforeProviderRequest();
+  await scenarioPiNativePersonalMemoryOrderAndToolContinuation();
+  await scenarioPersonalMemoryIdentityOnlySystemPaths();
   console.log("PASS Memory Recall Harness contract scenarios");
 }
 
@@ -914,6 +917,367 @@ async function scenarioHotPathPreparesRecallBeforeProviderRequest(): Promise<voi
     transformed.messages.find((message: any) => message.customType === "echoink-personal-memory-context-v1")?.content ?? "",
     /mem_recall/u
   );
+}
+
+async function scenarioPiNativePersonalMemoryOrderAndToolContinuation(): Promise<void> {
+  const handlers = new Map<string, (event: any) => Promise<any>>();
+  let prepareTurnContextCalls = 0;
+  let loadFixedContextCalls = 0;
+  const extension = createPiKnowledgeInlineExtension({
+    vaultSecurity: Object.freeze({
+      name: "personal-memory-order-test",
+      hidden: true,
+      factory: async () => undefined
+    }) as never,
+    currentTurn: () => null,
+    currentMemoryTurn: () => ({
+      vaultId: "vault-order",
+      conversationId: "conversation-order",
+      piSessionId: "session-order",
+      productRunId: "product-run-order",
+      memoryMode: "normal",
+      query: "结合当前修正回答",
+      recentConversation: ["最近历史"]
+    } as never),
+    currentTaskPlanTurn: () => null,
+    personalMemory: {
+      async loadFixedContext() {
+        loadFixedContextCalls += 1;
+        return {
+          revision: 12,
+          agent: "AGENT_SELF_SHOULD_ONLY_BE_SYSTEM",
+          user: "USER_PROFILE_SHOULD_BE_BACKGROUND",
+          memory: "MEMORY_OVERVIEW_MUST_NOT_BE_INJECTED",
+          injectionKeys: ["echoink.agent", "echoink.user", "echoink.memory.overview"]
+        };
+      },
+      async prepareTurnContext() {
+        prepareTurnContextCalls += 1;
+        return {
+          revision: 12,
+          agent: "AGENT_SELF_SHOULD_ONLY_BE_SYSTEM",
+          user: "USER_PROFILE_SHOULD_BE_BACKGROUND",
+          memory: "MEMORY_OVERVIEW_MUST_NOT_BE_INJECTED",
+          recall: {
+            candidates: [{
+              id: "mem_primary_order",
+              kind: "decision",
+              title: "当前顺序决定",
+              recallWhen: "需要安排当前上下文时",
+              summary: "当前真实 user 必须晚于 Personal Memory 背景。",
+              date: "2026-08-30",
+              score: 1,
+              secondaryMatches: [{
+                id: "secondary_order",
+                parentId: "mem_primary_order",
+                title: "关联线索",
+                content: "SECONDARY_MATCHED_ONLY_TO_PRIMARY",
+                recallWhen: "需要核对关联线索时",
+                matchTerms: ["顺序"],
+                relation: "supports",
+                basis: "inferred"
+              }]
+            }],
+            exhaustive: true,
+            hasMore: false,
+            total: 1,
+            injected: 1,
+            remaining: 0
+          },
+          injectionKeys: [
+            "echoink.agent",
+            "echoink.user",
+            "echoink.memory.overview",
+            "echoink.memory.recall"
+          ]
+        };
+      }
+    } as never
+  });
+  await extension.factory({
+    on(name: string, handler: (event: any) => Promise<any>) {
+      handlers.set(name, handler);
+    }
+  } as never);
+
+  const before = await handlers.get("before_agent_start")!({
+    type: "before_agent_start",
+    prompt: "结合当前修正回答",
+    systemPrompt: "SYSTEM_CONSTITUTION",
+    systemPromptOptions: { skills: [] }
+  });
+  assert.equal(prepareTurnContextCalls, 1, "one user turn prepares Recall exactly once");
+  assert.equal(loadFixedContextCalls, 0);
+  assert.match(String(before?.systemPrompt), /^SYSTEM_CONSTITUTION/u);
+  assert.match(String(before?.systemPrompt), /echoink_agent_self trust="system-managed-identity"/u);
+  assert.match(String(before?.systemPrompt), /AGENT_SELF_SHOULD_ONLY_BE_SYSTEM/u);
+  assert.doesNotMatch(String(before?.systemPrompt), /USER_PROFILE_SHOULD_BE_BACKGROUND/u);
+  assert.doesNotMatch(String(before?.systemPrompt), /MEMORY_OVERVIEW_MUST_NOT_BE_INJECTED/u);
+
+  const compaction = {
+    role: "compactionSummary",
+    summary: "COMPACTION_SUMMARY",
+    tokensBefore: 8_000,
+    timestamp: 1
+  };
+  const historyUser = { role: "user", content: "HISTORY_USER", timestamp: 2 };
+  const historyAssistant = {
+    role: "assistant",
+    content: [{ type: "text", text: "HISTORY_ASSISTANT" }],
+    stopReason: "stop",
+    timestamp: 3
+  };
+  const currentUser = {
+    role: "user",
+    content: [
+      { type: "text", text: "CURRENT_REAL_USER" },
+      { type: "image", data: "CURRENT_IMAGE_BYTES", mimeType: "image/png" }
+    ],
+    timestamp: 4
+  };
+  const otherCustom = {
+    role: "custom",
+    customType: "echoink-document-context-v1",
+    content: "OTHER_DOCUMENT_CUSTOM",
+    display: false,
+    details: { type: "document" },
+    timestamp: 5
+  };
+  const stalePersonalMemory = {
+    role: "custom",
+    customType: "echoink-personal-memory-context-v1",
+    content: "STALE_PERSONAL_MEMORY",
+    display: false,
+    details: { type: "stale" },
+    timestamp: 6
+  };
+  const firstInput = [
+    compaction,
+    historyUser,
+    historyAssistant,
+    currentUser,
+    otherCustom,
+    stalePersonalMemory
+  ];
+  const currentUserSnapshot = structuredClone(currentUser.content);
+  const first = await handlers.get("context")!({ messages: firstInput });
+  const firstPersonalIndex = first.messages.findIndex(
+    (message: any) => message.customType === "echoink-personal-memory-context-v1"
+  );
+  const firstCurrentUserIndex = first.messages.indexOf(currentUser);
+  const firstOtherCustomIndex = first.messages.indexOf(otherCustom);
+  assert.equal(firstPersonalIndex, 3, "Personal Memory follows Pi history");
+  assert.equal(firstCurrentUserIndex, 4, "Personal Memory precedes the current real user");
+  assert.equal(firstOtherCustomIndex, 5, "unrelated custom messages keep their position");
+  assert.strictEqual(first.messages[firstCurrentUserIndex], currentUser);
+  assert.deepEqual(currentUser.content, currentUserSnapshot, "current text and image blocks stay unchanged");
+  assert.equal(
+    first.messages.filter(
+      (message: any) => message.customType === "echoink-personal-memory-context-v1"
+    ).length,
+    1,
+    "stale Personal Memory is replaced instead of accumulated"
+  );
+  const firstPersonalMemory = first.messages[firstPersonalIndex];
+  assert.match(String(firstPersonalMemory.content), /USER_PROFILE_SHOULD_BE_BACKGROUND/u);
+  assert.match(String(firstPersonalMemory.content), /mem_primary_order/u);
+  assert.match(String(firstPersonalMemory.content), /SECONDARY_MATCHED_ONLY_TO_PRIMARY/u);
+  assert.doesNotMatch(String(firstPersonalMemory.content), /AGENT_SELF_SHOULD_ONLY_BE_SYSTEM/u);
+  assert.doesNotMatch(String(firstPersonalMemory.content), /MEMORY_OVERVIEW_MUST_NOT_BE_INJECTED/u);
+  assert.deepEqual(firstPersonalMemory.details?.injectionKeys, [
+    "echoink.user",
+    "echoink.memory.recall"
+  ]);
+
+  const convertedFirst = convertToLlm(first.messages as never) as any[];
+  assert.equal(piMessageText(convertedFirst[3]), piMessageText(firstPersonalMemory));
+  assert.equal(piMessageText(convertedFirst[4]), "CURRENT_REAL_USER");
+  assert.deepEqual((convertedFirst[4] as any).content, currentUserSnapshot);
+  const sharedProviderPayloads = ["qwen", "deepseek", "openai", "anthropic"].map(
+    () => convertToLlm(structuredClone(first.messages) as never)
+  );
+  for (const payload of sharedProviderPayloads.slice(1)) {
+    assert.deepEqual(payload, sharedProviderPayloads[0], "Provider-independent Pi conversion stays identical");
+  }
+
+  const assistantToolCall = {
+    role: "assistant",
+    content: [{
+      type: "toolCall",
+      id: "call_order",
+      name: "memory_search",
+      arguments: { query: "顺序" }
+    }],
+    stopReason: "toolUse",
+    timestamp: 7
+  };
+  const toolResult = {
+    role: "toolResult",
+    toolCallId: "call_order",
+    toolName: "memory_search",
+    content: [{ type: "text", text: "TOOL_RESULT_ORDER" }],
+    isError: false,
+    timestamp: 8
+  };
+  const continuationInput = [
+    compaction,
+    historyUser,
+    historyAssistant,
+    currentUser,
+    otherCustom,
+    structuredClone(firstPersonalMemory),
+    assistantToolCall,
+    toolResult
+  ];
+  const durableSnapshot = structuredClone(continuationInput);
+  const continuation = await handlers.get("context")!({ messages: continuationInput });
+  assert.deepEqual(continuationInput, durableSnapshot, "context hook does not mutate durable Session input");
+  assert.equal(prepareTurnContextCalls, 1, "Tool continuation reuses the frozen Recall snapshot");
+  assert.equal(
+    continuation.messages.filter(
+      (message: any) => message.customType === "echoink-personal-memory-context-v1"
+    ).length,
+    1
+  );
+  const continuedPersonalMemory = continuation.messages.find(
+    (message: any) => message.customType === "echoink-personal-memory-context-v1"
+  );
+  assert.deepEqual(continuedPersonalMemory, firstPersonalMemory, "Tool continuation reuses identical background");
+  assert.equal(continuation.messages.indexOf(continuedPersonalMemory), 3);
+  assert.equal(continuation.messages.indexOf(currentUser), 4);
+  assert.strictEqual(continuation.messages.at(-2), assistantToolCall);
+  assert.strictEqual(continuation.messages.at(-1), toolResult);
+
+  const noUserAnchor = await handlers.get("context")!({
+    messages: [assistantToolCall, toolResult]
+  });
+  assert.equal(noUserAnchor.messages[0]?.customType, "echoink-personal-memory-context-v1");
+}
+
+async function scenarioPersonalMemoryIdentityOnlySystemPaths(): Promise<void> {
+  const handlers = new Map<string, (event: any) => Promise<any>>();
+  let memoryTurn: any = {
+    vaultId: "vault-identity",
+    conversationId: "conversation-identity",
+    piSessionId: "session-identity",
+    productRunId: "product-run-identity",
+    memoryMode: "no_memory",
+    query: "不使用个人记忆"
+  };
+  let knowledgeTurn: any = null;
+  let prepareCalls = 0;
+  let identityLoads = 0;
+  const extension = createPiKnowledgeInlineExtension({
+    vaultSecurity: Object.freeze({
+      name: "personal-memory-identity-only-test",
+      hidden: true,
+      factory: async () => undefined
+    }) as never,
+    currentTurn: () => knowledgeTurn,
+    currentMemoryTurn: () => memoryTurn,
+    currentTaskPlanTurn: () => null,
+    personalMemory: {
+      async loadFixedContext() {
+        identityLoads += 1;
+        return {
+          revision: 0,
+          agent: "AGENT_IDENTITY_WITHOUT_MEMORY_TURN",
+          user: null,
+          memory: null,
+          injectionKeys: ["echoink.agent"]
+        };
+      },
+      async prepareTurnContext() {
+        prepareCalls += 1;
+        return {
+          revision: 0,
+          agent: "AGENT_IDENTITY_NO_MEMORY_MODE",
+          user: null,
+          memory: null,
+          recall: null,
+          injectionKeys: ["echoink.agent"]
+        };
+      }
+    } as never
+  });
+  await extension.factory({
+    on(name: string, handler: (event: any) => Promise<any>) {
+      handlers.set(name, handler);
+    }
+  } as never);
+
+  const noMemory = await handlers.get("before_agent_start")!({
+    systemPrompt: "SYSTEM_NO_MEMORY",
+    systemPromptOptions: { skills: [] }
+  });
+  assert.equal(prepareCalls, 1);
+  assert.match(String(noMemory?.systemPrompt), /AGENT_IDENTITY_NO_MEMORY_MODE/u);
+  assert.doesNotMatch(String(noMemory?.systemPrompt), /USER|OVERVIEW|RECALL/u);
+  const noMemoryContext = await handlers.get("context")!({
+    messages: [{ role: "user", content: "NO_MEMORY_USER", timestamp: 1 }]
+  });
+  assert.equal(
+    noMemoryContext.messages.some(
+      (message: any) => message.customType === "echoink-personal-memory-context-v1"
+    ),
+    false
+  );
+
+  memoryTurn = null;
+  knowledgeTurn = {
+    kind: "ask",
+    providerResourceText: "KNOWLEDGE_WITHOUT_MEMORY_TURN",
+    references: []
+  };
+  const withoutMemoryTurn = await handlers.get("before_agent_start")!({
+    systemPrompt: "SYSTEM_KNOWLEDGE",
+    systemPromptOptions: { skills: [] }
+  });
+  assert.equal(identityLoads, 1);
+  assert.match(String(withoutMemoryTurn?.systemPrompt), /AGENT_IDENTITY_WITHOUT_MEMORY_TURN/u);
+  assert.equal(withoutMemoryTurn?.message?.customType, "echoink-knowledge-ask-resource-v1");
+  const withoutMemoryTurnContext = await handlers.get("context")!({
+    messages: [
+      { role: "user", content: "KNOWLEDGE_USER", timestamp: 2 },
+      withoutMemoryTurn.message
+    ]
+  });
+  assert.equal(
+    withoutMemoryTurnContext.messages.some(
+      (message: any) => message.customType === "echoink-personal-memory-context-v1"
+    ),
+    false
+  );
+
+  const unavailableHandlers = new Map<string, (event: any) => Promise<any>>();
+  const unavailable = createPiKnowledgeInlineExtension({
+    vaultSecurity: Object.freeze({
+      name: "personal-memory-unavailable-test",
+      hidden: true,
+      factory: async () => undefined
+    }) as never,
+    currentTurn: () => null,
+    currentMemoryTurn: () => null,
+    currentTaskPlanTurn: () => null
+  });
+  await unavailable.factory({
+    on(name: string, handler: (event: any) => Promise<any>) {
+      unavailableHandlers.set(name, handler);
+    }
+  } as never);
+  const unchanged = await unavailableHandlers.get("before_agent_start")!({
+    systemPrompt: "SYSTEM_WITHOUT_REPOSITORY",
+    systemPromptOptions: { skills: [] }
+  });
+  assert.equal(unchanged, undefined, "missing Personal Memory repository keeps System unchanged");
+}
+
+function piMessageText(message: any): string {
+  if (typeof message?.content === "string") return message.content;
+  return (message?.content ?? [])
+    .filter((part: any) => part?.type === "text")
+    .map((part: any) => String(part.text))
+    .join("\n");
 }
 
 async function scenarioControlledInlineExtensionUsesOneBeforeAgentStartHandler(): Promise<void> {
