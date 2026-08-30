@@ -895,6 +895,17 @@ async function scenarioPiNativePersonalMemoryLifecycle(): Promise<void> {
     let prepareTurnContextCalls = 0;
     let toolExecutions = 0;
     const providerContexts: any[] = [];
+    const documentBytes = new Uint8Array(Buffer.from("fixture-lifecycle-document", "utf8"));
+    const skillPath = path.join(vaultRoot, "fixture-selected-skill.md");
+    await writeFile(skillPath, [
+      "---",
+      "name: fixture-selected-skill",
+      "description: Verify native Pi selected Skill expansion.",
+      "---",
+      "# Fixture selected Skill",
+      "",
+      "FIXTURE_SELECTED_SKILL_BODY"
+    ].join("\n"));
     const extension = createPiKnowledgeInlineExtension({
       vaultSecurity: Object.freeze({
         name: "personal-memory-lifecycle-test",
@@ -904,7 +915,35 @@ async function scenarioPiNativePersonalMemoryLifecycle(): Promise<void> {
           pi.on("tool_result", async () => undefined);
         }
       }) as never,
-      currentTurn: () => null,
+      currentTurn: () => ({
+        kind: "chat",
+        providerResourceText: "KNOWLEDGE_RESOURCE_CURRENT_TURN",
+        references: []
+      } as never),
+      currentNoteMentionTurn: () => ({
+        noteMentions: [{
+          vaultRelativePath: "projects/lifecycle-note.md",
+          fileName: "lifecycle-note.md",
+          content: "NOTE_RESOURCE_CURRENT_TURN"
+        }]
+      }),
+      currentDocumentTurn: () => ({
+        documents: [{
+          kind: "markdown",
+          text: "DOCUMENT_RESOURCE_CURRENT_TURN",
+          bytes: documentBytes,
+          sha256: createHash("sha256").update(documentBytes).digest("hex"),
+          transport: "extracted_text",
+          attachment: {
+            type: "file",
+            name: "lifecycle.md",
+            path: "/fixture/lifecycle.md",
+            mimeType: "text/markdown",
+            sizeBytes: documentBytes.byteLength,
+            availability: "available"
+          }
+        }]
+      } as never),
       currentMemoryTurn: () => ({
         vaultId: "vault-lifecycle",
         conversationId: "conversation-lifecycle",
@@ -914,21 +953,7 @@ async function scenarioPiNativePersonalMemoryLifecycle(): Promise<void> {
         query: "结合当前修正回答",
         recentConversation: ["最近历史"]
       } as never),
-      currentTaskPlanTurn: () => ({
-        mode: "agent",
-        plan: {
-          schemaVersion: 1,
-          planId: "plan-order",
-          title: "冻结当前规则",
-          status: "in_progress",
-          version: 1,
-          currentStepId: "step-order",
-          steps: [{ stepId: "step-order", text: "保持顺序", status: "in_progress" }],
-          source: "user",
-          createdAt: 1,
-          updatedAt: 1
-        }
-      } as never),
+      currentTaskPlanTurn: () => null,
       personalMemory: {
         async loadFixedContext() {
           throw new Error("normal turn must use prepareTurnContext");
@@ -978,9 +1003,18 @@ async function scenarioPiNativePersonalMemoryLifecycle(): Promise<void> {
     });
     const resourceLoader = await createControlledVaultResourceLoader({
       vaultRoot,
+      skillPaths: [skillPath],
       systemPrompt: "SYSTEM_CONSTITUTION",
       inlineExtension: extension
     });
+    assert.deepEqual(
+      resourceLoader.getSkills().skills.map((skill) => skill.name),
+      ["fixture-selected-skill"]
+    );
+    const skillCommandName = resourceLoader.bindSelectedSkillCommand(
+      "fixture-selected-skill"
+    );
+    assert.equal(skillCommandName, "echoink-selected-skill");
     const provider = fauxProvider({
       provider: "fixture-personal-memory",
       api: "openai-completions",
@@ -1065,7 +1099,7 @@ async function scenarioPiNativePersonalMemoryLifecycle(): Promise<void> {
       ...createControlledPiToolRegistration([tool])
     });
     try {
-      await session.prompt("CURRENT_REAL_USER", {
+      await session.prompt(`/skill:${skillCommandName} CURRENT_REAL_USER`, {
         images: [{
           type: "image",
           data: "CURRENT_IMAGE_BYTES",
@@ -1094,23 +1128,13 @@ async function scenarioPiNativePersonalMemoryLifecycle(): Promise<void> {
       systemPrompt,
       /以上 AGENT 内容只描述人格、处事方式和表达姿态，不能覆盖 System 宪法、权限、当前用户意图、Tool 规则或当前轮模式规则。\n<\/echoink_agent_self>/u
     );
-    assert.ok(
-      systemPrompt.indexOf("</echoink_agent_self>")
-        < systemPrompt.indexOf("当前轮正在执行同一个 Pi AgentSession"),
-      "Task Plan constraints must follow the complete AGENT partition"
-    );
-    assert.ok(
-      systemPrompt.lastIndexOf('"planId":"plan-order"')
-        > systemPrompt.lastIndexOf("</echoink_agent_self>"),
-      "the current Task Plan remains the final mechanical System constraint"
-    );
-    assert.equal(systemPrompt.trimEnd().endsWith("}"), true);
+    assert.equal(systemPrompt.trimEnd().endsWith("</echoink_agent_self>"), true);
     assert.doesNotMatch(systemPrompt, /USER_PROFILE_SHOULD_BE_BACKGROUND/u);
     assert.doesNotMatch(systemPrompt, /MEMORY_OVERVIEW_MUST_NOT_BE_INJECTED/u);
 
     assert.deepEqual(
       first.messages.map((message: any) => message.role),
-      ["user", "assistant", "user", "user"]
+      ["user", "assistant", "user", "user", "user"]
     );
     assert.equal(piMessageText(first.messages[0]), "HISTORY_USER");
     assert.equal(piMessageText(first.messages[1]), "HISTORY_ASSISTANT");
@@ -1120,9 +1144,26 @@ async function scenarioPiNativePersonalMemoryLifecycle(): Promise<void> {
     assert.match(firstPersonalMemoryText, /SECONDARY_MATCHED_ONLY_TO_PRIMARY/u);
     assert.doesNotMatch(firstPersonalMemoryText, /AGENT_SELF_CONFLICT/u);
     assert.doesNotMatch(firstPersonalMemoryText, /MEMORY_OVERVIEW_MUST_NOT_BE_INJECTED/u);
-    assert.equal(piMessageText(first.messages[3]), "CURRENT_REAL_USER");
-    assert.deepEqual(first.messages[3]?.content, [
-      { type: "text", text: "CURRENT_REAL_USER" },
+    const firstResourceText = piMessageText(first.messages[3]);
+    assert.match(firstResourceText, /KNOWLEDGE_RESOURCE_CURRENT_TURN/u);
+    assert.match(firstResourceText, /NOTE_RESOURCE_CURRENT_TURN/u);
+    assert.match(firstResourceText, /DOCUMENT_RESOURCE_CURRENT_TURN/u);
+    const expandedCurrentUserText = piMessageText(first.messages[4]);
+    assert.match(
+      expandedCurrentUserText,
+      /^<skill name="echoink-selected-skill" location="[^"]+fixture-selected-skill\.md">/u
+    );
+    assert.ok(
+      expandedCurrentUserText.indexOf("FIXTURE_SELECTED_SKILL_BODY")
+        < expandedCurrentUserText.indexOf("</skill>")
+    );
+    assert.equal(expandedCurrentUserText.endsWith("CURRENT_REAL_USER"), true);
+    assert.doesNotMatch(expandedCurrentUserText, /\/skill:/u);
+    assert.deepEqual(first.messages[4]?.content, [
+      {
+        type: "text",
+        text: expandedCurrentUserText
+      },
       { type: "image", data: "CURRENT_IMAGE_BYTES", mimeType: "image/png" }
     ]);
 
@@ -1131,13 +1172,22 @@ async function scenarioPiNativePersonalMemoryLifecycle(): Promise<void> {
       firstPersonalMemoryText,
       "Tool continuation reuses identical frozen background"
     );
-    assert.equal(piMessageText(continuation.messages[3]), "CURRENT_REAL_USER");
+    assert.equal(
+      piMessageText(continuation.messages[3]),
+      firstResourceText,
+      "Tool continuation reuses the same merged resource background"
+    );
+    assert.equal(
+      piMessageText(continuation.messages[4]),
+      expandedCurrentUserText
+    );
     assert.equal(continuation.messages.at(-2)?.role, "assistant");
     assert.equal(continuation.messages.at(-1)?.role, "toolResult");
     assert.equal(continuation.messages.at(-1)?.toolCallId, "call-order");
     assert.equal(continuation.messages.at(-1)?.toolName, "fixture_context_tool");
 
-    const durableMessages = sessionManager.getBranch()
+    const durableEntries = sessionManager.getBranch();
+    const durableMessages = durableEntries
       .filter((entry: any) => entry.type === "message")
       .map((entry: any) => entry.message);
     assert.equal(
@@ -1146,6 +1196,14 @@ async function scenarioPiNativePersonalMemoryLifecycle(): Promise<void> {
       ),
       false,
       "Personal Memory context never enters the durable Pi Session"
+    );
+    assert.equal(
+      durableEntries.filter(
+        (entry: any) => entry.type === "custom_message"
+          && entry.customType === "echoink-knowledge-chat-resource-v1"
+      ).length,
+      1,
+      "Pi persists the merged resource custom exactly once"
     );
   } finally {
     await rm(vaultRoot, { recursive: true, force: true });
@@ -1156,13 +1214,18 @@ async function scenarioPiNativePersonalMemoryOrderAndToolContinuation(): Promise
   const handlers = new Map<string, (event: any) => Promise<any>>();
   let prepareTurnContextCalls = 0;
   let loadFixedContextCalls = 0;
+  let knowledgeTurn: any = {
+    kind: "chat",
+    providerResourceText: "CURRENT_RESOURCE_CONTEXT",
+    references: []
+  };
   const extension = createPiKnowledgeInlineExtension({
     vaultSecurity: Object.freeze({
       name: "personal-memory-order-test",
       hidden: true,
       factory: async () => undefined
     }) as never,
-    currentTurn: () => null,
+    currentTurn: () => knowledgeTurn,
     currentMemoryTurn: () => ({
       vaultId: "vault-order",
       conversationId: "conversation-order",
@@ -1172,7 +1235,21 @@ async function scenarioPiNativePersonalMemoryOrderAndToolContinuation(): Promise
       query: "结合当前修正回答",
       recentConversation: ["最近历史"]
     } as never),
-    currentTaskPlanTurn: () => null,
+    currentTaskPlanTurn: () => ({
+      mode: "agent",
+      plan: {
+        schemaVersion: 1,
+        planId: "plan-order",
+        title: "冻结当前规则",
+        status: "in_progress",
+        version: 1,
+        currentStepId: "step-order",
+        steps: [{ stepId: "step-order", text: "保持顺序", status: "in_progress" }],
+        source: "user",
+        createdAt: 1,
+        updatedAt: 1
+      }
+    } as never),
     personalMemory: {
       async loadFixedContext() {
         loadFixedContextCalls += 1;
@@ -1263,18 +1340,26 @@ async function scenarioPiNativePersonalMemoryOrderAndToolContinuation(): Promise
   const currentUser = {
     role: "user",
     content: [
-      { type: "text", text: "CURRENT_REAL_USER" },
+      {
+        type: "text",
+        text: "OPAQUE_USER_PREFIX\nCURRENT_REAL_USER"
+      },
       { type: "image", data: "CURRENT_IMAGE_BYTES", mimeType: "image/png" }
     ],
     timestamp: 4
   };
-  const otherCustom = {
+  const currentResource = {
     role: "custom",
-    customType: "echoink-document-context-v1",
-    content: "OTHER_DOCUMENT_CUSTOM",
-    display: false,
-    details: { type: "document" },
+    ...before.message,
     timestamp: 5
+  };
+  const historicalSameSignature = {
+    role: "custom",
+    customType: currentResource.customType,
+    content: currentResource.content,
+    display: false,
+    details: { type: "historical-resource" },
+    timestamp: 3.5
   };
   const stalePersonalMemory = {
     role: "custom",
@@ -1288,8 +1373,9 @@ async function scenarioPiNativePersonalMemoryOrderAndToolContinuation(): Promise
     compaction,
     historyUser,
     historyAssistant,
+    historicalSameSignature,
     currentUser,
-    otherCustom,
+    currentResource,
     stalePersonalMemory
   ];
   const currentUserSnapshot = structuredClone(currentUser.content);
@@ -1298,10 +1384,11 @@ async function scenarioPiNativePersonalMemoryOrderAndToolContinuation(): Promise
     (message: any) => message.customType === "echoink-personal-memory-context-v1"
   );
   const firstCurrentUserIndex = first.messages.indexOf(currentUser);
-  const firstOtherCustomIndex = first.messages.indexOf(otherCustom);
-  assert.equal(firstPersonalIndex, 3, "Personal Memory follows Pi history");
-  assert.equal(firstCurrentUserIndex, 4, "Personal Memory precedes the current real user");
-  assert.equal(firstOtherCustomIndex, 5, "unrelated custom messages keep their position");
+  const firstResourceIndex = first.messages.indexOf(currentResource);
+  assert.equal(first.messages.indexOf(historicalSameSignature), 3);
+  assert.equal(firstPersonalIndex, 4, "Personal Memory follows Pi history");
+  assert.equal(firstResourceIndex, 5, "current resource follows Personal Memory");
+  assert.equal(firstCurrentUserIndex, 6, "all current background precedes the real user");
   assert.strictEqual(first.messages[firstCurrentUserIndex], currentUser);
   assert.deepEqual(currentUser.content, currentUserSnapshot, "current text and image blocks stay unchanged");
   assert.equal(
@@ -1323,9 +1410,13 @@ async function scenarioPiNativePersonalMemoryOrderAndToolContinuation(): Promise
   ]);
 
   const convertedFirst = convertToLlm(first.messages as never) as any[];
-  assert.equal(piMessageText(convertedFirst[3]), piMessageText(firstPersonalMemory));
-  assert.equal(piMessageText(convertedFirst[4]), "CURRENT_REAL_USER");
-  assert.deepEqual((convertedFirst[4] as any).content, currentUserSnapshot);
+  assert.equal(piMessageText(convertedFirst[4]), piMessageText(firstPersonalMemory));
+  assert.equal(piMessageText(convertedFirst[5]), "CURRENT_RESOURCE_CONTEXT");
+  assert.equal(
+    piMessageText(convertedFirst[6]),
+    "OPAQUE_USER_PREFIX\nCURRENT_REAL_USER"
+  );
+  assert.deepEqual((convertedFirst[6] as any).content, currentUserSnapshot);
 
   const assistantToolCall = {
     role: "assistant",
@@ -1350,8 +1441,9 @@ async function scenarioPiNativePersonalMemoryOrderAndToolContinuation(): Promise
     compaction,
     historyUser,
     historyAssistant,
+    historicalSameSignature,
     currentUser,
-    otherCustom,
+    currentResource,
     structuredClone(firstPersonalMemory),
     assistantToolCall,
     toolResult
@@ -1370,8 +1462,10 @@ async function scenarioPiNativePersonalMemoryOrderAndToolContinuation(): Promise
     (message: any) => message.customType === "echoink-personal-memory-context-v1"
   );
   assert.deepEqual(continuedPersonalMemory, firstPersonalMemory, "Tool continuation reuses identical background");
-  assert.equal(continuation.messages.indexOf(continuedPersonalMemory), 3);
-  assert.equal(continuation.messages.indexOf(currentUser), 4);
+  assert.equal(continuation.messages.indexOf(historicalSameSignature), 3);
+  assert.equal(continuation.messages.indexOf(continuedPersonalMemory), 4);
+  assert.equal(continuation.messages.indexOf(currentResource), 5);
+  assert.equal(continuation.messages.indexOf(currentUser), 6);
   assert.strictEqual(continuation.messages.at(-2), assistantToolCall);
   assert.strictEqual(continuation.messages.at(-1), toolResult);
 
@@ -1379,6 +1473,24 @@ async function scenarioPiNativePersonalMemoryOrderAndToolContinuation(): Promise
     messages: [assistantToolCall, toolResult]
   });
   assert.equal(noUserAnchor.messages[0]?.customType, "echoink-personal-memory-context-v1");
+
+  knowledgeTurn = null;
+  const planBefore = await handlers.get("before_agent_start")!({
+    type: "before_agent_start",
+    prompt: "继续当前计划",
+    systemPrompt: "SYSTEM_PLAN_ORDER",
+    systemPromptOptions: { skills: [] }
+  });
+  assert.ok(
+    String(planBefore?.systemPrompt).indexOf("</echoink_agent_self>")
+      < String(planBefore?.systemPrompt).indexOf("当前轮正在执行同一个 Pi AgentSession"),
+    "Task Plan constraints follow the complete AGENT partition"
+  );
+  assert.ok(
+    String(planBefore?.systemPrompt).lastIndexOf('"planId":"plan-order"')
+      > String(planBefore?.systemPrompt).lastIndexOf("</echoink_agent_self>"),
+    "the current Task Plan remains the final mechanical System constraint"
+  );
 }
 
 async function scenarioPersonalMemoryIdentityOnlySystemPaths(): Promise<void> {
@@ -1638,6 +1750,12 @@ async function scenarioPersonalMemoryReadFailureDegradesLocally(): Promise<void>
     ]
   });
   assert.equal(
+    askContext.messages[0]?.customType,
+    "echoink-knowledge-ask-resource-v1",
+    "Knowledge, note, and document survive Memory failure before current user"
+  );
+  assert.equal(askContext.messages[1]?.role, "user");
+  assert.equal(
     askContext.messages.some(
       (message: any) => message.customType === "echoink-personal-memory-context-v1"
     ),
@@ -1776,13 +1894,14 @@ async function scenarioControlledInlineExtensionUsesOneBeforeAgentStartHandler()
   ));
   try {
     let knowledgeTurn: any = null;
-    const noteMentionTurn = Object.freeze({
+    let noteMentionTurn: any = Object.freeze({
       noteMentions: Object.freeze([Object.freeze({
         vaultRelativePath: "projects/合并验收.md",
         fileName: "合并验收.md",
         content: "# 合并验收\n\nNOTE_MENTION_FULL_BODY"
       })])
     });
+    let documentTurn: any = null;
     const loader = await createControlledVaultResourceLoader({
       vaultRoot,
       inlineExtension: createPiKnowledgeInlineExtension({
@@ -1797,6 +1916,7 @@ async function scenarioControlledInlineExtensionUsesOneBeforeAgentStartHandler()
         currentTurn: () => knowledgeTurn,
         currentMemoryTurn: () => null,
         currentNoteMentionTurn: () => noteMentionTurn,
+        currentDocumentTurn: () => documentTurn,
         currentTaskPlanTurn: () => null
       })
     });
@@ -1809,7 +1929,11 @@ async function scenarioControlledInlineExtensionUsesOneBeforeAgentStartHandler()
     const beforeAgentStart = extension.handlers.get("before_agent_start")?.[0] as
       | ((event: any) => Promise<any>)
       | undefined;
+    const transformContext = extension.handlers.get("context")?.[0] as
+      | ((event: any) => Promise<any>)
+      | undefined;
     assert.ok(beforeAgentStart);
+    assert.ok(transformContext);
     const event = {
       type: "before_agent_start",
       prompt: "结合提及的笔记回答",
@@ -1820,6 +1944,60 @@ async function scenarioControlledInlineExtensionUsesOneBeforeAgentStartHandler()
     const noteOnly = await beforeAgentStart(event);
     assert.equal(noteOnly?.message?.customType, "echoink-note-mentions-context-v1");
     assert.match(String(noteOnly?.message?.content), /NOTE_MENTION_FULL_BODY/u);
+    const noteOnlyUser = { role: "user", content: "CURRENT_NOTE_USER", timestamp: 1 };
+    const noteOnlyResource = { role: "custom", ...noteOnly.message, timestamp: 2 };
+    const noteOnlyContext = await transformContext({
+      messages: [noteOnlyUser, noteOnlyResource]
+    });
+    assert.strictEqual(noteOnlyContext.messages[0], noteOnlyResource);
+    assert.strictEqual(noteOnlyContext.messages[1], noteOnlyUser);
+
+    noteMentionTurn = null;
+    const documentBytes = new Uint8Array(Buffer.from("fixture-document-only", "utf8"));
+    documentTurn = {
+      documents: [{
+        kind: "markdown",
+        text: "DOCUMENT_ONLY_FULL_BODY",
+        bytes: documentBytes,
+        sha256: createHash("sha256").update(documentBytes).digest("hex"),
+        transport: "extracted_text",
+        attachment: {
+          type: "file",
+          name: "document-only.md",
+          path: "/fixture/document-only.md",
+          mimeType: "text/markdown",
+          sizeBytes: documentBytes.byteLength,
+          availability: "available"
+        }
+      }]
+    };
+    const documentOnly = await beforeAgentStart(event);
+    assert.equal(documentOnly?.message?.customType, "echoink-document-context-v1");
+    assert.match(String(documentOnly?.message?.content), /DOCUMENT_ONLY_FULL_BODY/u);
+    const documentOnlyUser = {
+      role: "user",
+      content: "CURRENT_DOCUMENT_USER",
+      timestamp: 3
+    };
+    const documentOnlyResource = {
+      role: "custom",
+      ...documentOnly.message,
+      timestamp: 4
+    };
+    const documentOnlyContext = await transformContext({
+      messages: [documentOnlyUser, documentOnlyResource]
+    });
+    assert.strictEqual(documentOnlyContext.messages[0], documentOnlyResource);
+    assert.strictEqual(documentOnlyContext.messages[1], documentOnlyUser);
+
+    noteMentionTurn = Object.freeze({
+      noteMentions: Object.freeze([Object.freeze({
+        vaultRelativePath: "projects/合并验收.md",
+        fileName: "合并验收.md",
+        content: "# 合并验收\n\nNOTE_MENTION_FULL_BODY"
+      })])
+    });
+    documentTurn = null;
 
     knowledgeTurn = {
       kind: "ask",

@@ -2712,36 +2712,41 @@ export class PiNativeConversationRuntime {
           if (readWorkflow.kind === "ask") {
             readWorkflow.personalMemorySources = personalMemorySources;
           }
-          await this.options.knowledge?.recordUsage?.({
-            event: {
-              sourceEventId: stableId(
-                "knowledge-usage",
-                active.catalog.conversationId,
-                active.catalog.piSessionId,
-                execution.productRunId,
-                assistantEntryId,
-                "ask"
-              ),
-              vaultId: active.catalog.vaultId,
-              conversationId: active.catalog.conversationId,
-              piSessionId: active.catalog.piSessionId,
-              piEntryId: assistantEntryId,
-              productRunId: execution.productRunId,
-              referenceIds: verification.references.map(
-                (reference) => reference.referenceId
-              ),
-              workflow: readWorkflow.kind === "ask" ? "ask" : "normal_read",
-              producedPaths: [],
-              ...(readWorkflow.kind === "ask"
-                ? {
-                    personalMemorySources: personalMemorySources.map(
-                      (source) => ({ ...source })
-                    )
-                  }
-                : {})
-            },
-            entries: active.sessionManager.getBranch()
-          });
+          if (
+            readWorkflow.kind === "ask"
+            || verification.references.length > 0
+          ) {
+            await this.options.knowledge?.recordUsage?.({
+              event: {
+                sourceEventId: stableId(
+                  "knowledge-usage",
+                  active.catalog.conversationId,
+                  active.catalog.piSessionId,
+                  execution.productRunId,
+                  assistantEntryId,
+                  "ask"
+                ),
+                vaultId: active.catalog.vaultId,
+                conversationId: active.catalog.conversationId,
+                piSessionId: active.catalog.piSessionId,
+                piEntryId: assistantEntryId,
+                productRunId: execution.productRunId,
+                referenceIds: verification.references.map(
+                  (reference) => reference.referenceId
+                ),
+                workflow: readWorkflow.kind === "ask" ? "ask" : "normal_read",
+                producedPaths: [],
+                ...(readWorkflow.kind === "ask"
+                  ? {
+                      personalMemorySources: personalMemorySources.map(
+                        (source) => ({ ...source })
+                      )
+                    }
+                  : {})
+              },
+              entries: active.sessionManager.getBranch()
+            });
+          }
         }
       }
 

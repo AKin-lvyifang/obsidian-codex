@@ -921,6 +921,10 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
       // Pi persists before_agent_start messages. Stage request-only context
       // here, then deliver it through the non-persistent context event below.
       let transientTurnContext: AgentMessage | null = null;
+      let transientResourceContextSignature: Readonly<{
+        customType: string;
+        content: string;
+      }> | null = null;
       let transientAskPersonalMemorySources: Readonly<{
         productRunId: string;
         sources: readonly Readonly<PersonalMemorySourceReference>[];
@@ -928,6 +932,7 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
       let transientAskPersonalMemorySourcesReported = false;
       pi.on("before_agent_start", async (event) => {
         transientTurnContext = null;
+        transientResourceContextSignature = null;
         transientAskPersonalMemorySources = null;
         transientAskPersonalMemorySourcesReported = false;
         input.contextLedger?.captureBeforeAgentStart({
@@ -1125,6 +1130,7 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
               turn.references.map((reference) => ({ ...reference }))
             )
           }, noteMentionMessage, documentMessage);
+          transientResourceContextSignature = piResourceContextSignature(message);
           return {
             ...systemPromptResult,
             message: message!
@@ -1159,6 +1165,7 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
               preferenceRevision: command.preference.revision
             })
           }, noteMentionMessage, documentMessage);
+          transientResourceContextSignature = piResourceContextSignature(message);
           return {
             ...systemPromptResult,
             message: message!
@@ -1170,6 +1177,9 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
           documentMessage
         );
         if (attachmentContextMessage) {
+          transientResourceContextSignature = piResourceContextSignature(
+            attachmentContextMessage
+          );
           return {
             ...systemPromptResult,
             message: attachmentContextMessage
@@ -1190,13 +1200,18 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
         const messages = event.messages.filter(
           (message) => !isPiTransientPersonalMemoryContext(message)
         );
+        const currentUserIndex = currentPiUserMessageIndex(messages);
+        const currentResourceContext = currentUserIndex < 0
+          ? null
+          : takePiCurrentTurnResourceContext(
+              messages,
+              currentUserIndex,
+              transientResourceContextSignature
+            );
+        const insertionIndex = currentUserIndex < 0 ? 0 : currentUserIndex;
+        const backgroundMessages: AgentMessage[] = [];
         if (transientTurnContext) {
-          const insertionIndex = transientContextInsertionIndex(messages);
-          messages.splice(
-            insertionIndex,
-            0,
-            structuredClone(transientTurnContext)
-          );
+          backgroundMessages.push(structuredClone(transientTurnContext));
           input.contextLedger?.captureTransientContextMessages([
             transientTurnContext
           ]);
@@ -1214,6 +1229,12 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
           }
         } else {
           input.contextLedger?.captureTransientContextMessages([]);
+        }
+        if (currentResourceContext) {
+          backgroundMessages.push(currentResourceContext);
+        }
+        if (backgroundMessages.length > 0) {
+          messages.splice(insertionIndex, 0, ...backgroundMessages);
         }
         return { messages };
       });
@@ -1298,6 +1319,40 @@ function isPiTransientPersonalMemoryContext(message: AgentMessage): boolean {
     && message.customType === PI_PERSONAL_MEMORY_CONTEXT_CUSTOM_TYPE;
 }
 
+function piResourceContextSignature(message: Readonly<{
+  customType: string;
+  content: string;
+}> | null): Readonly<{
+  customType: string;
+  content: string;
+}> | null {
+  if (!message) return null;
+  return Object.freeze({
+    customType: message.customType,
+    content: message.content
+  });
+}
+
+function takePiCurrentTurnResourceContext(
+  messages: AgentMessage[],
+  currentUserIndex: number,
+  signature: Readonly<{ customType: string; content: string }> | null
+): AgentMessage | null {
+  if (!signature) return null;
+  let current: AgentMessage | null = null;
+  for (let index = messages.length - 1; index > currentUserIndex; index -= 1) {
+    const message = messages[index];
+    if (
+      message?.role !== "custom"
+      || message.customType !== signature.customType
+      || message.content !== signature.content
+    ) continue;
+    current = message;
+    messages.splice(index, 1);
+  }
+  return current;
+}
+
 function primaryPersonalMemorySources(fixed: Readonly<{
   recall?: PersonalMemoryPreparedTurnContext["recall"];
 }>): readonly Readonly<PersonalMemorySourceReference>[] {
@@ -1377,12 +1432,12 @@ function buildPersonalMemoryContextMessage(fixed: Readonly<{
   };
 }
 
-function transientContextInsertionIndex(messages: readonly AgentMessage[]): number {
+function currentPiUserMessageIndex(messages: readonly AgentMessage[]): number {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     if (messages[index]?.role !== "user") continue;
     return index;
   }
-  return 0;
+  return -1;
 }
 
 function personalMemoryAgentSystemPrompt(base: string, agent: string): string {

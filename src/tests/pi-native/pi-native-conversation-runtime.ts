@@ -105,6 +105,8 @@ export async function runPiNativeConversationRuntimeTests(): Promise<void> {
   await assertRuntimeAutoSkillSelectionAndReviewLifecycle();
   await assertFreshnessRoutesExternalReadToolsAcrossWorkflows();
   await assertRelatedNormalChatPreflightsAndReadsKnowledge();
+  await assertZeroReferenceNormalChatSkipsUsageAndSettles();
+  await assertKnowledgeUsageFailureRemainsTerminal();
   await assertUserQuestionUsesCentralFailClosedSecurity();
   assertReasoningSummaryLifecycleSemantics();
   await assertReasoningSummaryRuntimeLifecycle();
@@ -450,6 +452,127 @@ async function assertRelatedNormalChatPreflightsAndReadsKnowledge(): Promise<voi
     session.finishSuccessful("依据项目原文，当前决定是优先使用个人知识。");
     assert.equal((await run.result).terminalState, "completed");
     assert.deepEqual(usage, ["normal_read"]);
+  }, { knowledge });
+}
+
+async function assertZeroReferenceNormalChatSkipsUsageAndSettles(): Promise<void> {
+  let verificationCalls = 0;
+  let usageCalls = 0;
+  const knowledge: PiKnowledgeRuntimePort = {
+    async retrieveChat() {
+      return Object.freeze({
+        status: "no_evidence" as const,
+        references: Object.freeze([]),
+        providerResourceText: "NO_PERSONAL_KNOWLEDGE",
+        retrieval: Object.freeze({
+          elapsedMs: 1,
+          total: 0,
+          returned: 0,
+          remaining: 0,
+          hasMore: false,
+          exhausted: true
+        })
+      });
+    },
+    async verifyAskReferences(input) {
+      verificationCalls += 1;
+      assert.deepEqual(input.references, []);
+      return Object.freeze({
+        status: "valid" as const,
+        references: Object.freeze([])
+      });
+    },
+    async recordUsage() {
+      usageCalls += 1;
+      throw new Error("empty_normal_read_must_not_be_recorded");
+    }
+  };
+  await withFixture(["run-zero-reference-chat"], async (fixture) => {
+    const conversationId = "zero-reference-chat";
+    const run = await fixture.submit({
+      conversationId,
+      text: "普通 Chat 没有 Knowledge 引用",
+      submittedAt: 1
+    });
+    const session = fixture.latestSession();
+    session.finishSuccessful("正常完成回答。");
+
+    const settled = await run.result;
+    assert.equal(settled.state, "product_run_settled");
+    assert.equal(settled.terminalState, "completed");
+    assert.equal(verificationCalls, 1);
+    assert.equal(usageCalls, 0);
+    assert.equal(
+      reasoningSummariesForRun(session.sessionManager, run.productRunId)
+        .at(-1)?.status,
+      "completed"
+    );
+    assert.equal(
+      (await fixture.catalog.diagnostics(conversationId)).some(
+        (diagnostic) => diagnostic.code === "runtime_interrupted"
+      ),
+      false
+    );
+  }, { knowledge });
+}
+
+async function assertKnowledgeUsageFailureRemainsTerminal(): Promise<void> {
+  const reference: PiKnowledgeReference = Object.freeze({
+    referenceId: `knowledge-reference:${"e".repeat(64)}`,
+    vaultRelativePath: "wiki/usage-failure.md",
+    title: "Usage failure",
+    excerpt: "非空引用必须继续严格记账。",
+    contentRevision: `sha256:${"f".repeat(64)}`,
+    lineStart: 1,
+    lineEnd: 1
+  });
+  const usageFailure = new Error("fixture_knowledge_usage_store_failure");
+  let usageCalls = 0;
+  const knowledge: PiKnowledgeRuntimePort = {
+    async retrieveChat() {
+      return Object.freeze({
+        status: "ready" as const,
+        references: Object.freeze([reference]),
+        providerResourceText: "NON_EMPTY_PERSONAL_KNOWLEDGE",
+        retrieval: Object.freeze({
+          elapsedMs: 1,
+          total: 1,
+          returned: 1,
+          remaining: 0,
+          hasMore: false,
+          exhausted: true
+        })
+      });
+    },
+    async verifyAskReferences(input) {
+      assert.deepEqual(input.references, [reference]);
+      return Object.freeze({
+        status: "valid" as const,
+        references: Object.freeze([reference])
+      });
+    },
+    async recordUsage() {
+      usageCalls += 1;
+      throw usageFailure;
+    }
+  };
+  await withFixture(["run-knowledge-usage-failure"], async (fixture) => {
+    const conversationId = "knowledge-usage-failure";
+    const run = await fixture.submit({
+      conversationId,
+      text: "非空 Knowledge Usage 失败必须上抛",
+      submittedAt: 1
+    });
+    fixture.latestSession().finishSuccessful("回答正文已经生成。");
+
+    await assert.rejects(run.result, (error: unknown) => error === usageFailure);
+    assert.equal(usageCalls, 1);
+    assert.equal(
+      (await fixture.catalog.diagnostics(conversationId)).some(
+        (diagnostic) => diagnostic.code === "runtime_interrupted"
+      ),
+      true
+    );
   }, { knowledge });
 }
 
