@@ -266,9 +266,7 @@ export function applyEchoInkPiReasoningPayload(
   if (resolveEchoInkProviderReasoningWirePolicy(model.provider, model.id)) {
     return applyEchoInkProviderReasoningWirePolicy(payload, model, level);
   }
-  const capabilities = resolveEchoInkPiModelReasoningCapabilities(
-    model as Model<Api>
-  );
+  const capabilities = resolveEchoInkPiModelReasoningCapabilities(model);
   if (
     !echoInkPiReasoningUsesExperimentalFiveLevels(capabilities)
     || !isPlainRecord(payload)

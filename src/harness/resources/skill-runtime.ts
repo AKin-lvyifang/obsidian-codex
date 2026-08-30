@@ -17,7 +17,7 @@ import {
   renderBuiltinSkill,
   type BuiltinSkillId
 } from "./builtin-skills";
-import { loadVaultSkill } from "./skill-loader";
+import { loadVaultSkill, type LoadedVaultSkill } from "./skill-loader";
 
 export const SKILL_RUNTIME_STATE_SCHEMA = "echoink.skill-runtime.v1" as const;
 export const SKILL_RUNTIME_STATE_RELATIVE_PATH = path.posix.join(
@@ -128,7 +128,6 @@ const MAX_SKILL_BYTES = 200_000;
 const AUTO_SKILL_ID = /^learned-[a-z0-9]+(?:-[a-z0-9]+)*-[a-f0-9]{8}$/u;
 const SAFE_SKILL_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
 const SHA256 = /^[a-f0-9]{64}$/u;
-const ONE_LINE = /^[^\u0000\r\n\u2028\u2029]+$/u;
 
 export async function installBuiltinSkillFiles(input: Readonly<{
   vaultPath: string;
@@ -198,7 +197,7 @@ export class SkillRuntimeCoordinator {
     const present = new Set<string>();
     for (const entry of entries) {
       if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
-      let loaded;
+      let loaded: LoadedVaultSkill;
       try {
         loaded = await loadVaultSkill({
           vaultPath: this.vaultPath,
@@ -804,11 +803,11 @@ function parseRecord(id: string, value: unknown): SkillRuntimeRecord {
     id,
     origin: record.origin as SkillOrigin,
     userModified: record.userModified,
-    createdAt: record.createdAt as number,
-    lastUsedAt: record.lastUsedAt as number | null,
+    createdAt: record.createdAt,
+    lastUsedAt: record.lastUsedAt,
     usageCount: record.usageCount as number,
     status: record.status as SkillLifecycleStatus,
-    statusChangedAt: record.statusChangedAt as number,
+    statusChangedAt: record.statusChangedAt,
     contentHash: record.contentHash,
     semanticFingerprint: record.semanticFingerprint,
     triggerPhrases: Object.freeze([...(record.triggerPhrases as string[])])
@@ -1016,11 +1015,11 @@ function parseSkillReview(
   const allowed = new Set(allowedCapabilities);
   if (existingCapabilities.some((capability) => !allowed.has(capability))) return null;
   return {
-    name: (candidate.name as string).trim(),
-    description: (candidate.description as string).trim(),
+    name: candidate.name.trim(),
+    description: candidate.description.trim(),
     triggerPhrases,
     steps,
-    output: (candidate.output as string).trim(),
+    output: candidate.output.trim(),
     boundaries,
     existingCapabilities
   };
@@ -1187,7 +1186,8 @@ function stringArray(
 
 function oneLine(value: unknown, maxLength: number): value is string {
   return typeof value === "string" && value.trim().length > 0
-    && value.length <= maxLength && ONE_LINE.test(value);
+    && value.length <= maxLength && !value.includes("\u0000")
+    && !/[\r\n\u2028\u2029]/u.test(value);
 }
 
 function timestamp(value: unknown): value is number {

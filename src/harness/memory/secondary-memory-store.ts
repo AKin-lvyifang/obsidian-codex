@@ -35,7 +35,6 @@ import {
   type SecondaryMemoryRecord,
   type SecondaryRelation,
   type SecondaryDisabledReason,
-  type SecondaryStatus,
   type SecondarySupportLevel
 } from "./personal-memory-contracts";
 import { cognitiveAtomicWrite, cognitivePathExists, newCognitiveId } from "./cognitive-file-utils";
@@ -254,12 +253,12 @@ function parseSecondaryRecordInternal(
   if (statusValue !== "current" && statusValue !== "disabled") {
     throw new Error(`Secondary record ${file} status is invalid`);
   }
-  const status = statusValue as SecondaryStatus;
+  const status = statusValue;
   const basisValue = fields.get("basis");
   if (basisValue !== "llm_inferred" && basisValue !== "user_edited_inference") {
     throw new Error(`Secondary record ${file} basis is invalid`);
   }
-  const basis = basisValue as SecondaryBasis;
+  const basis = basisValue;
   const relation = fields.get("relation");
   if (!isSecondaryRelation(relation)) throw new Error(`Secondary record ${file} relation is invalid`);
   const supportLevel = fields.get("support_level");

@@ -905,11 +905,14 @@ export class CodexSettingTab extends PluginSettingTab {
     card.dataset.profileState = ready ? "ready" : "error";
 
     const header = card.createDiv({ cls: "echoink-agent-profile-card-header" });
-    header.createEl("h4", {
-      cls: "echoink-agent-profile-card-label",
-      text: zh ? "Agent 画像" : "Agent profile",
-      attr: { id: profileCardTitleId }
-    });
+    const profileCardHeading = new Setting(header)
+      .setName(zh ? "Agent 画像" : "Agent profile")
+      .setHeading();
+    profileCardHeading.settingEl.addClass("echoink-agent-profile-heading-row");
+    profileCardHeading.nameEl.addClass("echoink-agent-profile-card-label");
+    profileCardHeading.nameEl.setAttr("id", profileCardTitleId);
+    profileCardHeading.nameEl.setAttr("role", "heading");
+    profileCardHeading.nameEl.setAttr("aria-level", "4");
     const templateBtn = header.createEl("button", {
       cls: "echoink-agent-profile-reselect",
       attr: {
@@ -1007,21 +1010,27 @@ export class CodexSettingTab extends PluginSettingTab {
       cls: "echoink-agent-profile-content",
       attr: { "aria-labelledby": profileContentTitleId }
     });
-    contentSide.createEl("h5", {
-      cls: "echoink-agent-profile-content-title",
-      text: zh ? "我的公开画像" : "My public profile",
-      attr: { id: profileContentTitleId }
-    });
+    const profileContentHeading = new Setting(contentSide)
+      .setName(zh ? "我的公开画像" : "My public profile")
+      .setHeading();
+    profileContentHeading.settingEl.addClass("echoink-agent-profile-heading-row");
+    profileContentHeading.nameEl.addClass("echoink-agent-profile-content-title");
+    profileContentHeading.nameEl.setAttr("id", profileContentTitleId);
+    profileContentHeading.nameEl.setAttr("role", "heading");
+    profileContentHeading.nameEl.setAttr("aria-level", "5");
     if (ready) {
       const currentSection = contentSide.createEl("section", {
         cls: "echoink-agent-profile-section is-current",
         attr: { "aria-labelledby": currentSectionTitleId }
       });
-      currentSection.createEl("h6", {
-        cls: "echoink-agent-profile-section-title",
-        text: zh ? "当前方式" : "How I work now",
-        attr: { id: currentSectionTitleId }
-      });
+      const currentSectionHeading = new Setting(currentSection)
+        .setName(zh ? "当前方式" : "How I work now")
+        .setHeading();
+      currentSectionHeading.settingEl.addClass("echoink-agent-profile-heading-row");
+      currentSectionHeading.nameEl.addClass("echoink-agent-profile-section-title");
+      currentSectionHeading.nameEl.setAttr("id", currentSectionTitleId);
+      currentSectionHeading.nameEl.setAttr("role", "heading");
+      currentSectionHeading.nameEl.setAttr("aria-level", "6");
       const currentFields = currentSection.createEl("dl", { cls: "echoink-agent-profile-current-fields" });
       const fields = [
         [zh ? "思考方式" : "Thinking", readyProfile.currentSelf.thinkingMethod],
@@ -1038,11 +1047,14 @@ export class CodexSettingTab extends PluginSettingTab {
         cls: "echoink-agent-profile-section is-growth",
         attr: { "aria-labelledby": growthSectionTitleId }
       });
-      growthSection.createEl("h6", {
-        cls: "echoink-agent-profile-section-title",
-        text: zh ? "长期成长" : "Long-term growth",
-        attr: { id: growthSectionTitleId }
-      });
+      const growthSectionHeading = new Setting(growthSection)
+        .setName(zh ? "长期成长" : "Long-term growth")
+        .setHeading();
+      growthSectionHeading.settingEl.addClass("echoink-agent-profile-heading-row");
+      growthSectionHeading.nameEl.addClass("echoink-agent-profile-section-title");
+      growthSectionHeading.nameEl.setAttr("id", growthSectionTitleId);
+      growthSectionHeading.nameEl.setAttr("role", "heading");
+      growthSectionHeading.nameEl.setAttr("aria-level", "6");
       if (readyProfile.currentSelf.representativeHabits.length > 0) {
         const habitList = growthSection.createEl("ul", { cls: "echoink-agent-profile-habit-list" });
         for (const habit of readyProfile.currentSelf.representativeHabits) {

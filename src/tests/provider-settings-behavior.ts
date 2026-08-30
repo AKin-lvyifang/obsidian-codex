@@ -10237,12 +10237,28 @@ async function assertAgentIdentityCardPlacementAndCopy(): Promise<void> {
   assert.ok(profileCard, "the merged Agent profile card must render");
   assert.equal(profileCard.tagName, "SECTION");
   const cardTitle = profileCard.querySelector<ProviderModalTestElement>(
-    "h4.echoink-agent-profile-card-label"
+    ".echoink-agent-profile-card-label"
   );
   assert.ok(cardTitle?.id);
+  assert.ok(cardTitle!.closest(".setting-item-heading.echoink-agent-profile-heading-row"));
+  assert.equal(cardTitle!.getAttribute("role"), "heading");
+  assert.equal(cardTitle!.getAttribute("aria-level"), "4");
   assert.equal(profileCard.getAttribute("aria-labelledby"), cardTitle!.id);
-  assert.ok(profileCard.querySelector("h5.echoink-agent-profile-content-title"));
-  assert.equal(profileCard.querySelectorAll("h6.echoink-agent-profile-section-title").length, 2);
+  const contentTitle = profileCard.querySelector<ProviderModalTestElement>(
+    ".echoink-agent-profile-content-title"
+  );
+  assert.ok(contentTitle?.closest(".setting-item-heading.echoink-agent-profile-heading-row"));
+  assert.equal(contentTitle?.getAttribute("role"), "heading");
+  assert.equal(contentTitle?.getAttribute("aria-level"), "5");
+  const sectionTitles = profileCard.querySelectorAll<ProviderModalTestElement>(
+    ".echoink-agent-profile-section-title"
+  );
+  assert.equal(sectionTitles.length, 2);
+  for (const sectionTitle of sectionTitles) {
+    assert.ok(sectionTitle.closest(".setting-item-heading.echoink-agent-profile-heading-row"));
+    assert.equal(sectionTitle.getAttribute("role"), "heading");
+    assert.equal(sectionTitle.getAttribute("aria-level"), "6");
+  }
   assert.equal(profileCard.querySelectorAll("dl.echoink-agent-profile-current-fields").length, 1);
   assert.equal(profileCard.querySelectorAll("dt.echoink-agent-profile-field-label").length, 3);
   assert.equal(profileCard.querySelectorAll("dd.echoink-agent-profile-field-value").length, 3);

@@ -657,9 +657,9 @@ export function parseUserProfileState(raw: Record<string, unknown>): UserProfile
           section: slot.section,
           profileKey: slot.profileKey,
           text,
-          basis: (item.basis === "observed_memory" || item.basis === "legacy_import"
+          basis: item.basis === "observed_memory" || item.basis === "legacy_import"
             ? item.basis
-            : "explicit_memory") as UserProfileItemBasis,
+            : "explicit_memory",
           status: item.status === "superseded" ? "superseded" as const : "current" as const,
           sourceMemoryIds: Object.freeze(
             Array.isArray(item.sourceMemoryIds)

@@ -335,7 +335,7 @@ export function createObsidianProviderFetch(
     });
     return {
       status: response.status,
-      json: async () => response.json
+      json: async (): Promise<unknown> => response.json as unknown
     };
   };
 }
@@ -368,7 +368,7 @@ function abortableProviderRequest<T>(
         signal.removeEventListener("abort", abort);
         resolve(value);
       },
-      (error) => {
+      (error: Error) => {
         signal.removeEventListener("abort", abort);
         reject(error);
       }

@@ -251,7 +251,13 @@ async function normalizeSvgForRasterization(file: Blob, canvas: AvatarSvgCanvas)
 function blobToDataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
+    reader.onload = () => {
+      if (typeof reader.result === "string") {
+        resolve(reader.result);
+        return;
+      }
+      reject(new Error("avatar_read_failed"));
+    };
     reader.onerror = () => reject(reader.error ?? new Error("avatar_read_failed"));
     reader.readAsDataURL(blob);
   });

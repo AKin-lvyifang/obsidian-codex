@@ -147,13 +147,13 @@ export class KnowledgeNotePickerModal extends Modal {
     applyAmicroButton(this.confirmEl, { variant: "primary", motion: "complete" });
     this.confirmEl.onclick = () => void this.confirm();
     this.keydownHandler = (event) => this.handleKeydown(event);
-    this.modalEl.addEventListener("keydown", this.keydownHandler as EventListener);
+    this.modalEl.addEventListener("keydown", this.keydownHandler);
     this.searchEl.focus();
   }
 
   onClose(): void {
     if (this.keydownHandler) {
-      this.modalEl.removeEventListener("keydown", this.keydownHandler as EventListener);
+      this.modalEl.removeEventListener("keydown", this.keydownHandler);
       this.keydownHandler = null;
     }
     // 取消 / Escape / 提交成功 / 提交失败后再取消：统一走稳定的焦点恢复。
@@ -229,7 +229,7 @@ export class KnowledgeNotePickerModal extends Modal {
       const checkbox = row.createEl("input", {
         cls: "echoink-knowledge-note-picker-checkbox",
         attr: { type: "checkbox" }
-      }) as HTMLInputElement;
+      });
       checkbox.checked = this.checked.has(note.sourcePath);
       checkbox.onchange = () => {
         if (checkbox.checked) this.checked.add(note.sourcePath);
@@ -317,11 +317,11 @@ export class KnowledgeNotePickerModal extends Modal {
     if (focusables.length === 0) return;
     const active = this.modalEl.ownerDocument?.activeElement ?? null;
     const index = focusables.indexOf(active as HTMLElement);
-    const shift = (event as KeyboardEvent).shiftKey;
+    const shift = event.shiftKey;
     let next: HTMLElement;
-    if (index === -1) next = focusables[0] as HTMLElement;
-    else if (shift) next = focusables[(index - 1 + focusables.length) % focusables.length] as HTMLElement;
-    else next = focusables[(index + 1) % focusables.length] as HTMLElement;
+    if (index === -1) next = focusables[0];
+    else if (shift) next = focusables[(index - 1 + focusables.length) % focusables.length];
+    else next = focusables[(index + 1) % focusables.length];
     event.preventDefault();
     next.focus();
   }

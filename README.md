@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://github.com/AKin-lvyifang/codex-echoink/releases/latest">
-    <img width="1024" alt="EchoInk Agent 2.0.3 release artwork" src="assets/releases/echoink-agent-2.0.1-release.png">
+    <img width="1024" alt="EchoInk Agent 2.1.0 release artwork" src="assets/releases/echoink-agent-2.1.0-release.png">
   </a>
 </p>
 
@@ -9,11 +9,11 @@
 <p align="center">Manage your Obsidian knowledge while your personal agent grows to understand you better.</p>
 
 <p align="center">
+  <a href="#whats-new-in-210">What's New</a> ·
   <a href="#features">Features</a> ·
   <a href="#installation">Installation</a> ·
   <a href="#quick-start">Quick Start</a> ·
-  <a href="#knowledge-maintenance">Knowledge Maintenance</a> ·
-  <a href="#review-and-memory-correction">Review and Memory</a> ·
+  <a href="#add-images-documents-and-notes-to-a-conversation">Conversation Files</a> ·
   <a href="#privacy-and-data">Privacy</a> ·
   <a href="README_CN.md">中文</a>
 </p>
@@ -21,69 +21,79 @@
 <p align="center">
   <a href="https://github.com/AKin-lvyifang/codex-echoink/releases/latest">
     <img src="https://img.shields.io/badge/platform-Obsidian_Desktop-7C3AED?style=flat-square&logo=obsidian&logoColor=white" alt="Platform: Obsidian Desktop">
-    <img src="https://img.shields.io/badge/version-2.0.3-0EA5E9?style=flat-square" alt="Version 2.0.3">
+    <img src="https://img.shields.io/badge/version-2.1.0-0EA5E9?style=flat-square" alt="Version 2.1.0">
     <img src="https://img.shields.io/badge/license-MIT-10B981?style=flat-square" alt="MIT License">
   </a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/AKin-lvyifang/codex-echoink/releases/tag/2.0.3"><strong>Download 2.0.3</strong></a>
+  <a href="https://github.com/AKin-lvyifang/codex-echoink/releases/tag/2.1.0"><strong>Download 2.1.0</strong></a>
 </p>
 
-EchoInk Agent is a personal knowledge agent for Obsidian. It keeps conversations going, organizes and maintains your vault, and turns useful context into visible, correctable long-term memory. As you use it, that memory helps the agent learn what you care about, how you make decisions, and what you are working on, so it becomes a more useful personal agent over time. No Codex CLI installation is required: add the API URL, API key, and model for OpenAI or a compatible provider to get started.
+EchoInk Agent is a personal knowledge agent for Obsidian. It keeps conversations going, organizes and maintains the current vault, stores useful long-term context as visible and correctable memory, and gradually develops its own way of working with you. No Codex CLI installation is required. Connect a supported model service to get started.
 
-## What changed in 2.0
+## What's new in 2.1.0
 
-- The conversation runtime now uses one Pi-native AgentSession path for history, tools, and follow-up turns.
-- Long-term memory is organized into facts, views, decisions, active items, and episodes. Corrections are generated as previews and written only after explicit confirmation.
-- `/maintain` supports global maintenance, one attached Raw note, and fuzzy note-name targeting. It ends without duplicate writes when nothing needs updating.
-- Review now combines report generation and destination settings, with entry points for archived conversations and memory correction.
-- Provider setup stores API keys directly and no longer requires a separate Credential setup step.
-- The conversation header, message actions, composer toolbar, and send button were rebuilt. Low-value Agent status and knowledge-health widgets were removed.
+- **An Agent with an identity that grows:** Choose from eight starting styles, 15 built-in avatars, or a custom SVG avatar. Long-term memory can update during ordinary conversations, while scheduled offline organization gradually builds a user profile and learned working habits.
+- **Bring source material straight into chat:** Add images, PDF, Word, Markdown, and HTML files, or mention Markdown notes from the current vault with `@`.
+- **A clearer working process:** Expand live reasoning and keep tool progress, approval requests, task plans, file changes, and turn sources together.
+- **More complete Provider and model setup:** OpenAI Codex browser sign-in Beta, separate Qwen API and Token Plan entries, multiple Provider instances, multiple enabled models, and reasoning controls matched to model capabilities.
+- **More reliable conversations:** Fixed cases where short follow-ups could keep reasoning, repeat an answer, or show a failure after the answer had completed. Failed or interrupted output no longer affects later turns.
 
 ## Features
 
-### Persistent conversations
+### Persistent conversations with a visible working process
 
-- Each Conversation maps to an independent Pi AgentSession.
-- Reading local history does not depend on a Provider. Opening a conversation prepares its AgentSession in the background.
-- Create, rename, archive, restore, and soft-delete conversations.
+- Create, rename, archive, restore, and soft-delete conversations. Reading local history does not depend on a Provider.
+- Reasoning, tool activity, approval requests, task plans, file changes, and final answers share one timeline.
+- Expand reasoning while it streams. Scrolling up pauses auto-follow until you return to the bottom.
+- Open **Plan mode** from the composer's `+` menu when a complex task should show its steps first. Approve or reject requested tool access inside the conversation.
 - Manage archived conversations under **Settings → EchoInk Agent → Review → Archived conversations**.
-- Model reasoning, tool calls, file changes, and final answers share one conversation timeline.
+
+### Agent identity and long-term growth
+
+- The updated five-step guide helps you choose an Agent style, name, and avatar. Names can be up to 24 characters; choose one of 15 built-in avatars or upload an SVG.
+- Long-term memory is enabled by default. The Agent can add or update information worth keeping during ordinary conversations without requiring a repeated “remember this” instruction.
+- **Offline memory organization (Dreaming)** runs three times per day by default and can be set from one to six. It connects related experiences and gradually updates the Agent profile, user profile, and learned working habits.
+- Open **Settings → EchoInk Agent → General → Long-term memory / Identity and user profile** to view profiles, change the schedule, or choose another starting style. Changing the Agent's name or avatar does not reset its style or memory.
+- Turning off offline organization leaves normal memory writes and recall available. Turning off long-term memory keeps the Agent's name, avatar, and base style.
+
+### Images, documents, and note context
+
+- Paste or drag images into the composer, or use `+` to add images and files.
+- PNG, JPEG, GIF, and WebP are supported directly. BMP, HEIC, HEIF, and SVG are converted to PNG when possible. EchoInk warns before sending when the current model cannot accept images.
+- Attach PDF, DOC, DOCX, Markdown, and HTML. A turn accepts up to eight documents, 20 MiB per file and 50 MiB in total.
+- Encrypted, damaged, or over-context documents are rejected instead of silently losing content. OCR for scanned PDFs is not included yet.
+- Type `@` to find Markdown notes in the current vault by file name, path, alias, Pinyin, or initials.
+- Sent images and documents remain available as openable thumbnails or file cards.
 
 ### Providers and models
 
-- Presets for Zhipu GLM, Kimi China, MiniMax China, DeepSeek, local Ollama, and Custom endpoints.
+- Built-in entries for OpenAI Codex Beta, Qwen, Qwen Token Plan, Zhipu GLM, Kimi China, MiniMax China, DeepSeek, local Ollama, and Custom endpoints.
 - OpenAI Responses, OpenAI Chat Completions, and Anthropic Messages protocols.
-- Model discovery, connection testing, custom model IDs, reasoning effort, and context settings.
-- API keys are stored directly in EchoInk settings for the current vault. The local Ollama preset does not require an API key by default.
+- Save multiple instances of the same Provider. Enable several models per instance, choose a default, discover available models, or add a Model ID manually.
+- Deep-reasoning controls appear only when the selected model supports them, avoiding unsupported parameters.
+- API keys for ordinary Providers and OpenAI Codex Beta sign-in credentials are stored in plugin settings for the current vault. The local Ollama entry does not require an API key by default.
 
 ### Vault knowledge maintenance
 
-- `/ask` performs read-only questions against the current knowledge base.
+- `/ask` performs read-only questions against the current knowledge base and shows the sources used for the turn.
 - `/maintain` refines Raw notes, writes reusable knowledge to Wiki or Projects, and verifies the result by reading it back.
-- Maintenance candidates are bound to the target content revision. If a target changes during generation, EchoInk refuses to overwrite the newer content.
+- Maintenance binds to the current target revision. If a note changes while generation is running, EchoInk refuses to overwrite the newer content.
 - Only an explicit `/maintain` can write. Natural-language chat such as “organize this” remains ordinary chat.
+- Knowledge setup shows a preview before organizing anything. Missing standard folders can be restored without moving, deleting, or rewriting existing notes.
 
 ### Visible, correctable long-term memory
 
-- Current memory is grouped into Facts, Views, Decisions, Active, and Episodes without exposing internal files, paths, IDs, or revisions.
-- Each record shows its title, content, and recall context.
-- The correction dialog keeps the original memory visible and generates a cyan preview from your correction notes.
-- Generating a preview never changes the original. Saving explicitly creates the new version.
-- Stop, close, failure, or late model results produce no write. Revision conflicts require a fresh preview from the latest record.
+- Current memory is grouped into Facts, Views, Decisions, Active, and Episodes. Each record shows its title, content, and recall context.
+- The correction dialog keeps the original, your correction notes, and the corrected preview visible together. Generating a preview never changes the original; only Save creates a new version.
+- Stop, close, generation failure, late output, or a revision conflict cannot overwrite the current record.
 
-### Review
+### Review, Skills, and MCP
 
-- Generate Agent or knowledge-base weekly reports on demand.
-- Choose the previous full week or the current week to date.
-- Reports default to `outputs`, or choose any folder inside the current vault.
-- Optionally open the generated HTML. EchoInk does not keep a separate recent-report list.
-
-### Resources and editor action
-
+- Generate Agent or knowledge-base weekly reports on demand. Choose the previous full week or the current week to date, a destination inside the vault, and whether to open the resulting HTML.
 - Manage plugin resources, Skills, and MCP connections for the current vault.
-- Read-only MCP tools run through the current Pi conversation and respect each connection's enabled and trusted settings.
+- Read-only MCP tools run through the current conversation and respect each connection's enabled and trusted settings.
 - Select text in the editor and use the context menu to translate it to English with the current default Provider.
 
 ## Installation
@@ -98,7 +108,7 @@ If EchoInk Agent is available in the Obsidian Community Plugins directory:
 
 ### Manual installation
 
-1. Download `main.js`, `manifest.json`, and `styles.css` from the [2.0.3 Release](https://github.com/AKin-lvyifang/codex-echoink/releases/tag/2.0.3).
+1. Download `main.js`, `manifest.json`, and `styles.css` from the [2.1.0 Release](https://github.com/AKin-lvyifang/codex-echoink/releases/tag/2.1.0).
 2. Create this directory inside your vault:
 
 ```text
@@ -108,15 +118,41 @@ If EchoInk Agent is available in the Obsidian Community Plugins directory:
 3. Place the three files in that directory.
 4. Restart Obsidian and enable `EchoInk Agent` under Community plugins.
 
-> **Sync note:** `main.js` in 2.0.3 is about 5.71 MiB, above the 5 MiB per-file limit of Obsidian Sync Standard. Install or update EchoInk Agent independently on each device, or use a sync method that supports larger files.
+> **Sync note:** `main.js` in 2.1.0 is about 12.64 MiB, above the 5 MiB per-file limit of Obsidian Sync Standard. Local installation and Community downloads still work, but install or update EchoInk Agent separately on each device, or use a sync method that supports larger files.
 
 ## Quick start
 
-1. Open **Settings → EchoInk Agent → API Provider**.
-2. Add a Provider, enter its API URL, API key, and model, then save. A local Ollama setup can omit the API key.
-3. Open the EchoInk sidebar from the ribbon or command palette.
-4. Create a conversation and start chatting. Use `/ask` for knowledge questions and `/maintain` for refinement.
-5. Open **Settings → EchoInk Agent → Review** to generate reports, manage archived conversations, or correct long-term memory.
+The first launch of 2.1.0 shows a one-time, clickable guide that can be dismissed:
+
+1. Select the robot icon in Obsidian's left ribbon to open EchoInk Agent.
+2. Select the gear in the upper-right corner of the EchoInk sidebar to open settings.
+3. Connect a model service under **API Provider**.
+4. Choose the recommended or custom plan under **Knowledge**, then confirm the preview.
+5. Choose the Agent's starting style, name, and avatar under **General**.
+
+Create a conversation when setup is complete. Before the first ordinary chat turn, use the folder control in the composer to choose a local workspace. Use `/ask` for Knowledge questions and `/maintain` for refinement. Use the composer's `+` menu or `@` when a turn needs images, documents, note context, or Plan mode.
+
+## Add images, documents, and notes to a conversation
+
+| Action | Result |
+| --- | --- |
+| Paste or drag an image | Add the image to the current input |
+| `+ → Add image` | Select an image from the computer |
+| `+ → Files and folders` | Select one or more supported files; this version does not import an entire folder |
+| `+ → Add current note` | Add the Markdown note currently open in the editor |
+| Type `@` | Find and add a Markdown note from the current vault |
+| `+ → Plan mode` | Ask a complex task to show its plan first |
+
+Attachments belong to the current input. Remove a card before sending to cancel it. If preparation fails, the whole turn stops with a clear reason instead of sending incomplete content.
+
+## Configure Providers and models
+
+Open **Settings → EchoInk Agent → API Provider → Add API Provider**:
+
+- For an API-key Provider, choose the service, enter its API URL and API key, discover or add models, enable the models you need, and choose a default.
+- For **OpenAI Codex Beta**, open the **Sign in** group, choose the entry, and select **Sign in with OpenAI**. If the browser cannot return automatically, paste the callback URL or authorization code into the settings dialog and select **Complete authorization**.
+- Qwen API and Qwen Token Plan are separate entries. Choose the one that matches your account.
+- To disconnect OpenAI Codex Beta, select **Sign out** in the same Provider dialog.
 
 ## Knowledge maintenance
 
@@ -125,42 +161,54 @@ If EchoInk Agent is available in the Obsidian Community Plugins directory:
 | Input | Scope |
 | --- | --- |
 | `/maintain` | Check all maintainable Raw notes |
-| Select one `raw/**.md` note with the composer's `+`, then run `/maintain` | Maintain only that Raw note |
+| Select one `raw/**.md` note in the composer, then run `/maintain` | Maintain only that Raw note |
 | `/maintain note name` | Fuzzy-search Raw notes and maintain within the candidate set |
 
-Single-note mode accepts one Raw Markdown note from the current vault. If a name query has no reliable match, EchoInk does not silently fall back to global maintenance. Already-refined content with no changes settles without another write.
+Single-note mode accepts one Raw Markdown note from the current vault. If a name query has no reliable match, EchoInk does not fall back to global maintenance. Already-refined content with no changes finishes normally without another write.
 
 ## Review and memory correction
 
 Open **Settings → EchoInk Agent → Review**:
 
 - Under Generate reports, choose the date range, destination folder, and whether to open the HTML result.
-- Under Archived conversations, search, restore, or soft-delete conversations. The original Pi Session JSONL remains intact.
+- Under Archived conversations, search, restore, or soft-delete conversations. The original conversation record remains available.
 - Under Memory correction, browse current records by category, generate a corrected preview, and decide whether to save it.
 
-## Upgrading from 1.x
+## Upgrade notes
 
-- EchoInk 2.0 stores Provider API keys directly. If an existing configuration contains only a retired Credential reference, enter its API key once in Provider settings.
-- EchoInk 2.0 does not read or migrate retired Codex, OpenCode, or Hermes conversations, or data from retired Cognitive, Reflection, and Memory formats. It does not proactively delete those old files.
+### Upgrading from 2.0.3
+
+- Upgrade in place without rebuilding conversations, Knowledge, or long-term memory. Saved Provider and model settings are upgraded automatically.
+- 2.1.0 does not rewrite content already stored in old conversations. If an older conversation already contains repeated answers or failed turns, create a new conversation after upgrading.
+- A one-time updated five-step guide appears on first launch. Complete or dismiss it, or restart it later from settings.
+
+### Upgrading from 1.x
+
+- EchoInk 2.x stores Provider API keys directly. If an existing configuration contains only a retired Credential reference, enter its API key once in Provider settings.
+- EchoInk 2.x does not read or migrate retired Codex, OpenCode, or Hermes conversations, or data from retired Cognitive, Reflection, and Memory formats. It does not proactively delete those files.
 - Keep a vault snapshot before upgrading, following your normal backup practice.
 
 ## Privacy and data
 
 - EchoInk is desktop-only and accesses the current vault through Obsidian APIs.
 - Conversation records, knowledge files, memory, and reports stay in the local vault.
-- API keys are stored directly in the current vault's plugin settings. Configure them only on trusted devices and in trusted vaults.
-- Remote Providers receive the prompt, conversation, knowledge, memory, and tool context needed for the current request. EchoInk does not upload the entire vault by default.
-- Custom Providers and MCP connections are also subject to the policies of their services, servers, and commands.
+- API keys, Provider configuration, and OpenAI Codex Beta sign-in credentials are stored in plugin settings for the current vault. Configure them only on trusted devices and in trusted vaults.
+- A local workspace selected for a conversation can be outside the current vault. The composer's file access can be Read only, Workspace write, or Full access. Full access removes the workspace boundary and should be used only for trusted tasks. EchoInk also reads outside-vault attachments only when you explicitly select, drag, or paste them.
+- Remote Providers receive the prompt, conversation, Knowledge, memory, notes, attachments, and tool results required for the current request. EchoInk does not upload the entire vault or workspace by default.
+- Custom Providers and MCP connections are also subject to the policies of their services, servers, and commands. Configure only services and local commands you trust.
 - EchoInk has no telemetry service of its own.
 
 ## Requirements
 
 - Obsidian Desktop 1.11.4 or later.
-- Node.js is required only for local development, not for normal installation.
-- Cloud Providers require their own API keys and may charge for usage.
+- Cloud Providers require their own API key or account and may charge for usage.
+- Image input requires a vision-capable model.
 - Obsidian Mobile is not supported.
+- Node.js is required only for local development, not for normal installation.
 
 ## Development
+
+Node.js 22.19.0 or later is recommended:
 
 ```bash
 npm install
@@ -177,4 +225,4 @@ npm run package
 
 ## License
 
-EchoInk is released under the [MIT License](LICENSE).
+EchoInk is released under the [MIT License](LICENSE). Third-party notices are available in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

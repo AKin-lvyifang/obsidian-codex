@@ -2302,7 +2302,8 @@ function imageAttachmentsFromContent(
   content: PiSessionMessageView["content"]
 ): StoredAttachment[] {
   if (!Array.isArray(content)) return [];
-  return content
+  const blocks = content as readonly PiSessionContentBlockView[];
+  return blocks
     .filter((block) => normalizedToken(block.type) === "image")
     .map((block, index) => {
       const mimeType = visibleText(block.mimeType);

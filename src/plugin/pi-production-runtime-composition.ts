@@ -857,7 +857,7 @@ function parsePiKnowledgeReference(value: unknown): PiKnowledgeReference | null 
       : { recordedAt: reference.recordedAt as number }),
     ...(reference.publishedAt === undefined
       ? {}
-      : { publishedAt: reference.publishedAt as string }),
+      : { publishedAt: reference.publishedAt }),
     ...(reference.verificationStatus === undefined
       ? {}
       : { verificationStatus: reference.verificationStatus })
@@ -1266,7 +1266,7 @@ function mergePiBeforeAgentStartContextMessages(
     : Object.freeze({});
   const content = [message, noteMentionMessage, documentMessage]
     .filter((candidate): candidate is NonNullable<typeof candidate> => Boolean(candidate))
-    .map((candidate) => String(candidate.content))
+    .map((candidate) => candidate.content as string)
     .join("\n\n");
   return Object.freeze({
     customType: primary.customType,

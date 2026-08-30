@@ -79,7 +79,7 @@ export class RuntimeTurnQueue {
     if (!queue) return false;
     const index = queue.items.findIndex((item) => item.id === itemId);
     if (index < 0) return false;
-    queue.items[index]!.piUserEntryAccepted = true;
+    queue.items[index].piUserEntryAccepted = true;
     queue.items.splice(index, 1);
     this.cleanupEmptySession(sessionId);
     return true;

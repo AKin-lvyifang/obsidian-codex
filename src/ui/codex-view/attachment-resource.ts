@@ -108,7 +108,10 @@ export function createAttachmentResourceResolver(
 ): EchoInkAttachmentResourceResolver {
   const normalizedVaultPath = normalizeAbsolutePath(vaultPath);
   return Object.freeze({
-    resolve: (attachment, displayIndex = 0) => resolveAttachmentResource(
+    resolve: (
+      attachment: Readonly<StoredAttachment>,
+      displayIndex = 0
+    ) => resolveAttachmentResource(
       app,
       normalizedVaultPath,
       attachment,

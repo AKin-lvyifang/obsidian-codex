@@ -394,7 +394,7 @@ function normalizeMimeType(value: unknown): string {
 }
 
 function normalizeDocumentText(value: string): string {
-  return value.replace(/\u0000/gu, "").trim();
+  return value.replaceAll("\u0000", "").trim();
 }
 
 function cloneDocumentBytes(value: unknown): Uint8Array {
@@ -408,5 +408,9 @@ function documentBytesSha256(value: Uint8Array): string {
 }
 
 function safeContextFileName(value: string): string {
-  return value.replace(/[\r\n\u0000]/gu, " ").trim() || "未命名文档";
+  return value
+    .replaceAll("\r", " ")
+    .replaceAll("\n", " ")
+    .replaceAll("\u0000", " ")
+    .trim() || "未命名文档";
 }

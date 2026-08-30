@@ -406,7 +406,7 @@ export class ProviderModelModal extends Modal {
         autocomplete: "off",
         "aria-label": this.label("搜索 Provider", "Search providers")
       }
-    }) as HTMLInputElement;
+    });
     const options = menu.createDiv({
       cls: "codex-provider-combobox-options",
       attr: {
@@ -571,7 +571,7 @@ export class ProviderModelModal extends Modal {
         "aria-describedby": descriptionId,
         "data-modal-focus-key": "name"
       }
-    }) as HTMLInputElement;
+    });
     input.value = apiProviderConfiguredNameOverride(
       this.providerId,
       this.draft.name
@@ -596,7 +596,7 @@ export class ProviderModelModal extends Modal {
           ? this.options.copy.providers.savedKeyPlaceholder
           : this.options.copy.providers.keyPlaceholder
       }
-    }) as HTMLInputElement;
+    });
     this.applyFieldAccessibility(input, "apiKey");
     input.value = this.apiKeyInput;
     input.oninput = () => {
@@ -945,7 +945,7 @@ export class ProviderModelModal extends Modal {
         type: "checkbox",
         "data-modal-focus-key": `model-enabled:${modelId}`
       }
-    }) as HTMLInputElement;
+    });
     checkbox.checked = Boolean(enabled);
     checkbox.onchange = () => {
       this.focusIntent = `model-enabled:${modelId}`;
@@ -961,7 +961,7 @@ export class ProviderModelModal extends Modal {
         name: `${this.accessibilityId}-default-model`,
         "data-modal-focus-key": `model-default:${modelId}`
       }
-    }) as HTMLInputElement;
+    });
     radio.checked = this.draft.defaultModelId === modelId;
     radio.disabled = !enabled;
     radio.onchange = () => {
@@ -1018,7 +1018,7 @@ export class ProviderModelModal extends Modal {
         autocomplete: "off",
         "data-modal-focus-key": "manual-model"
       }
-    }) as HTMLInputElement;
+    });
     input.oninput = () => {
       this.manualModelId = input.value;
       this.clearFieldError("model", input);
@@ -1212,7 +1212,7 @@ export class ProviderModelModal extends Modal {
         placeholder: this.modelLimitPlaceholder(model[key]),
         "data-modal-focus-key": `model:${model.id}:${key}`
       }
-    }) as HTMLInputElement;
+    });
     const hintId = `${id}-hint`;
     const hint = field.createDiv({
       cls: "codex-provider-context-field-hint",
@@ -1524,7 +1524,7 @@ export class ProviderModelModal extends Modal {
         autocomplete: "off",
         "data-modal-focus-key": "endpoint"
       }
-    }) as HTMLInputElement;
+    });
     this.applyFieldAccessibility(endpointInput, "endpoint");
     endpointInput.oninput = () => {
       this.draft.baseUrl = endpointInput.value;
@@ -1553,7 +1553,7 @@ export class ProviderModelModal extends Modal {
         id: protocolId,
         "data-modal-focus-key": "protocol"
       }
-    }) as HTMLSelectElement;
+    });
     this.applyFieldAccessibility(select, "protocol");
     for (const item of [
       "openai-completions",
@@ -1593,7 +1593,7 @@ export class ProviderModelModal extends Modal {
     });
     const input = control.createEl("input", {
       attr: { type: "checkbox", "data-modal-focus-key": `toggle:${focusKey}` }
-    }) as HTMLInputElement;
+    });
     input.checked = checked;
     input.disabled = options.disabled === true;
     input.onchange = () => {

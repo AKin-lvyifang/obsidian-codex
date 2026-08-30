@@ -75,7 +75,7 @@ export function parseAgentSelfMetadata(raw: Record<string, unknown>): AgentSelfM
   return Object.freeze({
     schema: AGENT_SELF_METADATA_SCHEMA,
     revision: raw.revision,
-    templateId: raw.templateId as AgentTemplateId | null,
+    templateId: raw.templateId,
     legacyPersonalityImported: raw.legacyPersonalityImported,
     derivations,
     updatedAt: raw.updatedAt
@@ -117,10 +117,10 @@ function parseAgentSelfDerivations(value: unknown): readonly AgentSelfDerivation
       sourceKeys.add(key);
       sources.push(Object.freeze({
         kind: source.kind,
-        id: source.id as string,
+        id: source.id,
         ...(source.revision === undefined ? {} : { revision: source.revision as number }),
-        contextId: source.contextId as string,
-        evidence: source.evidence as string
+        contextId: source.contextId,
+        evidence: source.evidence
       }));
     }
     if (raw.basis === "inferred"
@@ -130,8 +130,8 @@ function parseAgentSelfDerivations(value: unknown): readonly AgentSelfDerivation
       operation: raw.operation,
       basis: raw.basis,
       sources: Object.freeze(sources),
-      previousValue: raw.previousValue as string | null,
-      currentValue: raw.currentValue as string | null,
+      previousValue: raw.previousValue,
+      currentValue: raw.currentValue,
       updatedAt: raw.updatedAt
     }));
   }
@@ -156,12 +156,12 @@ function isDerivationOperation(value: unknown): value is AgentSelfDerivationOper
 
 function boundedToken(value: unknown, max: number): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= max
-    && !/[\u0000\r\n]/u.test(value);
+    && !value.includes("\u0000") && !/[\r\n]/u.test(value);
 }
 
 function boundedText(value: unknown, max: number): value is string {
   return typeof value === "string" && value.trim().length > 0 && value.length <= max
-    && !/[\u0000\r\n\u2028\u2029]/u.test(value);
+    && !value.includes("\u0000") && !/[\r\n\u2028\u2029]/u.test(value);
 }
 
 export function agentSelfMetadataJson(state: AgentSelfMetadata): string {

@@ -1,5 +1,95 @@
 # Changelog
 
+## 2.1.0 - 2026-08-30
+
+![EchoInk Agent 2.1.0](https://raw.githubusercontent.com/AKin-lvyifang/codex-echoink/2.1.0/assets/releases/echoink-agent-2.1.0-release.png)
+
+### 中文
+
+#### 一个有名字、会成长的个人 Agent
+
+1. 新增 8 种起始风格、15 个内置头像和自定义 SVG 头像。完成新版引导后，可以为 Agent 设置名称和头像；以后修改身份不会清空它的长期记忆或相处习惯。
+2. 长期记忆现在会在对话中自主新增和更新，不必每次手动要求“记住”。Agent 也会定时做离线记忆整理，把分散的经历连起来，逐步更新它对你的理解和长期相处方式。
+3. 在 **设置 → EchoInk Agent → 基础设置 → 长期记忆 / 身份与用户画像** 中，可以查看 Agent 画像和用户画像，选择新的起始风格，并调整离线整理开关与每天 1–6 次的频率。关闭离线整理不会关闭普通的记忆写入和召回；关闭长期记忆后，名称、头像和基础风格仍会保留。
+
+#### 图片、文档和 Vault 笔记可以直接进入对话
+
+1. 输入区现在支持粘贴或拖入图片，也可以通过 `+` 添加图片和文件。图片会根据当前模型能力发送；BMP、HEIC、HEIF 和 SVG 会在可转换时转为 PNG。
+2. 支持 PDF、Word、Markdown 和 HTML 文档。每轮最多 8 个文件，单文件不超过 20 MiB，合计不超过 50 MiB；加密、损坏或超出模型上下文的文档会在发送前明确提示。扫描版 PDF 暂不支持 OCR。
+3. 输入 `@` 可以按文件名、路径、别名、拼音或首字母搜索当前 Vault 的 Markdown 笔记，并把选中的笔记作为本轮背景。发送后的图片和文件会保留为可打开的缩略图或文件卡片。
+
+#### 对话过程更清楚
+
+1. 模型思考可以实时展开，工具进度、授权请求、任务计划、文件变化和最终回答会在同一条时间线中显示。手动上滚思考区时，界面不会强行拉回底部。
+2. 需要分步骤处理复杂任务时，可从输入区 `+` 打开 **计划模式**。工具需要权限时，可以直接在对话中批准或拒绝。
+3. Knowledge、Memory、笔记和文档来源会随本轮结果显示，便于分辨回答用了哪些背景。
+
+#### Provider 与模型设置
+
+1. 新增 **OpenAI Codex Beta** 浏览器登录。进入 **设置 → EchoInk Agent → API Provider → 新增 API Provider → 登录账户**，选择 OpenAI Codex Beta 后点击 **使用 OpenAI 登录**；浏览器没有自动返回时，也可以粘贴回调地址或授权码完成登录。
+2. 通义千问 API 与通义千问 Token Plan 现在使用各自清楚的入口，并修复 Token Plan 传输和断流问题。
+3. 同一种 Provider 可以保存多个实例；每个实例可启用多个模型、选择默认模型、获取模型列表或手动添加 Model ID。深度思考选项会按当前模型实际能力显示。
+
+#### 首次使用与知识库初始化
+
+1. 新增一次性的五步引导：打开 Agent 侧栏、进入设置、连接模型、建立知识库、选择 Agent 风格。引导可以随时关闭，也可以从设置重新开始。
+2. 知识库初始化会先显示将要进行的整理预览，再由你确认执行。缺少固定目录时，可以只补齐目录，不会移动、删除或重写已有笔记；设置页也加入了图解指南。
+
+#### 可靠性修复
+
+1. 修复部分 Provider 在短句追问，或请求带有 Memory、Knowledge、笔记、文档背景时反复思考、重复回答，以及回答已经完成却仍显示失败的问题。新请求现在会按稳定顺序组织当前问题和相关背景，并能在没有知识引用时正常结束。
+2. 失败或中断的模型输出不再写入后续对话历史；工具完成状态、正常流结束、长会话恢复、连续记忆写入和思考区滚动也更稳定。
+
+#### 升级说明
+
+- 可以从 2.0.3 直接升级到 2.1.0，无需重建会话、知识库或长期记忆；已保存的 Provider 和模型配置会自动升级。
+- 2.1.0 不会改写已经保存的旧会话内容。如果某个旧会话已经留下重复回答或失败记录，升级后建议新建会话继续。
+- 2.1.0 的 `main.js` 约为 12.64 MiB，超过 Obsidian Sync Standard 的 5 MiB 单文件上限。本地安装和社区下载不受影响，但需要在每台设备上分别更新，或使用支持更大文件的同步方式。
+- 仍需 Obsidian Desktop 1.11.4 或更高版本，暂不支持移动端。
+
+### English
+
+#### A personal Agent with an identity that grows over time
+
+1. Choose from eight starting styles, 15 built-in avatars, or a custom SVG avatar. The updated guide lets you name the Agent and choose its avatar; changing either later does not clear long-term memory or learned habits.
+2. Long-term memory can now add and update useful records during ordinary conversations without requiring a repeated “remember this” instruction. Scheduled offline memory organization connects related experiences and gradually updates how the Agent understands and works with you.
+3. Open **Settings → EchoInk Agent → General → Long-term memory / Identity and user profile** to view Agent and user profiles, choose another starting style, and set offline organization from one to six times per day. Turning off offline organization leaves normal memory writes and recall available. Turning off long-term memory keeps the Agent's name, avatar, and base style.
+
+#### Images, documents, and vault notes in conversation
+
+1. Paste or drag images into the composer, or use `+` to add images and files. Images are sent only when the current model supports them; BMP, HEIC, HEIF, and SVG are converted to PNG when possible.
+2. Attach PDF, Word, Markdown, and HTML documents. A turn accepts up to eight files, 20 MiB per file and 50 MiB in total. Encrypted, damaged, or over-context documents are rejected with a clear message before sending. OCR for scanned PDFs is not included yet.
+3. Type `@` to find Markdown notes in the current vault by file name, path, alias, Pinyin, or initials and add a selected note to the current turn. Sent images and documents remain available as openable thumbnails or file cards.
+
+#### A clearer conversation process
+
+1. Expand live reasoning while the model works. Tool progress, approval requests, task plans, file changes, and the final answer share one timeline. Manually scrolling up no longer forces the reasoning view back to the bottom.
+2. For complex work, open **Plan mode** from the composer's `+` menu. Approve or reject requested tool access directly inside the conversation.
+3. Knowledge, Memory, note, and document sources are shown with the turn so you can see which background informed the answer.
+
+#### Providers and models
+
+1. Added **OpenAI Codex Beta** browser sign-in. Open **Settings → EchoInk Agent → API Provider → Add API Provider → Sign in**, choose OpenAI Codex Beta, and select **Sign in with OpenAI**. If the browser cannot return automatically, paste the callback URL or authorization code to finish.
+2. Qwen API and Qwen Token Plan now have separate, clearly named entries, with fixes for Token Plan transport and stream completion.
+3. Save multiple instances of the same Provider, enable several models per instance, choose a default, discover available models, or add a Model ID manually. Deep-reasoning controls appear only when the selected model supports them.
+
+#### Setup and Knowledge initialization
+
+1. A one-time five-step guide now covers opening the Agent sidebar, entering settings, connecting a model, setting up Knowledge, and choosing an Agent style. Dismiss it at any time or restart it from settings.
+2. Knowledge setup shows a preview before organizing anything. Missing standard folders can be restored without moving, deleting, or rewriting existing notes, and a visual guide is available in settings.
+
+#### Reliability fixes
+
+1. Fixed cases where some Providers could keep reasoning or repeat an answer after a short follow-up, especially when Memory, Knowledge, notes, or documents were included. Current questions and relevant background are now ordered consistently, and a turn can finish normally even when no Knowledge reference is found.
+2. Failed or interrupted model output no longer leaks into later conversation history. Tool completion, clean stream endings, long-conversation recovery, consecutive memory writes, and reasoning-panel scrolling are also more reliable.
+
+#### Upgrade notes
+
+- Upgrade directly from 2.0.3 to 2.1.0 without rebuilding conversations, Knowledge, or long-term memory. Saved Provider and model settings are upgraded automatically.
+- 2.1.0 does not rewrite content already stored in old conversations. If an older conversation already contains repeated answers or failed turns, create a new conversation after upgrading.
+- `main.js` in 2.1.0 is about 12.64 MiB, above the 5 MiB per-file limit of Obsidian Sync Standard. Local installation and Community downloads still work, but update the plugin separately on each device or use a sync method that supports larger files.
+- Obsidian Desktop 1.11.4 or later is still required. Mobile is not supported.
+
 ## 2.0.3 - 2026-08-16
 
 ![EchoInk Agent 2.0.3](https://raw.githubusercontent.com/AKin-lvyifang/codex-echoink/2.0.3/assets/releases/echoink-agent-2.0.1-release.png)

@@ -231,7 +231,11 @@ export function parseDreamExperienceInboxState(
     if (typeof item.fingerprint !== "string" || !/^[a-f0-9]{64}$/u.test(item.fingerprint)) return null;
     if (fingerprints.has(item.fingerprint)) return null;
     fingerprints.add(item.fingerprint);
-    if (typeof item.userText !== "string" || typeof item.assistantText !== "string"
+    if (typeof item.conversationId !== "string"
+      || typeof item.productRunId !== "string"
+      || typeof item.userEntryId !== "string"
+      || typeof item.assistantEntryId !== "string"
+      || typeof item.userText !== "string" || typeof item.assistantText !== "string"
       || typeof item.occurredAt !== "number" || !Number.isFinite(item.occurredAt)
       || (item.evaluatedAt !== null && (typeof item.evaluatedAt !== "number" || !Number.isFinite(item.evaluatedAt)))) {
       return null;
@@ -239,14 +243,14 @@ export function parseDreamExperienceInboxState(
     let normalized: DreamPublicExperience;
     try {
       normalized = normalizeDreamPublicExperience({
-        conversationId: String(item.conversationId ?? ""),
-        productRunId: String(item.productRunId ?? ""),
-        userEntryId: String(item.userEntryId ?? ""),
-        assistantEntryId: String(item.assistantEntryId ?? ""),
+        conversationId: item.conversationId,
+        productRunId: item.productRunId,
+        userEntryId: item.userEntryId,
+        assistantEntryId: item.assistantEntryId,
         occurredAt: item.occurredAt,
         userText: item.userText,
         assistantText: item.assistantText,
-        taskResult: item.taskResult as DreamTaskResultSummary
+        taskResult: normalizeTaskResult(item.taskResult)
       });
     } catch {
       return null;
@@ -254,16 +258,16 @@ export function parseDreamExperienceInboxState(
     if (normalized.fingerprint !== item.fingerprint) return null;
     entries.push(Object.freeze({
       ...normalized,
-      evaluatedAt: item.evaluatedAt as number | null
+      evaluatedAt: item.evaluatedAt
     }));
   }
   const state = finalizeState({
     schema: DREAM_EXPERIENCE_INBOX_SCHEMA,
-    revision: raw.revision as number,
+    revision: raw.revision,
     entries: Object.freeze(entries),
-    duplicateCount: raw.duplicateCount as number,
-    droppedEvaluatedCount: raw.droppedEvaluatedCount as number,
-    droppedUnevaluatedCount: raw.droppedUnevaluatedCount as number,
+    duplicateCount: raw.duplicateCount,
+    droppedEvaluatedCount: raw.droppedEvaluatedCount,
+    droppedUnevaluatedCount: raw.droppedUnevaluatedCount,
     updatedAt: raw.updatedAt
   });
   return Buffer.byteLength(dreamExperienceInboxJsonUnchecked(state), "utf8") <= DREAM_EXPERIENCE_MAX_BYTES
@@ -310,7 +314,8 @@ function dreamExperienceInboxJsonUnchecked(state: DreamExperienceInboxState): st
 
 function boundedId(value: string, name: string): string {
   const normalized = value.trim();
-  if (!normalized || normalized.length > 512 || /[\u0000\r\n]/u.test(normalized)) {
+  if (!normalized || normalized.length > 512
+    || normalized.includes("\u0000") || /[\r\n]/u.test(normalized)) {
     throw new Error(`dream_experience_${name}_invalid`);
   }
   return normalized;
@@ -320,20 +325,26 @@ function publicText(value: string): string {
   return value.replaceAll("\u0000", "").trim();
 }
 
-function normalizeTaskResult(value: DreamTaskResultSummary): DreamTaskResultSummary {
-  if (!value || (value.terminalState !== "completed" && value.terminalState !== "failed")) {
+function normalizeTaskResult(value: unknown): DreamTaskResultSummary {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("dream_experience_task_result_invalid");
+  }
+  const taskResult = value as Record<string, unknown>;
+  if (taskResult.terminalState !== "completed" && taskResult.terminalState !== "failed") {
     throw new Error("dream_experience_task_result_invalid");
   }
   return Object.freeze({
-    terminalState: value.terminalState,
-    successfulToolNames: Object.freeze(normalizeToolNames(value.successfulToolNames)),
-    failedToolNames: Object.freeze(normalizeToolNames(value.failedToolNames))
+    terminalState: taskResult.terminalState,
+    successfulToolNames: Object.freeze(normalizeToolNames(taskResult.successfulToolNames)),
+    failedToolNames: Object.freeze(normalizeToolNames(taskResult.failedToolNames))
   });
 }
 
-function normalizeToolNames(values: readonly string[]): string[] {
+function normalizeToolNames(values: unknown): string[] {
   if (!Array.isArray(values)) throw new Error("dream_experience_tool_names_invalid");
-  const result = [...new Set(values.map((value) => value.trim()).filter((value) => TOOL_NAME.test(value)))];
+  const strings = values.filter((value): value is string => typeof value === "string");
+  if (strings.length !== values.length) throw new Error("dream_experience_tool_names_invalid");
+  const result = [...new Set(strings.map((value) => value.trim()).filter((value) => TOOL_NAME.test(value)))];
   return result.sort().slice(0, 64);
 }
 

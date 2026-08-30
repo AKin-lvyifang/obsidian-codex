@@ -84,7 +84,7 @@ export class AgentIdentityModal extends Modal {
         placeholder: zh ? "例如：小墨" : "e.g. Xiaomo",
         maxlength: String(AGENT_DISPLAY_NAME_MAX_CHARS * 4)
       }
-    }) as unknown as HTMLInputElement;
+    });
     const nameInputId = `${this.radioGroupName}-name`;
     this.nameInputEl.id = nameInputId;
     nameLabel.setAttribute("for", nameInputId);
@@ -111,14 +111,14 @@ export class AgentIdentityModal extends Modal {
         "aria-label": zh ? "上传 SVG 头像" : "Upload SVG avatar",
         title: zh ? "上传 SVG 头像" : "Upload SVG avatar"
       }
-    }) as unknown as HTMLButtonElement;
+    });
     renderAnimateIcon(this.uploadButtonEl, "upload");
     this.uploadButtonEl.createSpan({ text: "Upload" });
 
     const fileInput = avatarArea.createEl("input", {
       cls: "echoink-agent-identity-file",
       attr: { type: "file", accept: ".svg,image/svg+xml" }
-    }) as unknown as HTMLInputElement;
+    });
     this.uploadButtonEl.addEventListener("click", () => {
       (fileInput as unknown as { click?: () => void }).click?.();
     });
@@ -152,7 +152,7 @@ export class AgentIdentityModal extends Modal {
         ? (zh ? "完成设置" : "Finish setup")
         : (zh ? "保存" : "Save"),
       attr: { type: "button" }
-    }) as unknown as HTMLButtonElement;
+    });
     applyAmicroButton(this.confirmButtonEl, { variant: "primary", motion: "complete" });
     this.confirmButtonEl.addEventListener("click", () => void this.handleConfirm());
     this.refreshConfirmState();
@@ -233,7 +233,7 @@ export class AgentIdentityModal extends Modal {
         value,
         "aria-label": label
       }
-    }) as unknown as HTMLInputElement;
+    });
     input.checked = selected;
     tile.createEl("img", { attr: { src: imageUrl, alt: "" } });
     tile.createSpan({ cls: "echoink-agent-avatar-option-name", text: label });
@@ -274,7 +274,7 @@ export class AgentIdentityModal extends Modal {
     if (this.avatarErrorEl) this.avatarErrorEl.setText("");
     try {
       const avatar = await processAgentAvatar(
-        file as unknown as Blob,
+        file,
         file.type,
         file.size,
         this.options.avatarRenderer ?? createBrowserAvatarRenderer()

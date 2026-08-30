@@ -124,7 +124,7 @@ export async function inspectLegacyPersonalityFile(
     kind: "valid",
     state: Object.freeze({
       schema: raw.schema as "echoink.personality.v1" | "echoink.personality.v2",
-      templateId: raw.templateId as string | null,
+      templateId: raw.templateId,
       learnedRequirements: Object.freeze(requirements)
     })
   });

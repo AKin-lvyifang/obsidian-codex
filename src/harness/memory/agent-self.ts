@@ -84,7 +84,7 @@ export function stableSelfKey(value: string): string {
   const canonical = value.normalize("NFKC").toLocaleLowerCase("en-US")
     .replaceAll(/\s+/gu, " ")
     .trim();
-  const hasNonAsciiWord = /[^\x00-\x7f]/u.test(canonical);
+  const hasNonAsciiWord = Array.from(canonical).some((character) => character.charCodeAt(0) > 0x7f);
   const ascii = canonical
     .replaceAll(/[^a-z0-9]+/gu, "-")
     .replaceAll(/^-+|-+$/gu, "")

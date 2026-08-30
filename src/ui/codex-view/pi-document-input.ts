@@ -221,7 +221,7 @@ async function prepareOneDocument(
   if (replay) {
     const mimeType = canonicalDocumentMimeType(kind, attachment);
     const text = typeof replay.text === "string"
-      ? replay.text.replace(/\u0000/gu, "").trim()
+      ? replay.text.split("\u0000").join("").trim()
       : null;
     if (
       replay.name !== name
@@ -369,13 +369,13 @@ async function createWordExtractor(): Promise<Readonly<{
   extract(source: Buffer): Promise<Readonly<{ getBody(): string }>>;
 }>> {
   if (typeof require === "undefined") {
-    (globalThis as typeof globalThis & { require?: NodeRequire }).require =
+    (globalThis as typeof globalThis & { require?: NodeJS.Require }).require =
       createRequire(`${process.cwd()}/package.json`);
   }
-  const imported = await import("word-extractor");
-  const Constructor = imported.default as unknown as new () => {
+  const imported: unknown = await import("word-extractor");
+  const Constructor = (imported as Readonly<{ default: new () => {
     extract(source: Buffer): Promise<Readonly<{ getBody(): string }>>;
-  };
+  } }>).default;
   return new Constructor();
 }
 
@@ -421,7 +421,12 @@ function decodeHtmlEntities(value: string): string {
     ndash: "–",
     quot: "\""
   });
-  return value.replace(/&(?:#(\d+)|#x([0-9a-f]+)|([a-z][a-z0-9]+));/giu, (entity, decimal, hexadecimal, name) => {
+  return value.replace(/&(?:#(\d+)|#x([0-9a-f]+)|([a-z][a-z0-9]+));/giu, (
+    entity: string,
+    decimal: string | undefined,
+    hexadecimal: string | undefined,
+    name: string | undefined
+  ) => {
     const codePoint = decimal
       ? Number.parseInt(decimal, 10)
       : hexadecimal
@@ -436,13 +441,13 @@ function decodeHtmlEntities(value: string): string {
         return entity;
       }
     }
-    return named[String(name).toLowerCase()] ?? entity;
+    return named[name?.toLowerCase() ?? ""] ?? entity;
   });
 }
 
 function normalizeExtractedText(value: string): string {
   return value
-    .replace(/\u0000/gu, "")
+    .split("\u0000").join("")
     .replace(/[\t\f\v ]+\n/gu, "\n")
     .replace(/\n[\t\f\v ]+/gu, "\n")
     .replace(/[\t\f\v ]{2,}/gu, " ")

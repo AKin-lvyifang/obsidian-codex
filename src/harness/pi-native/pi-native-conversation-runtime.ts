@@ -4099,7 +4099,7 @@ export class PiNativeConversationRuntime {
       piSessionId: active.catalog.piSessionId,
       activeLeafId: active.sessionManager.getLeafId(),
       occurredAt
-    } as PiChatRuntimeEvent;
+    };
     const publish = async (published: Readonly<PiChatRuntimeEvent>) => {
       active.projection = this.projector.projectRuntimeEvent({
         current: active.projection,

@@ -20,7 +20,7 @@ export function productRunIdFromMemorySource(source: string): string | null {
   try {
     const values = new URLSearchParams(source.slice(queryIndex + 1)).getAll("productRun");
     if (values.length !== 1) return null;
-    return values[0]!.trim() || null;
+    return values[0].trim() || null;
   } catch {
     return null;
   }

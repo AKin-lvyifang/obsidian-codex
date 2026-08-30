@@ -13995,6 +13995,22 @@ body.theme-dark .codex-session-picker {
   gap: 8px;
 }
 
+.echoink-agent-profile-heading-row.setting-item {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+}
+
+.echoink-agent-profile-heading-row .setting-item-info {
+  min-width: 0;
+  padding: 0;
+}
+
+.echoink-agent-profile-heading-row .setting-item-description,
+.echoink-agent-profile-heading-row .setting-item-control {
+  display: none;
+}
+
 .echoink-agent-profile-card-label {
   margin: 0;
   color: var(--text-normal);

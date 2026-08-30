@@ -95,11 +95,12 @@ export function createQwenTokenPlanOpenAICompletionsAdapter(
     });
     return output;
   };
-  return Object.freeze({
+  const streams: ProviderStreams = {
     stream: (model, context, options = {}) => start(model, context, options),
     streamSimple: (model, context, options = {}) =>
       start(model, context, options)
-  });
+  };
+  return Object.freeze(streams);
 }
 
 export async function requestQwenTokenPlanProvider(

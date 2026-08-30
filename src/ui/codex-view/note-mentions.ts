@@ -61,8 +61,17 @@ export function buildVaultNoteMentionCatalog(
   return buildNoteMentionCatalog(app.vault.getMarkdownFiles().map((file) => ({
     vaultRelativePath: file.path,
     fileName: file.name,
-    aliases: app.metadataCache.getFileCache(file)?.frontmatter?.aliases
+    aliases: noteAliasesFromFrontmatter(
+      app.metadataCache.getFileCache(file)?.frontmatter
+    )
   })));
+}
+
+function noteAliasesFromFrontmatter(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  return (value as Readonly<Record<string, unknown>>).aliases;
 }
 
 export function buildNoteMentionCatalog(

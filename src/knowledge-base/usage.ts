@@ -504,7 +504,7 @@ function normalizeKnowledgeUsageEvent(
     throw new PiNativeFileStoreError(errorCode, "KnowledgeUsageEvent 必须是对象");
   }
   const object = value as Record<string, unknown>;
-  const hasPersonalMemorySources = Object.prototype.hasOwnProperty.call(
+  const hasPersonalMemorySources = Object.hasOwn(
     object,
     "personalMemorySources"
   );

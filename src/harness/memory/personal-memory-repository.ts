@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { watch, type FSWatcher } from "node:fs";
+import { watch, type FSWatcher, type Stats } from "node:fs";
 import {
   copyFile,
   lstat,
@@ -43,7 +43,6 @@ import {
   scorePrimaryEntry,
   scoreSecondaryEntry,
   type BuildIndexCatalogInput,
-  type SearchCatalogEntryV3,
   type SearchIndexV3,
   type SecondaryCatalogEntry
 } from "./search-index-v3";
@@ -244,8 +243,6 @@ interface PersonalMemoryManifest {
   updatedAt: number;
   fixedFileHashes?: PersonalMemoryFixedFileHashes;
 }
-
-type SearchCatalogEntry = SearchCatalogEntryV3;
 
 export interface PersonalMemoryTurnSnapshot {
   readonly revision: number;
@@ -3209,7 +3206,7 @@ export class PersonalMemoryRepository {
       this.layout.agentSelfMetadata,
       this.layout.agentIdentity
     ]) {
-      let stat;
+      let stat: Stats;
       try {
         stat = await lstat(target);
       } catch (error) {
@@ -3254,7 +3251,7 @@ export class PersonalMemoryRepository {
       this.layout.runtime,
       this.layout.manifest
     ]) {
-      let stat;
+      let stat: Stats;
       try {
         stat = await lstat(target);
       } catch (error) {
@@ -3542,7 +3539,7 @@ export class PersonalMemoryRepository {
       || typeof index.checksum !== "string"
       || index.checksum !== indexChecksum(
         index.revision,
-        index.catalog as SearchCatalogEntry[],
+        index.catalog,
         index.secondaryCatalog,
         index.secondaryIndex
       );

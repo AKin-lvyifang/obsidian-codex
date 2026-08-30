@@ -42,7 +42,7 @@ export function updateReasoningActivity(input: Readonly<{
   }
   const activities = input.summary.activities.map((activity) => ({ ...activity }));
   if (existingIndex >= 0) {
-    const previous = activities[existingIndex]!;
+    const previous = activities[existingIndex];
     activities[existingIndex] = {
       ...input.activity,
       startedAt: Math.min(previous.startedAt, input.activity.startedAt),
