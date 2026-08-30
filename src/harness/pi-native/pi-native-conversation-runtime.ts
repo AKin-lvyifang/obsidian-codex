@@ -43,6 +43,7 @@ import {
   openDurablePiSession,
   persistPiActiveLeaf,
   type InvalidPiSessionJsonlInspection,
+  type PiSessionDurabilityErrorCode,
   type PiSessionManagerApi,
   type ValidPiSessionJsonlInspection
 } from "./pi-session-durability";
@@ -99,7 +100,8 @@ import {
 } from "./pi-native-controlled-provider";
 import {
   PiNativeFileStoreError,
-  runtimeInterruptedDiagnosticId
+  runtimeInterruptedDiagnosticId,
+  type PiNativeFileStoreErrorCode
 } from "./file-store-utils";
 import {
   appendTaskPlanEntry,
@@ -519,6 +521,47 @@ export class PiNativeConversationRuntimeError extends Error {
   readonly piUserEntryAccepted: boolean;
   readonly piUserEntryId?: string;
 }
+
+const SAFE_PI_NATIVE_CONVERSATION_RUNTIME_ERROR_CODES:
+ReadonlySet<string> = new Set<PiNativeConversationRuntimeErrorCode>([
+  "runtime_not_initialized",
+  "runtime_shutting_down",
+  "conversation_not_found",
+  "conversation_deleted",
+  "conversation_conflict",
+  "conversation_busy",
+  "conversation_derivation_invalid",
+  "draft_invalid",
+  "skill_binding_invalid",
+  "session_recovery_invalid",
+  "agent_session_invalid",
+  "image_input_unsupported",
+  "document_request_too_large",
+  "reasoning_level_invalid",
+  "product_run_start_failed_after_user_entry",
+  "agent_settled_missing",
+  "projection_unsettled",
+  "provider_execution_unbound"
+]);
+
+const SAFE_PI_SESSION_DURABILITY_ERROR_CODES:
+ReadonlySet<string> = new Set<PiSessionDurabilityErrorCode>([
+  "pi_session_api_incompatible",
+  "pi_session_path_unsafe",
+  "pi_session_jsonl_invalid",
+  "pi_session_readback_mismatch",
+  "pi_session_active_leaf_invalid"
+]);
+
+const SAFE_PI_NATIVE_FILE_STORE_ERROR_CODES:
+ReadonlySet<string> = new Set<PiNativeFileStoreErrorCode>([
+  "invalid-input",
+  "mapping-conflict",
+  "not-found",
+  "invalid-transition",
+  "store-corrupt",
+  "readback-diverged"
+]);
 
 interface ActiveConversation {
   catalog: Readonly<PiConversationCatalogEntry>;
@@ -5576,14 +5619,39 @@ function safePersistedRuntimeErrorCode(error: unknown): string {
 }
 
 function safeProductRunStartFailureCode(error: unknown): string {
-  if (
-    error instanceof PiNativeConversationRuntimeError
-    || error instanceof PiSessionDurabilityError
-    || error instanceof PiNativeFileStoreError
-  ) {
-    return error.code;
+  if (error instanceof PiNativeConversationRuntimeError) {
+    return safeWhitelistedErrorCode(
+      error,
+      SAFE_PI_NATIVE_CONVERSATION_RUNTIME_ERROR_CODES
+    );
+  }
+  if (error instanceof PiSessionDurabilityError) {
+    return safeWhitelistedErrorCode(
+      error,
+      SAFE_PI_SESSION_DURABILITY_ERROR_CODES
+    );
+  }
+  if (error instanceof PiNativeFileStoreError) {
+    return safeWhitelistedErrorCode(
+      error,
+      SAFE_PI_NATIVE_FILE_STORE_ERROR_CODES
+    );
   }
   return "unknown";
+}
+
+function safeWhitelistedErrorCode(
+  error: Readonly<{ code: unknown }>,
+  allowedCodes: ReadonlySet<string>
+): string {
+  try {
+    const code = error.code;
+    return typeof code === "string" && allowedCodes.has(code)
+      ? code
+      : "unknown";
+  } catch {
+    return "unknown";
+  }
 }
 
 function normalizeAgentSessionWarning(value: unknown): string {

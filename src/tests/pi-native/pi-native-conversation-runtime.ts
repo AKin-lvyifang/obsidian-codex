@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { appendFileSync } from "node:fs";
 import {
   appendFile,
   copyFile,
@@ -135,6 +136,7 @@ export async function runPiNativeConversationRuntimeTests(): Promise<void> {
   await assertProductRunCreateFailureCleansRuntime();
   await assertProductRunMarkRunningFailureCleansRuntime();
   await assertProductRunStartDiagnosticFailureDoesNotMaskCause();
+  await assertTamperedProductRunStartCodesAreRedacted();
   await assertSuccessfulProductRunDoesNotWriteStartDiagnostic();
   await assertSubscriberFailuresAreIsolated();
   await assertSettlementFailureIsDiagnosedAndReleasesRun();
@@ -4035,22 +4037,31 @@ async function assertUserEntryReadbackFailureIsSafelyDiagnosed(): Promise<void> 
     });
     await fixture.runtime.activateConversation(conversationId);
     const session = fixture.latestSession();
-    const readbackError = new PiSessionDurabilityError({
-      code: "pi_session_readback_mismatch",
-      message: "SECRET_USER PRIVATE_MEMORY sk-private /Users/private"
-    });
-    session.failNextUserEntryReadback(readbackError);
+    session.corruptSessionJsonlAfterNextUserEntry();
 
+    let primaryReadbackError: PiSessionDurabilityError | null = null;
     await assert.rejects(
       fixture.submit({
         conversationId,
         text: "PRIVATE_USER_MESSAGE",
         submittedAt: 2
       }),
-      (error: unknown) => error === readbackError
+      (error: unknown) => {
+        const primaryError = error instanceof AggregateError
+          ? error.errors[0]
+          : error;
+        if (!(primaryError instanceof PiSessionDurabilityError)) return false;
+        primaryReadbackError = primaryError;
+        return primaryError.code === "pi_session_jsonl_invalid";
+      }
     );
 
     assert.equal(session.promptTexts.length, 1);
+    assert.equal(primaryReadbackError?.code, "pi_session_jsonl_invalid");
+    assert.ok(session.sessionManager.getEntries().some(
+      (entry) => entry.type === "message" && entry.message.role === "user"
+    ));
+    assert.match(await readFile(session.sessionFile!, "utf8"), /not-json/u);
     assert.deepEqual(await fixture.productRuns.list(conversationId), []);
     assert.equal(
       reasoningSummariesForRun(
@@ -4062,8 +4073,8 @@ async function assertUserEntryReadbackFailureIsSafelyDiagnosed(): Promise<void> 
     await assertSafeStartFailureDiagnostic(
       fixture,
       conversationId,
-      "pi_native_start_failed:user_entry_readback:pi_session_readback_mismatch",
-      ["SECRET_USER", "PRIVATE_MEMORY", "PRIVATE_USER_MESSAGE", "sk-private", "/Users/private"]
+      "pi_native_start_failed:user_entry_readback:pi_session_jsonl_invalid",
+      ["PRIVATE_USER_MESSAGE", "not-json"]
     );
   });
 }
@@ -4177,6 +4188,73 @@ Promise<void> {
       "failed"
     );
   });
+}
+
+async function assertTamperedProductRunStartCodesAreRedacted(): Promise<void> {
+  const cases: ReadonlyArray<Readonly<{
+    suffix: string;
+    error: Error;
+    sensitiveCode: string;
+  }>> = [
+    {
+      suffix: "runtime",
+      error: new PiNativeConversationRuntimeError(
+        "conversation_busy",
+        "runtime error with a safe constructor code"
+      ),
+      sensitiveCode: "SECRET_RUNTIME_CODE_sk-private_/Users/private"
+    },
+    {
+      suffix: "session",
+      error: new PiSessionDurabilityError({
+        code: "pi_session_readback_mismatch",
+        message: "session error with a safe constructor code"
+      }),
+      sensitiveCode: "SECRET_SESSION_CODE_sk-private_/Users/private"
+    },
+    {
+      suffix: "store",
+      error: new PiNativeFileStoreError(
+        "store-corrupt",
+        "store error with a safe constructor code"
+      ),
+      sensitiveCode: "SECRET_STORE_CODE_sk-private_/Users/private"
+    }
+  ];
+  await withFixture(
+    cases.map(({ suffix }) => `run-sensitive-${suffix}`),
+    async (fixture) => {
+      for (const testCase of cases) {
+        Object.defineProperty(testCase.error, "code", {
+          value: testCase.sensitiveCode,
+          configurable: true
+        });
+        fixture.productRuns.create = async () => {
+          throw testCase.error;
+        };
+        const conversationId = `sensitive-${testCase.suffix}-conversation`;
+
+        await assert.rejects(
+          fixture.submit({
+            conversationId,
+            text: `sensitive ${testCase.suffix} code`,
+            submittedAt: 5
+          }),
+          (error: unknown) =>
+            error instanceof PiNativeConversationRuntimeError
+            && error.code === "product_run_start_failed_after_user_entry"
+            && error.cause === testCase.error
+        );
+
+        await assertSafeStartFailureDiagnostic(
+          fixture,
+          conversationId,
+          "pi_native_start_failed:product_run_create:unknown",
+          [testCase.sensitiveCode, "sk-private", "/Users/private"]
+        );
+      }
+    }
+  );
 }
 
 async function assertSuccessfulProductRunDoesNotWriteStartDiagnostic():
@@ -4679,7 +4757,7 @@ class ControlledAgentSession {
   private rejectPrompt: ((error: unknown) => void) | null = null;
   private idlePromise: Promise<void> = Promise.resolve();
   private nextPromptError: Error | null = null;
-  private nextUserEntryReadbackError: Error | null = null;
+  private corruptJsonlAfterNextUserEntry = false;
   private runtimeMessageTimestampDrift = false;
   private emitSettledOnAbort = true;
   isStreaming = false;
@@ -4724,8 +4802,8 @@ class ControlledAgentSession {
     this.nextPromptError = error;
   }
 
-  failNextUserEntryReadback(error: Error): void {
-    this.nextUserEntryReadbackError = error;
+  corruptSessionJsonlAfterNextUserEntry(): void {
+    this.corruptJsonlAfterNextUserEntry = true;
   }
 
   enableRuntimeMessageTimestampDrift(): void {
@@ -4768,14 +4846,11 @@ class ControlledAgentSession {
       timestamp: 200_000 + this.promptSequence
     };
     this.sessionManager.appendMessage(userMessage);
-    if (this.nextUserEntryReadbackError) {
-      const error = this.nextUserEntryReadbackError;
-      const originalGetEntries = this.sessionManager.getEntries;
-      this.nextUserEntryReadbackError = null;
-      this.sessionManager.getEntries = (() => {
-        this.sessionManager.getEntries = originalGetEntries;
-        throw error;
-      }) as SessionManager["getEntries"];
+    if (this.corruptJsonlAfterNextUserEntry) {
+      const sessionFile = this.sessionManager.getSessionFile();
+      assert.ok(sessionFile, "expected a persistent test Session JSONL");
+      this.corruptJsonlAfterNextUserEntry = false;
+      appendFileSync(sessionFile, "not-json\n", "utf8");
     }
     if (this.runtimeMessageTimestampDrift) {
       const runtimeUserMessage = {
