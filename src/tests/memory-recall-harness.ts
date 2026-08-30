@@ -508,6 +508,8 @@ async function scenarioRecallWhenIsNewWriteOldReadCompatible(): Promise<void> {
     assert.match(newMarkdown, /^recall_when: "准备宣布阶段完成或发布时"$/mu);
     assert.equal((created.record as unknown as { recallWhen?: string }).recallWhen, "准备宣布阶段完成或发布时");
 
+    // Build the legacy disk fixture only after the previous runtime has fully stopped.
+    await fixture.repository.dispose();
     const legacyMarkdown = newMarkdown.replace(/^recall_when: .*\n/mu, "");
     await writeFile(recordPath, legacyMarkdown, "utf8");
     const legacyManifest = JSON.parse(
