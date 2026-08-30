@@ -289,7 +289,7 @@ async function scenarioNoMemoryIdentityOnlyAndWarmSnapshotReuse(): Promise<void>
       beforeNoMemoryTree,
       "/no-memory must not initialize, rewrite, or otherwise mutate the Memory tree"
     );
-  });
+  }, { watchExternalChanges: false });
 }
 
 async function snapshotTreeBytes(root: string): Promise<readonly Readonly<{
