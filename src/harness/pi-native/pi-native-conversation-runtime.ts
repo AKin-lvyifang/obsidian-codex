@@ -97,7 +97,10 @@ import {
   piModelSupportsImageInput,
   type PiNativeProviderExecutionContext
 } from "./pi-native-controlled-provider";
-import { runtimeInterruptedDiagnosticId } from "./file-store-utils";
+import {
+  PiNativeFileStoreError,
+  runtimeInterruptedDiagnosticId
+} from "./file-store-utils";
 import {
   appendTaskPlanEntry,
   failTaskPlanForProductRun,
@@ -163,6 +166,12 @@ type PiChatRuntimeMetadataKey =
   | "piSessionId"
   | "activeLeafId"
   | "occurredAt";
+
+type PiProductRunStartFailureStage =
+  | "user_entry_readback"
+  | "draft_remove"
+  | "product_run_create"
+  | "product_run_mark_running";
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown
   ? Omit<T, Extract<keyof T, K>>
@@ -1543,6 +1552,12 @@ export class PiNativeConversationRuntime {
         expectedEntryIds: [userEntry.id]
       });
     } catch (error) {
+      await this.appendProductRunStartFailureDiagnostic(
+        active,
+        execution,
+        "user_entry_readback",
+        error
+      );
       const cleanupErrors = await this.cleanupFailedProductRunStart(
         active,
         execution,
@@ -1560,6 +1575,12 @@ export class PiNativeConversationRuntime {
         await this.catalog.removeDraft(selectedDraft.draftId);
       }
     } catch (error) {
+      await this.appendProductRunStartFailureDiagnostic(
+        active,
+        execution,
+        "draft_remove",
+        error
+      );
       const cleanupErrors = await this.cleanupFailedProductRunStart(
         active,
         execution,
@@ -1592,12 +1613,13 @@ export class PiNativeConversationRuntime {
         createdAt,
         updatedAt: createdAt
       });
-      await this.productRuns.update(productRunId, {
-        state: "running",
-        activeLeafId: active.sessionManager.getLeafId(),
-        updatedAt: Math.max(createdAt, this.now())
-      });
     } catch (storageError) {
+      await this.appendProductRunStartFailureDiagnostic(
+        active,
+        execution,
+        "product_run_create",
+        storageError
+      );
       const cleanupErrors = await this.cleanupFailedProductRunStart(
         active,
         execution,
@@ -1607,8 +1629,35 @@ export class PiNativeConversationRuntime {
         storageError,
         cleanupErrors,
         cleanupErrors.length > 0
-          ? "Pi user Entry 已接受，但 ProductRun 持久化与清理未完整完成。"
-          : "Pi user Entry 已接受，但 ProductRun 持久化失败。",
+          ? "Pi user Entry 已接受，但 ProductRun 创建与清理未完整完成。"
+          : "Pi user Entry 已接受，但 ProductRun 创建失败。",
+        userEntry.id
+      );
+    }
+    try {
+      await this.productRuns.update(productRunId, {
+        state: "running",
+        activeLeafId: active.sessionManager.getLeafId(),
+        updatedAt: Math.max(createdAt, this.now())
+      });
+    } catch (storageError) {
+      await this.appendProductRunStartFailureDiagnostic(
+        active,
+        execution,
+        "product_run_mark_running",
+        storageError
+      );
+      const cleanupErrors = await this.cleanupFailedProductRunStart(
+        active,
+        execution,
+        promptPromise
+      );
+      throw productRunStartFailureAfterUserEntry(
+        storageError,
+        cleanupErrors,
+        cleanupErrors.length > 0
+          ? "Pi user Entry 已接受，但 ProductRun 标记运行与清理未完整完成。"
+          : "Pi user Entry 已接受，但 ProductRun 标记运行失败。",
         userEntry.id
       );
     }
@@ -3041,6 +3090,31 @@ export class PiNativeConversationRuntime {
       conversationId: active.catalog.conversationId,
       piSessionId: active.catalog.piSessionId,
       code: "runtime_resource_warning",
+      message,
+      createdAt: this.now()
+    }).catch(() => undefined);
+  }
+
+  private async appendProductRunStartFailureDiagnostic(
+    active: ActiveConversation,
+    execution: ActiveProductRun,
+    stage: PiProductRunStartFailureStage,
+    error: unknown
+  ): Promise<void> {
+    const message = [
+      "pi_native_start_failed",
+      stage,
+      safeProductRunStartFailureCode(error)
+    ].join(":");
+    await this.catalog.appendDiagnostic({
+      diagnosticId: runtimeInterruptedDiagnosticId(
+        active.catalog.conversationId,
+        active.catalog.piSessionId,
+        `${execution.productRunId}:start:${stage}`
+      ),
+      conversationId: active.catalog.conversationId,
+      piSessionId: active.catalog.piSessionId,
+      code: "runtime_interrupted",
       message,
       createdAt: this.now()
     }).catch(() => undefined);
@@ -5499,6 +5573,17 @@ function safePersistedRuntimeErrorCode(error: unknown): string {
     return `pi_session_${error.code}`;
   }
   return "pi_native_runtime_interrupted";
+}
+
+function safeProductRunStartFailureCode(error: unknown): string {
+  if (
+    error instanceof PiNativeConversationRuntimeError
+    || error instanceof PiSessionDurabilityError
+    || error instanceof PiNativeFileStoreError
+  ) {
+    return error.code;
+  }
+  return "unknown";
 }
 
 function normalizeAgentSessionWarning(value: unknown): string {

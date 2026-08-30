@@ -130,8 +130,12 @@ export async function runPiNativeConversationRuntimeTests(): Promise<void> {
   await assertVerifiedPrefixRecoveryIsExplicitAndFailClosed();
   await assertExperienceSourceRefsArePointerOnlyAndDeleteAware();
   await assertMemoryTurnIsAvailableBeforeUserEntryPersistence();
+  await assertUserEntryReadbackFailureIsSafelyDiagnosed();
+  await assertDraftRemoveFailureIsSafelyDiagnosed();
   await assertProductRunCreateFailureCleansRuntime();
-  await assertProductRunUpdateFailureCleansRuntime();
+  await assertProductRunMarkRunningFailureCleansRuntime();
+  await assertProductRunStartDiagnosticFailureDoesNotMaskCause();
+  await assertSuccessfulProductRunDoesNotWriteStartDiagnostic();
   await assertSubscriberFailuresAreIsolated();
   await assertSettlementFailureIsDiagnosedAndReleasesRun();
   await assertPromptStartFailureReleasesSettlementBarrier();
@@ -3908,18 +3912,25 @@ async function assertProductRunCreateFailureCleansRuntime(): Promise<void> {
   await assertProductRunPersistenceFailure("create");
 }
 
-async function assertProductRunUpdateFailureCleansRuntime(): Promise<void> {
-  await assertProductRunPersistenceFailure("update");
+async function assertProductRunMarkRunningFailureCleansRuntime(): Promise<void> {
+  await assertProductRunPersistenceFailure("mark_running");
 }
 
 async function assertProductRunPersistenceFailure(
-  stage: "create" | "update"
+  stage: "create" | "mark_running"
 ): Promise<void> {
   const failedRunId = `run-${stage}-failure`;
   await withFixture(
     [failedRunId, `run-${stage}-retry`],
     async (fixture) => {
-      const storageError = new Error(`${stage} storage failure`);
+      const storageError = stage === "create"
+        ? new Error(
+            "SECRET_CREATE user=PRIVATE apiKey=sk-private path=/Users/private"
+          )
+        : new PiNativeFileStoreError(
+            "invalid-transition",
+            "SECRET_MARK_RUNNING provider response and /Users/private"
+          );
       const store = fixture.productRuns;
       const originalCreate = store.create.bind(store);
       const originalUpdate = store.update.bind(store);
@@ -3960,9 +3971,15 @@ async function assertProductRunPersistenceFailure(
         }
       );
       const session = fixture.latestSession();
+      assert.equal(session.promptTexts.length, 1, "Provider must run once");
       assert.ok(session.sessionManager.getEntries().some(
         (entry) => entry.id === acceptedFailure?.piUserEntryId
       ));
+      assert.equal(
+        reasoningSummariesForRun(session.sessionManager, failedRunId)
+          .at(-1)?.status,
+        "failed"
+      );
       assert.deepEqual(session.lifecycleCalls, [
         "clearQueue",
         "abort",
@@ -3972,6 +3989,28 @@ async function assertProductRunPersistenceFailure(
         () => fixture.runtime.subscribeProductRun(failedRunId, () => undefined),
         unavailableRunError
       );
+      const expectedDiagnosticStage = stage === "create"
+        ? "product_run_create"
+        : "product_run_mark_running";
+      const expectedSafeCode = stage === "create"
+        ? "unknown"
+        : "invalid-transition";
+      await assertSafeStartFailureDiagnostic(
+        fixture,
+        `${stage}-failure-conversation`,
+        `pi_native_start_failed:${expectedDiagnosticStage}:${expectedSafeCode}`,
+        ["SECRET", "PRIVATE", "sk-private", "/Users/private", "provider response"]
+      );
+      const failedRuns = await fixture.productRuns.list(
+        `${stage}-failure-conversation`
+      );
+      if (stage === "create") {
+        assert.deepEqual(failedRuns, [], "create failure must leave no ProductRun");
+      } else {
+        assert.equal(failedRuns.length, 1);
+        assert.equal(failedRuns[0]?.productRunId, failedRunId);
+        assert.equal(failedRuns[0]?.state, "accepted");
+      }
 
       const retry = await fixture.submit({
         conversationId: `${stage}-failure-conversation`,
@@ -3983,6 +4022,200 @@ async function assertProductRunPersistenceFailure(
       assert.equal(fixture.runtime.releaseProductRun(retry.productRunId), true);
     }
   );
+}
+
+async function assertUserEntryReadbackFailureIsSafelyDiagnosed(): Promise<void> {
+  await withFixture(["run-user-readback-failure"], async (fixture) => {
+    const conversationId = "user-readback-failure-conversation";
+    await fixture.runtime.createConversation({
+      conversationId,
+      title: "User readback failure",
+      cwd: fixture.root,
+      createdAt: 1
+    });
+    await fixture.runtime.activateConversation(conversationId);
+    const session = fixture.latestSession();
+    const readbackError = new PiSessionDurabilityError({
+      code: "pi_session_readback_mismatch",
+      message: "SECRET_USER PRIVATE_MEMORY sk-private /Users/private"
+    });
+    session.failNextUserEntryReadback(readbackError);
+
+    await assert.rejects(
+      fixture.submit({
+        conversationId,
+        text: "PRIVATE_USER_MESSAGE",
+        submittedAt: 2
+      }),
+      (error: unknown) => error === readbackError
+    );
+
+    assert.equal(session.promptTexts.length, 1);
+    assert.deepEqual(await fixture.productRuns.list(conversationId), []);
+    assert.equal(
+      reasoningSummariesForRun(
+        session.sessionManager,
+        "run-user-readback-failure"
+      ).at(-1)?.status,
+      "failed"
+    );
+    await assertSafeStartFailureDiagnostic(
+      fixture,
+      conversationId,
+      "pi_native_start_failed:user_entry_readback:pi_session_readback_mismatch",
+      ["SECRET_USER", "PRIVATE_MEMORY", "PRIVATE_USER_MESSAGE", "sk-private", "/Users/private"]
+    );
+  });
+}
+
+async function assertDraftRemoveFailureIsSafelyDiagnosed(): Promise<void> {
+  await withFixture(["run-draft-remove-failure"], async (fixture) => {
+    const conversationId = "draft-remove-failure-conversation";
+    const catalog = await fixture.runtime.createConversation({
+      conversationId,
+      title: "Draft remove failure",
+      cwd: fixture.root,
+      createdAt: 1
+    });
+    const draft = await fixture.catalog.upsertDraft({
+      draftId: "draft-remove-failure",
+      conversationId,
+      piSessionId: catalog.piSessionId,
+      source: "restart",
+      text: "PRIVATE_DRAFT_BODY",
+      createdAt: 2
+    });
+    await fixture.runtime.activateConversation(conversationId);
+    const session = fixture.latestSession();
+    const storageError = new PiNativeFileStoreError(
+      "readback-diverged",
+      "SECRET_DRAFT PRIVATE_MEMORY /Users/private"
+    );
+    const originalRemoveDraft = fixture.catalog.removeDraft.bind(fixture.catalog);
+    fixture.catalog.removeDraft = async () => {
+      fixture.catalog.removeDraft = originalRemoveDraft;
+      throw storageError;
+    };
+
+    let acceptedFailure: PiNativeConversationRuntimeError | null = null;
+    await assert.rejects(
+      fixture.submit({
+        conversationId,
+        text: "PRIVATE_DRAFT_RESUBMISSION",
+        draftId: draft.draftId,
+        submittedAt: 3
+      }),
+      (error: unknown) => {
+        if (!(error instanceof PiNativeConversationRuntimeError)) return false;
+        acceptedFailure = error;
+        return error.code === "product_run_start_failed_after_user_entry"
+          && error.piUserEntryAccepted === true
+          && Boolean(error.piUserEntryId)
+          && error.cause === storageError;
+      }
+    );
+
+    assert.equal(session.promptTexts.length, 1);
+    assert.ok(session.sessionManager.getEntries().some(
+      (entry) => entry.id === acceptedFailure?.piUserEntryId
+    ));
+    assert.deepEqual(await fixture.productRuns.list(conversationId), []);
+    assert.equal(
+      reasoningSummariesForRun(
+        session.sessionManager,
+        "run-draft-remove-failure"
+      ).at(-1)?.status,
+      "failed"
+    );
+    assert.deepEqual(await fixture.catalog.drafts(conversationId), [draft]);
+    await assertSafeStartFailureDiagnostic(
+      fixture,
+      conversationId,
+      "pi_native_start_failed:draft_remove:readback-diverged",
+      ["SECRET_DRAFT", "PRIVATE_MEMORY", "PRIVATE_DRAFT_BODY", "PRIVATE_DRAFT_RESUBMISSION", "/Users/private"]
+    );
+  });
+}
+
+async function assertProductRunStartDiagnosticFailureDoesNotMaskCause():
+Promise<void> {
+  await withFixture(["run-start-diagnostic-failure"], async (fixture) => {
+    const conversationId = "start-diagnostic-failure-conversation";
+    const storageError = new PiNativeFileStoreError(
+      "store-corrupt",
+      "ORIGINAL_PRIVATE_STORAGE_ERROR"
+    );
+    const diagnosticError = new Error("DIAGNOSTIC_STORE_FAILURE");
+    fixture.productRuns.create = async () => {
+      throw storageError;
+    };
+    fixture.catalog.appendDiagnostic = async () => {
+      throw diagnosticError;
+    };
+
+    await assert.rejects(
+      fixture.submit({
+        conversationId,
+        text: "diagnostic failure must not mask cause",
+        submittedAt: 4
+      }),
+      (error: unknown) => error instanceof PiNativeConversationRuntimeError
+        && error.code === "product_run_start_failed_after_user_entry"
+        && error.piUserEntryAccepted === true
+        && Boolean(error.piUserEntryId)
+        && error.cause === storageError
+    );
+
+    const session = fixture.latestSession();
+    assert.equal(session.promptTexts.length, 1);
+    assert.deepEqual(await fixture.productRuns.list(conversationId), []);
+    assert.equal(
+      reasoningSummariesForRun(
+        session.sessionManager,
+        "run-start-diagnostic-failure"
+      ).at(-1)?.status,
+      "failed"
+    );
+  });
+}
+
+async function assertSuccessfulProductRunDoesNotWriteStartDiagnostic():
+Promise<void> {
+  await withFixture(["run-start-diagnostic-success"], async (fixture) => {
+    const conversationId = "start-diagnostic-success-conversation";
+    const handle = await fixture.submit({
+      conversationId,
+      text: "successful start",
+      submittedAt: 5
+    });
+    fixture.latestSession().finishSuccessful("successful answer");
+    assert.equal((await handle.result).terminalState, "completed");
+    assert.equal(
+      (await fixture.catalog.diagnostics(conversationId)).some(
+        (diagnostic) => diagnostic.message.startsWith("pi_native_start_failed:")
+      ),
+      false
+    );
+  });
+}
+
+async function assertSafeStartFailureDiagnostic(
+  fixture: RuntimeFixture,
+  conversationId: string,
+  expectedMessage: string,
+  forbiddenFragments: readonly string[]
+): Promise<void> {
+  const diagnostics = (await fixture.catalog.diagnostics(conversationId))
+    .filter((diagnostic) =>
+      diagnostic.message.startsWith("pi_native_start_failed:")
+    );
+  assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0]?.code, "runtime_interrupted");
+  assert.equal(diagnostics[0]?.message, expectedMessage);
+  const serialized = JSON.stringify(diagnostics[0]);
+  for (const fragment of forbiddenFragments) {
+    assert.equal(serialized.includes(fragment), false);
+  }
 }
 
 async function assertSubscriberFailuresAreIsolated(): Promise<void> {
@@ -4446,6 +4679,7 @@ class ControlledAgentSession {
   private rejectPrompt: ((error: unknown) => void) | null = null;
   private idlePromise: Promise<void> = Promise.resolve();
   private nextPromptError: Error | null = null;
+  private nextUserEntryReadbackError: Error | null = null;
   private runtimeMessageTimestampDrift = false;
   private emitSettledOnAbort = true;
   isStreaming = false;
@@ -4490,6 +4724,10 @@ class ControlledAgentSession {
     this.nextPromptError = error;
   }
 
+  failNextUserEntryReadback(error: Error): void {
+    this.nextUserEntryReadbackError = error;
+  }
+
   enableRuntimeMessageTimestampDrift(): void {
     this.runtimeMessageTimestampDrift = true;
   }
@@ -4530,6 +4768,15 @@ class ControlledAgentSession {
       timestamp: 200_000 + this.promptSequence
     };
     this.sessionManager.appendMessage(userMessage);
+    if (this.nextUserEntryReadbackError) {
+      const error = this.nextUserEntryReadbackError;
+      const originalGetEntries = this.sessionManager.getEntries;
+      this.nextUserEntryReadbackError = null;
+      this.sessionManager.getEntries = (() => {
+        this.sessionManager.getEntries = originalGetEntries;
+        throw error;
+      }) as SessionManager["getEntries"];
+    }
     if (this.runtimeMessageTimestampDrift) {
       const runtimeUserMessage = {
         ...userMessage,
