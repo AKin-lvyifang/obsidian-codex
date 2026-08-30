@@ -101,6 +101,7 @@ async function assertMaintenanceScopeSecurityIsFailClosed(): Promise<void> {
       | { mode: "query"; candidatePaths: readonly string[] }
     >;
     arguments: Readonly<Record<string, unknown>>;
+    successfulExternalRead?: boolean;
   }>) => {
     const security = createPiKnowledgeMaintenanceToolSecurity({
       currentRunIdentity: () => Object.freeze({
@@ -118,6 +119,8 @@ async function assertMaintenanceScopeSecurityIsFailClosed(): Promise<void> {
           providerResourceText: "PREFERENCE_FIXTURE"
         })
       }),
+      hasSuccessfulExternalRead: () =>
+        input.successfulExternalRead === true,
       egress: { assertAllowed: () => undefined }
     });
     const toolCallId = `tool-${input.name}`;
@@ -133,14 +136,94 @@ async function assertMaintenanceScopeSecurityIsFailClosed(): Promise<void> {
     name: "global",
     request: "",
     scope: { mode: "global" },
-    arguments: { candidateActions: [] }
+    arguments: {
+      candidateActions: [],
+      assessments: [{
+        claim: "当前版本仍受支持",
+        status: "valid",
+        evidence: ["https://example.test/current"],
+        asOf: "2026-08-30",
+        verification: "external_verified"
+      }]
+    }
   });
   assert.equal(global.blocked, undefined);
-  assert.deepEqual(
-    global.security.consume(global.toolCallId, { candidateActions: [] })
-      .sourcePaths,
-    []
-  );
+  const globalConsumed = global.security.consume(global.toolCallId, {
+    candidateActions: [],
+    assessments: [{
+      claim: "当前版本仍受支持",
+      status: "valid",
+      evidence: ["https://example.test/current"],
+      asOf: "2026-08-30",
+      verification: "external_verified"
+    }]
+  });
+  assert.deepEqual(globalConsumed.sourcePaths, []);
+  assert.equal(globalConsumed.assessments[0]?.status, "valid");
+  assert.equal(globalConsumed.assessments[0]?.verification, "unverified",
+    "without an external Tool result the model cannot self-report external verification");
+
+  const failedExternal = await authorize({
+    name: "failed-external-read",
+    request: "",
+    scope: { mode: "global" },
+    successfulExternalRead: false,
+    arguments: {
+      candidateActions: [],
+      assessments: [{
+        claim: "外部工具调用失败后仍声称核验",
+        status: "needs_supplement",
+        evidence: ["failed external read"],
+        asOf: "2026-08-30",
+        verification: "external_verified"
+      }]
+    }
+  });
+  assert.equal(failedExternal.blocked, undefined);
+  assert.equal(failedExternal.security.consume(
+    failedExternal.toolCallId,
+    {
+      candidateActions: [],
+      assessments: [{
+        claim: "外部工具调用失败后仍声称核验",
+        status: "needs_supplement",
+        evidence: ["failed external read"],
+        asOf: "2026-08-30",
+        verification: "external_verified"
+      }]
+    }
+  ).assessments[0]?.verification, "unverified");
+
+  const successfulExternal = await authorize({
+    name: "successful-external-read",
+    request: "",
+    scope: { mode: "global" },
+    successfulExternalRead: true,
+    arguments: {
+      candidateActions: [],
+      assessments: [{
+        claim: "同轮成功读取的外部证据",
+        status: "valid",
+        evidence: ["successful external read"],
+        asOf: "2026-08-30",
+        verification: "external_verified"
+      }]
+    }
+  });
+  assert.equal(successfulExternal.blocked, undefined);
+  assert.equal(successfulExternal.security.consume(
+    successfulExternal.toolCallId,
+    {
+      candidateActions: [],
+      assessments: [{
+        claim: "同轮成功读取的外部证据",
+        status: "valid",
+        evidence: ["successful external read"],
+        asOf: "2026-08-30",
+        verification: "external_verified"
+      }]
+    }
+  ).assessments[0]?.verification, "external_verified");
   assert.deepEqual((await authorize({
     name: "global-forged-source",
     request: "",
@@ -258,6 +341,57 @@ async function assertMaintenanceScopeSecurityIsFailClosed(): Promise<void> {
       }
     })).blocked, { block: true, reason: "tool_policy_blocked" }, name);
   }
+
+  const actionWithoutAssessment = await authorize({
+    name: "write-without-assessment",
+    request: "",
+    scope: { mode: "global" },
+    arguments: {
+      candidateActions: [{
+        targetPath: "wiki/missing-assessment.md",
+        content: "candidate",
+        expectedTarget: { kind: "missing" }
+      }]
+    }
+  });
+  assert.deepEqual(actionWithoutAssessment.blocked, {
+    block: true,
+    reason: "tool_policy_blocked"
+  });
+
+  for (const [index, status] of [
+    "valid",
+    "needs_supplement",
+    "outdated",
+    "conflict"
+  ].entries()) {
+    const argumentsValue = {
+      candidateActions: [{
+        targetPath: `wiki/assessment-${status}.md`,
+        content: `candidate ${status}`,
+        expectedTarget: { kind: "missing" }
+      }],
+      assessments: [{
+        claim: `claim ${status}`,
+        status,
+        evidence: ["raw/a.md"],
+        asOf: "2026-08-30",
+        verification: "unverified"
+      }]
+    };
+    const authorized = await authorize({
+      name: `assessment-${index}`,
+      request: "",
+      scope: { mode: "global" },
+      arguments: argumentsValue
+    });
+    assert.equal(authorized.blocked, undefined);
+    assert.equal(
+      authorized.security.consume(authorized.toolCallId, argumentsValue)
+        .assessments[0]?.status,
+      status
+    );
+  }
 }
 
 async function assertReliableExistingKnowledgeReturnsNoopBeforeWrites(): Promise<void> {
@@ -305,11 +439,19 @@ async function assertReliableExistingKnowledgeReturnsNoopBeforeWrites(): Promise
       targetPath: "wiki/should-not-write.md",
       content: "不得写入",
       expectedTarget: { kind: "missing" }
+    }],
+    assessments: [{
+      claim: "现有知识仍与当前 Raw 一致",
+      status: "valid",
+      evidence: ["raw/a.md", "wiki/existing.md"],
+      asOf: "2026-08-30",
+      verification: "local_verified"
     }]
   });
   assert.equal(indexCalls, 1);
   assert.equal(result.status, "completed");
   assert.equal(result.maintenanceResult?.status, "noop");
+  assert.equal(result.maintenanceResult?.assessments[0]?.status, "valid");
   assert.deepEqual(result.producedPaths, []);
   assert.match(result.message, /现有知识/u);
   assert.match(result.message, /wiki\/existing\.md/u);
@@ -348,6 +490,30 @@ async function assertProductionStructuredNoopCompletesChangedRaw(): Promise<void
       dateKey: () => DATE_KEY
     });
     await port.initialize();
+    const writesBeforeRejectedCandidate = domain.formalWrites.length;
+    const rejectedCandidate = await port.execute({
+      vaultId: VAULT_ID,
+      conversationId: "conversation-production-missing-assessment",
+      piSessionId: "pi-production-missing-assessment",
+      productRunId: "run-production-missing-assessment",
+      toolCallId: "tool-production-missing-assessment",
+      mode: "maintain",
+      request: "/maintain",
+      sourcePaths: [rawPath],
+      preferenceSnapshot: PREFERENCE,
+      candidateActions: [{
+        targetPath: "wiki/missing-assessment.md",
+        content: "must not write",
+        expectedTarget: { kind: "missing" }
+      }]
+    });
+    assert.equal(rejectedCandidate.status, "failed");
+    assert.equal(
+      domain.formalWrites.length,
+      writesBeforeRejectedCandidate,
+      "candidateActions without assessments fail before any Vault write"
+    );
+
     const result = await port.execute({
       vaultId: VAULT_ID,
       conversationId: "conversation-production-noop",
@@ -420,7 +586,19 @@ function assertStrictDurableResultEnvelope(): void {
       PHASE3_MAINTENANCE_RAW_INDEX_PATH,
       PHASE3_MAINTENANCE_TRACKER_PATH,
       phase3MaintenanceReportPath(DATE_KEY)
-    ]
+    ],
+    assessments: ([
+      "valid",
+      "needs_supplement",
+      "outdated",
+      "conflict"
+    ] as const).map((status) => ({
+      claim: `claim ${status}`,
+      status,
+      evidence: ["raw/a.md"],
+      asOf: "2026-08-30",
+      verification: "unverified" as const
+    }))
   });
   const payload = knowledgeMaintenanceReportPayloadFromToolResult({
     details: { maintenanceResult: envelope }
@@ -429,6 +607,13 @@ function assertStrictDurableResultEnvelope(): void {
   assert.equal(payload?.sections[0]?.items[0]?.path, "wiki/result.md");
   assert.equal(payload?.sections[0]?.items[0]?.description,
     "新建 · 来自最终回读正文的摘要");
+  assert.deepEqual(
+    parseKnowledgeMaintenanceResultEnvelope(envelope)?.assessments.map(
+      (assessment) => assessment.status
+    ),
+    ["valid", "needs_supplement", "outdated", "conflict"],
+    "all four maintenance assessment states survive the durable envelope"
+  );
   assert.equal(payload?.sections.flatMap((section) => section.items)
     .some((item) => item.path === PHASE3_MAINTENANCE_RAW_INDEX_PATH), false);
 

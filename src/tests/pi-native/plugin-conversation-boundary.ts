@@ -829,8 +829,11 @@ async function localManagementAndMemoryStayProviderIndependent(): Promise<void> 
     },
     personalMemory: {
       readUserControlState: async () => ({
-        identity: { agent: "Agent", user: "User" },
-        records: [{ id: "memory-local" }]
+        revision: 7,
+        user: "# USER\n",
+        memory: "# MEMORY\n",
+        records: [{ id: "memory-local" }],
+        forgottenIds: []
       })
     }
   };
@@ -839,6 +842,20 @@ async function localManagementAndMemoryStayProviderIndependent(): Promise<void> 
     piRuntimeBundle: null,
     piRuntimeFlight: null,
     piActivatedConversationId: "history-managed",
+    cognitiveSystem: {
+      readAgentProfile: async () => ({
+        revision: 7,
+        templateId: "executor",
+        preferredSkillNames: ["最小现实实验", "多视角解题", "深度理解与拆解"],
+        currentSelf: {
+          thinkingMethod: "我处理重要或复杂问题的方式是：先锁定目标、约束和验收结果。",
+          answerTone: "我的语气会保持简短、坚定和有推动力。",
+          answerStructure: "我的回答通常会按结论、立即行动和必要风险来组织。",
+          representativeHabits: ["我会先说明最关键的下一步。"]
+        }
+      }),
+      readAgentIdentity: async () => defaultAgentIdentityState()
+    },
     settlePiRuntimeFlight: async () => undefined,
     ensurePiLocalData: async () => localData,
     ensurePiProductionRuntime: async () => {
@@ -871,14 +888,33 @@ async function localManagementAndMemoryStayProviderIndependent(): Promise<void> 
     "history-managed:archived",
     "history-managed:deleted"
   ]);
-  assert.deepEqual(
-    await pluginPrototype.getEchoInkPersonalMemoryState.call(host),
-    {
-      identity: { agent: "Agent", user: "User" },
-      records: [{ id: "memory-local" }],
-      agentIdentity: defaultAgentIdentityState(),
-      personalityState: null
+  const personalMemoryState = await pluginPrototype.getEchoInkPersonalMemoryState.call(host);
+  assert.deepEqual(personalMemoryState, {
+    revision: 7,
+    user: "# USER\n",
+    memory: "# MEMORY\n",
+    records: [{ id: "memory-local" }],
+    forgottenIds: [],
+    agentIdentity: defaultAgentIdentityState(),
+    agentProfile: {
+      kind: "ready",
+      revision: 7,
+      templateId: "executor",
+      preferredSkillNames: ["最小现实实验", "多视角解题", "深度理解与拆解"],
+      currentSelf: {
+        thinkingMethod: "我处理重要或复杂问题的方式是：先锁定目标、约束和验收结果。",
+        answerTone: "我的语气会保持简短、坚定和有推动力。",
+        answerStructure: "我的回答通常会按结论、立即行动和必要风险来组织。",
+        representativeHabits: ["我会先说明最关键的下一步。"]
+      }
     }
+  });
+  assert.equal("styleName" in personalMemoryState.agentProfile, false);
+  assert.equal("introduction" in personalMemoryState.agentProfile, false);
+  assert.equal(
+    "personalityState" in personalMemoryState,
+    false,
+    "the settings DTO must expose the current-self profile, not a retired six-dimension field"
   );
 }
 

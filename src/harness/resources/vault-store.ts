@@ -3,6 +3,7 @@ import * as path from "node:path";
 import type { ResourceRef } from "../../resources/types";
 import { parseResourceUri, resourceRefToUri } from "./resource-ref";
 import { loadVaultSkill } from "./skill-loader";
+import { installBuiltinSkillFiles } from "./skill-runtime";
 
 export interface VaultResourceManifest {
   version: 1;
@@ -103,6 +104,11 @@ export async function initializeVaultResourceStore(input: { vaultPath: string })
   await ensureFile(layout.mcpServers, JSON.stringify({ servers: {} }, null, 2), created, existing);
   await ensureFile(layout.bindings, JSON.stringify({ bindings: [] }, null, 2), created, existing);
   await ensureFile(layout.policies, JSON.stringify({ policies: {} }, null, 2), created, existing);
+  await installBuiltinSkillFiles({
+    vaultPath: input.vaultPath,
+    created,
+    existing
+  });
   return { created, existing };
 }
 

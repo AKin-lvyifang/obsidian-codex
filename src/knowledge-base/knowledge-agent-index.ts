@@ -51,6 +51,8 @@ export interface KnowledgeAgentSearchHit {
   kind: KnowledgeAgentKind;
   title: string;
   contentRevision: string;
+  recordedAt: number;
+  verificationStatus: "local_revision_verified" | "source_link_changed";
   rawSources: KnowledgeAgentRawSource[];
 }
 
@@ -197,6 +199,8 @@ export class KnowledgeAgentIndex {
       .filter((candidate) => candidate.score > 0)
       .sort((left, right) =>
         kindPriority(left.entry.kind) - kindPriority(right.entry.kind)
+        || verificationPriority(left.entry, index)
+          - verificationPriority(right.entry, index)
         || right.score - left.score
         || left.entry.vaultRelativePath.localeCompare(
           right.entry.vaultRelativePath
@@ -646,6 +650,10 @@ function materializeHit(
     kind: entry.kind,
     title: entry.title,
     contentRevision: entry.contentRevision,
+    recordedAt: entry.mtimeMs,
+    verificationStatus: verificationPriority(entry, index) === 0
+      ? "local_revision_verified" as const
+      : "source_link_changed" as const,
     rawSources: entry.rawSources.map((source) => {
       const current = index.entries[source.vaultRelativePath];
       if (!current || current.kind !== "raw") {
@@ -672,6 +680,19 @@ function materializeHit(
       };
     })
   };
+}
+
+function verificationPriority(
+  entry: StoredKnowledgeEntry,
+  index: StoredKnowledgeAgentIndex
+): number {
+  return entry.rawSources.some((source) => {
+    const current = index.entries[source.vaultRelativePath];
+    return !current
+      || current.kind !== "raw"
+      || (source.contentRevision !== null
+        && source.contentRevision !== current.contentRevision);
+  }) ? 1 : 0;
 }
 
 function freezeHit(hit: KnowledgeAgentSearchHit): KnowledgeAgentSearchHit {

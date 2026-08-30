@@ -83,6 +83,8 @@ interface KnowledgeSearchToolResult {
     kind: KnowledgeAgentKind;
     title: string;
     contentRevision: string;
+    recordedAt: number;
+    verificationStatus: "local_revision_verified" | "source_link_changed";
     rawSources: readonly Readonly<KnowledgeAgentRawSource>[];
   }>[];
 }
@@ -115,7 +117,7 @@ implements PiVaultAdditionalToolSecurityPort {
 
   constructor(private readonly options: Readonly<{
     currentRunIdentity(): Readonly<PiKnowledgeRunIdentity>;
-    currentWorkflow(): "ask" | "maintain" | "none";
+    currentWorkflow(): "chat" | "ask" | "maintain" | "none";
     egress: VaultToolResultEgressPort;
   }>) {}
 
@@ -127,7 +129,8 @@ implements PiVaultAdditionalToolSecurityPort {
       return block("tool_policy_blocked");
     }
     if (
-      this.options.currentWorkflow() !== "ask"
+      (this.options.currentWorkflow() !== "ask"
+        && this.options.currentWorkflow() !== "chat")
       || this.seenToolCallIds.has(event.toolCallId)
     ) {
       return block("authorization_failed");
@@ -438,6 +441,8 @@ function searchToolResult(
       kind: hit.kind,
       title: hit.title,
       contentRevision: hit.contentRevision,
+      recordedAt: hit.recordedAt,
+      verificationStatus: hit.verificationStatus,
       rawSources: Object.freeze(hit.rawSources.map((source) =>
         Object.freeze({ ...source })
       ))
@@ -470,7 +475,10 @@ function readToolResult(
     excerpt: selected.join("\n"),
     contentRevision: snapshot.contentRevision,
     lineStart,
-    lineEnd
+    lineEnd,
+    sourceType: snapshot.kind,
+    recordedAt: snapshot.recordedAt,
+    verificationStatus: snapshot.verificationStatus
   });
   return Object.freeze({
     kind: "read" as const,
@@ -506,6 +514,10 @@ function toolResultForProvider(
     vaultRelativePath: result.reference.vaultRelativePath,
     title: result.reference.title,
     contentRevision: result.reference.contentRevision,
+    sourceType: result.reference.sourceType,
+    recordedAt: result.reference.recordedAt,
+    publishedAt: result.reference.publishedAt,
+    verificationStatus: result.reference.verificationStatus,
     lineStart: result.reference.lineStart,
     lineEnd: result.reference.lineEnd,
     excerpt: result.reference.excerpt,

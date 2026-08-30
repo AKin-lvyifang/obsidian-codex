@@ -94,6 +94,9 @@ interface KnowledgeSourceSnapshot {
   lines: string[];
   text: string;
   contentRevision: string;
+  sourceType: "wiki" | "projects" | "raw";
+  recordedAt: number;
+  publishedAt?: string;
 }
 
 interface KnowledgeCandidate {
@@ -151,7 +154,11 @@ export class KnowledgeReferenceBuilder {
       excerpt,
       contentRevision: snapshot.contentRevision,
       lineStart: lineRange.lineStart,
-      lineEnd: lineRange.lineEnd
+      lineEnd: lineRange.lineEnd,
+      sourceType: snapshot.sourceType,
+      recordedAt: snapshot.recordedAt,
+      ...(snapshot.publishedAt ? { publishedAt: snapshot.publishedAt } : {}),
+      verificationStatus: "local_revision_verified"
     });
   }
 
@@ -187,7 +194,13 @@ export class KnowledgeReferenceBuilder {
           changedReferenceIds.push(normalized.referenceId);
           continue;
         }
-        verified.push(normalized);
+        verified.push(freezeKnowledgeReference({
+          ...normalized,
+          sourceType: snapshot.sourceType,
+          recordedAt: snapshot.recordedAt,
+          ...(snapshot.publishedAt ? { publishedAt: snapshot.publishedAt } : {}),
+          verificationStatus: "local_revision_verified"
+        }));
       } catch {
         changedReferenceIds.push(reference.referenceId);
       }
@@ -473,6 +486,10 @@ export function formatKnowledgeReferencesForPrompt(
       `来源：${reference.vaultRelativePath}`,
       `行号：${reference.lineStart}-${reference.lineEnd}`,
       `版本：${reference.contentRevision}`,
+      `来源类型：${reference.sourceType ?? "unknown"}`,
+      `记录时间：${reference.recordedAt === undefined ? "unknown" : new Date(reference.recordedAt).toISOString()}`,
+      `发布时间：${reference.publishedAt ?? "未声明"}`,
+      `核验状态：${reference.verificationStatus ?? "unknown"}；未表示已联网核验`,
       "原文：",
       reference.excerpt
     ].join("\n")
@@ -883,8 +900,33 @@ async function readKnowledgeSourceSnapshot(
     bytes,
     lines,
     text,
-    contentRevision: knowledgeContentRevision(bytes)
+    contentRevision: knowledgeContentRevision(bytes),
+    sourceType: knowledgeSourceType(canonicalRelativePath),
+    recordedAt: stat.mtimeMs,
+    ...(frontmatterPublishedAt(lines)
+      ? { publishedAt: frontmatterPublishedAt(lines)! }
+      : {})
   };
+}
+
+function knowledgeSourceType(
+  relativePath: string
+): "wiki" | "projects" | "raw" {
+  const root = relativePath.split("/", 1)[0];
+  if (root === "wiki" || root === "projects" || root === "raw") return root;
+  return "raw";
+}
+
+function frontmatterPublishedAt(lines: readonly string[]): string | null {
+  if (lines[0]?.trim() !== "---") return null;
+  for (const line of lines.slice(1, 80)) {
+    if (line.trim() === "---") break;
+    const match = line.match(/^(?:published|publishedAt|date)\s*:\s*["']?([^"']+?)["']?\s*$/iu);
+    if (match?.[1] && /^[0-9]{4}-[0-9]{2}-[0-9]{2}(?:[T ][0-9:.+\-Z]+)?$/u.test(match[1].trim())) {
+      return match[1].trim();
+    }
+  }
+  return null;
 }
 
 async function assertNoSymbolicLinkSegments(
@@ -1125,6 +1167,19 @@ function normalizeKnowledgeReference(
     || !Number.isSafeInteger(reference.lineEnd)
     || reference.lineStart < 1
     || reference.lineEnd < reference.lineStart
+    || (reference.sourceType !== undefined
+      && reference.sourceType !== "wiki"
+      && reference.sourceType !== "projects"
+      && reference.sourceType !== "raw")
+    || (reference.recordedAt !== undefined
+      && (!Number.isFinite(reference.recordedAt) || reference.recordedAt < 0))
+    || (reference.publishedAt !== undefined
+      && (typeof reference.publishedAt !== "string"
+        || reference.publishedAt.length > 100
+        || /[\r\n]/u.test(reference.publishedAt)))
+    || (reference.verificationStatus !== undefined
+      && reference.verificationStatus !== "local_revision_verified"
+      && reference.verificationStatus !== "source_link_changed")
   ) {
     throw new KnowledgeRetrievalError(
       "invalid-path",

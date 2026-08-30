@@ -5,7 +5,10 @@ import type {
   ChatMessage,
   PersonalMemorySourceReference
 } from "../../settings/settings";
-import type { KnowledgeMaintenanceResultEnvelope } from "../../knowledge-base/knowledge-maintenance-result";
+import type {
+  KnowledgeMaintenanceAssessment,
+  KnowledgeMaintenanceResultEnvelope
+} from "../../knowledge-base/knowledge-maintenance-result";
 import type {
   EchoInkTaskPlanSnapshot
 } from "../../types/task-plan";
@@ -96,6 +99,7 @@ export interface PiMemoryRecallObservation {
 export interface PiKnowledgeObservation {
   /** Legacy maintain values are read-only compatibility for durable ProductRuns. */
   readonly workflow:
+    | "chat"
     | "ask"
     | "maintain"
     | "maintain_preview"
@@ -166,6 +170,10 @@ export interface PiKnowledgeReference {
   readonly contentRevision: string;
   readonly lineStart: number;
   readonly lineEnd: number;
+  readonly sourceType?: "wiki" | "projects" | "raw";
+  readonly recordedAt?: number;
+  readonly publishedAt?: string;
+  readonly verificationStatus?: "local_revision_verified" | "source_link_changed";
 }
 
 export interface PiKnowledgeRunIdentity {
@@ -241,6 +249,13 @@ export interface PiKnowledgeRuntimePort {
       includeUnrefined: boolean;
     }
   >): Promise<PiKnowledgeAskPreflightResult>;
+  retrieveChat?(input: Readonly<
+    PiKnowledgeRunIdentity & {
+      question: string;
+      explicitPaths: readonly string[];
+      includeUnrefined: boolean;
+    }
+  >): Promise<PiKnowledgeAskPreflightResult>;
   verifyAskReferences(input: Readonly<
     PiKnowledgeRunIdentity & {
       references: readonly Readonly<PiKnowledgeReference>[];
@@ -289,6 +304,7 @@ export interface PiKnowledgeMaintenanceToolInput extends PiKnowledgeRunIdentity 
       | { kind: "file"; contentRevision: string }
     >;
   }>[];
+  readonly assessments?: readonly Readonly<KnowledgeMaintenanceAssessment>[];
   readonly signal?: AbortSignal;
 }
 

@@ -141,6 +141,10 @@ import {
   isEchoInkPiReasoningEffortSupported,
   resolveEchoInkPiReasoningCapabilities
 } from "../../settings/pi-model-catalog";
+import type {
+  DreamPublicExperienceInput,
+  DreamTaskResultSummary
+} from "../memory/dream-experience-inbox";
 
 const BUILTIN_TOOL_NAMES = new Set([
   "bash",
@@ -175,6 +179,8 @@ export interface PiNativeAgentSessionFactoryInput {
   sessionManager: SessionManager;
   skillPath?: string;
   skillName?: string;
+  skillPaths?: readonly string[];
+  skillNames?: readonly string[];
   currentExecutionContext(): Readonly<PiNativeProviderExecutionContext>;
   currentToolExecutionContext(): Readonly<{
     conversationId: string;
@@ -189,6 +195,8 @@ export interface PiNativeAgentSessionFactoryInput {
   currentNoteMentionTurnContext?(): Readonly<PiNativeNoteMentionTurnContext> | null;
   currentDocumentTurnContext?(): Readonly<PiNativeDocumentTurnContext> | null;
   currentTaskPlanTurnContext(): Readonly<PiNativeTaskPlanTurnContext> | null;
+  /** Successful read-only external Tools from the currently bound ProductRun. */
+  currentSuccessfulExternalReadToolNames(): readonly string[];
   reportInteractionRequested?(
     interaction: Readonly<EchoInkTurnInteraction>
   ): Promise<void>;
@@ -229,9 +237,50 @@ export interface PiNativeDocumentTurnContext {
 }
 
 export function knowledgeWorkflowAllowsPersonalMemory(
-  workflow: "none" | "ask" | "maintain"
+  workflow: "none" | "chat" | "ask" | "maintain"
 ): boolean {
   return workflow !== "maintain";
+}
+
+export function shouldPreflightPersonalKnowledge(text: string): boolean {
+  const normalized = text.normalize("NFKC").trim();
+  if (!normalized) return false;
+  if (/^(?:你好|嗨|哈喽|谢谢|收到|好的|ok|hello|hi|thanks)[!！,.，。?？\s]*$/iu.test(normalized)) {
+    return false;
+  }
+  if (/^(?:请)?(?:把|将).{1,500}(?:翻译|改写|润色|校对|格式化)(?:成|为)?/iu.test(normalized)) {
+    return false;
+  }
+  return !/^(?:请)?(?:翻译|改写|润色|校对|计算|格式化|translate|rewrite|proofread|calculate|format)(?:一下|下列|以下|这段|这个|\s|[:：])/iu.test(normalized);
+}
+
+const FAST_CHANGING_KNOWLEDGE = /(?:\bAI\b|人工智能|大模型|LLM|模型能力|API|SDK|软件|框架|版本|产品能力|价格|政策|法规|安全公告|漏洞)/iu;
+const FRESHNESS_REVIEW_REQUEST = /(?:旧|还能用|仍可用|有效吗|过时|过期|时效|最新|当前|核验|查证|still\s+valid|outdated|obsolete|current|latest)/iu;
+const FAST_KNOWLEDGE_STALE_AFTER_MS = 180 * 24 * 60 * 60 * 1_000;
+
+export function knowledgeReferencesRequireFreshnessVerification(
+  question: string,
+  references: readonly Readonly<PiKnowledgeReference>[],
+  now: number
+): boolean {
+  const explicitlyRequested = FRESHNESS_REVIEW_REQUEST.test(question.normalize("NFKC"));
+  return references.some((reference) => {
+    const subject = [
+      reference.title,
+      reference.vaultRelativePath,
+      reference.excerpt
+    ].join("\n");
+    if (!FAST_CHANGING_KNOWLEDGE.test(subject)) return false;
+    if (explicitlyRequested) return true;
+    const publishedAt = reference.publishedAt
+      ? Date.parse(reference.publishedAt)
+      : Number.NaN;
+    const observedAt = Number.isFinite(publishedAt)
+      ? publishedAt
+      : reference.recordedAt;
+    if (observedAt === undefined || !Number.isFinite(observedAt)) return true;
+    return now - observedAt >= FAST_KNOWLEDGE_STALE_AFTER_MS;
+  });
 }
 
 export function resolvePiTurnToolNames(input: Readonly<{
@@ -241,7 +290,12 @@ export function resolvePiTurnToolNames(input: Readonly<{
   defaultToolNames: readonly string[];
   memoryToolNames: readonly string[];
   planToolNames: readonly string[];
+  externalReadToolNames?: readonly string[];
+  requiresFreshnessVerification?: boolean;
 }>): readonly string[] {
+  const freshnessTools = input.requiresFreshnessVerification
+    ? input.externalReadToolNames ?? []
+    : [];
   if (input.commandKind === "ask") {
     const memoryReads = input.memoryToolNames.filter((name) =>
       name === "memory_search" || name === "memory_read"
@@ -249,16 +303,25 @@ export function resolvePiTurnToolNames(input: Readonly<{
     return [
       ...PI_KNOWLEDGE_READ_TOOL_IDS,
       "note_read",
+      ...freshnessTools,
       ...(input.memoryMode === "no_memory" ? [] : memoryReads)
     ];
   }
   if (input.commandKind === "maintain") {
-    return ["vault_search", "note_read", PI_KNOWLEDGE_MAINTAIN_TOOL_ID];
+    return [
+      "vault_search",
+      "note_read",
+      ...(input.externalReadToolNames ?? []),
+      PI_KNOWLEDGE_MAINTAIN_TOOL_ID
+    ];
   }
   if (input.mode === "plan") return [...input.planToolNames];
+  const external = new Set(input.externalReadToolNames ?? []);
+  const base = input.defaultToolNames.filter((name) => !external.has(name));
+  const withFreshness = [...base, ...freshnessTools];
   return input.memoryMode === "no_memory"
-    ? input.defaultToolNames.filter((name) => !input.memoryToolNames.includes(name))
-    : [...input.defaultToolNames];
+    ? withFreshness.filter((name) => !input.memoryToolNames.includes(name))
+    : withFreshness;
 }
 
 export interface PiNativeTaskPlanTurnContext {
@@ -267,6 +330,11 @@ export interface PiNativeTaskPlanTurnContext {
 }
 
 export type PiNativeKnowledgeTurnContext =
+  | Readonly<{
+      kind: "chat";
+      providerResourceText: string;
+      references: readonly Readonly<PiKnowledgeReference>[];
+    }>
   | Readonly<{
       kind: "ask";
       providerResourceText: string;
@@ -281,11 +349,38 @@ export interface PiNativeAgentSessionFactoryResult {
   session: AgentSession;
   /** Command-safe alias exposed by the controlled Pi ResourceLoader. */
   skillCommandName?: string;
+  /** Fully expanded bodies of the exact routed Skill set. */
+  skillPromptPrefix?: string;
   /** Read-only Vault/MCP Tools plus task_update; never inferred from copy. */
   planToolNames?: readonly string[];
   /** The fixed controlled long-term Memory Tool set, omitted in no_memory turns. */
   memoryToolNames?: readonly string[];
+  /** Existing authorized read-only external Tools that `/ask` may use for freshness checks. */
+  externalReadToolNames?: readonly string[];
   warnings?: readonly string[];
+}
+
+export interface PiRuntimeSkillPort {
+  selectForTask(input: Readonly<{ text: string }>): Promise<Readonly<{
+    id: string;
+    skillPath: string;
+    skillName: string;
+    skills: readonly Readonly<{
+      id: string;
+      skillPath: string;
+      skillName: string;
+    }>[];
+    applicableSkillIds: readonly string[];
+    requiresFreshnessVerification: boolean;
+  }> | null>;
+  recordUse(skillId: string, usedAt: number): Promise<void>;
+  reviewCompletedTask(input: Readonly<{
+    productRunId: string;
+    request: string;
+    result: string;
+    terminalState: "completed" | "failed" | "cancelled";
+    existingCapabilityIds: readonly string[];
+  }>): Promise<unknown>;
 }
 
 export interface PiNativeConversationRuntimeOptions {
@@ -311,6 +406,10 @@ export interface PiNativeConversationRuntimeOptions {
     piSessionId: string;
     entries: readonly SessionEntry[];
   }): Promise<readonly PiChatUiMessageDecoration[]>;
+  /** Receives only public user/assistant text plus a minimal Tool outcome summary. */
+  recordDreamExperience?(input: DreamPublicExperienceInput): Promise<void>;
+  /** Product-owned Skill routing and independent post-task review. */
+  skills?: PiRuntimeSkillPort;
   /** Disposes runtime-owned live resources before active sessions are released. */
   disposeRuntimeResources?(): void;
   knowledge?: PiKnowledgeRuntimePort;
@@ -356,6 +455,8 @@ export interface DerivePiNativeConversationInput {
 export interface ActivatePiNativeConversationOptions {
   skillPath?: string;
   skillName?: string;
+  skillPaths?: readonly string[];
+  skillNames?: readonly string[];
 }
 
 export interface RecoverPiNativeConversationInput {
@@ -415,9 +516,11 @@ interface ActiveConversation {
   cwd: string;
   resourceKey: string;
   skillCommandName?: string;
+  skillPromptPrefix?: string;
   defaultToolNames: readonly string[];
   planToolNames: readonly string[];
   memoryToolNames: readonly string[];
+  externalReadToolNames: readonly string[];
   registeredToolNames: ReadonlySet<string>;
   sessionManager: SessionManager;
   session: AgentSession;
@@ -444,6 +547,10 @@ interface ActiveProductRun {
   channel: PiRuntimeEventChannel;
   settlementBarrier: PiProductRunSettlementBarrier;
   requestText: string;
+  commandKind: "chat" | "ask" | "maintain";
+  selectedSkillIds: readonly string[];
+  requiresFreshnessVerification: boolean;
+  successfulCapabilityIds: Set<string>;
   projectId?: string;
   mode: PiChatMode;
   memoryMode: PiConversationMemoryMode;
@@ -468,6 +575,11 @@ interface ActiveProductRun {
   knowledgeObservation: MutablePiKnowledgeObservation | null;
   knowledgeWorkflow:
     | null
+    | {
+        kind: "chat";
+        references: readonly Readonly<PiKnowledgeReference>[];
+        bufferedAssistantEvents: PiChatRuntimeEventPayload[];
+      }
     | {
         kind: "ask";
         references: readonly Readonly<PiKnowledgeReference>[];
@@ -1109,14 +1221,30 @@ export class PiNativeConversationRuntime {
         ? Object.freeze({ kind: "chat", originalText: request.text })
         : routeKnowledgeConversationCommand(request.text);
 
+    const selectedRuntimeSkill = !request.skillPath
+      && mode !== "plan"
+      ? await this.options.skills?.selectForTask({ text: request.text }) ?? null
+      : null;
+    const selectedRuntimeSkills = selectedRuntimeSkill
+      ? selectedRuntimeSkill.skills?.length
+        ? selectedRuntimeSkill.skills
+        : Object.freeze([Object.freeze({
+            id: selectedRuntimeSkill.id,
+            skillPath: selectedRuntimeSkill.skillPath,
+            skillName: selectedRuntimeSkill.skillName
+          })])
+      : Object.freeze([]);
+
     const active = await this.requireActiveConversation(
       request.conversationId,
-      knowledgeCommand.kind === "chat"
-        ? {
-            skillPath: request.skillPath,
-            skillName: request.skillName
-          }
-        : {}
+      request.skillPath
+        ? { skillPath: request.skillPath, skillName: request.skillName }
+        : selectedRuntimeSkill
+          ? {
+              skillPaths: selectedRuntimeSkills.map((skill) => skill.skillPath),
+              skillNames: selectedRuntimeSkills.map((skill) => skill.skillName)
+            }
+          : {}
     );
     if (active.currentRun || active.session.isStreaming) {
       throw new PiNativeConversationRuntimeError(
@@ -1182,6 +1310,13 @@ export class PiNativeConversationRuntime {
       channel,
       settlementBarrier: createSettlementBarrier(),
       requestText: request.text,
+      commandKind: knowledgeCommand.kind,
+      selectedSkillIds: Object.freeze(selectedRuntimeSkill
+        ? selectedRuntimeSkills.map((skill) => skill.id)
+        : request.skillName ? [request.skillName] : []),
+      requiresFreshnessVerification:
+        selectedRuntimeSkill?.requiresFreshnessVerification === true,
+      successfulCapabilityIds: new Set<string>(),
       ...(projectId ? { projectId } : {}),
       mode,
       memoryMode,
@@ -1252,6 +1387,54 @@ export class PiNativeConversationRuntime {
           providerResourceText: preflight.providerResourceText,
           references: preflight.references
         });
+      } else if (mode !== "plan"
+        && knowledgeCommand.kind === "chat"
+        && this.options.knowledge?.retrieveChat
+        && shouldPreflightPersonalKnowledge(request.text)) {
+        await this.emitRuntimeEvent(active, execution, {
+          type: "knowledge_progress",
+          status: "active",
+          stage: "searching"
+        });
+        const preflight = await this.options.knowledge.retrieveChat({
+          vaultId: catalog.vaultId,
+          conversationId: catalog.conversationId,
+          piSessionId: catalog.piSessionId,
+          productRunId,
+          question: request.text,
+          explicitPaths: [],
+          includeUnrefined: false
+        });
+        execution.knowledgeWorkflow = {
+          kind: "chat",
+          references: preflight.references,
+          bufferedAssistantEvents: []
+        };
+        execution.knowledgeObservation = createKnowledgeObservation(
+          "chat",
+          preflight.retrieval
+        );
+        await this.emitRuntimeEvent(active, execution, {
+          type: "knowledge_progress",
+          status: "completed",
+          stage: "searching"
+        });
+        active.knowledgeTurnContext = Object.freeze({
+          kind: "chat",
+          providerResourceText: preflight.providerResourceText,
+          references: preflight.references
+        });
+        if (
+          !execution.requiresFreshnessVerification
+          && knowledgeReferencesRequireFreshnessVerification(
+            request.text,
+            preflight.references,
+            this.now()
+          )
+        ) {
+          execution.requiresFreshnessVerification = true;
+          this.configureToolsForTurn(active, knowledgeCommand, mode, memoryMode);
+        }
       } else if (knowledgeCommand.kind === "maintain") {
         const preference =
           await this.options.knowledge!.prepareMaintenancePreferences?.();
@@ -1288,9 +1471,11 @@ export class PiNativeConversationRuntime {
       throw error;
     }
 
-    const promptText = knowledgeCommand.kind === "chat" && active.skillCommandName
-      ? `/skill:${active.skillCommandName} ${request.text}`
-      : request.text;
+    const promptText = active.skillPromptPrefix
+      ? `${active.skillPromptPrefix}\n\n${request.text}`
+      : knowledgeCommand.kind === "chat" && active.skillCommandName
+        ? `/skill:${active.skillCommandName} ${request.text}`
+        : request.text;
     try {
       execution.reasoningStartEntryId = appendReasoningSummaryEntry(
         active.sessionManager,
@@ -1454,7 +1639,10 @@ export class PiNativeConversationRuntime {
       memoryMode,
       defaultToolNames: active.defaultToolNames,
       memoryToolNames: active.memoryToolNames,
-      planToolNames: active.planToolNames
+      planToolNames: active.planToolNames,
+      externalReadToolNames: active.externalReadToolNames,
+      requiresFreshnessVerification:
+        active.currentRun?.requiresFreshnessVerification === true
     });
     if (command.kind === "ask") {
       if (names.some((name) => !active.registeredToolNames.has(name))) {
@@ -2051,6 +2239,8 @@ export class PiNativeConversationRuntime {
       sessionManager: opened.sessionManager,
       skillPath: options.skillPath,
       skillName: options.skillName,
+      skillPaths: options.skillPaths,
+      skillNames: options.skillNames,
       currentExecutionContext: () => {
         const active = holder.active;
         const run = active?.currentRun;
@@ -2141,6 +2331,14 @@ export class PiNativeConversationRuntime {
           plan: activeTaskPlanFromBranch(branch)
             ?? latestTaskPlanFromBranch(branch)
         });
+      },
+      currentSuccessfulExternalReadToolNames: () => {
+        const active = holder.active;
+        const run = active?.currentRun;
+        if (!active || !run) return Object.freeze([]);
+        return Object.freeze([...run.successfulCapabilityIds]
+          .filter((name) => active.externalReadToolNames.includes(name))
+          .sort());
       },
       reportAskPersonalMemorySources: async (input) => {
         const active = holder.active;
@@ -2296,6 +2494,9 @@ export class PiNativeConversationRuntime {
             )
           }
         : {}),
+      ...(created.skillPromptPrefix
+        ? { skillPromptPrefix: created.skillPromptPrefix }
+        : {}),
       sessionManager: opened.sessionManager,
       session: created.session,
       defaultToolNames: Object.freeze(created.session.getActiveToolNames()),
@@ -2304,6 +2505,9 @@ export class PiNativeConversationRuntime {
       ]),
       memoryToolNames: Object.freeze([
         ...(created.memoryToolNames ?? [])
+      ]),
+      externalReadToolNames: Object.freeze([
+        ...(created.externalReadToolNames ?? [])
       ]),
       registeredToolNames: new Set(
         created.session.getAllTools().map((tool) => tool.name)
@@ -2433,13 +2637,14 @@ export class PiNativeConversationRuntime {
         execution.toolCallIds
       );
 
-      const ask = execution.knowledgeWorkflow?.kind === "ask"
+      const readWorkflow = execution.knowledgeWorkflow?.kind === "ask"
+        || execution.knowledgeWorkflow?.kind === "chat"
         ? execution.knowledgeWorkflow
         : null;
-      let askSourceChanged = false;
-      if (ask && terminalState === "completed" && assistantEntryId) {
+      let readSourceChanged = false;
+      if (readWorkflow && terminalState === "completed" && assistantEntryId) {
         const actualReferences = mergeKnowledgeReferences(
-          ask.references,
+          readWorkflow.references,
           collectKnowledgeToolReferences(runEntries)
         );
         const verification = await this.options.knowledge!.verifyAskReferences({
@@ -2450,7 +2655,7 @@ export class PiNativeConversationRuntime {
           references: actualReferences
         });
         if (verification.status === "source_changed") {
-          askSourceChanged = true;
+          readSourceChanged = true;
           if (execution.knowledgeObservation) {
             execution.knowledgeObservation.conflictOrFreshnessTriggered = true;
             await this.setKnowledgeProgressState(
@@ -2461,7 +2666,7 @@ export class PiNativeConversationRuntime {
             );
             await this.persistKnowledgeObservation(active, execution);
           }
-          ask.bufferedAssistantEvents.length = 0;
+          readWorkflow.bufferedAssistantEvents.length = 0;
           active.sessionManager.branch(accepted.userEntryId);
           assistantEntryId = active.sessionManager.appendMessage(
             localAssistantMessage(
@@ -2494,15 +2699,19 @@ export class PiNativeConversationRuntime {
             "completed"
           );
         } else {
-          for (const event of ask.bufferedAssistantEvents) {
+          for (const event of readWorkflow.bufferedAssistantEvents) {
             await this.emitRuntimeEvent(active, execution, event);
           }
-          ask.bufferedAssistantEvents.length = 0;
-          const personalMemorySources = mergePersonalMemorySourceReferences(
-            ask.personalMemorySources,
-            collectSuccessfulAskPersonalMemoryToolSources(runEntries)
-          );
-          ask.personalMemorySources = personalMemorySources;
+          readWorkflow.bufferedAssistantEvents.length = 0;
+          const personalMemorySources = readWorkflow.kind === "ask"
+            ? mergePersonalMemorySourceReferences(
+                readWorkflow.personalMemorySources,
+                collectSuccessfulAskPersonalMemoryToolSources(runEntries)
+              )
+            : Object.freeze([]);
+          if (readWorkflow.kind === "ask") {
+            readWorkflow.personalMemorySources = personalMemorySources;
+          }
           await this.options.knowledge?.recordUsage?.({
             event: {
               sourceEventId: stableId(
@@ -2521,18 +2730,22 @@ export class PiNativeConversationRuntime {
               referenceIds: verification.references.map(
                 (reference) => reference.referenceId
               ),
-              workflow: "ask",
+              workflow: readWorkflow.kind === "ask" ? "ask" : "normal_read",
               producedPaths: [],
-              personalMemorySources: personalMemorySources.map(
-                (source) => ({ ...source })
-              )
+              ...(readWorkflow.kind === "ask"
+                ? {
+                    personalMemorySources: personalMemorySources.map(
+                      (source) => ({ ...source })
+                    )
+                  }
+                : {})
             },
             entries: active.sessionManager.getBranch()
           });
         }
       }
 
-      if (!askSourceChanged) {
+      if (!readSourceChanged) {
         await this.resolveRuntimeEntryIds(active, execution, runEntries);
       }
       if (maintenance && terminalState === "completed" && assistantEntryId) {
@@ -2547,7 +2760,7 @@ export class PiNativeConversationRuntime {
           entries: active.sessionManager.getBranch()
         });
       } else if (
-        !ask
+        !readWorkflow
         && terminalState === "completed"
         && assistantEntryId
       ) {
@@ -2602,7 +2815,7 @@ export class PiNativeConversationRuntime {
           maintenanceResult.toolCallIds
         );
       }
-      if (ask) {
+      if (readWorkflow) {
         await this.emitRuntimeEvent(active, execution, {
           type: "agent_settled"
         });
@@ -2654,6 +2867,82 @@ export class PiNativeConversationRuntime {
           updatedAt: settledAt
         }
       );
+      if (
+        terminalState === "completed"
+        && execution.mode !== "plan"
+        && execution.commandKind === "chat"
+        && execution.selectedSkillIds.length
+      ) {
+        for (const skillId of execution.selectedSkillIds) {
+          await this.options.skills?.recordUse(skillId, settledAt).catch(async () => {
+            await this.appendRuntimeResourceWarning(
+              active,
+              execution,
+              "skill_usage_record_failed"
+            );
+          });
+        }
+      }
+      const reusableCapabilities = Object.freeze([
+        ...execution.selectedSkillIds.map((id) => `skill:${id}`),
+        ...execution.successfulCapabilityIds
+      ].sort());
+      if (
+        this.options.skills
+        && terminalState === "completed"
+        && execution.mode !== "plan"
+        && execution.commandKind === "chat"
+      ) {
+        void this.options.skills.reviewCompletedTask({
+          productRunId: execution.productRunId,
+          request: execution.requestText,
+          result: lastAssistantEntry(runEntries)
+            ? publicMessageText(lastAssistantEntry(runEntries)!.message).trim()
+            : "",
+          terminalState,
+          existingCapabilityIds: reusableCapabilities
+        }).catch(async () => {
+          await this.appendRuntimeResourceWarning(
+            active,
+            execution,
+            "skill_review_failed"
+          );
+        }).catch(() => undefined);
+      }
+      if (
+        execution.memoryMode === "normal"
+        && terminalState !== "cancelled"
+        && assistantEntryId
+        && this.options.recordDreamExperience
+      ) {
+        const experience = buildDreamPublicExperienceFromRun({
+          conversationId: active.catalog.conversationId,
+          productRunId: execution.productRunId,
+          userEntryId: accepted.userEntryId,
+          assistantEntryId,
+          terminalState,
+          occurredAt: settledAt,
+          entries: runEntries
+        });
+        if (experience) {
+          try {
+            await this.options.recordDreamExperience(experience);
+          } catch {
+            await this.catalog.appendDiagnostic({
+              diagnosticId: runtimeInterruptedDiagnosticId(
+                active.catalog.conversationId,
+                active.catalog.piSessionId,
+                `${execution.productRunId}:dream-experience`
+              ),
+              conversationId: active.catalog.conversationId,
+              piSessionId: active.catalog.piSessionId,
+              code: "runtime_resource_warning",
+              message: "dream_experience_capture_failed",
+              createdAt: this.now()
+            }).catch(() => undefined);
+          }
+        }
+      }
       await this.emitRuntimeEvent(active, execution, {
         type: "product_run_settled",
         terminalState,
@@ -2731,6 +3020,25 @@ export class PiNativeConversationRuntime {
     } finally {
       this.finishProductRunRuntimeState(active, execution);
     }
+  }
+
+  private async appendRuntimeResourceWarning(
+    active: ActiveConversation,
+    execution: ActiveProductRun,
+    message: string
+  ): Promise<void> {
+    await this.catalog.appendDiagnostic({
+      diagnosticId: runtimeInterruptedDiagnosticId(
+        active.catalog.conversationId,
+        active.catalog.piSessionId,
+        `${execution.productRunId}:${message}`
+      ),
+      conversationId: active.catalog.conversationId,
+      piSessionId: active.catalog.piSessionId,
+      code: "runtime_resource_warning",
+      message,
+      createdAt: this.now()
+    }).catch(() => undefined);
   }
 
   private async handleAgentSessionEvent(
@@ -2931,7 +3239,8 @@ export class PiNativeConversationRuntime {
         break;
       case "agent_settled":
         execution.agentSettledSeen = true;
-        if (execution.knowledgeWorkflow?.kind !== "ask") {
+        if (execution.knowledgeWorkflow?.kind !== "ask"
+          && execution.knowledgeWorkflow?.kind !== "chat") {
           await this.emitRuntimeEvent(active, execution, {
             type: "agent_settled"
           });
@@ -3250,7 +3559,12 @@ export class PiNativeConversationRuntime {
   ): Promise<void> {
     const observation = execution.knowledgeObservation;
     if (!observation) return;
-    const stage = knowledgeToolProgressStage(execution, toolName, args);
+    const stage = knowledgeToolProgressStage(
+      execution,
+      toolName,
+      args,
+      active.externalReadToolNames
+    );
     if (!stage) return;
     if (
       toolName === PI_KNOWLEDGE_MAINTAIN_TOOL_ID
@@ -3268,6 +3582,9 @@ export class PiNativeConversationRuntime {
     execution.knowledgeProgressDepth.set(stage, depth + 1);
     if (toolName === "memory_search") observation.memorySearchUsed = true;
     if (toolName === "memory_read") observation.memoryReadUsed = true;
+    if (active.externalReadToolNames.includes(toolName)) {
+      observation.conflictOrFreshnessTriggered = true;
+    }
     if (depth === 0) {
       await this.emitRuntimeEvent(active, execution, {
         type: "knowledge_progress",
@@ -3439,7 +3756,8 @@ export class PiNativeConversationRuntime {
     event: PiChatRuntimeEventPayload
   ): Promise<void> {
     const workflow = execution.knowledgeWorkflow;
-    if (workflow?.kind === "ask" && runtimeMessageRole(message) === "assistant") {
+    if ((workflow?.kind === "ask" || workflow?.kind === "chat")
+      && runtimeMessageRole(message) === "assistant") {
       workflow.bufferedAssistantEvents.push(structuredClone(event));
       return;
     }
@@ -3594,6 +3912,9 @@ export class PiNativeConversationRuntime {
     if (event.type !== "tool_execution_end") return;
     if (event.toolName === PI_USER_QUESTION_TOOL_ID) return;
     if (active.registeredToolNames.has(event.toolName)) {
+      if (!event.isError && !reasoningToolWasCancelled(event.result)) {
+        execution.successfulCapabilityIds.add(event.toolName);
+      }
       this.updateReasoningActivitySafely(execution, {
         id: stableId("reasoning-tool", event.toolCallId),
         kind: "tool",
@@ -3992,6 +4313,54 @@ export class PiNativeConversationRuntime {
     }
     return id;
   }
+}
+
+export function buildDreamPublicExperienceFromRun(input: Readonly<{
+  conversationId: string;
+  productRunId: string;
+  userEntryId: string;
+  assistantEntryId: string;
+  terminalState: "completed" | "failed";
+  occurredAt: number;
+  entries: readonly SessionEntry[];
+}>): DreamPublicExperienceInput | null {
+  const userEntry = input.entries.find((entry) => entry.id === input.userEntryId);
+  const assistantEntry = input.entries.find((entry) => entry.id === input.assistantEntryId);
+  if (!userEntry || userEntry.type !== "message" || userEntry.message.role !== "user"
+    || !assistantEntry || assistantEntry.type !== "message"
+    || assistantEntry.message.role !== "assistant") return null;
+  const userText = publicMessageText(userEntry.message).trim();
+  const assistantText = publicMessageText(assistantEntry.message).trim();
+  if (!userText && !assistantText) return null;
+  return Object.freeze({
+    conversationId: input.conversationId,
+    productRunId: input.productRunId,
+    userEntryId: input.userEntryId,
+    assistantEntryId: input.assistantEntryId,
+    occurredAt: input.occurredAt,
+    userText,
+    assistantText,
+    taskResult: collectMinimalDreamTaskResult(input.entries, input.terminalState)
+  });
+}
+
+function collectMinimalDreamTaskResult(
+  entries: readonly SessionEntry[],
+  terminalState: "completed" | "failed"
+): DreamTaskResultSummary {
+  const successful = new Set<string>();
+  const failed = new Set<string>();
+  for (const entry of entries) {
+    if (entry.type !== "message" || entry.message.role !== "toolResult") continue;
+    const name = entry.message.toolName.trim();
+    if (!name) continue;
+    (entry.message.isError ? failed : successful).add(name);
+  }
+  return Object.freeze({
+    terminalState,
+    successfulToolNames: Object.freeze([...successful].sort()),
+    failedToolNames: Object.freeze([...failed].sort())
+  });
 }
 
 /**
@@ -5467,7 +5836,9 @@ function createKnowledgeObservation(
     memoryReadUsed: false,
     conflictOrFreshnessTriggered: false
   };
-  if (workflow !== "ask") {
+  if (workflow === "maintain"
+    || workflow === "maintain_preview"
+    || workflow === "maintain_confirm") {
     observation.protocolVersion =
       ECHOINK_KNOWLEDGE_MAINTENANCE_PROTOCOL_VERSION;
   }
@@ -5513,24 +5884,30 @@ function freezeKnowledgeObservation(
 function knowledgeToolProgressStage(
   execution: Readonly<ActiveProductRun>,
   toolName: string,
-  args: unknown
+  args: unknown,
+  externalReadToolNames: readonly string[]
 ): Extract<
   PiChatRuntimeEvent,
   { type: "knowledge_progress" }
 >["stage"] | null {
-  if (execution.knowledgeObservation?.workflow === "ask") {
+  if (execution.knowledgeObservation?.workflow === "ask"
+    || execution.knowledgeObservation?.workflow === "chat") {
     if (toolName === "knowledge_search") {
       return safeRecord(args)?.cursor ? "continuing_search" : "searching";
     }
     if (toolName === "knowledge_read" || toolName === "note_read") {
       return "reading_knowledge";
     }
-    if (toolName === "memory_search" || toolName === "memory_read") {
+    if (execution.knowledgeObservation.workflow === "ask"
+      && (toolName === "memory_search" || toolName === "memory_read")) {
       return "comparing_memory";
     }
   }
   if (toolName === PI_KNOWLEDGE_MAINTAIN_TOOL_ID) {
     return "writing_and_readback";
+  }
+  if (externalReadToolNames.includes(toolName)) {
+    return "checking_conflicts_freshness";
   }
   return null;
 }
@@ -5607,7 +5984,12 @@ function safeVersionToken(value: unknown): string | null {
 function resourceKeyFor(
   options: ActivatePiNativeConversationOptions
 ): string {
-  return `${options.skillPath ?? ""}\0${options.skillName ?? ""}`;
+  return [
+    options.skillPath ?? "",
+    options.skillName ?? "",
+    ...(options.skillPaths ?? []),
+    ...(options.skillNames ?? [])
+  ].join("\0");
 }
 
 function normalizePiChatMode(value: unknown): PiChatMode {
@@ -5619,10 +6001,17 @@ function normalizePiChatMode(value: unknown): PiChatMode {
 function assertValidSkillBinding(
   options: Readonly<ActivatePiNativeConversationOptions>
 ): void {
-  if (Boolean(options.skillPath) === Boolean(options.skillName)) return;
+  const singleValid = Boolean(options.skillPath) === Boolean(options.skillName);
+  const paths = options.skillPaths ?? [];
+  const names = options.skillNames ?? [];
+  const setValid = paths.length === names.length
+    && new Set(paths).size === paths.length
+    && new Set(names).size === names.length;
+  if (singleValid && setValid
+    && !(options.skillPath && paths.length > 0)) return;
   throw new PiNativeConversationRuntimeError(
     "skill_binding_invalid",
-    "Pi-native Skill requires skillPath and skillName together"
+    "Pi-native Skill requires one binding form with matching unique paths and names"
   );
 }
 

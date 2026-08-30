@@ -114,6 +114,14 @@ export interface KnowledgeReference {
   contentRevision: string;
   lineStart: number;
   lineEnd: number;
+  /** Vault collection that owns this source. */
+  sourceType?: "wiki" | "projects" | "raw";
+  /** File modification time observed while the exact revision was read. */
+  recordedAt?: number;
+  /** Optional publication date declared in Markdown frontmatter. */
+  publishedAt?: string;
+  /** Local revision/source-link verification only; never implies web freshness. */
+  verificationStatus?: "local_revision_verified" | "source_link_changed";
 }
 
 export interface KnowledgeRetrievalRequest {

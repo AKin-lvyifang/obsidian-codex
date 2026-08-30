@@ -24,7 +24,6 @@ export const USER_PROFILE_ITEM_RECOMMENDED_MAX_CHARS = 80 as const;
 export const USER_PROFILE_ITEM_HARD_MAX_CHARS = 120 as const;
 export const USER_PROFILE_PROJECTION_TARGET_CHARS = 2_000 as const;
 export const USER_PROFILE_WRITE_HARD_MAX_CHARS = 8_000 as const;
-export const USER_PROFILE_LEGACY_READ_MAX_CHARS = 16_000 as const;
 
 function normalizedProfileClaimValue(text: string): string {
   return text.normalize("NFKC").replaceAll(/\s+/gu, " ").trim().toLowerCase();
@@ -151,11 +150,11 @@ export const USER_PROFILE_STATE_RELATIVE_PATH = path.posix.join(
 );
 
 /**
- * observed 画像至少需要多少个独立、方向一致的有效一级 Memory 来源，
- * 才能进入 USER.md（人格草案 §9.2 / 最新决定）。一条 observed view
- * 绝不能直接写入 USER.md。
+ * inferred 画像至少需要多少个独立、方向一致的 Memory 或公开经历来源，
+ * 才能进入 USER.md。与 Agent Self 的行为推断门槛一致：单一观察不能
+ * 直接成为长期画像。
  */
-export const USER_OBSERVED_MIN_SOURCES = 3 as const;
+export const USER_OBSERVED_MIN_SOURCES = 2 as const;
 
 export type UserProfileStateInspection =
   | Readonly<{ kind: "missing" }>

@@ -6349,6 +6349,14 @@ button.echoink-settings-navigation-row:focus-visible {
   min-width: 0;
 }
 
+.codex-resource-row-title {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+}
+
 .codex-resource-row button.codex-resource-row-name {
   appearance: none;
   display: block;
@@ -6381,6 +6389,24 @@ button.echoink-settings-navigation-row:focus-visible {
 .codex-resource-row button.codex-resource-row-name:focus-visible {
   outline: 2px solid var(--interactive-accent);
   outline-offset: 2px;
+}
+
+.codex-resource-preset-badge {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  box-sizing: border-box;
+  max-width: 100%;
+  min-height: 18px;
+  padding: 0 6px;
+  border-radius: 9999px;
+  background: var(--background-primary-alt, var(--background-primary));
+  color: var(--text-muted);
+  font-size: 10.5px;
+  font-weight: 550;
+  line-height: 1.25;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .codex-resource-row-meta,
@@ -13651,207 +13677,6 @@ body.theme-dark .codex-session-picker {
   }
 }
 
-/* ==========================================================================
-   Cognitive System v2: Trait Hexagon (personality radar chart)
-   Visual language adapted from amicro MonoRoundedRadarChart.
-   Monochrome palette using Obsidian CSS variables for theme compatibility.
-   ========================================================================== */
-
-.echoink-trait-hexagon {
-  display: block;
-  margin: 0 auto;
-}
-
-/* Grid rings — subtle concentric hexagons */
-.echoink-trait-hexagon-grid {
-  fill: none;
-  stroke: var(--background-modifier-border);
-  stroke-width: 0.5;
-  opacity: 0.6;
-}
-
-/* Axis spokes — lines from center to each vertex */
-.echoink-trait-hexagon-spoke {
-  stroke: var(--background-modifier-border);
-  stroke-width: 0.5;
-  opacity: 0.4;
-}
-
-/* Baseline polygon — initial template scores (dashed, lighter) */
-.echoink-trait-hexagon-baseline {
-  fill: var(--text-muted);
-  fill-opacity: 0.06;
-  stroke: var(--text-muted);
-  stroke-width: 1;
-  stroke-dasharray: 4 3;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  opacity: 0.5;
-}
-
-/* Current score polygon — the main filled shape */
-.echoink-trait-hexagon-score {
-  fill: var(--interactive-accent);
-  fill-opacity: 0.15;
-  stroke: var(--interactive-accent);
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  transition: all 0.4s ease;
-}
-
-/* Score dots at each vertex */
-.echoink-trait-hexagon-dot {
-  fill: var(--interactive-accent);
-  stroke: var(--background-primary);
-  stroke-width: 1.5;
-  transition: all 0.4s ease;
-}
-
-/* Axis labels */
-.echoink-trait-hexagon-label {
-  font-size: 11px;
-  font-weight: 500;
-  fill: var(--text-muted);
-  font-family: var(--font-interface);
-  user-select: none;
-}
-
-/* Container card for the hexagon in settings */
-.echoink-trait-hexagon-card {
-  border-radius: 16px;
-  padding: 16px;
-  background: var(--background-secondary);
-  border: 1px solid var(--background-modifier-border);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
-}
-
-.echoink-trait-hexagon-card-header {
-  width: 100%;
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-}
-
-.echoink-trait-hexagon-card-title {
-  font-size: 12px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--text-muted);
-}
-
-.echoink-trait-hexagon-card-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 6px;
-  border-radius: 999px;
-  font-size: 10px;
-  font-family: var(--font-monospace);
-  background: var(--background-modifier-hover);
-  color: var(--text-muted);
-  border: 1px solid var(--background-modifier-border);
-}
-
-.echoink-trait-hexagon-card-footer {
-  width: 100%;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding-top: 8px;
-  border-top: 1px solid var(--background-modifier-border);
-  font-size: 11px;
-  font-family: var(--font-monospace);
-  color: var(--text-muted);
-}
-
-/* ==========================================================================
-   Cognitive System v2: Agent Profile Card (read-only hexagon + collapsible text)
-   Replaces the old AGENT.md textarea editor.
-   ========================================================================== */
-
-/* --- Agent identity card (settings: 身份与用户画像) ---------------------- */
-.echoink-agent-identity-card {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 12px 14px;
-  padding: 12px 14px;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 10px;
-  background: var(--background-secondary);
-  margin-bottom: 12px;
-}
-
-.echoink-agent-identity-avatar {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 40px;
-  height: 40px;
-  flex: 0 0 40px;
-  border-radius: 50%;
-  overflow: hidden;
-  color: #f8f7ff;
-  background: #8b5cf6;
-}
-
-.echoink-agent-identity-avatar.is-default svg {
-  width: 22px;
-  height: 22px;
-}
-
-.echoink-agent-identity-avatar img {
-  width: 100%;
-  height: 100%;
-  display: block;
-  object-fit: cover;
-}
-
-.echoink-agent-identity-copy {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-  flex: 1 1 auto;
-}
-
-.echoink-agent-identity-name {
-  font-weight: 600;
-  font-size: 14px;
-}
-
-.echoink-agent-identity-desc {
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-.echoink-agent-identity-edit {
-  flex: 0 0 auto;
-  margin-inline-start: auto;
-  white-space: nowrap;
-}
-
-.echoink-agent-identity-default-badge {
-  font-size: 11px;
-  color: var(--text-muted);
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 999px;
-  padding: 1px 8px;
-}
-
-/* Narrow settings window: avatar + name copy stay on the top row; the action
-   button drops to its own full-width line instead of being clipped. */
-@container (max-width: 420px) {
-  .echoink-agent-identity-edit {
-    flex: 1 0 100%;
-    margin-inline-start: 0;
-  }
-}
-
 /* --- Agent identity modal ------------------------------------------------- */
 .echoink-agent-identity-modal {
   display: flex;
@@ -14140,34 +13965,42 @@ body.theme-dark .codex-session-picker {
   margin-top: 4px;
 }
 
-/* Agent 画像：整个区域只保留这一个主要外层卡片边界；内部不再嵌套
-   带边框圆角的子卡片。全部颜色来自 Obsidian 主题变量，浅色/深色通用。 */
+/* Agent Profile is one read-only, resume-style surface. Its public copy is a
+   same-revision projection of current-self; no score, drawer, or raw AGENT
+   content is rendered here. */
 .echoink-agent-profile-card {
+  margin-bottom: 8px;
+  min-width: 0;
+  overflow: hidden;
+  container-type: inline-size;
+  border: 1px solid var(--background-modifier-border);
   border-radius: var(--echoink-settings-radius, 12px);
   background: var(--background-secondary);
-  border: 1px solid var(--background-modifier-border);
-  overflow: hidden;
-  margin-bottom: 8px;
 }
 
 .echoink-agent-profile-card-header {
-  padding: 14px 16px 10px;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  justify-content: space-between;
+  gap: 10px 16px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--background-modifier-border);
 }
 
 .echoink-agent-profile-card-title-area {
   display: flex;
+  min-width: 0;
   align-items: center;
   gap: 8px;
 }
 
 .echoink-agent-profile-card-label {
-  font-size: var(--font-ui-medium);
-  font-weight: 600;
+  margin: 0;
   color: var(--text-normal);
+  font-size: var(--font-ui-medium);
+  font-weight: 650;
+  line-height: 1.4;
 }
 
 .echoink-agent-profile-card-badge {
@@ -14175,299 +14008,412 @@ body.theme-dark .codex-session-picker {
   align-items: center;
   padding: 1px 7px;
   border-radius: 999px;
-  font-size: var(--font-ui-smaller);
-  font-family: var(--font-monospace);
   background: var(--background-modifier-border);
   color: var(--text-muted);
-}
-
-/* 「查看完整画像」：稳定的次级按钮。无 morph 图标动画、无缩放跳动；
-   只用 chevron 旋转表达开合。 */
-.echoink-agent-profile-expand-btn {
-  margin-left: auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 32px;
-  padding: 4px 12px;
-  border-radius: var(--echoink-settings-radius-sm, 8px);
-  font-size: var(--font-ui-small);
-  font-weight: 500;
-  cursor: pointer;
-  border: 1px solid var(--background-modifier-border);
-  background: var(--background-primary);
-  color: var(--text-muted);
-  white-space: nowrap;
-  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
-}
-
-.echoink-agent-profile-expand-btn:hover {
-  background: var(--background-modifier-hover);
-  color: var(--text-normal);
-}
-
-.echoink-agent-profile-expand-btn.is-open {
-  border-color: var(--background-modifier-border-hover, var(--background-modifier-border));
-  color: var(--text-normal);
-}
-
-.echoink-agent-profile-expand-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  transition: transform 0.15s ease;
-}
-
-.echoink-agent-profile-expand-icon svg {
-  width: 14px;
-  height: 14px;
-}
-
-.echoink-agent-profile-expand-btn.is-open .echoink-agent-profile-expand-icon {
-  transform: rotate(180deg);
-}
-
-.echoink-agent-profile-expand-label {
-  overflow-wrap: anywhere;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
 }
 
 .echoink-agent-profile-card-desc {
-  font-size: var(--font-ui-small);
-  color: var(--text-muted);
   flex-basis: 100%;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
 
-/* --- Body: left hexagon + right trait bars --- */
-.echoink-agent-profile-card-body {
-  display: flex;
-  min-height: 260px;
-}
-
-.echoink-agent-profile-hex-side {
-  flex: 0 0 200px;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  align-items: center;
-  padding: 12px;
-  border-right: 1px solid var(--background-modifier-border);
-}
-
-.echoink-agent-profile-text-side {
-  flex: 1;
-  min-width: 0;
-  padding: 14px 16px;
-  overflow-y: auto;
-  max-height: 320px;
-}
-
-/* Trait dimension rows */
-.echoink-trait-row {
-  padding: 2px 0;
-}
-
-.echoink-trait-dim {
-  font-weight: 600;
-  color: var(--text-normal);
-  min-width: 36px;
-  font-size: 12px;
-}
-
-.echoink-trait-bar-bg {
-  flex: 1;
-  height: 5px;
-  border-radius: 3px;
-  background: var(--background-modifier-border);
-  overflow: hidden;
-}
-
-.echoink-trait-bar-fg {
-  height: 100%;
-  border-radius: 3px;
-  background: var(--interactive-accent);
-  width: 50%; /* default; set dynamically when TraitStore is wired */
-  transition: width 0.4s ease;
-}
-
-.echoink-trait-row {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 3px;
-}
-
-.echoink-trait-head {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-}
-
-.echoink-trait-value {
-  font-size: 11px;
-  font-family: var(--font-monospace);
-  color: var(--text-muted);
-  margin-left: auto;
-  text-align: right;
-}
-
-.echoink-trait-band-desc {
-  font-size: 10px;
-  color: var(--text-muted);
-  opacity: 0.8;
-  margin-bottom: 4px;
-}
-
-.echoink-trait-hexagon-caption {
-  font-size: 10px;
-  color: var(--text-muted);
-  opacity: 0.75;
-  text-align: center;
-  margin-top: 6px;
-  max-width: 170px;
-}
-
-/* --- Footer --- */
-.echoink-agent-profile-card-footer {
-  padding: 10px 16px;
-  border-top: 1px solid var(--background-modifier-border);
-  font-size: var(--font-ui-small);
-  color: var(--text-muted);
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  align-items: center;
-  gap: 8px;
-}
-
 .echoink-agent-profile-reselect {
-  padding: 4px 10px;
-  min-height: 28px;
-  color: var(--interactive-accent);
-  background: none;
-  border: 0;
+  display: inline-flex;
+  flex: 0 1 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 32px;
+  max-width: 100%;
+  padding: 5px 10px;
+  border: 1px solid var(--background-modifier-border);
   border-radius: var(--echoink-settings-radius-sm, 8px);
-  text-decoration: none;
+  background: transparent;
+  color: var(--text-muted);
   cursor: pointer;
   font-size: var(--font-ui-small);
+  line-height: 1.4;
   overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.echoink-agent-profile-template-icon,
+.echoink-agent-profile-template-chevron {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+}
+
+.echoink-agent-profile-template-icon .echoink-animate-icon {
+  width: 16px;
+  height: 16px;
+  stroke-width: 2;
+}
+
+.echoink-animate-users-primary-arc,
+.echoink-animate-users-secondary-head,
+.echoink-animate-users-secondary-arc,
+.echoink-animate-user-round-pen-body {
+  stroke-dashoffset: 0;
+}
+
+.echoink-agent-profile-template-chevron svg {
+  width: 14px;
+  height: 14px;
+}
+
+.echoink-agent-profile-reselect.is-expanded .echoink-agent-profile-template-chevron {
+  transform: rotate(180deg);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .echoink-agent-profile-template-chevron {
+    transition-property: transform;
+    transition-duration: 150ms;
+    transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
+  }
+
+  .echoink-agent-profile-reselect .echoink-animate-users-secondary,
+  .echoink-agent-identity-edit .echoink-animate-user-round-pen-tool {
+    transform-box: fill-box;
+    transform-origin: center;
+    transition-property: transform;
+    transition-duration: 150ms;
+    transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
+  }
+
+  .echoink-agent-profile-reselect:is(:hover, :focus-visible) .echoink-animate-users-secondary {
+    transform: translateX(1px);
+  }
+
+  .echoink-agent-identity-edit:is(:hover, :focus-visible) .echoink-animate-user-round-pen-tool {
+    transform: translate(-0.5px, 0.5px) rotate(-4deg);
+  }
 }
 
 .echoink-agent-profile-reselect:hover {
-  text-decoration: underline;
-}
-
-/* 未选择模板：「初始风格选择」是明确的主要行动。 */
-.echoink-agent-profile-reselect.is-primary {
-  background: var(--interactive-accent);
-  color: var(--text-on-accent);
-  font-weight: 600;
-}
-
-.echoink-agent-profile-reselect.is-primary:hover {
-  text-decoration: none;
-  background: var(--interactive-accent-hover, var(--interactive-accent));
-}
-
-/* 已有模板：「重置人格」是低强调、带风险语义的文字按钮。 */
-.echoink-agent-profile-reselect.is-danger {
-  color: var(--text-error);
-  font-size: var(--font-ui-smaller);
+  border-color: var(--background-modifier-border-hover);
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
 }
 
 .echoink-agent-profile-reselect:focus-visible,
-.echoink-agent-profile-expand-btn:focus-visible {
+.echoink-agent-identity-edit:focus-visible,
+.echoink-picker-cancel-btn:focus-visible {
   outline: 2px solid var(--interactive-accent);
   outline-offset: 2px;
 }
 
-/* --- Drawer (slides down) --- */
-.echoink-agent-profile-drawer {
-  max-height: 0;
-  overflow: hidden;
-  transition: max-height 0.4s ease;
-  border-top: 0 solid var(--background-modifier-border);
-}
-
-.echoink-agent-profile-drawer.is-open {
-  max-height: 800px;
-  border-top-width: 1px;
-}
-
-.echoink-agent-profile-drawer-inner {
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
+.echoink-agent-profile-card-body {
+  display: grid;
+  grid-template-columns: minmax(132px, 0.34fr) minmax(0, 1fr);
   min-width: 0;
 }
 
-/* 人格总结：普通内容分组（标题 + 正文），不再套带边框圆角的子卡片，
-   与下方「画像文本」之间靠间距和标题层级区分。 */
-.echoink-agent-profile-summary-group {
+.echoink-agent-profile-identity {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding-bottom: 4px;
   min-width: 0;
+  padding: 24px 18px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border-inline-end: 1px solid var(--background-modifier-border);
+  text-align: center;
 }
 
-.echoink-agent-profile-summary-title {
-  font-size: var(--font-ui-small);
-  font-weight: 600;
+.echoink-agent-profile-personality {
+  max-width: 100%;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--background-modifier-hover);
   color: var(--text-muted);
-}
-
-.echoink-agent-profile-summary-text {
-  font-size: var(--font-ui-medium);
-  line-height: 1.7;
-  color: var(--text-normal);
+  font-size: var(--font-ui-smaller);
+  font-weight: 500;
+  line-height: 1.45;
   overflow-wrap: anywhere;
 }
 
-/* Raw AGENT.md text inside drawer（画像文本是内容区，不算嵌套卡片边界：
-   仅用浅色底与细分隔线保证可读，不承担主要卡片语义）。 */
-.echoink-agent-profile-raw-title {
-  font-size: var(--font-ui-small);
-  font-weight: 600;
-  color: var(--text-muted);
-}
-
-.echoink-agent-profile-raw-text {
-  margin: 0;
-  padding: 12px;
-  font-size: var(--font-ui-small);
-  line-height: 1.7;
-  font-family: var(--font-monospace);
-  color: var(--text-muted);
-  white-space: pre-wrap;
-  word-break: break-word;
-  max-height: 200px;
-  overflow-y: auto;
+.echoink-agent-profile-avatar {
+  display: flex;
+  width: clamp(76px, 28cqi, 104px);
+  max-width: 104px;
+  aspect-ratio: 1;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 50%;
+  outline: 1px solid oklch(0 0 0 / 0.1);
+  outline-offset: -1px;
   background: var(--background-primary);
-  border: 1px solid var(--background-modifier-border);
-  border-radius: var(--echoink-settings-radius-sm, 8px);
+  color: var(--text-muted);
 }
 
-.echoink-agent-profile-collapse-btn {
-  align-self: center;
-  padding: 4px 14px;
+.theme-dark .echoink-agent-profile-avatar {
+  outline-color: oklch(1 0 0 / 0.1);
+}
+
+.echoink-agent-profile-avatar img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.echoink-agent-profile-avatar svg {
+  width: 42%;
+  height: 42%;
+}
+
+.echoink-agent-profile-name-row {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+}
+
+.echoink-agent-profile-name {
+  min-width: 0;
+  max-width: 100%;
+  color: var(--text-normal);
+  font-size: var(--font-ui-large);
+  font-weight: 700;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.echoink-agent-identity-edit {
+  display: inline-flex;
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  padding: 4px;
+  flex: 0 0 24px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
   border-radius: 6px;
-  font-size: 11px;
-  cursor: pointer;
-  border: 1px solid var(--background-modifier-border);
   background: transparent;
   color: var(--text-muted);
-  transition-property: border-color, color, background-color, transform;
-  transition-duration: 140ms;
-  transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
+  cursor: pointer;
+  line-height: 1;
 }
 
-.echoink-agent-profile-collapse-btn:hover {
-  border-color: var(--interactive-accent);
+.echoink-agent-identity-edit:hover {
+  background: var(--background-modifier-hover);
   color: var(--text-normal);
+}
+
+.echoink-agent-identity-edit .echoink-animate-icon {
+  width: 15px;
+  height: 15px;
+  stroke-width: 2;
+}
+
+.echoink-agent-profile-methods {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  margin-block-start: 3px;
+}
+
+.echoink-agent-profile-methods-label {
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.echoink-agent-profile-method-tags {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 5px;
+}
+
+.echoink-agent-profile-method-tag {
+  display: inline-flex;
+  max-width: 100%;
+  padding: 2px 7px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  background: var(--background-primary);
+  font-size: var(--font-ui-smaller);
+  font-weight: 400;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  text-align: start;
+}
+
+.echoink-agent-profile-content {
+  display: flex;
+  min-width: 0;
+  padding: 24px clamp(18px, 5cqi, 32px);
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 20px;
+}
+
+.echoink-agent-profile-content-title,
+.echoink-agent-profile-section-title,
+.echoink-agent-profile-field-label,
+.echoink-agent-profile-field-value,
+.echoink-agent-profile-growth-empty,
+.echoink-agent-profile-growth-note,
+.echoink-agent-profile-error {
+  margin: 0;
+}
+
+.echoink-agent-profile-content-title {
+  max-width: 100%;
+  color: var(--text-normal);
+  font-size: var(--font-ui-large);
+  font-weight: 700;
+  line-height: 1.3;
+  text-wrap: balance;
+}
+
+.echoink-agent-profile-section {
+  display: flex;
+  width: min(100%, 70ch);
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.echoink-agent-profile-section-title {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  font-weight: 650;
+  line-height: 1.4;
+}
+
+.echoink-agent-profile-current-fields {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  gap: 10px;
+  margin: 0;
+}
+
+.echoink-agent-profile-field {
+  min-width: 0;
+  padding: 9px 12px;
+  border-inline-start: 2px solid var(--background-modifier-border-hover);
+  border-radius: 0 var(--echoink-settings-radius-sm, 8px) var(--echoink-settings-radius-sm, 8px) 0;
+  background: var(--background-primary);
+}
+
+.echoink-agent-profile-field-label {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  font-weight: 650;
+  line-height: 1.4;
+}
+
+.echoink-agent-profile-field-value {
+  max-width: 70ch;
+  margin-block-start: 4px;
+  margin-inline-start: 0;
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
+}
+
+.echoink-agent-profile-habit-list {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding-inline-start: 1.25em;
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  line-height: 1.55;
+}
+
+.echoink-agent-profile-habit {
+  padding-inline-start: 2px;
+  overflow-wrap: anywhere;
+}
+
+.echoink-agent-profile-growth-empty {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  font-style: italic;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.echoink-agent-profile-growth-note {
+  max-width: 70ch;
+  margin-block-start: 2px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
+}
+
+.echoink-agent-profile-error {
+  max-width: 70ch;
+  color: var(--text-error);
+  font-size: var(--font-ui-small);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.echoink-user-profile-text {
+  margin: 0;
+  padding: 14px 16px;
+  border-top: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-muted);
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-small);
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@container (max-width: 420px) {
+  .echoink-agent-profile-card-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .echoink-agent-profile-reselect {
+    align-self: flex-start;
+  }
+
+  .echoink-agent-profile-card-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .echoink-agent-profile-identity {
+    border-inline-end: 0;
+    border-bottom: 1px solid var(--background-modifier-border);
+  }
+
+  .echoink-agent-profile-content {
+    padding: 20px 16px;
+  }
 }
 
 /* --- Template picker panel (inline, slides open below footer) --- */
@@ -14680,21 +14626,9 @@ button.echoink-picker-row:focus-visible {
   }
 }
 
-/* Responsive: stack vertically on narrow screens */
-@media (max-width: 560px) {
-  .echoink-agent-profile-card-body {
-    flex-direction: column;
-  }
-  .echoink-agent-profile-hex-side {
-    flex: none;
-    border-right: none;
-    border-bottom: 1px solid var(--background-modifier-border);
-  }
-}
-
 /* ==========================================================================
-   Cognitive System v2: Personality Onboarding (cold-start setup flow)
-   Multi-step: template grid → scenario questions → hexagon preview
+   Agent onboarding (cold-start setup flow)
+   Template picker and identity setup
    ========================================================================== */
 
 .echoink-about-card {
@@ -15758,7 +15692,6 @@ button.echoink-picker-row:focus-visible {
   .echoink-settings-page .echoink-personalization-actions > button,
   .echoink-memory-correction-actions > button,
   .echoink-picker-cancel-btn,
-  .echoink-agent-profile-collapse-btn,
   .codex-provider-model-manager button,
   .codex-resource-manager button,
   .codex-provider-model-modal button,
@@ -15850,7 +15783,6 @@ button.echoink-picker-row:focus-visible {
   .echoink-memory-correction-actions > button:not(.mod-cta),
   .echoink-knowledge-init-note-remove,
   .codex-provider-model-manager button.codex-provider-row-action:not(.is-delete),
-  .echoink-agent-profile-expand-btn,
   .echoink-agent-profile-reselect:not(.is-primary):not(.is-danger),
   .echoink-settings-back,
   .echoink-settings-state-action,
@@ -15870,7 +15802,6 @@ button.echoink-picker-row:focus-visible {
   .echoink-memory-correction-actions > button:not(.mod-cta),
   .echoink-knowledge-init-note-remove,
   .codex-provider-model-manager button.codex-provider-row-action:not(.is-delete),
-  .echoink-agent-profile-expand-btn,
   .echoink-agent-profile-reselect:not(.is-primary):not(.is-danger),
   .echoink-settings-back,
   .echoink-settings-state-action,
@@ -16111,7 +16042,6 @@ button.echoink-picker-row:focus-visible {
   .echoink-settings-page .echoink-personalization-actions > button,
   .echoink-memory-correction-actions > button,
   .echoink-picker-cancel-btn,
-  .echoink-agent-profile-collapse-btn,
   .codex-provider-model-manager button,
   .codex-resource-manager button,
   .codex-provider-model-modal button,
@@ -16159,7 +16089,6 @@ button.echoink-picker-row:focus-visible {
     .echoink-settings-page .echoink-personalization-actions > button,
     .echoink-memory-correction-actions > button,
     .echoink-picker-cancel-btn,
-    .echoink-agent-profile-collapse-btn,
     .codex-provider-model-manager button,
     .codex-resource-manager button,
     .codex-provider-model-modal button,

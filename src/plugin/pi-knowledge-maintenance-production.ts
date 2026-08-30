@@ -163,6 +163,13 @@ implements PiKnowledgeMaintenanceToolPort {
     try {
       this.assertIdentity(input);
       if (input.signal?.aborted) return cancelledResult();
+      const actions = input.candidateActions ?? [];
+      if (actions.length > 0 && !(input.assessments?.length)) {
+        throw new Phase3MaintenanceError(
+          "invalid_input",
+          "Knowledge maintenance writes require at least one assessment"
+        );
+      }
       const sourcePaths = input.sourcePaths?.length
         ? [...input.sourcePaths]
         : extractExplicitRawPaths(input.request);
@@ -175,7 +182,8 @@ implements PiKnowledgeMaintenanceToolPort {
             status: "completed" as const,
             producedPaths: Object.freeze([]),
             maintenanceResult: createKnowledgeMaintenanceResultEnvelope({
-              status: "noop"
+              status: "noop",
+              assessments: input.assessments
             }),
             protocolVersion: ECHOINK_KNOWLEDGE_MAINTENANCE_PROTOCOL_VERSION,
             preferenceProfileVersion: input.preferenceSnapshot?.profileVersion,
@@ -184,7 +192,6 @@ implements PiKnowledgeMaintenanceToolPort {
           });
         }
       }
-      const actions = input.candidateActions ?? [];
       const preference = requirePreferenceSnapshot(input.preferenceSnapshot);
       const proposal = new FilePhase3MaintenanceShadowProposalPort({
           vaultRootPath: this.vaultRootPath,
@@ -221,7 +228,8 @@ implements PiKnowledgeMaintenanceToolPort {
             : committed.status,
           notes: committed.notes,
           issues: committed.issues,
-          systemPaths: committed.systemPaths
+          systemPaths: committed.systemPaths,
+          assessments: input.assessments
         }),
         protocolVersion: ECHOINK_KNOWLEDGE_MAINTENANCE_PROTOCOL_VERSION,
         preferenceProfileVersion:
@@ -266,7 +274,8 @@ implements PiKnowledgeMaintenanceToolPort {
             ...(error instanceof Phase3MaintenanceError && error.relativePath
               ? { path: error.relativePath }
               : {})
-          }]
+          }],
+          assessments: input.assessments
         })
       });
     }

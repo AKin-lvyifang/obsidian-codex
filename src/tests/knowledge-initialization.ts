@@ -222,6 +222,10 @@ async function assertGeneratedGuideIncludesOfflineAssets(): Promise<void> {
     assert.match(guide, /日常怎么整理知识/u);
     assert.match(guide, /五类长期记忆/u);
     assert.match(guide, /人格会影响什么/u);
+    assert.match(guide, /当前自我由自然语言写成/u);
+    assert.match(guide, /不会形成分数、能力值/u);
+    assert.doesNotMatch(guide, /六维|锋利度|主导度/u);
+    assert.doesNotMatch(guide, /memory-personality-v1\.webp/u);
     for (const assetPath of KNOWLEDGE_INITIALIZATION_GUIDE_ASSET_PATHS) {
       assert.match(guide, new RegExp(assetPath.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
       assert.ok(

@@ -54,26 +54,38 @@ import {
   rebindProfileSource,
   reconcileProfileSources,
   USER_PROFILE_ITEM_HARD_MAX_CHARS,
-  USER_PROFILE_LEGACY_READ_MAX_CHARS,
-  USER_PROFILE_WRITE_HARD_MAX_CHARS,
   userProfileStateJson,
   UserProfileStateStore
 } from "./user-profile-state";
-import { AgentIdentityStateStore } from "./agent-identity-state";
+import { AgentIdentityStateStore, type AgentIdentityState } from "./agent-identity-state";
 import {
-  inspectPersonalityFile,
-  personalityStateJson,
-  reconcilePersonalitySources,
-  PersonalityStateStore
-} from "./personality-state";
-import {
-  renderAgentMarkdown,
-  renderBaseAgentMarkdown,
   renderUserMarkdown
 } from "./cognitive-projection";
+import {
+  AGENT_MD_HARD_MAX_BYTES,
+  USER_MD_HARD_MAX_BYTES,
+  agentSelfFromTemplate,
+  parseAgentCurrentSelf,
+  replaceAgentCurrentSelf,
+  renderAgentMarkdown as renderCurrentAgentMarkdown,
+  renderBaseAgentMarkdown as renderCurrentBaseAgentMarkdown
+} from "./agent-self";
+import {
+  AGENT_SELF_METADATA_RELATIVE_PATH,
+  AgentSelfMetadataStore,
+  agentSelfMetadataJson,
+  reconcileAgentSelfDerivationSources,
+  type AgentSelfMetadata
+} from "./agent-self-metadata";
+import { getAgentTemplate } from "./agent-templates";
 import { normalizeTextForDedupe } from "./cognitive-file-utils";
+import {
+  experienceSourceGroup,
+  invalidatedMemoryProductRunIds,
+  productRunIdFromExperienceProfileSourceId,
+  productRunIdFromMemorySource
+} from "./dream-source-group";
 
-const MAX_PROFILE_CHARS = USER_PROFILE_LEGACY_READ_MAX_CHARS;
 const MAX_OVERVIEW_CHARS = 20_000;
 const MAX_RECORD_CONTENT_CHARS = 24_000;
 const MAX_SEARCH_LIMIT = 50;
@@ -104,8 +116,11 @@ export interface PersonalMemoryRepositoryOptions {
   readonly vaultId: string;
   readonly now?: () => number;
   readonly idFactory?: () => string;
-  /** Test-only crash seam: leaves the prepared transaction for startup recovery. */
-  readonly failTransactionAfterChange?: (operation: string, appliedChanges: number) => boolean;
+  /** Test-only after-change seam for crash recovery and live transaction barriers. */
+  readonly failTransactionAfterChange?: (
+    operation: string,
+    appliedChanges: number
+  ) => boolean | Promise<boolean>;
   /**
    * Optional provider of current secondary (二级事实) records so Search Index v3
    * can fold them into the derived index. Cognitive system wires this in
@@ -142,6 +157,7 @@ interface CognitiveUpdateInput {
   readonly detail: string;
   readonly expectedMemoryRevision?: number;
   readonly expectedAgentIdentityRevision?: number;
+  readonly expectedAgentProjectionHash?: string;
   readonly expectedUserProjectionHash?: string;
 }
 
@@ -178,9 +194,11 @@ export interface PersonalMemoryLayout {
   readonly backups: string;
   readonly secondary: string;
   readonly personalityState: string;
+  readonly agentSelfMetadata: string;
   readonly userProfileState: string;
   readonly agentIdentity: string;
   readonly dreamState: string;
+  readonly dreamExperienceInbox: string;
 }
 
 export interface PersonalMemoryAuditObservation {
@@ -316,7 +334,10 @@ export class PersonalMemoryRepository {
   private readonly vaultId: string;
   private readonly now: () => number;
   private readonly idFactory: () => string;
-  private readonly failTransactionAfterChange?: (operation: string, appliedChanges: number) => boolean;
+  private readonly failTransactionAfterChange?: (
+    operation: string,
+    appliedChanges: number
+  ) => boolean | Promise<boolean>;
   private readonly watchExternalChanges: boolean;
   private disposed = false;
   private initialization: Promise<Readonly<PersonalMemoryLayout>> | null = null;
@@ -383,9 +404,11 @@ export class PersonalMemoryRepository {
       backups: path.join(runtime, "backups"),
       secondary: path.join(history, "secondary"),
       personalityState: path.join(root, "agents", "echoink", "personality-state.json"),
+      agentSelfMetadata: path.join(root, "agents", "echoink", "agent-self-meta.json"),
       userProfileState: path.join(sharedUser, "user-profile-state.json"),
       agentIdentity: path.join(root, "agents", "echoink", "agent-identity.json"),
-      dreamState: path.join(runtime, "dream-state.json")
+      dreamState: path.join(runtime, "dream-state.json"),
+      dreamExperienceInbox: path.join(runtime, "dream-experience-inbox.json")
     });
     for (const key of Object.keys(this.layout) as Array<keyof PersonalMemoryLayout>) {
       this.assertManagedPath(this.layout[key]);
@@ -1115,13 +1138,20 @@ export class PersonalMemoryRepository {
     injectionKeys: readonly string[];
   }>> {
     await this.assertBaseIdentityStatePathsSafe();
-    const [personality, identity] = await Promise.all([
-      new PersonalityStateStore(this.layout.root).read(),
-      new AgentIdentityStateStore(this.layout.root).read()
-    ]);
+    const identity = await new AgentIdentityStateStore(this.layout.root).read();
+    const onDisk = await pathExists(this.layout.agent)
+      ? await readUtf8Bounded(this.layout.agent, AGENT_MD_HARD_MAX_BYTES, "AGENT.md")
+      : defaultAgentProfile(identity);
+    const parsed = parseAgentCurrentSelf(onDisk);
+    if (parsed.kind !== "ok") {
+      throw new PersonalMemoryAccessError(
+        "revision_conflict",
+        `agent_self_invalid:${parsed.reason}`
+      );
+    }
     return Object.freeze({
       revision: 0,
-      agent: renderBaseAgentMarkdown(personality, identity),
+      agent: renderCurrentBaseAgentMarkdown(onDisk),
       user: null,
       memory: null,
       injectionKeys: Object.freeze(["echoink.agent"])
@@ -1139,10 +1169,10 @@ export class PersonalMemoryRepository {
     injectionKeys: readonly string[];
   }>> {
     const fixed = await this.currentFixedContext();
-    if (fixed.user.length > USER_PROFILE_WRITE_HARD_MAX_CHARS) {
+    if (utf8Bytes(fixed.user) > USER_MD_HARD_MAX_BYTES) {
       throw new PersonalMemoryAccessError(
         "revision_conflict",
-        "USER.md exceeds the 8000 character context boundary"
+        "USER.md exceeds the 128 KiB UTF-8 context boundary"
       );
     }
     const agent = fixed.agent;
@@ -1185,8 +1215,8 @@ export class PersonalMemoryRepository {
   }>> {
     if (this.fixedContextCache) return this.fixedContextCache;
     const [agent, user, memory] = await Promise.all([
-      readBounded(this.layout.agent, MAX_PROFILE_CHARS, "AGENT.md"),
-      readFile(this.layout.user, "utf8"),
+      readUtf8Bounded(this.layout.agent, AGENT_MD_HARD_MAX_BYTES, "AGENT.md"),
+      readUtf8Bounded(this.layout.user, USER_MD_HARD_MAX_BYTES, "USER.md"),
       readBounded(this.layout.memory, MAX_OVERVIEW_CHARS, "MEMORY.md")
     ]);
     this.fixedContextCache = Object.freeze({ agent, user, memory });
@@ -1212,6 +1242,17 @@ export class PersonalMemoryRepository {
   async applyCognitiveUpdate(
     input: Readonly<CognitiveUpdateInput>
   ): Promise<Readonly<{ revision: number }>> {
+    if (input.extraChanges.some((change) =>
+      path.posix.normalize(change.relativePath.replaceAll(path.sep, path.posix.sep))
+        === "agents/echoink/AGENT.md")) {
+      throw new PersonalMemoryAccessError(
+        "invalid_request",
+        "AGENT.md changes must use the validated agentContent field"
+      );
+    }
+    const normalizedAgentContent = input.agentContent === undefined
+      ? undefined
+      : normalizeAgentProfileWrite(input.agentContent, "AGENT.md projection");
     // Reject oversized USER.md output before initialization or mutation-lane
     // entry so no transaction can begin with an invalid new projection.
     const normalizedUserContent = input.userContent === undefined
@@ -1219,7 +1260,10 @@ export class PersonalMemoryRepository {
       : normalizeUserProfileWrite(input.userContent, "USER.md projection");
     await this.initialize();
     return await this.withMutation(async () =>
-      await this.applyCognitiveUpdateInMutation(input, normalizedUserContent)
+      await this.applyCognitiveUpdateInMutation(
+        normalizedAgentContent === undefined ? input : { ...input, agentContent: normalizedAgentContent },
+        normalizedUserContent
+      )
     );
   }
 
@@ -1331,8 +1375,21 @@ export class PersonalMemoryRepository {
     const manifest = await this.readManifest();
     assertExpectedRevision(manifest, input.expectedMemoryRevision);
     await this.assertFixedFilesMatchManifest(manifest);
+    if (input.expectedAgentProjectionHash !== undefined) {
+      const diskAgentHash = contentHash(
+        await readUtf8Bounded(this.layout.agent, AGENT_MD_HARD_MAX_BYTES, "AGENT.md")
+      );
+      if (diskAgentHash !== input.expectedAgentProjectionHash) {
+        throw new PersonalMemoryAccessError(
+          "revision_conflict",
+          "AGENT.md projection conflict: disk content changed after projection planning"
+        );
+      }
+    }
     if (input.expectedUserProjectionHash !== undefined) {
-      const diskUserHash = contentHash(await readFile(this.layout.user, "utf8"));
+      const diskUserHash = contentHash(
+        await readUtf8Bounded(this.layout.user, USER_MD_HARD_MAX_BYTES, "USER.md")
+      );
       if (diskUserHash !== input.expectedUserProjectionHash) {
         throw new PersonalMemoryAccessError(
           "revision_conflict",
@@ -1562,6 +1619,7 @@ export class PersonalMemoryRepository {
     now: number,
     options: Readonly<{
       includeUser?: boolean;
+      invalidatedProductRunIds?: ReadonlySet<string>;
       replacement?: Readonly<{
         previousMemoryId: string;
         replacementMemoryId: string;
@@ -1573,49 +1631,14 @@ export class PersonalMemoryRepository {
     const validMemoryIds = new Set(records
       .filter((record) => record.status === "current")
       .map((record) => record.id));
+    const invalidatedProductRunIds = new Set([
+      ...invalidatedMemoryProductRunIds(records),
+      ...(options.invalidatedProductRunIds ?? [])
+    ]);
     const fixed = await this.currentFixedContext();
     const changes: TransactionChange[] = [];
     let agentHash: string | undefined;
     let userHash: string | undefined;
-
-    const personalityInspection = await inspectPersonalityFile(this.layout.personalityState);
-    if (personalityInspection.kind === "invalid") {
-      throw new PersonalMemoryAccessError(
-        "revision_conflict",
-        `personality_state_invalid:${personalityInspection.reason}`
-      );
-    }
-    if (
-      personalityInspection.kind === "v1"
-      || personalityInspection.kind === "v2_recoverable"
-    ) {
-      throw new PersonalMemoryAccessError(
-        "revision_conflict",
-        "personality_state_requires_cognitive_recovery"
-      );
-    }
-    if (personalityInspection.kind === "v2") {
-      const nextPersonality = reconcilePersonalitySources(
-        personalityInspection.state,
-        validMemoryIds,
-        now
-      );
-      if (nextPersonality !== personalityInspection.state) {
-        changes.push({
-          relativePath: path.relative(this.layout.root, this.layout.personalityState),
-          content: personalityStateJson(nextPersonality)
-        });
-        const identity = await new AgentIdentityStateStore(this.layout.root).read();
-        const projectedAgent = renderAgentMarkdown(nextPersonality, identity);
-        if (projectedAgent !== fixed.agent) {
-          agentHash = contentHash(projectedAgent);
-          changes.push({
-            relativePath: path.relative(this.layout.root, this.layout.agent),
-            content: projectedAgent
-          });
-        }
-      }
-    }
 
     const profileStore = new UserProfileStateStore(this.layout.root);
     const previousProfile = options.includeUser === false
@@ -1653,7 +1676,16 @@ export class PersonalMemoryRepository {
             now
           })
         : previousProfile;
-      let nextProfile = reconcileProfileSources(profileBase, validMemoryIds, now);
+      const validProfileSourceIds = new Set(validMemoryIds);
+      for (const item of profileBase.items) {
+        for (const sourceId of item.sourceMemoryIds) {
+          const productRunId = productRunIdFromExperienceProfileSourceId(sourceId);
+          if (productRunId && !invalidatedProductRunIds.has(productRunId)) {
+            validProfileSourceIds.add(sourceId);
+          }
+        }
+      }
+      let nextProfile = reconcileProfileSources(profileBase, validProfileSourceIds, now);
       if (nextProfile !== previousProfile) {
         const projectedUser = normalizeUserProfileWrite(
           renderUserMarkdown(nextProfile),
@@ -1674,6 +1706,56 @@ export class PersonalMemoryRepository {
             content: projectedUser
           });
         }
+      }
+    }
+
+    const metadataStore = new AgentSelfMetadataStore(this.layout.root);
+    const metadataInspection = await metadataStore.inspect();
+    if (metadataInspection.kind === "invalid") {
+      throw new PersonalMemoryAccessError(
+        "revision_conflict",
+        `AGENT Self provenance conflict: ${metadataInspection.reason}`
+      );
+    }
+    if (metadataInspection.kind === "valid" && metadataInspection.state.derivations.length > 0) {
+      const parsed = parseAgentCurrentSelf(fixed.agent);
+      if (parsed.kind !== "ok") {
+        throw new PersonalMemoryAccessError(
+          "revision_conflict",
+          `AGENT.md current-self conflict: ${parsed.reason}`
+        );
+      }
+      const reconciled = reconcileAgentSelfDerivationSources({
+        state: parsed.state,
+        metadata: metadataInspection.state,
+        currentMemoryRevisions: new Map(records
+          .filter((record) => record.status === "current")
+          .map((record) => [record.id, record.revision])),
+        invalidatedExperienceContextIds: new Set(
+          [...invalidatedProductRunIds].map((productRunId) => experienceSourceGroup(productRunId))
+        ),
+        now
+      });
+      if (reconciled.metadata !== metadataInspection.state) {
+        changes.push({
+          relativePath: AGENT_SELF_METADATA_RELATIVE_PATH,
+          content: agentSelfMetadataJson(reconciled.metadata)
+        });
+      }
+      if (reconciled.state !== parsed.state) {
+        const projectedAgent = normalizeAgentProfileWrite(
+          replaceAgentCurrentSelf(fixed.agent, reconciled.state),
+          "AGENT.md provenance reconciliation"
+        );
+        changes.push({
+          relativePath: `agents/echoink/history/AGENT-source-r${metadataInspection.state.revision}.md`,
+          content: fixed.agent
+        });
+        changes.push({
+          relativePath: path.relative(this.layout.root, this.layout.agent),
+          content: projectedAgent
+        });
+        agentHash = contentHash(projectedAgent);
       }
     }
 
@@ -1731,18 +1813,13 @@ export class PersonalMemoryRepository {
     });
   }
 
-  /**
-   * Dream-only fixed-file inspection. USER.md may exceed the legacy read
-   * boundary here solely so its trusted manifest hash can be checked and the
-   * original can be backed up/replaced. Callers must never place an oversized
-   * value in a Provider prompt or normal fixed-context injection.
-   */
+  /** Dream-only fixed-file inspection under the final AGENT/USER byte caps. */
   async inspectCognitiveFixedFiles(): Promise<Readonly<{
     agent: string;
+    agentHash: string;
     user: string;
     userHash: string;
-    userChars: number;
-    userManifestHashMatches: boolean;
+    userBytes: number;
   }>> {
     await this.initialize();
     return await this.withMutation(async () => {
@@ -1758,10 +1835,10 @@ export class PersonalMemoryRepository {
       const userHash = contentHash(user);
       return Object.freeze({
         agent,
+        agentHash: contentHash(agent),
         user,
         userHash,
-        userChars: user.length,
-        userManifestHashMatches: manifest.fixedFileHashes.user === userHash
+        userBytes: utf8Bytes(user)
       });
     });
   }
@@ -1779,10 +1856,10 @@ export class PersonalMemoryRepository {
       this.readManifest(),
       this.currentFixedContext()
     ]);
-    if (fixed.user.length > USER_PROFILE_WRITE_HARD_MAX_CHARS) {
+    if (utf8Bytes(fixed.user) > USER_MD_HARD_MAX_BYTES) {
       throw new PersonalMemoryAccessError(
         "revision_conflict",
-        "USER.md exceeds the 8000 character control boundary"
+        "USER.md exceeds the 128 KiB UTF-8 control boundary"
       );
     }
     const activeRecordIds = new Set(manifest.records.map((item) => item.id));
@@ -1798,6 +1875,45 @@ export class PersonalMemoryRepository {
     });
   }
 
+  /**
+   * Read the Agent Self control plane from one committed disk revision.
+   *
+   * Multiple Repository instances for the same Vault share the mutation lane,
+   * so a reader waits for an in-flight cognitive transaction and never mixes
+   * another instance's stale fixed-file cache with freshly written metadata.
+   */
+  async readAgentSelfControlSnapshot(): Promise<Readonly<{
+    revision: number;
+    agent: string;
+    metadata: AgentSelfMetadata | null;
+  }>> {
+    await this.initialize();
+    return await this.withMutation(async () => {
+      await this.assertAgentSelfControlSnapshotPathsSafe();
+      const manifest = await this.readManifestFromDisk();
+      const agent = await readUtf8Bounded(this.layout.agent, AGENT_MD_HARD_MAX_BYTES, "AGENT.md");
+      if (!validFixedFileHashes(manifest.fixedFileHashes)
+        || contentHash(agent) !== manifest.fixedFileHashes.agent) {
+        throw new PersonalMemoryAccessError(
+          "revision_conflict",
+          "Agent Self control snapshot does not match the committed manifest"
+        );
+      }
+      const metadataInspection = await new AgentSelfMetadataStore(this.layout.root).inspect();
+      if (metadataInspection.kind === "invalid") {
+        throw new PersonalMemoryAccessError(
+          "revision_conflict",
+          `Agent Self metadata conflict: ${metadataInspection.reason}`
+        );
+      }
+      return Object.freeze({
+        revision: manifest.revision,
+        agent,
+        metadata: metadataInspection.kind === "valid" ? metadataInspection.state : null
+      });
+    });
+  }
+
   async updateIdentityFile(
     profile: "agent" | "user",
     contentValue: string,
@@ -1805,7 +1921,7 @@ export class PersonalMemoryRepository {
   ): Promise<Readonly<{ revision: number; profile: "agent" | "user" }>> {
     const normalizedContent = profile === "user"
       ? normalizeUserProfileWrite(contentValue, "user profile")
-      : normalizeProfileWrite(contentValue, "agent profile", MAX_PROFILE_CHARS);
+      : normalizeAgentProfileWrite(contentValue, "agent profile");
     await this.initialize();
     return await this.withMutation(async () => {
       await this.assertManagedTreeSafe();
@@ -2088,6 +2204,10 @@ export class PersonalMemoryRepository {
       allRecords,
       this.now(),
       {
+        invalidatedProductRunIds: new Set(
+          [productRunIdFromMemorySource(previous.source)]
+            .filter((value): value is string => value !== null)
+        ),
         replacement: {
           previousMemoryId: previous.id,
           replacementMemoryId: replacement.id,
@@ -2148,7 +2268,13 @@ export class PersonalMemoryRepository {
     const lifecycle = await this.applySecondaryLifecycle("close", targetId);
     const projection = await this.reconcileControlledProjectionSources(
       allRecords,
-      this.now()
+      this.now(),
+      {
+        invalidatedProductRunIds: new Set(
+          [productRunIdFromMemorySource(previous.source)]
+            .filter((value): value is string => value !== null)
+        )
+      }
     );
     if (projection.agentHash || projection.userHash) {
       next.fixedFileHashes = {
@@ -2191,7 +2317,7 @@ export class PersonalMemoryRepository {
     }
     const text = cleanRequired(request.text, "profile text", USER_PROFILE_ITEM_HARD_MAX_CHARS);
     const now = this.now();
-    const diskUser = await readFile(this.layout.user, "utf8");
+    const diskUser = await readUtf8Bounded(this.layout.user, USER_MD_HARD_MAX_BYTES, "USER.md");
     const diskUserHash = contentHash(diskUser);
     const profileStore = new UserProfileStateStore(this.layout.root);
     let previousProfile = (await profileStore.read()) ?? emptyUserProfileState(now);
@@ -2339,6 +2465,10 @@ export class PersonalMemoryRepository {
         includeUser: false,
         ...(supersededSource
           ? {
+              invalidatedProductRunIds: new Set(
+                [productRunIdFromMemorySource(supersededSource.source)]
+                  .filter((value): value is string => value !== null)
+              ),
               replacement: {
                 previousMemoryId: supersededSource.id,
                 replacementMemoryId: record.id,
@@ -2443,7 +2573,13 @@ export class PersonalMemoryRepository {
     const lifecycle = await this.applySecondaryLifecycle("forget", targetId);
     const projection = await this.reconcileControlledProjectionSources(
       remaining,
-      this.now()
+      this.now(),
+      {
+        invalidatedProductRunIds: new Set(
+          [productRunIdFromMemorySource(target.source)]
+            .filter((value): value is string => value !== null)
+        )
+      }
     );
     if (projection.agentHash || projection.userHash) {
       next.fixedFileHashes = {
@@ -2516,8 +2652,8 @@ export class PersonalMemoryRepository {
     const manifest = await this.readManifestFromDisk();
     const records = await this.readAllRecordsFromDisk(manifest);
     const [agent, user, memory] = await Promise.all([
-      readBounded(this.layout.agent, MAX_PROFILE_CHARS, "AGENT.md"),
-      readFile(this.layout.user, "utf8"),
+      readUtf8Bounded(this.layout.agent, AGENT_MD_HARD_MAX_BYTES, "AGENT.md"),
+      readUtf8Bounded(this.layout.user, USER_MD_HARD_MAX_BYTES, "USER.md"),
       readBounded(this.layout.memory, MAX_OVERVIEW_CHARS, "MEMORY.md")
     ]);
     const index = await this.readSearchIndexFromDisk(manifest, records);
@@ -2562,14 +2698,8 @@ export class PersonalMemoryRepository {
     const profile = relativePath === "agents/echoink/AGENT.md" ? "agent" : "user";
     const target = this.absoluteFromRelative(relativePath);
     const content = profile === "agent"
-      ? await readBounded(target, MAX_PROFILE_CHARS, "AGENT.md")
-      : await readFile(target, "utf8");
-    if (profile === "user" && content.length > USER_PROFILE_WRITE_HARD_MAX_CHARS) {
-      throw new PersonalMemoryAccessError(
-        "revision_conflict",
-        "Externally edited USER.md exceeds the 8000 character write boundary"
-      );
-    }
+      ? await readUtf8Bounded(target, AGENT_MD_HARD_MAX_BYTES, "AGENT.md")
+      : await readUtf8Bounded(target, USER_MD_HARD_MAX_BYTES, "USER.md");
     if (content === currentFixed[profile]) return;
     const targetRevision = manifest.revision + 1;
     const next = cloneManifest(manifest);
@@ -2737,11 +2867,8 @@ export class PersonalMemoryRepository {
   private async reconcileMarkdownTruth(): Promise<void> {
     await this.assertManagedTreeSafe();
     const [agent, user, markdownRecords, current] = await Promise.all([
-      readBounded(this.layout.agent, MAX_PROFILE_CHARS, "AGENT.md"),
-      // Maintenance-only raw read: an old oversized USER.md may be read once
-      // here to verify its manifest hash and enable backup/replacement. Normal
-      // context loading remains bounded and never injects this raw value.
-      readFile(this.layout.user, "utf8"),
+      readUtf8Bounded(this.layout.agent, AGENT_MD_HARD_MAX_BYTES, "AGENT.md"),
+      readUtf8Bounded(this.layout.user, USER_MD_HARD_MAX_BYTES, "USER.md"),
       this.readMarkdownRecords(),
       this.readManifestForReconciliation()
     ]);
@@ -2751,10 +2878,10 @@ export class PersonalMemoryRepository {
     });
 
     if (!current) {
-      if (user.length > USER_PROFILE_WRITE_HARD_MAX_CHARS) {
+      if (utf8Bytes(user) > USER_MD_HARD_MAX_BYTES) {
         throw new PersonalMemoryAccessError(
           "revision_conflict",
-          "USER.md exceeds 8000 characters without a trusted manifest hash; automatic repair is blocked"
+          "USER.md exceeds the 128 KiB UTF-8 boundary; automatic repair is blocked"
         );
       }
       const recovered = await this.reconstructRuntimeMetadata(markdownRecords);
@@ -2802,11 +2929,11 @@ export class PersonalMemoryRepository {
     const currentById = new Map(current.records.map((record) => [record.id, record]));
     const markdownById = new Map(markdownRecords.map((record) => [record.id, record]));
     const fixedHashesKnown = validFixedFileHashes(current.fixedFileHashes);
-    if (user.length > USER_PROFILE_WRITE_HARD_MAX_CHARS
+    if (utf8Bytes(user) > USER_MD_HARD_MAX_BYTES
       && (!fixedHashesKnown || current.fixedFileHashes!.user !== fixedFileHashes.user)) {
       throw new PersonalMemoryAccessError(
         "revision_conflict",
-        "USER.md exceeds 8000 characters and does not match the trusted manifest hash; automatic repair is blocked"
+        "USER.md exceeds the 128 KiB UTF-8 boundary and does not match the trusted manifest hash; automatic repair is blocked"
       );
     }
     const fixedChanged = fixedHashesKnown && (
@@ -3078,7 +3205,8 @@ export class PersonalMemoryRepository {
       this.layout.root,
       path.join(this.layout.root, "agents"),
       path.dirname(this.layout.agent),
-      this.layout.personalityState,
+      this.layout.agent,
+      this.layout.agentSelfMetadata,
       this.layout.agentIdentity
     ]) {
       let stat;
@@ -3100,6 +3228,51 @@ export class PersonalMemoryRepository {
         throw new PersonalMemoryAccessError(
           "unsafe_path",
           "Managed Agent identity realpath escapes the active Vault"
+        );
+      }
+    }
+  }
+
+  /**
+   * Profile reads depend only on the committed manifest, AGENT.md and Agent
+   * Self metadata. Keep their full ancestor chain inside the active Vault,
+   * without recursively inspecting unrelated Memory/runtime content.
+   */
+  private async assertAgentSelfControlSnapshotPathsSafe(): Promise<void> {
+    const vaultStat = await lstat(this.vaultPath);
+    if (vaultStat.isSymbolicLink()) {
+      throw new PersonalMemoryAccessError("unsafe_path", "Active Vault root must not be a symlink");
+    }
+    const vaultRealPath = await realpath(this.vaultPath);
+    for (const target of [
+      this.layout.root,
+      path.join(this.layout.root, "agents"),
+      path.dirname(this.layout.agent),
+      this.layout.agent,
+      this.layout.agentSelfMetadata,
+      this.layout.sharedUser,
+      this.layout.runtime,
+      this.layout.manifest
+    ]) {
+      let stat;
+      try {
+        stat = await lstat(target);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw error;
+      }
+      if (stat.isSymbolicLink()) {
+        throw new PersonalMemoryAccessError(
+          "unsafe_path",
+          `Managed Agent Self control path must not be a symlink: ${target}`
+        );
+      }
+      const targetRealPath = await realpath(target);
+      const relative = path.relative(vaultRealPath, targetRealPath);
+      if (relative.startsWith("..") || path.isAbsolute(relative)) {
+        throw new PersonalMemoryAccessError(
+          "unsafe_path",
+          "Managed Agent Self control realpath escapes the active Vault"
         );
       }
     }
@@ -3205,7 +3378,7 @@ export class PersonalMemoryRepository {
           await atomicWrite(target, change.content);
         }
         appliedChanges += 1;
-        if (this.failTransactionAfterChange?.(operation, appliedChanges)) {
+        if (await this.failTransactionAfterChange?.(operation, appliedChanges)) {
           simulatedCrash = true;
           throw new Error("personal_memory_simulated_crash");
         }
@@ -3472,10 +3645,8 @@ export class PersonalMemoryRepository {
       );
     }
     const [agent, user] = await Promise.all([
-      readBounded(this.layout.agent, MAX_PROFILE_CHARS, "AGENT.md"),
-      // Hash-only maintenance read permits an already-trusted oversized legacy
-      // projection to be backed up and replaced in this transaction.
-      readFile(this.layout.user, "utf8")
+      readUtf8Bounded(this.layout.agent, AGENT_MD_HARD_MAX_BYTES, "AGENT.md"),
+      readUtf8Bounded(this.layout.user, USER_MD_HARD_MAX_BYTES, "USER.md")
     ]);
     if (
       contentHash(agent) !== manifest.fixedFileHashes.agent
@@ -3684,31 +3855,13 @@ function isPrimaryRecordRelativePath(relativePath: string): boolean {
     .test(relativePath);
 }
 
-export function defaultAgentProfile(): string {
-  return [
-    "# EchoInk Agent",
-    "",
-    "EchoInk 是同一 Vault 中持续协作的一位个人 Agent。",
-    "",
-    "## 人格",
-    "",
-    "- 真诚、冷静、有主见，温和但不含糊。",
-    "- 忠于事实、用户的长期目标和更好的结果；不以迎合用户或证明自己正确为目标。",
-    "- 尊重用户的最终决定，同时保留独立判断。",
-    "",
-    "## 合作方式",
-    "",
-    "- 先理解当前目标，再决定是否需要历史。",
-    "- 形成重要建议前，检查关键前提、相关经验、反例和信息时效。",
-    "- 发现会影响结果的目标冲突或历史冲突时，先核对当前场景，再提醒、追问、纠正或反对。",
-    "",
-    "## 表达",
-    "",
-    "- 先给结论，再给依据、风险和下一步。",
-    "- 语言自然、具体、克制；不奉承、不含糊、不抬杠。",
-    "- 有证据时才提醒、纠正或反对；不确定时明确说明。",
-    ""
-  ].join("\n");
+export function defaultAgentProfile(identity?: AgentIdentityState | null): string {
+  const template = getAgentTemplate("advisor")!;
+  return renderCurrentAgentMarkdown({
+    identity,
+    styleName: "尚未选择",
+    self: agentSelfFromTemplate(template)
+  });
 }
 
 export function defaultUserProfile(): string {
@@ -4096,17 +4249,42 @@ function cleanRequired(value: unknown, name: string, maxChars: number): string {
   return clean;
 }
 
-function normalizeProfileWrite(value: unknown, name: string, maxChars: number): string {
-  const clean = cleanRequired(value, name, maxChars);
+function normalizeProfileWrite(value: unknown, name: string, maxBytes: number): string {
+  if (typeof value !== "string") {
+    throw new PersonalMemoryAccessError("invalid_request", `${name} must be text`);
+  }
+  const clean = value.trim();
+  if (!clean || hasDisallowedControlCharacters(clean)) {
+    throw new PersonalMemoryAccessError(
+      "invalid_request",
+      `${name} is empty or contains control characters`
+    );
+  }
   const normalized = clean.endsWith("\n") ? clean : `${clean}\n`;
-  if (normalized.length > maxChars) {
-    throw new PersonalMemoryAccessError("invalid_request", `${name} exceeds ${maxChars} characters`);
+  const bytes = utf8Bytes(normalized);
+  if (bytes > maxBytes) {
+    throw new PersonalMemoryAccessError(
+      "invalid_request",
+      `${name} exceeds ${maxBytes} UTF-8 bytes`
+    );
   }
   return normalized;
 }
 
 function normalizeUserProfileWrite(value: unknown, name: string): string {
-  return normalizeProfileWrite(value, name, USER_PROFILE_WRITE_HARD_MAX_CHARS);
+  return normalizeProfileWrite(value, name, USER_MD_HARD_MAX_BYTES);
+}
+
+function normalizeAgentProfileWrite(value: unknown, name: string): string {
+  const normalized = normalizeProfileWrite(value, name, AGENT_MD_HARD_MAX_BYTES);
+  const parsed = parseAgentCurrentSelf(normalized);
+  if (parsed.kind !== "ok") {
+    throw new PersonalMemoryAccessError(
+      "invalid_request",
+      `${name} current-self is invalid: ${parsed.reason}`
+    );
+  }
+  return normalized;
 }
 
 function cleanOptional(value: unknown, name: string, maxChars: number): string | undefined {
@@ -4230,6 +4408,22 @@ async function readBounded(target: string, maxChars: number, name: string): Prom
     throw new PersonalMemoryAccessError("invalid_request", `${name} is too large or contains control characters`);
   }
   return text;
+}
+
+async function readUtf8Bounded(target: string, maxBytes: number, name: string): Promise<string> {
+  const text = await readFile(target, "utf8");
+  const bytes = utf8Bytes(text);
+  if (bytes > maxBytes || hasDisallowedControlCharacters(text)) {
+    throw new PersonalMemoryAccessError(
+      "invalid_request",
+      `${name} exceeds ${maxBytes} UTF-8 bytes or contains control characters`
+    );
+  }
+  return text;
+}
+
+function utf8Bytes(value: string): number {
+  return Buffer.byteLength(value, "utf8");
 }
 
 async function readJsonOrNull<T>(target: string): Promise<T | null> {

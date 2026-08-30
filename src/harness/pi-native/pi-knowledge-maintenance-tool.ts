@@ -20,6 +20,7 @@ import {
 } from "./vault-tool-result-safety";
 import { echoInkKnowledgeMaintenanceProtocolPrompt } from "../../knowledge-base/knowledge-maintenance-protocol";
 import { isRawMarkdownPath } from "../../knowledge-base/raw-digest";
+import type { KnowledgeMaintenanceAssessment } from "../../knowledge-base/knowledge-maintenance-result";
 
 export const PI_KNOWLEDGE_MAINTAIN_TOOL_ID = "knowledge_maintain" as const;
 
@@ -52,7 +53,9 @@ interface AuthorizedMaintenanceExecution {
   readonly command: Readonly<PiKnowledgeMaintenanceCommandContext>;
   readonly candidateActions: readonly Readonly<KnowledgeMaintenanceCandidateAction>[];
   readonly sourcePaths: readonly string[];
+  readonly assessments: readonly Readonly<KnowledgeMaintenanceAssessment>[];
   readonly arguments: Readonly<Record<string, unknown>>;
+  readonly externalReadVerified: boolean;
   state: "authorized" | "consumed" | "result_ready";
   result?: Readonly<PiKnowledgeMaintenanceToolResult>;
 }
@@ -60,6 +63,8 @@ interface AuthorizedMaintenanceExecution {
 export interface CreatePiKnowledgeMaintenanceSecurityOptions {
   currentRunIdentity(): Readonly<PiKnowledgeRunIdentity>;
   currentCommand(): Readonly<PiKnowledgeMaintenanceCommandContext>;
+  /** True only after a successful external-read Tool result in this ProductRun. */
+  hasSuccessfulExternalRead?(): boolean;
   readonly egress: VaultToolResultEgressPort;
 }
 
@@ -90,16 +95,24 @@ implements PiVaultAdditionalToolSecurityPort {
     let command: Readonly<PiKnowledgeMaintenanceCommandContext>;
     let candidateActions: readonly Readonly<KnowledgeMaintenanceCandidateAction>[];
     let sourcePaths: readonly string[];
+    let assessments: readonly Readonly<KnowledgeMaintenanceAssessment>[];
     let normalizedArguments: Readonly<Record<string, unknown>>;
+    let externalReadVerified: boolean;
     try {
       identity = freezeIdentity(this.options.currentRunIdentity());
       command = freezeCommand(this.options.currentCommand());
       if (this.seenProductRunIds.has(identity.productRunId)) {
         return block("authorization_failed");
       }
-      const normalized = normalizeArguments(event.input, command);
+      externalReadVerified = this.options.hasSuccessfulExternalRead?.() === true;
+      const normalized = normalizeArguments(
+        event.input,
+        command,
+        externalReadVerified
+      );
       candidateActions = normalized.candidateActions;
       sourcePaths = normalized.sourcePaths;
+      assessments = normalized.assessments;
       normalizedArguments = normalized.arguments;
     } catch {
       return block("tool_policy_blocked");
@@ -111,7 +124,9 @@ implements PiVaultAdditionalToolSecurityPort {
       command,
       candidateActions,
       sourcePaths,
+      assessments,
       arguments: normalizedArguments,
+      externalReadVerified,
       state: "authorized"
     });
   }
@@ -124,12 +139,17 @@ implements PiVaultAdditionalToolSecurityPort {
     command: Readonly<PiKnowledgeMaintenanceCommandContext>;
     candidateActions: readonly Readonly<KnowledgeMaintenanceCandidateAction>[];
     sourcePaths: readonly string[];
+    assessments: readonly Readonly<KnowledgeMaintenanceAssessment>[];
   }> {
     const execution = this.executions.get(toolCallId);
     if (!execution || execution.state !== "authorized") {
       throw new Error("knowledge_maintenance_authorization_failed");
     }
-    const normalized = normalizeArguments(rawArguments, execution.command);
+    const normalized = normalizeArguments(
+      rawArguments,
+      execution.command,
+      execution.externalReadVerified
+    );
     if (!isDeepStrictEqual(normalized.arguments, execution.arguments)) {
       throw new Error("knowledge_maintenance_authorization_failed");
     }
@@ -138,7 +158,8 @@ implements PiVaultAdditionalToolSecurityPort {
       identity: execution.identity,
       command: execution.command,
       candidateActions: execution.candidateActions,
-      sourcePaths: execution.sourcePaths
+      sourcePaths: execution.sourcePaths,
+      assessments: execution.assessments
     });
   }
 
@@ -257,7 +278,8 @@ export function createPiKnowledgeMaintenanceToolDefinition(
       "再读取 Tracker 标记 changed 的 Raw。candidateActions 只可包含 wiki/** 或 projects/** 的 Markdown 候选；",
       "每个候选必须携带 expectedTarget。更新已有目标前先 note_read，并原样使用其 contentRevision；确认目标不存在时使用 kind=missing。",
       "raw/index.md、Tracker 和维护报告由 EchoInk 确定性生成，不要放进 candidateActions。",
-      "候选完成自检后只调用一次本工具；工具会直接安全写入并回读。不要调用任何 Vault 写 Tool。"
+      "候选完成自检后只调用一次本工具；工具会直接安全写入并回读。不要调用任何 Vault 写 Tool。",
+      "同时对重要知识主张给出 assessments：仍有效(valid)、需补充(needs_supplement)、已过时(outdated)或冲突(conflict)，并记录证据、日期和是否完成外部核验；candidateActions 非空时 assessments 至少一项；无法核验时使用 unverified。"
     ].join(""),
     parameters: Type.Object({
       sourcePaths: Type.Optional(Type.Array(Type.String({ minLength: 1 }), {
@@ -278,7 +300,25 @@ export function createPiKnowledgeMaintenanceToolDefinition(
             })
           }, { additionalProperties: false })
         ])
-      }, { additionalProperties: false })))
+      }, { additionalProperties: false }))),
+      assessments: Type.Optional(Type.Array(Type.Object({
+        claim: Type.String({ minLength: 1, maxLength: 500 }),
+        status: Type.Union([
+          Type.Literal("valid"),
+          Type.Literal("needs_supplement"),
+          Type.Literal("outdated"),
+          Type.Literal("conflict")
+        ]),
+        evidence: Type.Array(Type.String({ minLength: 1, maxLength: 500 }), {
+          maxItems: 20
+        }),
+        asOf: Type.String({ minLength: 1, maxLength: 100 }),
+        verification: Type.Union([
+          Type.Literal("local_verified"),
+          Type.Literal("external_verified"),
+          Type.Literal("unverified")
+        ])
+      }, { additionalProperties: false }), { maxItems: 100 }))
     }, { additionalProperties: false }),
     executionMode: "sequential",
     execute: async (toolCallId, rawArguments, signal) => {
@@ -290,6 +330,7 @@ export function createPiKnowledgeMaintenanceToolDefinition(
         request: authorized.command.request,
         sourcePaths: authorized.sourcePaths,
         candidateActions: authorized.candidateActions,
+        assessments: authorized.assessments,
         preferenceSnapshot: {
           profileVersion: authorized.command.preference.profileVersion,
           state: authorized.command.preference.state,
@@ -321,21 +362,23 @@ function pendingResult(
 
 function normalizeArguments(
   value: unknown,
-  command: Readonly<PiKnowledgeMaintenanceCommandContext>
+  command: Readonly<PiKnowledgeMaintenanceCommandContext>,
+  externalReadVerified = false
 ): Readonly<{
   arguments: Readonly<Record<string, unknown>>;
   candidateActions: readonly Readonly<KnowledgeMaintenanceCandidateAction>[];
   sourcePaths: readonly string[];
+  assessments: readonly Readonly<KnowledgeMaintenanceAssessment>[];
 }> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError("knowledge_maintenance_arguments_invalid");
   }
   const record = value as Record<string, unknown>;
-  const keys = Object.keys(record).sort();
+  const keys = Object.keys(record);
+  const allowedKeys = new Set(["candidateActions", "sourcePaths", "assessments"]);
   if (
-    (keys.length !== 1 && keys.length !== 2)
-    || keys[0] !== "candidateActions"
-    || (keys.length === 2 && keys[1] !== "sourcePaths")
+    !Object.prototype.hasOwnProperty.call(record, "candidateActions")
+    || keys.some((key) => !allowedKeys.has(key))
     || !Array.isArray(record.candidateActions)
     || record.candidateActions.length > 100
   ) {
@@ -367,14 +410,69 @@ function normalizeArguments(
     record.sourcePaths,
     command.scope
   );
+  const assessments = normalizeMaintenanceAssessments(
+    record.assessments,
+    externalReadVerified
+  );
+  if (candidateActions.length > 0 && assessments.length === 0) {
+    throw new TypeError("knowledge_maintenance_assessments_required");
+  }
   return Object.freeze({
     arguments: Object.freeze({
       candidateActions,
-      ...(sourcePaths.length ? { sourcePaths } : {})
+      ...(sourcePaths.length ? { sourcePaths } : {}),
+      assessments
     }),
     candidateActions,
-    sourcePaths
+    sourcePaths,
+    assessments
   });
+}
+
+function normalizeMaintenanceAssessments(
+  value: unknown,
+  externalReadVerified: boolean
+): readonly Readonly<KnowledgeMaintenanceAssessment>[] {
+  if (value === undefined) return Object.freeze([]);
+  if (!Array.isArray(value) || value.length > 100) {
+    throw new TypeError("knowledge_maintenance_assessments_invalid");
+  }
+  return Object.freeze(value.map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new TypeError("knowledge_maintenance_assessment_invalid");
+    }
+    const record = item as Record<string, unknown>;
+    if (Object.keys(record).sort().join("\0")
+      !== "asOf\0claim\0evidence\0status\0verification"
+      || typeof record.claim !== "string" || !record.claim.trim()
+      || record.claim.length > 500
+      || !["valid", "needs_supplement", "outdated", "conflict"].includes(
+        String(record.status)
+      )
+      || !Array.isArray(record.evidence) || record.evidence.length > 20
+      || record.evidence.some((entry) =>
+        typeof entry !== "string" || !entry.trim() || entry.length > 500
+      )
+      || typeof record.asOf !== "string" || !record.asOf.trim()
+      || record.asOf.length > 100
+      || !["local_verified", "external_verified", "unverified"].includes(
+        String(record.verification)
+      )) {
+      throw new TypeError("knowledge_maintenance_assessment_invalid");
+    }
+    return Object.freeze({
+      claim: record.claim.trim(),
+      status: record.status as KnowledgeMaintenanceAssessment["status"],
+      evidence: Object.freeze((record.evidence as string[]).map((entry) =>
+        entry.trim()
+      )),
+      asOf: record.asOf.trim(),
+      verification: record.verification === "external_verified"
+        && !externalReadVerified
+        ? "unverified"
+        : record.verification as KnowledgeMaintenanceAssessment["verification"]
+    });
+  }));
 }
 
 function normalizeMaintenanceSourcePaths(

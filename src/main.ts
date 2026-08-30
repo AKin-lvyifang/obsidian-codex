@@ -104,7 +104,7 @@ import {
   type PersonalMemoryCorrectionRecord
 } from "./plugin/personal-memory-correction-service";
 import { normalizeApiProviderId } from "./settings/provider-presets";
-import { CognitiveSystem } from "./harness/memory/cognitive-system";
+import { CognitiveSystem, type AgentProfileView } from "./harness/memory/cognitive-system";
 import {
   DEFAULT_AGENT_DISPLAY_NAME,
   defaultAgentIdentityState
@@ -911,18 +911,41 @@ export default class CodexForObsidianPlugin extends Plugin {
   }
   async getEchoInkPersonalMemoryState() {
     const localData = await this.ensurePiLocalData();
-    // 身份与人格真源只有一份：CognitiveSystem 的落盘状态。设置页不再
-    // 维护第二套身份数据；身份绝不复制进 plugin settings。
-    const system = this.cognitiveSystem
-      ?? (typeof this.getCognitiveSystem === "function"
-        ? await this.getCognitiveSystem().catch(() => null)
-        : null);
+    let control = await localData.personalMemory.readUserControlState();
+    let agentProfile:
+      | Readonly<{ kind: "ready" } & AgentProfileView>
+      | Readonly<{ kind: "error" }>;
+    let system: CognitiveSystem | null = null;
+    let agentIdentity = defaultAgentIdentityState();
+    try {
+      system = this.cognitiveSystem
+        ?? (typeof this.getCognitiveSystem === "function"
+          ? await this.getCognitiveSystem()
+          : null);
+      agentProfile = Object.freeze({ kind: "error" as const });
+      if (system) {
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const profile = await system.readAgentProfile();
+          const identity = await system.readAgentIdentity();
+          const nextControl = await localData.personalMemory.readUserControlState();
+          control = nextControl;
+          agentIdentity = identity;
+          if (profile.revision !== nextControl.revision) continue;
+          agentProfile = Object.freeze({ kind: "ready" as const, ...profile });
+          break;
+        }
+      }
+    } catch {
+      agentProfile = Object.freeze({ kind: "error" as const });
+    }
     return Object.freeze({
-      ...await localData.personalMemory.readUserControlState(),
-      agentIdentity: system
-        ? await system.readAgentIdentity()
-        : defaultAgentIdentityState(),
-      personalityState: system ? await system.readPersonalityState() : null
+      revision: control.revision,
+      user: control.user,
+      memory: control.memory,
+      records: control.records,
+      forgottenIds: control.forgottenIds,
+      agentIdentity,
+      agentProfile
     });
   }
 
@@ -1222,6 +1245,11 @@ export default class CodexForObsidianPlugin extends Plugin {
         maxTokens: input.maxTokens
       })
     };
+  }
+
+  /** Independent post-task Skill review; unavailable without a configured Provider. */
+  createSkillReviewLlmPort(): DreamLlmPort | null {
+    return this.createDreamLlmPort();
   }
 
   private getPersonalMemoryCorrectionService(): PersonalMemoryCorrectionService {

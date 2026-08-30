@@ -2,7 +2,9 @@ export type EchoInkAnimateIconName =
   | "upload"
   | "send-horizontal"
   | "circle-stop"
-  | "mic";
+  | "mic"
+  | "users"
+  | "user-round-pen";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -25,6 +27,9 @@ export function renderAnimateIcon(
     "stroke-linecap": "round",
     "stroke-linejoin": "round",
     "aria-hidden": "true",
+    focusable: "false",
+    "data-animateicons-source": "lucide",
+    "data-animateicons-icon": name,
     class: `echoink-animate-icon echoink-animate-icon-${name}`
   });
 
@@ -50,12 +55,47 @@ export function renderAnimateIcon(
       circle("12", "12", "10", "echoink-animate-circle-stop-ring"),
       rect("9", "9", "6", "6", "1", "echoink-animate-circle-stop-symbol")
     );
-  } else {
+  } else if (name === "mic") {
     svg.append(
       path("M12 19v3"),
       path("M19 10v2a7 7 0 0 1-14 0v-2"),
       rect("9", "2", "6", "13", "3")
     );
+  } else if (name === "users") {
+    const primary = document.createElementNS(SVG_NS, "g");
+    primary.setAttribute("class", "echoink-animate-users-primary");
+    const primaryArc = path(
+      "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2",
+      "echoink-animate-users-primary-arc"
+    );
+    setAttributes(primaryArc, { "stroke-dasharray": "50", "stroke-dashoffset": "50" });
+    const primaryHead = circle("9", "7", "4", "echoink-animate-users-primary-head");
+    primary.append(primaryArc, primaryHead);
+    const secondary = document.createElementNS(SVG_NS, "g");
+    secondary.setAttribute("class", "echoink-animate-users-secondary");
+    const secondaryHead = path(
+      "M16 3.128a4 4 0 0 1 0 7.744",
+      "echoink-animate-users-secondary-head"
+    );
+    const secondaryArc = path(
+      "M22 21v-2a4 4 0 0 0-3-3.87",
+      "echoink-animate-users-secondary-arc"
+    );
+    setAttributes(secondaryHead, { "stroke-dasharray": "40", "stroke-dashoffset": "40" });
+    setAttributes(secondaryArc, { "stroke-dasharray": "40", "stroke-dashoffset": "40" });
+    secondary.append(secondaryHead, secondaryArc);
+    svg.append(primary, secondary);
+  } else {
+    const person = document.createElementNS(SVG_NS, "g");
+    person.setAttribute("class", "echoink-animate-user-round-pen-person");
+    const body = path("M2 21a8 8 0 0 1 10.821-7.487", "echoink-animate-user-round-pen-body");
+    setAttributes(body, { "stroke-dasharray": "60", "stroke-dashoffset": "60" });
+    person.append(body, circle("10", "8", "5", "echoink-animate-user-round-pen-head"));
+    const pen = path(
+      "M21.378 16.626a1 1 0 0 0-3.004-3.004l-4.01 4.012a2 2 0 0 0-.506.854l-.837 2.87a.5.5 0 0 0 .62.62l2.87-.837a2 2 0 0 0 .854-.506z",
+      "echoink-animate-user-round-pen-tool"
+    );
+    svg.append(person, pen);
   }
 
   container.append(svg);

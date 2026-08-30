@@ -1,26 +1,18 @@
-import { Notice, PluginSettingTab, Setting, TFile, normalizePath, setIcon } from "obsidian";
+import { Notice, PluginSettingTab, Setting, TFile, normalizePath, setIcon, setTooltip } from "obsidian";
 import type CodexForObsidianPlugin from "../main";
 import type { PiConversationCatalogEntry } from "../harness/pi-native/contracts";
 import {
   type PersonalMemoryKind,
   type PersonalMemoryRecord
 } from "../harness/memory/personal-memory-contracts";
-import {
-  currentPersonalityScores,
-  templateBaselineScores,
-  type PersonalityState
-} from "../harness/memory/personality-state";
 import { initialTemplateSelectionStatus } from "../harness/memory/cognitive-system";
 import {
-  PERSONALITY_TEMPLATES,
-  TRAIT_DIMENSIONS,
-  TRAIT_DIMENSION_META,
-  getPersonalityTemplate,
-  traitBehaviorBand,
-  type TraitDimension
-} from "../harness/memory/personality-templates";
+  AGENT_TEMPLATES
+} from "../harness/memory/agent-templates";
+import { isBuiltinSkillId } from "../harness/resources/builtin-skills";
 import { AGENT_AVATAR_PRESETS, resolveAgentAvatarUrl } from "../ui/agent-avatar-presets";
 import { AgentIdentityModal } from "../ui/agent-identity-modal";
+import { renderAnimateIcon } from "../ui/animate-icon";
 import {
   mountEchoInkOnboardingCoachmark,
   type EchoInkOnboardingCoachmarkHandle
@@ -147,19 +139,15 @@ type KnowledgeMaintenancePreferenceControlState = Awaited<
 >;
 
 interface AgentProfileCardRefs {
-  readonly hexSide: HTMLElement;
-  /** SVG 挂载点：重渲染只清空它，说明文案是兄弟节点不被波及。 */
-  readonly hexChartMount: HTMLElement;
-  readonly barFgs: HTMLElement[];
-  readonly pctSpans: HTMLElement[];
-  readonly barDescs: HTMLElement[];
-  readonly dimLabels: [string, string, string][];
-  readonly footerStatus: HTMLElement;
   readonly templateBtn: HTMLElement;
+  readonly templateLabel: HTMLElement;
   readonly pickerPanel: HTMLElement;
-  readonly summaryText: HTMLElement;
-  readonly rawPre: HTMLElement;
+  readonly collapsedTemplateLabel: string;
+  readonly expandedTemplateLabel: string;
 }
+
+const settingsContainerFocusIntents = new WeakMap<HTMLElement, string>();
+const PERSONALITY_TEMPLATE_FOCUS_INTENT = "explicit:general:personality-template";
 
 export class CodexSettingTab extends PluginSettingTab {
   private resourceSnapshot: WorkspaceResourceSnapshot | null = null;
@@ -410,8 +398,22 @@ export class CodexSettingTab extends PluginSettingTab {
   }
 
   private restoreSettingsFocusIntent(): void {
-    const key = this.settingsFocusIntent;
+    const sharedKey = settingsContainerFocusIntents.get(this.containerEl);
+    const key = sharedKey ?? this.settingsFocusIntent;
     if (!key) return;
+    if (sharedKey) {
+      window.requestAnimationFrame(() => {
+        const focusable = Array.from(this.containerEl.querySelectorAll<HTMLElement>(
+          "button, input, select, textarea, a[href]"
+        )).find((element) => this.settingsFocusKey(element) === sharedKey);
+        if (!focusable?.isConnected) return;
+        focusable.focus({ preventScroll: true });
+        if (document.activeElement !== focusable) return;
+        settingsContainerFocusIntents.delete(this.containerEl);
+        this.settingsFocusIntent = null;
+      });
+      return;
+    }
     const focusable = Array.from(this.containerEl.querySelectorAll<HTMLElement>(
       "button, input, select, textarea, a[href]"
     )).find((element) => this.settingsFocusKey(element) === key);
@@ -422,6 +424,14 @@ export class CodexSettingTab extends PluginSettingTab {
     focusTarget();
     window.requestAnimationFrame(focusTarget);
     this.settingsFocusIntent = null;
+  }
+
+  private requestPersonalityTemplateFocusRestore(): void {
+    this.settingsFocusIntent = PERSONALITY_TEMPLATE_FOCUS_INTENT;
+    settingsContainerFocusIntents.set(
+      this.containerEl,
+      PERSONALITY_TEMPLATE_FOCUS_INTENT
+    );
   }
 
   private settingsFocusKey(element: HTMLElement): string {
@@ -656,8 +666,8 @@ export class CodexSettingTab extends PluginSettingTab {
     applySettingsRow(new Setting(memoryGroup)
       .setName(zh ? "离线记忆整理（做梦）" : "Offline memory consolidation (dreaming)")
       .setDesc(zh
-        ? "默认开启。开启后，Obsidian 打开期间定时处理一级 Memory，生成只帮助召回、不代表用户确认的二级联想，并更新 Dream 派生用户画像、Agent 人格与六维投影。关闭后，一级 Memory 仍在对话当轮正常写入和召回；上述派生状态停止随新记忆更新，已有状态与积压保留，重新开启后继续处理。"
-        : "Enabled by default. While Obsidian is open, it periodically processes primary Memory, creates secondary associations that aid recall without representing user confirmation, and updates the Dream-derived user profile, Agent personality, and six-dimension projection. When disabled, primary Memory still writes and recalls during conversations; derived state stops updating from new memories, while existing state and backlog are preserved and resume after re-enabling.")
+        ? "默认开启。开启后，Obsidian 打开期间定时处理一级 Memory，生成只帮助召回、不代表用户确认的二级联想，并更新用户画像与 Agent 长期形成的处事方式。关闭后，一级 Memory 仍在对话当轮正常写入和召回；派生状态与积压会保留，重新开启后继续处理。"
+        : "Enabled by default. While Obsidian is open, it periodically processes primary Memory, creates secondary associations that aid recall without representing user confirmation, and updates the user profile and the Agent's learned ways of working. When disabled, primary Memory still writes and recalls; derived state and backlog are preserved and resume after re-enabling.")
       .addToggle((toggle) => {
         labelSettingsToggle(toggle, zh ? "离线记忆整理" : "Memory consolidation");
         toggle.setValue(this.plugin.settings.memory.dreamEnabled).onChange(async (enabled) => {
@@ -690,8 +700,8 @@ export class CodexSettingTab extends PluginSettingTab {
     const section = createSettingsSection(page, {
       title: zh ? "身份与用户画像" : "Identity and user profile",
       description: zh
-        ? "Agent 画像由系统自动生成，不能手动编辑；用户画像由做梦与记忆修正自动维护。Agent 身份（名称和头像）可以随时修改，不影响人格或 Memory。"
-        : "The Agent profile is auto-generated and cannot be edited manually; the user profile is maintained by dreaming and memory corrections. Agent identity (name and avatar) can be changed anytime without affecting personality or Memory.",
+        ? "Agent 画像由当前自我即时形成；用户画像由做梦与记忆修正自动维护。名称和头像可以随时修改，不影响人格或 Memory。"
+        : "The Agent profile is projected from its current self; the user profile is maintained by dreaming and memory corrections. Name and avatar can be changed anytime without affecting personality or Memory.",
       surface: "group"
     });
     const group = createSettingsGroup(section);
@@ -714,10 +724,7 @@ export class CodexSettingTab extends PluginSettingTab {
       );
       return;
     }
-    // Agent identity (name + avatar): user-editable; never touches personality or Memory.
-    this.addAgentIdentitySetting(group);
-    // Agent profile: read-only hexagon card + collapsible text (no editing)
-    this.addAgentProfileCard(group, this.personalMemoryState.agent);
+    this.addAgentProfileCard(group);
     // User profile: read-only (maintained by dreaming / memory corrections)
     this.addReadOnlyUserProfileCard(group, this.personalMemoryState.user);
     applySettingsRow(new Setting(group)
@@ -867,294 +874,305 @@ export class CodexSettingTab extends PluginSettingTab {
       text: zh ? "反馈问题" : "Report Issue"
     });
   }
-
   /**
-   * Agent profile card: read-only projection of personality-state.json.
-   * Template selection / reset persist the state and rewrite AGENT.md in ONE
-   * local transaction — no Provider involved. Nothing here is manually editable.
+   * Agent Profile is a read-only projection of AGENT.md/current-self. The UI
+   * receives no full AGENT.md content and exposes no numeric personality state.
    */
-  private addAgentProfileCard(container: HTMLElement, agentContent: string): void {
+  private addAgentProfileCard(container: HTMLElement): void {
     const zh = this.plugin.settings.settingsLanguage !== "en";
-    const card = container.createDiv({ cls: "echoink-agent-profile-card" });
-
-    // --- Header ---
-    const header = card.createDiv({ cls: "echoink-agent-profile-card-header" });
-    const titleArea = header.createDiv({ cls: "echoink-agent-profile-card-title-area" });
-    titleArea.createDiv({ cls: "echoink-agent-profile-card-label", text: zh ? "Agent 画像" : "Agent profile" });
-    titleArea.createSpan({
-      cls: "echoink-agent-profile-card-badge",
-      text: zh ? "自动生成" : "Auto-generated"
+    const state = this.personalMemoryState!;
+    const profile = state.agentProfile;
+    const readyProfile = profile.kind === "ready" ? profile : null;
+    const identity = state.agentIdentity;
+    const ready = readyProfile !== null;
+    const selectedTemplateId = readyProfile?.templateId ?? null;
+    const pickerId = "echoink-agent-template-picker";
+    const pickerTriggerId = `${pickerId}-trigger`;
+    const profileCardTitleId = "echoink-agent-profile-card-title";
+    const profileContentTitleId = "echoink-agent-profile-content-title";
+    const currentSectionTitleId = "echoink-agent-profile-current-title";
+    const growthSectionTitleId = "echoink-agent-profile-growth-title";
+    const collapsedTemplateLabel = !ready
+      ? (zh ? "重新读取人格" : "Reload profile")
+      : readyProfile.templateId
+        ? (zh ? "重新选择人格模板" : "Choose another template")
+        : (zh ? "选择人格模板" : "Choose a template");
+    const expandedTemplateLabel = zh ? "收起人格模板" : "Hide personality templates";
+    const card = container.createEl("section", {
+      cls: "echoink-agent-profile-card",
+      attr: { "aria-labelledby": profileCardTitleId }
     });
-    // 稳定的次级按钮：单一 chevron 图标 + 文案，aria-expanded 表达开合；
-    // 不再使用 User→UserCheck 的 morph 动画或缩放跳动。
-    const expandBtn = header.createEl("button", {
-      cls: "echoink-agent-profile-expand-btn",
+    card.dataset.profileState = ready ? "ready" : "error";
+
+    const header = card.createDiv({ cls: "echoink-agent-profile-card-header" });
+    header.createEl("h4", {
+      cls: "echoink-agent-profile-card-label",
+      text: zh ? "Agent 画像" : "Agent profile",
+      attr: { id: profileCardTitleId }
+    });
+    const templateBtn = header.createEl("button", {
+      cls: "echoink-agent-profile-reselect",
       attr: {
         type: "button",
-        "aria-expanded": "false",
-        "aria-controls": "echoink-agent-profile-drawer"
+        "data-echoink-focus-key": "general:personality-template",
+        ...(ready ? {
+          id: pickerTriggerId,
+          "aria-expanded": "false",
+          "aria-controls": pickerId
+        } : {})
       }
     });
-    const expandIcon = expandBtn.createSpan({ cls: "echoink-agent-profile-expand-icon" });
-    setIcon(expandIcon, "chevron-down");
-    expandIcon.setAttr("aria-hidden", "true");
-    const btnLabel = expandBtn.createSpan({
-      cls: "echoink-agent-profile-expand-label",
-      text: zh ? "查看完整画像" : "Full profile"
-    });
-    header.createDiv({
-      cls: "echoink-agent-profile-card-desc",
-      text: zh
-        ? "人格来自初始模板，并根据长期协作缓慢演化；不能直接修改六维数值。"
-        : "Personality starts from the chosen template and evolves slowly through long-term collaboration; the six dimensions cannot be edited directly."
-    });
-
-    // --- Body: left hexagon + right trait bars ---
-    const body = card.createDiv({ cls: "echoink-agent-profile-card-body" });
-    const hexSide = body.createDiv({ cls: "echoink-agent-profile-hex-side" });
-    // Round 6 修复八：六边形 SVG 挂在独立子节点上；重渲染只清空这个节点，
-    // 轮廓说明文案是它的兄弟节点，不会被 empty() 误删。
-    const hexChartMount = hexSide.createDiv({ cls: "echoink-trait-hexagon-mount" });
-    const textSide = body.createDiv({ cls: "echoink-agent-profile-text-side" });
-    // 图表、文字、模板和 Prompt 共享同一份维度常量（TRAIT_DIMENSION_META）。
-    // 单向语义：数值越高 = 该特质表现越多；文案全部来自行为档 Meta。
-    const dimLabels: [string, string, string][] = TRAIT_DIMENSIONS.map((dim) => {
-      const meta = TRAIT_DIMENSION_META[dim];
-      return [dim, zh ? meta.labelZh : meta.labelEn, ""];
-    });
-    const barFgs: HTMLElement[] = [];
-    const pctSpans: HTMLElement[] = [];
-    const barDescs: HTMLElement[] = [];
-    for (let i = 0; i < dimLabels.length; i++) {
-      const [dim, label] = dimLabels[i];
-      const row = textSide.createDiv({ cls: "echoink-trait-row" });
-      const head = row.createDiv({ cls: "echoink-trait-head" });
-      head.createSpan({ cls: "echoink-trait-dim", text: label });
-      const value = head.createSpan({ cls: "echoink-trait-value", text: "" });
-      pctSpans.push(value);
-      const barBg = row.createDiv({ cls: "echoink-trait-bar-bg" });
-      const barFg = barBg.createDiv({ cls: "echoink-trait-bar-fg" });
-      barFgs.push(barFg);
-      const desc = textSide.createDiv({ cls: "echoink-trait-band-desc", text: "" });
-      barDescs.push(desc);
-      void dim;
+    if (ready) {
+      templateBtn.addClass("is-disclosure");
+      templateBtn.dataset.templateId = readyProfile.templateId ?? "";
+      const usersIcon = templateBtn.createSpan({ cls: "echoink-agent-profile-template-icon" });
+      renderAnimateIcon(usersIcon, "users");
+    } else {
+      templateBtn.dataset.failClosed = "true";
     }
-    // 人格轮廓说明：六边形表示行为特质强弱组合，不代表能力高低。
-    hexSide.createDiv({
-      cls: "echoink-trait-hexagon-caption",
-      text: zh
-        ? "人格轮廓表示六种行为特质的强弱组合，不代表 Agent 能力高低。"
-        : "The personality profile shows six behavioral traits; area does not mean capability."
+    const templateLabel = templateBtn.createSpan({
+      cls: "echoink-agent-profile-template-label",
+      text: collapsedTemplateLabel
     });
-    void body;
+    if (ready) {
+      const chevron = templateBtn.createSpan({
+        cls: "echoink-agent-profile-template-chevron",
+        attr: { "aria-hidden": "true" }
+      });
+      setIcon(chevron, "chevron-down");
+    }
 
-    // --- Footer ---
-    const footer = card.createDiv({ cls: "echoink-agent-profile-card-footer" });
-    const footerStatus = footer.createSpan({});
-    footerStatus.setText(zh ? "正在读取人格状态…" : "Loading personality state…");
-    const templateBtn = footer.createEl("button", {
-      cls: "echoink-agent-profile-reselect",
-      text: zh ? "初始风格选择" : "Choose initial style",
-      attr: { type: "button", "data-echoink-focus-key": "general:personality-template" }
+    const body = card.createDiv({ cls: "echoink-agent-profile-card-body" });
+    const identitySide = body.createDiv({ cls: "echoink-agent-profile-identity" });
+    const selectedTemplate = ready
+      ? AGENT_TEMPLATES.find((template) => template.id === readyProfile.templateId) ?? null
+      : null;
+    identitySide.createDiv({
+      cls: "echoink-agent-profile-personality",
+      text: ready
+        ? selectedTemplate
+          ? (zh ? selectedTemplate.labelZh : selectedTemplate.labelEn)
+          : (zh ? "尚未选择" : "Not selected")
+        : (zh ? "人格读取失败" : "Profile unavailable")
     });
-    templateBtn.dataset.hasTemplate = "false";
-
-    // --- Template picker panel (hidden by default) ---
-    const pickerPanel = card.createDiv({ cls: "echoink-template-picker" });
-
-    // --- Drawer (toggled by expand button) ---
-    // 人格总结不再是嵌套卡片：普通内容分组，用标题 + 细分隔线区分，
-    // 整个 Agent 画像只保留外层一个主要卡片边界。
-    const drawer = card.createDiv({ cls: "echoink-agent-profile-drawer" });
-    drawer.setAttr("id", "echoink-agent-profile-drawer");
-    const drawerInner = drawer.createDiv({ cls: "echoink-agent-profile-drawer-inner" });
-    const summaryGroup = drawerInner.createDiv({ cls: "echoink-agent-profile-summary-group" });
-    summaryGroup.createDiv({ cls: "echoink-agent-profile-summary-title", text: zh ? "人格总结" : "Personality Summary" });
-    const summaryText = summaryGroup.createDiv({ cls: "echoink-agent-profile-summary-text" });
-    summaryText.setText(zh ? "正在读取…" : "Loading…");
-    drawerInner.createDiv({ cls: "echoink-agent-profile-raw-title", text: zh ? "画像文本" : "Profile text" });
-    const rawPre = drawerInner.createEl("pre", {
-      cls: "echoink-agent-profile-raw-text",
-      text: agentContent
+    const avatarEl = identitySide.createDiv({ cls: "echoink-agent-profile-avatar" });
+    const avatarUrl = resolveAgentAvatarUrl(identity.avatar);
+    if (avatarUrl) {
+      const image = avatarEl.createEl("img", {
+        attr: { src: avatarUrl, alt: "" }
+      });
+      image.addEventListener("error", () => {
+        image.remove();
+        avatarEl.addClass("is-default");
+        setIcon(avatarEl, "bot");
+      }, { once: true });
+    } else {
+      avatarEl.addClass("is-default");
+      setIcon(avatarEl, "bot");
+    }
+    const nameRow = identitySide.createDiv({ cls: "echoink-agent-profile-name-row" });
+    const editIdentityLabel = !selectedTemplateId
+      ? (zh ? "选择风格并设置身份" : "Choose a style and set identity")
+      : (zh ? "编辑 Agent 身份" : "Edit Agent identity");
+    const editIdentityBtn = ready
+      ? nameRow.createEl("button", {
+          cls: "echoink-agent-identity-edit",
+          attr: {
+            type: "button",
+            "aria-label": editIdentityLabel
+          }
+        })
+      : null;
+    if (editIdentityBtn) {
+      renderAnimateIcon(editIdentityBtn, "user-round-pen");
+      setTooltip(editIdentityBtn, editIdentityLabel, { placement: "top" });
+    }
+    nameRow.createDiv({
+      cls: "echoink-agent-profile-name",
+      text: identity.displayName
     });
-    rawPre.setAttr("tabindex", "0");
-
-    let isOpen = false;
-    expandBtn.onclick = () => {
-      isOpen = !isOpen;
-      drawer.classList.toggle("is-open", isOpen);
-      btnLabel.setText(isOpen
-        ? (zh ? "收起画像" : "Collapse profile")
-        : (zh ? "查看完整画像" : "Full profile"));
-      expandBtn.classList.toggle("is-open", isOpen);
-      expandBtn.setAttr("aria-expanded", String(isOpen));
-      if (isOpen) {
-        // 做梦可能在后台更新了人格状态和 AGENT.md；展开时重新读取。
-        void (async () => {
-          try {
-            const system = await this.plugin.getCognitiveSystem();
-            const files = await system.readFixedFiles();
-            rawPre.setText(files.agent);
-          } catch { /* keep previous text */ }
-          void this.loadPersonalityIntoCard(refs, zh);
-        })();
+    if (ready && readyProfile.preferredSkillNames.length > 0) {
+      const methods = identitySide.createDiv({ cls: "echoink-agent-profile-methods" });
+      methods.createDiv({
+        cls: "echoink-agent-profile-methods-label",
+        text: zh ? "更常采用的方法" : "Methods I often consider"
+      });
+      const methodTags = methods.createDiv({ cls: "echoink-agent-profile-method-tags" });
+      for (const skillName of readyProfile.preferredSkillNames) {
+        methodTags.createSpan({ cls: "echoink-agent-profile-method-tag", text: skillName });
       }
-    };
+    }
 
+    const contentSide = body.createEl("section", {
+      cls: "echoink-agent-profile-content",
+      attr: { "aria-labelledby": profileContentTitleId }
+    });
+    contentSide.createEl("h5", {
+      cls: "echoink-agent-profile-content-title",
+      text: zh ? "我的公开画像" : "My public profile",
+      attr: { id: profileContentTitleId }
+    });
+    if (ready) {
+      const currentSection = contentSide.createEl("section", {
+        cls: "echoink-agent-profile-section is-current",
+        attr: { "aria-labelledby": currentSectionTitleId }
+      });
+      currentSection.createEl("h6", {
+        cls: "echoink-agent-profile-section-title",
+        text: zh ? "当前方式" : "How I work now",
+        attr: { id: currentSectionTitleId }
+      });
+      const currentFields = currentSection.createEl("dl", { cls: "echoink-agent-profile-current-fields" });
+      const fields = [
+        [zh ? "思考方式" : "Thinking", readyProfile.currentSelf.thinkingMethod],
+        [zh ? "回答语气" : "Answer tone", readyProfile.currentSelf.answerTone],
+        [zh ? "回答结构" : "Answer structure", readyProfile.currentSelf.answerStructure]
+      ] as const;
+      for (const [label, value] of fields) {
+        const field = currentFields.createDiv({ cls: "echoink-agent-profile-field" });
+        field.createEl("dt", { cls: "echoink-agent-profile-field-label", text: label });
+        field.createEl("dd", { cls: "echoink-agent-profile-field-value", text: value });
+      }
+
+      const growthSection = contentSide.createEl("section", {
+        cls: "echoink-agent-profile-section is-growth",
+        attr: { "aria-labelledby": growthSectionTitleId }
+      });
+      growthSection.createEl("h6", {
+        cls: "echoink-agent-profile-section-title",
+        text: zh ? "长期成长" : "Long-term growth",
+        attr: { id: growthSectionTitleId }
+      });
+      if (readyProfile.currentSelf.representativeHabits.length > 0) {
+        const habitList = growthSection.createEl("ul", { cls: "echoink-agent-profile-habit-list" });
+        for (const habit of readyProfile.currentSelf.representativeHabits) {
+          habitList.createEl("li", { cls: "echoink-agent-profile-habit", text: habit });
+        }
+      } else {
+        growthSection.createEl("p", {
+          cls: "echoink-agent-profile-growth-empty",
+          text: zh
+            ? "我们还没有形成需要长期展示的相处习惯。"
+            : "We have not formed any long-term habits to show here yet."
+        });
+      }
+      growthSection.createEl("p", {
+        cls: "echoink-agent-profile-growth-note",
+        text: zh
+          ? "我会随着与你的长期对话持续学习，逐步调整自己的处事方式。"
+          : "I keep learning through our long-term conversations and gradually adjust how I work with you."
+      });
+    } else {
+      contentSide.createEl("p", {
+        cls: "echoink-agent-profile-error",
+        text: zh
+          ? "当前人格无法读取。现有数据不会被覆盖，请重新读取。"
+          : "The current profile could not be read. Existing data was not overwritten; reload to try again."
+      });
+    }
+
+    const pickerPanel = card.createDiv({
+      cls: "echoink-template-picker",
+      attr: ready ? {
+        id: pickerId,
+        "aria-labelledby": pickerTriggerId
+      } : {}
+    });
     const refs: AgentProfileCardRefs = {
-      hexSide, hexChartMount, barFgs, pctSpans, barDescs, dimLabels, footerStatus, templateBtn, pickerPanel, summaryText, rawPre
+      templateBtn,
+      templateLabel,
+      pickerPanel,
+      collapsedTemplateLabel,
+      expandedTemplateLabel
     };
 
     templateBtn.onclick = () => {
-      // Round 6 修复三：fail-closed 状态下此按钮只是重试入口，
-      // 禁止打开会覆盖现有数据的模板选择器。
-      if (templateBtn.dataset.failClosed === "true") {
-        void this.loadPersonalityIntoCard(refs, zh);
+      if (!ready) {
+        void this.loadPersonalMemoryState(true);
         return;
       }
-      if (templateBtn.dataset.hasTemplate === "true") {
-        // 重置人格（人格草案 §10.3）：每次都确认；确认后只打开模板列表，
-        // 不修改任何文件；取消零写入，原人格继续生效。
-        void confirmModal(
-          this.app,
-          zh ? "重置人格" : "Reset personality",
-          zh
-            ? "选择新模板后：\n\n• 当前自动演化的人格会被替换。\n• 长期 Memory 不会删除。\n• 保留的记忆可能让 Agent 以后再次形成相似风格。\n\n如果某条记忆不准确，请先在「复盘」中修正或忘记。"
-            : "After you choose a new template:\n\n• The current evolved personality will be replaced.\n• Long-term Memory will not be deleted.\n• Retained memories may lead the Agent toward a similar style again.\n\nIf a memory is inaccurate, correct or forget it first in Review.",
-          zh ? "选择新模板" : "Choose new template",
-          zh ? "取消" : "Cancel",
-          { preformatted: true }
-        ).then((confirmed) => {
-          if (!confirmed) return;
-          // 确认后仅打开 8 套模板列表；真正写入只发生在选中新模板时。
-          this.showTemplatePicker(refs, zh, { reset: true });
-        });
-      } else {
-        this.showTemplatePicker(refs, zh);
+      if (pickerPanel.hasClass("is-visible")) {
+        this.closeTemplatePicker(refs);
+        return;
       }
+      this.showTemplatePicker(refs, zh);
     };
 
-    void this.loadPersonalityIntoCard(refs, zh);
-  }
-
-  private async loadPersonalityIntoCard(refs: AgentProfileCardRefs, zh: boolean): Promise<void> {
-    try {
-      const system = await this.plugin.getCognitiveSystem();
-      const state = await system.readPersonalityState();
-      // 读取成功：退出 fail-closed 态，按钮恢复模板选择/重置语义。
-      refs.templateBtn.dataset.failClosed = "false";
-      this.applyPersonalityToCard(refs, state, null, zh);
-      refs.summaryText.setText(await system.renderPersonalitySummary(zh ? "zh" : "en"));
-    } catch (error) {
-      // Round 6 修复三：fail-closed（迁移失败/文件损坏/未知 schema）时显示
-      // 明确错误与重试入口；不得显示「尚未选择初始风格」诱导用户覆盖现有数据。
-      console.error("EchoInk personality state load failed", error);
-      const reason = error instanceof Error ? error.message : String(error);
-      refs.templateBtn.dataset.failClosed = "true";
-      refs.templateBtn.setText(zh ? "重试读取人格" : "Retry loading personality");
-      refs.footerStatus.setText(zh
-        ? `人格数据暂不可用（${reason}），修复后点此重试`
-        : `Personality data unavailable (${reason}). Retry after fixing.`);
-    }
-  }
-
-  private applyPersonalityToCard(
-    refs: AgentProfileCardRefs,
-    state: PersonalityState,
-    agentText: string | null,
-    zh: boolean
-  ): void {
-    const scores = currentPersonalityScores(state);
-    const template = state.templateId ? getPersonalityTemplate(state.templateId) : null;
-    refs.templateBtn.dataset.hasTemplate = template ? "true" : "false";
-    refs.templateBtn.dataset.templateId = template?.id ?? "";
-    refs.templateBtn.setText(template
-      ? (zh ? "重置人格" : "Reset personality")
-      : (zh ? "初始风格选择" : "Choose initial style"));
-    // 视觉层级：未选模板时「初始风格选择」是明确的主要行动；已有模板时
-    // 「重置人格」降级为带风险语义的低强调文字按钮（确认弹窗不变）。
-    refs.templateBtn.classList.toggle("is-primary", !template);
-    refs.templateBtn.classList.toggle("is-danger", Boolean(template));
-    refs.footerStatus.setText(template
-      ? (zh ? `基于「${template.labelZh}」模板` : `Template: ${template.labelEn}`)
-      : (zh ? "尚未选择初始风格" : "No style selected yet"));
-    const baseline = templateBaselineScores(state);
-    void import("../ui/trait-hexagon").then(({ renderTraitHexagon }) => {
-      // 只清空 SVG 挂载点；轮廓说明文案是兄弟节点，重渲染后仍然存在。
-      refs.hexChartMount.empty();
-      renderTraitHexagon(refs.hexChartMount, scores as Record<string, number> as never, {
-        size: 170,
-        rings: 4,
-        // 同时显示模板基线与当前 observed 值。
-        baselineScores: baseline ?? undefined
+    if (editIdentityBtn) editIdentityBtn.onclick = () => {
+      if (!selectedTemplateId) {
+        this.startInitialIdentitySetup();
+        return;
+      }
+      const modal = new AgentIdentityModal(this.plugin.app, {
+        initialName: identity.displayName,
+        initialAvatar: identity.avatar,
+        language: zh ? "zh" : "en",
+        mode: "edit",
+        presets: AGENT_AVATAR_PRESETS,
+        onConfirm: async (draft) => {
+          const system = await this.plugin.getCognitiveSystem();
+          await system.updateAgentIdentity({
+            displayName: draft.displayName,
+            avatar: draft.avatar
+          });
+          await this.refreshIdentityAfterChange();
+          new Notice(zh ? "Agent 身份已更新" : "Agent identity updated");
+        }
       });
-    }).catch(() => {});
-    for (let i = 0; i < refs.dimLabels.length; i++) {
-      const dim = refs.dimLabels[i][0] as keyof typeof scores;
-      const score = scores[dim] ?? 0.5;
-      const behaviorBand = traitBehaviorBand(dim, score);
-      refs.barFgs[i].style.width = `${Math.round(score * 100)}%`;
-      refs.pctSpans[i].setText(
-        `${Math.round(score * 100)} · ${zh ? behaviorBand.labelZh : behaviorBand.labelEn}`
-      );
-      refs.barDescs[i].setText(
-        zh ? behaviorBand.uiDescriptionZh : behaviorBand.uiDescriptionEn
-      );
-    }
-    if (agentText !== null) refs.rawPre.setText(agentText);
+      modal.open();
+    };
   }
 
-  /** Inline picker: 8 templates; applying one is a single local transaction. */
-  private showTemplatePicker(
-    refs: AgentProfileCardRefs,
-    zh: boolean,
-    options?: Readonly<{ reset?: boolean }>
-  ): void {
-    const reset = Boolean(options?.reset);
+  private showTemplatePicker(refs: AgentProfileCardRefs, zh: boolean): void {
     const panel = refs.pickerPanel;
     panel.empty();
     panel.addClass("is-visible");
+    this.setTemplatePickerExpanded(refs, true);
+    panel.onkeydown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.closeTemplatePicker(refs);
+    };
+
     const intro = panel.createDiv({ cls: "echoink-picker-intro" });
     const introText = intro.createDiv({ cls: "echoink-picker-intro-text" });
     introText.createDiv({
       cls: "echoink-picker-intro-title",
-      text: zh
-        ? (reset ? "选择新的初始风格" : "选择 Agent 的初始风格")
-        : (reset ? "Choose a new starting style" : "Choose the Agent's starting style")
+      text: zh ? "选择 Agent 的初始风格" : "Choose the Agent's starting style"
     });
     introText.createDiv({
       cls: "echoink-picker-intro-copy",
       text: zh
-        ? (reset
-            ? "选中即重置到该模板；长期 Memory 不会删除。取消不会产生任何修改。"
-            : "选择一个最接近你的起点。名称和头像将在下一步设置，人格之后会随长期协作缓慢演化。")
-        : (reset
-            ? "Selecting a card resets to that template without deleting long-term Memory. Cancel changes nothing."
-            : "Choose the closest starting point. You'll set the name and avatar next, and personality can evolve gradually over time.")
+        ? "只调整基础风格，长期形成的习惯会保留。关闭或取消不会产生修改。"
+        : "Only the base style changes; learned habits are preserved. Closing or cancelling makes no changes."
     });
     intro.createDiv({
       cls: "echoink-picker-count",
-      text: zh ? `${PERSONALITY_TEMPLATES.length} 种风格` : `${PERSONALITY_TEMPLATES.length} styles`
+      text: zh ? `${AGENT_TEMPLATES.length} 种风格` : `${AGENT_TEMPLATES.length} styles`
     });
+
     const list = panel.createDiv({ cls: "echoink-picker-list" });
-
-    // 描述统一来自 PERSONALITY_TEMPLATES 常量，不再在此重复维护（避免漂移）。
-
-    for (const tpl of PERSONALITY_TEMPLATES) {
-      const isCurrent = reset && refs.templateBtn.dataset.templateId === tpl.id;
+    const currentTemplateId = refs.templateBtn.dataset.templateId ?? "";
+    let firstRow: HTMLElement | null = null;
+    let currentRow: HTMLElement | null = null;
+    for (const template of AGENT_TEMPLATES) {
+      const isCurrent = currentTemplateId === template.id;
       const row = list.createEl("button", {
         cls: "echoink-picker-row",
         attr: {
           type: "button",
-          "data-template-id": tpl.id,
+          "data-template-id": template.id,
           ...(isCurrent ? { "aria-current": "true" } : {})
         }
       });
+      firstRow ??= row;
+      if (isCurrent) currentRow = row;
       row.classList.toggle("is-current", isCurrent);
       const heading = row.createDiv({ cls: "echoink-picker-row-heading" });
       heading.createSpan({
         cls: "echoink-picker-row-name",
-        text: zh ? tpl.labelZh : tpl.labelEn
+        text: zh ? template.labelZh : template.labelEn
       });
       if (isCurrent) {
         heading.createSpan({
@@ -1162,8 +1180,10 @@ export class CodexSettingTab extends PluginSettingTab {
           text: zh ? "当前模板" : "Current"
         });
       }
-      row.createDiv({ cls: "echoink-picker-row-desc" })
-        .setText(zh ? tpl.richDescZh : tpl.richDescEn);
+      row.createDiv({
+        cls: "echoink-picker-row-desc",
+        text: template.complexProblemMethod
+      });
       const indicator = row.createSpan({
         cls: "echoink-picker-row-indicator",
         attr: { "aria-hidden": "true" }
@@ -1175,36 +1195,27 @@ export class CodexSettingTab extends PluginSettingTab {
         void (async () => {
           try {
             const system = await this.plugin.getCognitiveSystem();
-            const personality = await system.readPersonalityState();
+            const snapshot = await system.readAgentSelfState();
             const identity = await system.readAgentIdentity();
-            // Round 6 修复二：首次选择判定与底层共用同一语义
-            // （initialTemplateSelectionStatus），不再叠加 personality.revision
-            // 条件。尚无模板且尚无身份时才要求命名弹窗；取消时根本不会调用
-            // selectPersonalityTemplate，因此取消 = 零写入。身份已存在但尚无
-            // 模板时直接落模板，保留现有身份。
-            const selection = initialTemplateSelectionStatus(personality, identity);
-            const firstTime = !reset && selection.requiresFirstNaming;
-            if (firstTime) {
+            const selection = initialTemplateSelectionStatus(snapshot.metadata, identity);
+            if (selection.requiresFirstNaming) {
               row.removeAttribute("disabled");
               this.openAgentIdentityModal({
-                templateId: tpl.id,
-                templateLabel: zh ? tpl.labelZh : tpl.labelEn,
+                templateId: template.id,
+                templateLabel: zh ? template.labelZh : template.labelEn,
                 panel,
                 refs,
                 zh
               });
               return;
             }
-            const result = await system.selectPersonalityTemplate(
-              tpl.id,
-              reset ? { reset: true } : undefined
-            );
-            this.applyPersonalityToCard(refs, result.state, result.agent, zh);
-            refs.summaryText.setText(await system.renderPersonalitySummary(zh ? "zh" : "en"));
+            await system.selectPersonalityTemplate(template.id);
+            this.requestPersonalityTemplateFocusRestore();
             await this.refreshIdentityAfterChange();
-            new Notice(zh ? `已应用「${tpl.labelZh}」人格模板` : `Applied template: ${tpl.labelEn}`);
-            panel.removeClass("is-visible");
-            panel.empty();
+            new Notice(zh
+              ? `已应用「${template.labelZh}」人格模板`
+              : `Applied template: ${template.labelEn}`);
+            this.closeTemplatePicker(refs);
           } catch (error) {
             console.error("EchoInk personality template selection failed", error);
             new Notice(zh ? "人格模板保存失败，请重试" : "Failed to save personality template");
@@ -1222,15 +1233,29 @@ export class CodexSettingTab extends PluginSettingTab {
       attr: { type: "button" }
     });
     cancelBtn.onclick = () => {
-      panel.removeClass("is-visible");
-      panel.empty();
+      this.closeTemplatePicker(refs);
     };
+
+    (currentRow ?? firstRow)?.focus({ preventScroll: true });
   }
 
-  /**
-   * 首次选择模板后的命名弹窗。确认前不写任何东西；取消只是关闭弹窗、
-   * 模板选择面板保持打开，用户可继续换模板或退出。
-   */
+  private closeTemplatePicker(refs: AgentProfileCardRefs): void {
+    if (!refs.templateBtn.isConnected || !refs.pickerPanel.isConnected) return;
+    refs.pickerPanel.removeClass("is-visible");
+    refs.pickerPanel.empty();
+    refs.pickerPanel.onkeydown = null;
+    this.setTemplatePickerExpanded(refs, false);
+    refs.templateBtn.focus({ preventScroll: true });
+  }
+
+  private setTemplatePickerExpanded(refs: AgentProfileCardRefs, expanded: boolean): void {
+    refs.templateBtn.setAttr("aria-expanded", expanded ? "true" : "false");
+    refs.templateBtn.classList.toggle("is-expanded", expanded);
+    refs.templateLabel.textContent = expanded
+      ? refs.expandedTemplateLabel
+      : refs.collapsedTemplateLabel;
+  }
+
   private openAgentIdentityModal(context: Readonly<{
     templateId: string;
     templateLabel: string;
@@ -1247,115 +1272,25 @@ export class CodexSettingTab extends PluginSettingTab {
       presets: AGENT_AVATAR_PRESETS,
       onConfirm: async (draft) => {
         const system = await this.plugin.getCognitiveSystem();
-        // 模板 + 名称 + 头像在同一个事务中落盘；失败时旧状态全部保留。
-        const result = await system.selectPersonalityTemplate(templateId, {
+        await system.selectPersonalityTemplate(templateId, {
           initialIdentity: { displayName: draft.displayName, avatar: draft.avatar }
         });
-        this.applyPersonalityToCard(refs, result.state, result.agent, zh);
-        refs.summaryText.setText(await system.renderPersonalitySummary(zh ? "zh" : "en"));
+        this.requestPersonalityTemplateFocusRestore();
         await this.refreshIdentityAfterChange();
         new Notice(zh
           ? `已应用「${templateLabel}」人格模板，Agent 名称：${draft.displayName}`
           : `Applied template: ${templateLabel}. Agent name: ${draft.displayName}`);
-        panel.removeClass("is-visible");
-        panel.empty();
+        this.closeTemplatePicker(refs);
       }
     });
     modal.open();
   }
 
-  /** 身份保存成功后：刷新设置页状态与对话区的消息头。 */
   private async refreshIdentityAfterChange(): Promise<void> {
     await this.loadPersonalMemoryState(true);
     this.plugin.getCodexView()?.refreshPersonalizationUi();
   }
 
-  /**
-   * 身份与用户画像页面顶部的「Agent 身份」卡片（草案 §8）：
-   * 名称 + 头像只由用户在这里修改，绝不影响人格或 Memory。
-   */
-  private addAgentIdentitySetting(container: HTMLElement): void {
-    const zh = this.plugin.settings.settingsLanguage !== "en";
-    const identity = this.personalMemoryState?.agentIdentity ?? null;
-    const personalityState = this.personalMemoryState?.personalityState ?? null;
-    const hasTemplate = Boolean(personalityState && personalityState.templateId);
-    const card = container.createDiv({ cls: "echoink-agent-identity-card" });
-
-    const avatarEl = card.createDiv({ cls: "echoink-agent-identity-avatar" });
-    const avatarUrl = identity ? resolveAgentAvatarUrl(identity.avatar) : null;
-    if (avatarUrl) {
-      avatarEl.createEl("img", { attr: { src: avatarUrl, alt: "" } });
-    } else {
-      avatarEl.addClass("is-default");
-      setIcon(avatarEl, "bot");
-    }
-
-    const copy = card.createDiv({ cls: "echoink-agent-identity-copy" });
-    copy.createDiv({
-      cls: "echoink-agent-identity-name",
-      text: identity ? identity.displayName : "EchoInk"
-    });
-    copy.createDiv({
-      cls: "echoink-agent-identity-desc",
-      text: !hasTemplate
-        ? (zh
-            ? "先选择一个初始风格，选中后继续设置名称和头像。"
-            : "Pick a starting style first, then continue setting the name and avatar.")
-        : (zh
-            ? "名称和头像会显示在 Agent 回复旁；修改身份不会重置人格或 Memory。"
-            : "Name and avatar appear next to the Agent's replies; editing identity never resets personality or Memory.")
-    });
-
-    const editButton = card.createEl("button", {
-      cls: "echoink-agent-identity-edit",
-      attr: { type: "button" },
-      text: hasTemplate
-        ? (zh ? "编辑身份" : "Edit identity")
-        : (zh ? "选择风格并设置身份" : "Choose style & identity")
-    });
-    // 不再 disabled：尚未选择模板时，按钮引导用户进入
-    // 「选择人格 → 设置名称与头像」的既有主链，而不是一个点不开的灰色入口。
-    if (!identity && hasTemplate) {
-      // 旧 Vault：人格模板已存在但没有身份文件 —— 显示默认值，可编辑，
-      // 不强制弹窗。
-      card.createSpan({ cls: "echoink-agent-identity-default-badge", text: zh ? "默认" : "Default" });
-    }
-    editButton.addEventListener("click", () => {
-      const currentPersonality = this.personalMemoryState?.personalityState ?? null;
-      const currentHasTemplate = Boolean(currentPersonality && currentPersonality.templateId);
-      if (!currentHasTemplate) {
-        // 首次设置：不直接打开身份编辑弹窗，也不直接写身份；
-        // 复用设置页已有的初始风格入口及其点击链。
-        this.startInitialIdentitySetup();
-        return;
-      }
-      const current = this.personalMemoryState?.agentIdentity ?? null;
-      const modal = new AgentIdentityModal(this.plugin.app, {
-        initialName: current?.displayName ?? "EchoInk",
-        initialAvatar: current?.avatar ?? Object.freeze({ kind: "default" }),
-        language: zh ? "zh" : "en",
-        mode: "edit",
-        presets: AGENT_AVATAR_PRESETS,
-        onConfirm: async (draft) => {
-          const system = await this.plugin.getCognitiveSystem();
-          await system.updateAgentIdentity({
-            displayName: draft.displayName,
-            avatar: draft.avatar
-          });
-          await this.refreshIdentityAfterChange();
-          new Notice(zh ? "Agent 身份已更新" : "Agent identity updated");
-        }
-      });
-      modal.open();
-    });
-  }
-
-  /**
-   * 尚未选择人格模板时的身份入口：定位设置页已有的初始风格按钮
-   * （data-echoink-focus-key="general:personality-template"），复用它的
-   * 现有点击链打开同一个 showTemplatePicker()。fail-closed 状态下该点击链
-   * 只会触发「重试读取人格」，不会出现模板选择器，也不会写任何身份数据。
-   */
   private startInitialIdentitySetup(): void {
     const templateEntry = this.containerEl.querySelector<HTMLElement>(
       '[data-echoink-focus-key="general:personality-template"]'
@@ -1363,7 +1298,6 @@ export class CodexSettingTab extends PluginSettingTab {
     if (!templateEntry) return;
     templateEntry.scrollIntoView({ block: "center", inline: "nearest" });
     templateEntry.click();
-    // 模板选择器在点击链中同步展开；展开后把焦点交给第一行模板。
     const picker = this.containerEl.querySelector<HTMLElement>(
       ".echoink-template-picker.is-visible"
     );
@@ -1391,7 +1325,7 @@ export class CodexSettingTab extends PluginSettingTab {
         : "The user profile is maintained by dreaming and memory corrections; manual editing is not available."
     });
     const pre = card.createEl("pre", {
-      cls: "echoink-agent-profile-raw-text",
+      cls: "echoink-user-profile-text",
       text: userContent
     });
     pre.setAttr("tabindex", "0");
@@ -3843,7 +3777,8 @@ export class CodexSettingTab extends PluginSettingTab {
     const name = resource.kind === "skill" ? `/${resource.name}` : resource.name;
     const connectionStatus = resource.kind === "mcp-server" ? mcpConnectionStatus(resource, this.plugin.settings.resources) : "not-mcp";
     const meta = resourceDisplayMeta(resource, this.plugin.settings.resources, this.plugin.settings.settingsLanguage);
-    const nameButton = content.createEl("button", {
+    const title = content.createDiv({ cls: "codex-resource-row-title" });
+    const nameButton = title.createEl("button", {
       cls: "codex-resource-row-name",
       text: name,
       attr: {
@@ -3855,6 +3790,13 @@ export class CodexSettingTab extends PluginSettingTab {
       }
     });
     nameButton.onclick = () => this.openSettingsDetail({ kind: "resource", resourceId: resource.id });
+    if (resource.kind === "skill" && isBuiltinSkillId(resource.metadata?.resourceId)) {
+      title.createSpan({
+        cls: "codex-resource-preset-badge",
+        text: copy.resources.preset,
+        attr: { "data-resource-preset": "true" }
+      });
+    }
     const desc = resource.description || resource.contentPath || resource.configPath || copy.resources.noDesc;
     const description = [desc, meta].filter(Boolean).join(" · ");
     if (description) content.createDiv({ cls: "codex-resource-row-desc", text: description });

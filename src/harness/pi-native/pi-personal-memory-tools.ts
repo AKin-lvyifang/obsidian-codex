@@ -159,7 +159,9 @@ const KIND_SCHEMA = Type.Union([
   Type.Literal("fact"), Type.Literal("view"), Type.Literal("decision"),
   Type.Literal("goal"), Type.Literal("task"), Type.Literal("open_loop"),
   Type.Literal("episode")
-]);
+], {
+  description: "Memory 类型：事实、观点、决定、目标、任务、未决事项或经历。"
+});
 const STATUS_SCHEMA = Type.Union([
   Type.Literal("current"), Type.Literal("superseded"), Type.Literal("closed")
 ]);
@@ -212,7 +214,11 @@ const FORGET_REQUEST_SCHEMA = Type.Object({
   operation: Type.Literal("forget"),
   targetId: Type.String({ minLength: 3, maxLength: 96 }),
   reason: Type.String({ minLength: 1, maxLength: 2_000 }),
-  evidenceQuote: Type.String({ minLength: 1, maxLength: 2_000 })
+  evidenceQuote: Type.String({
+    minLength: 1,
+    maxLength: 2_000,
+    description: "逐字引用当前用户消息中明确要求忘记的原话。"
+  })
 }, { additionalProperties: false });
 const MEMORY_WRITE_REQUEST_JSON_MAX_CHARS = 32_768;
 const MEMORY_WRITE_REQUEST_SCHEMA = Type.Union([
@@ -222,8 +228,9 @@ const MEMORY_WRITE_REQUEST_SCHEMA = Type.Union([
   FORGET_REQUEST_SCHEMA,
   Type.String({ maxLength: MEMORY_WRITE_REQUEST_JSON_MAX_CHARS })
 ]);
-const MEMORY_SEARCH_TOOL_DESCRIPTION = "按查询、类型、范围、状态和日期搜索当前 Vault 的长期 Memory 摘要。两种合法触发：相关历史可能影响当前回答；或准备 create、update、profile_update、forget 前做去重、定位和 revision 获取。当前用户消息对应的本轮首次 memory_write 前必须完成一次 memory_search，历史轮搜索不能替代；exhausted=false 时必须携带相同 query/filters 与 nextCursor 继续分页，直到 exhausted=true。同轮写入成功后可继续写入其余已判断 Memory，不必机械重复搜索；写入失败或 revision 冲突后必须重新搜索。除此之外不机械搜索。";
-const MEMORY_WRITE_TOOL_DESCRIPTION = "System Prompt 判断内容值得跨轮保存且对象清楚时，先在当前用户消息对应的本轮首次写入前完成一次 memory_search，再实际调用本 Tool；历史轮搜索不能授权当前轮写入：同义内容已存在就跳过，内容变化时用 update 更新原记录，无相关记录才用 create；同轮写入成功后可继续写入其余已判断 Memory，写入失败或 revision 冲突后重新搜索。普通文字不会落盘，只有真实结构化 Tool 回执才能声称已写入长期 Memory。create 必须选择七类 kind；profile_update 若搜索命中同一用户事实必须传 targetId；forget 响应用户当前明确原话直接忘掉，并逐字填写 evidenceQuote。来源与 revision 由宿主处理。";
+const MEMORY_SEARCH_TOOL_DESCRIPTION = "搜索当前 Vault 的长期 Memory 摘要。相关历史可能影响当前回答，或需要新增、更新、修正画像、忘记前定位现有记录时调用。";
+const MEMORY_READ_TOOL_DESCRIPTION = "按 Memory ID 读取正文；只有确需核对真实内容时调用。";
+const MEMORY_WRITE_TOOL_DESCRIPTION = "当用户内容具有跨轮价值且对象明确时，新增或更新长期 Memory、修正 USER 画像，或按用户当前原话忘记旧 Memory。选择一种 schema operation；普通文字不会保存，只根据本 Tool 的真实结果说明是否成功。";
 
 export const PI_PERSONAL_MEMORY_TOOL_SCHEMAS: Readonly<Record<PiPersonalMemoryToolId, TSchema>> = Object.freeze({
   memory_search: Type.Object({
@@ -242,7 +249,10 @@ export const PI_PERSONAL_MEMORY_TOOL_SCHEMAS: Readonly<Record<PiPersonalMemoryTo
   memory_read: Type.Object({
     id: Type.String({ minLength: 3, maxLength: 96 }),
     includeHistorical: Type.Optional(Type.Boolean())
-  }, { additionalProperties: false }),
+  }, {
+    additionalProperties: false,
+    description: MEMORY_READ_TOOL_DESCRIPTION
+  }),
   memory_write: Type.Object({
     request: MEMORY_WRITE_REQUEST_SCHEMA
   }, {

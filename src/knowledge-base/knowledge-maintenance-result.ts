@@ -23,12 +23,27 @@ export interface KnowledgeMaintenanceResultIssue {
   path?: string;
 }
 
+export type KnowledgeMaintenanceAssessmentStatus =
+  | "valid"
+  | "needs_supplement"
+  | "outdated"
+  | "conflict";
+
+export interface KnowledgeMaintenanceAssessment {
+  claim: string;
+  status: KnowledgeMaintenanceAssessmentStatus;
+  evidence: readonly string[];
+  asOf: string;
+  verification: "local_verified" | "external_verified" | "unverified";
+}
+
 export interface KnowledgeMaintenanceResultEnvelope {
   schema: typeof KNOWLEDGE_MAINTENANCE_RESULT_SCHEMA;
   status: KnowledgeMaintenanceResultStatus;
   notes: readonly Readonly<KnowledgeMaintenanceResultNote>[];
   issues: readonly Readonly<KnowledgeMaintenanceResultIssue>[];
   systemPaths: readonly string[];
+  assessments: readonly Readonly<KnowledgeMaintenanceAssessment>[];
 }
 
 export function knowledgeMaintenanceNoteFromReadback(input: Readonly<{
@@ -51,13 +66,15 @@ export function createKnowledgeMaintenanceResultEnvelope(input: Readonly<{
   notes?: readonly Readonly<KnowledgeMaintenanceResultNote>[];
   issues?: readonly Readonly<KnowledgeMaintenanceResultIssue>[];
   systemPaths?: readonly string[];
+  assessments?: readonly Readonly<KnowledgeMaintenanceAssessment>[];
 }>): Readonly<KnowledgeMaintenanceResultEnvelope> {
   return parseKnowledgeMaintenanceResultEnvelope({
     schema: KNOWLEDGE_MAINTENANCE_RESULT_SCHEMA,
     status: input.status,
     notes: input.notes ?? [],
     issues: input.issues ?? [],
-    systemPaths: input.systemPaths ?? []
+    systemPaths: input.systemPaths ?? [],
+    assessments: input.assessments ?? []
   })!;
 }
 
@@ -66,11 +83,12 @@ export function parseKnowledgeMaintenanceResultEnvelope(
 ): Readonly<KnowledgeMaintenanceResultEnvelope> | null {
   if (!isRecord(value) || !exactKeys(value, [
     "schema", "status", "notes", "issues", "systemPaths"
-  ])) return null;
+  ], ["assessments"])) return null;
   if (value.schema !== KNOWLEDGE_MAINTENANCE_RESULT_SCHEMA) return null;
   if (!isStatus(value.status)) return null;
   if (!Array.isArray(value.notes) || !Array.isArray(value.issues)
-    || !Array.isArray(value.systemPaths)) return null;
+    || !Array.isArray(value.systemPaths)
+    || (value.assessments !== undefined && !Array.isArray(value.assessments))) return null;
   const notes: KnowledgeMaintenanceResultNote[] = [];
   for (const raw of value.notes) {
     if (!isRecord(raw) || !exactKeys(raw, ["operation", "path", "title", "summary"])) return null;
@@ -105,12 +123,36 @@ export function parseKnowledgeMaintenanceResultEnvelope(
   }
   if ((value.status === "completed" || value.status === "partial") && notes.length === 0) return null;
   if (value.status === "noop" && notes.length !== 0) return null;
+  const assessments: KnowledgeMaintenanceAssessment[] = [];
+  for (const raw of value.assessments ?? []) {
+    if (!isRecord(raw) || !exactKeys(raw, [
+      "claim", "status", "evidence", "asOf", "verification"
+    ])) return null;
+    if (typeof raw.claim !== "string" || !raw.claim.trim()
+      || !isAssessmentStatus(raw.status)
+      || !Array.isArray(raw.evidence) || raw.evidence.length > 20
+      || raw.evidence.some((item) => typeof item !== "string" || !item.trim())
+      || typeof raw.asOf !== "string" || !raw.asOf.trim()
+      || !["local_verified", "external_verified", "unverified"].includes(
+        String(raw.verification)
+      )) return null;
+    assessments.push(Object.freeze({
+      claim: raw.claim.trim().replace(/\s+/gu, " ").slice(0, 500),
+      status: raw.status,
+      evidence: Object.freeze((raw.evidence as string[]).map((item) =>
+        item.trim().replace(/\s+/gu, " ").slice(0, 500)
+      )),
+      asOf: raw.asOf.trim().slice(0, 100),
+      verification: raw.verification as KnowledgeMaintenanceAssessment["verification"]
+    }));
+  }
   return Object.freeze({
     schema: KNOWLEDGE_MAINTENANCE_RESULT_SCHEMA,
     status: value.status,
     notes: Object.freeze(notes),
     issues: Object.freeze(issues),
-    systemPaths: Object.freeze([...new Set(systemPaths)])
+    systemPaths: Object.freeze([...new Set(systemPaths)]),
+    assessments: Object.freeze(assessments)
   });
 }
 
@@ -175,6 +217,17 @@ export function knowledgeMaintenanceReportPayloadFromToolResult(
           ...(issue.path ? { path: issue.path } : {}),
           description: issue.message,
           tone: "warning" as const
+        }))
+      }] : []),
+      ...(envelope.assessments.length ? [{
+        id: "assessments",
+        title: "时效与冲突判断",
+        count: envelope.assessments.length,
+        emptyText: "没有需要判断的知识主张。",
+        items: envelope.assessments.map((assessment) => ({
+          title: assessment.claim,
+          description: `${assessmentLabel(assessment.status)} · ${assessment.asOf} · ${assessment.verification}`,
+          tone: assessment.status === "valid" ? "success" as const : "warning" as const
         }))
       }] : [])
     ]
@@ -241,6 +294,20 @@ function safeToken(value: string): boolean {
 function isStatus(value: unknown): value is KnowledgeMaintenanceResultStatus {
   return value === "completed" || value === "partial" || value === "noop"
     || value === "failed" || value === "write_uncertain";
+}
+
+function isAssessmentStatus(
+  value: unknown
+): value is KnowledgeMaintenanceAssessmentStatus {
+  return value === "valid" || value === "needs_supplement"
+    || value === "outdated" || value === "conflict";
+}
+
+function assessmentLabel(value: KnowledgeMaintenanceAssessmentStatus): string {
+  if (value === "valid") return "仍有效";
+  if (value === "needs_supplement") return "需补充";
+  if (value === "outdated") return "已过时";
+  return "存在冲突";
 }
 
 function exactKeys(

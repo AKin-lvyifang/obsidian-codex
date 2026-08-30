@@ -21,6 +21,8 @@ import {
   MAX_KNOWLEDGE_REFERENCES,
   formatKnowledgeReferencesForPrompt
 } from "../knowledge-base/query";
+import { KnowledgeAgentIndex } from "../knowledge-base/knowledge-agent-index";
+import { createProductionPiKnowledgeRuntime } from "../plugin/pi-production-runtime-composition";
 
 export async function runPhase3KnowledgeRetrieverTests(): Promise<void> {
   assert.match(
@@ -72,6 +74,13 @@ export async function runPhase3KnowledgeRetrieverTests(): Promise<void> {
         vaultPath,
         `many/note-${String(index).padStart(2, "0")}.md`,
         `# Note ${index}\nLIMIT_SCOPE_TOKEN\n`
+      );
+    }
+    for (let index = 1; index <= 8; index += 1) {
+      await writeFixture(
+        vaultPath,
+        `projects/production-note-${String(index).padStart(2, "0")}.md`,
+        `# Production Note ${index}\nPRODUCTION_LIMIT_SCOPE_TOKEN\n`
       );
     }
     const outsideFile = path.join(outsidePath, "outside.md");
@@ -169,6 +178,35 @@ export async function runPhase3KnowledgeRetrieverTests(): Promise<void> {
         `many/note-${String(index + 1).padStart(2, "0")}.md`
       )
     );
+
+    const productionIndex = new KnowledgeAgentIndex({
+      vaultPath,
+      storageRootPath: path.join(outsidePath, "production-index")
+    });
+    await productionIndex.refresh();
+    const productionRuntime = createProductionPiKnowledgeRuntime({
+      vaultRootPath: vaultPath,
+      knowledgeAgentIndex: productionIndex,
+      knowledgePreferences: {} as never,
+      usage: {} as never
+    });
+    const productionChat = await productionRuntime.retrieveChat!({
+      vaultId: "vault-production-chat",
+      conversationId: "conversation-production-chat",
+      piSessionId: "pi-production-chat",
+      productRunId: "run-production-chat",
+      question: "PRODUCTION_LIMIT_SCOPE_TOKEN",
+      explicitPaths: [],
+      includeUnrefined: false
+    });
+    assert.equal(productionChat.status, "ready");
+    assert.equal(productionChat.references.length, 6,
+      "production normal Chat preflight is bounded to six references");
+    assert.match(productionChat.providerResourceText, /有界本地预检/u);
+    assert.equal(productionChat.references.every((item) =>
+      item.recordedAt !== undefined
+      && item.verificationStatus === "local_revision_verified"
+    ), true);
 
     assert.deepEqual(
       await snapshotFixtureTree(vaultPath),

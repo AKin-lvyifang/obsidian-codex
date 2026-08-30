@@ -1,54 +1,68 @@
 /**
- * cognitive-system.ts — facade wiring 人格(personality) / 做梦(dreaming) /
- * 二级事实(secondary facts) / Recall into one product main-chain.
+ * cognitive-system.ts — facade wiring Agent Self, dreaming, secondary facts
+ * and Recall into one product main-chain.
  *
- * Truth sources (never plugin settings):
- * - .echoink/agents/echoink/personality-state.json
- * - .echoink/shared-user/user-profile-state.json
- * - .echoink/shared-user/.runtime/dream-state.json
- * - .echoink/shared-user/memory/secondary/<parent>/<id>.md
- * - AGENT.md / USER.md / Search Index v3
+ * Current runtime truth:
+ * - AGENT.md current-self block
+ * - agents/echoink/agent-self-meta.json (template/revision metadata only)
+ * - shared-user/user-profile-state.json
+ * - shared-user/.runtime/dream-state.json
+ * - shared-user/memory/secondary/<parent>/<id>.md
  *
- * Template selection and reset run as ONE local transaction with NO Provider.
+ * The legacy personality-state.json is read only when agent-self metadata is
+ * absent. It is never changed or used after migration succeeds.
  */
 
-import {
-  PERSONALITY_STATE_RELATIVE_PATH,
-  PersonalityStateStore,
-  applyTemplateToState,
-  buildPersonalityV2FromLegacy,
-  detectPersonalityStateSchema,
-  emptyPersonalityState,
-  inspectPersonalityFile,
-  parseLegacyPersonalityStateV1,
-  personalityStateJson,
-  type LegacyPersonalityStateV1,
-  type PersonalityState,
-  type RecoverablePersonalityState
-} from "./personality-state";
-import { cognitiveReadJsonOrNull, newCognitiveId } from "./cognitive-file-utils";
+import { createHash } from "node:crypto";
 import {
   inspectUserProfileStateFile,
   userProfileStateJson,
   UserProfileStateStore
 } from "./user-profile-state";
 import {
-  DREAM_STATE_RELATIVE_PATH,
   DreamStateStore,
-  enqueuePendingMemoryIds,
-  type DreamState
+  enqueuePendingMemoryIds
 } from "./dream-state";
-import { cognitiveJsonText } from "./cognitive-file-utils";
+import { DreamExperienceInboxStore } from "./dream-experience-inbox";
 import {
   SecondaryMemoryStore,
   serializeSecondaryRecord
 } from "./secondary-memory-store";
 import {
-  getPersonalityTemplate,
-  PERSONALITY_TEMPLATES,
-  type PersonalityTemplate
-} from "./personality-templates";
-import { renderAgentMarkdown, renderPersonalitySummary } from "./cognitive-projection";
+  AGENT_TEMPLATES,
+  getAgentTemplate,
+  type AgentTemplate,
+  type AgentTemplateId
+} from "./agent-templates";
+import {
+  applyAgentSelfOperations as applyStructuredAgentSelfOperations,
+  agentSelfFromTemplate,
+  parseAgentCurrentSelf,
+  publicAgentSelfProfile,
+  renderAgentMarkdown,
+  replaceAgentCurrentSelf,
+  stableSelfKey,
+  type AgentSelfHabit,
+  type AgentSelfOperation,
+  type AgentSelfState,
+  type PublicAgentSelfProfile
+} from "./agent-self";
+import { BUILTIN_SKILLS } from "../resources/builtin-skills";
+import {
+  AGENT_SELF_METADATA_RELATIVE_PATH,
+  AgentSelfMetadataStore,
+  agentSelfMetadataJson,
+  emptyAgentSelfMetadata,
+  type AgentSelfDerivation,
+  type AgentSelfDerivationSource,
+  type AgentSelfDerivationTarget,
+  type AgentSelfMetadata
+} from "./agent-self-metadata";
+import {
+  inspectLegacyAgentMarkdown,
+  inspectLegacyPersonalityFile,
+  legacyAgentBackupRelativePath
+} from "./legacy-personality-reader";
 import {
   DreamEngine,
   type DreamLlmPort,
@@ -60,12 +74,12 @@ import type {
   PersonalMemoryRecord,
   SecondaryMemoryRecord
 } from "./personal-memory-contracts";
+import { memorySourceGroup } from "./dream-source-group";
 import { defaultAgentProfile, type PersonalMemoryRepository } from "./personal-memory-repository";
 import {
   AGENT_IDENTITY_RELATIVE_PATH,
   AgentIdentityStateStore,
   agentIdentityStateJson,
-  defaultAgentIdentityState,
   normalizeAgentAvatar,
   normalizeAgentDisplayName,
   type AgentAvatarState,
@@ -73,7 +87,6 @@ import {
 } from "./agent-identity-state";
 
 export interface CognitiveSystemLlmOptions {
-  /** null → Provider 未配置：做梦当轮不产生模型结果，队列保持 pending。 */
   readonly llm: () => DreamLlmPort | null;
 }
 
@@ -84,6 +97,20 @@ export interface CognitiveSystemOptions {
   readonly isForegroundBusy: () => boolean;
   readonly registerInterval: (handle: number) => void;
   readonly now?: () => number;
+}
+
+export interface AgentSelfSnapshot {
+  readonly revision: number;
+  readonly metadata: AgentSelfMetadata;
+  readonly state: AgentSelfState;
+  readonly agent: string;
+}
+
+export interface AgentProfileView {
+  readonly revision: number;
+  readonly templateId: AgentTemplateId | null;
+  readonly preferredSkillNames: readonly string[];
+  readonly currentSelf: PublicAgentSelfProfile;
 }
 
 class RepositoryDreamPort implements DreamRepositoryPort {
@@ -100,10 +127,10 @@ class RepositoryDreamPort implements DreamRepositoryPort {
 
   async readFixedFiles(): Promise<Readonly<{
     agent: string;
+    agentHash: string;
     user: string;
     userHash: string;
-    userChars: number;
-    userManifestHashMatches: boolean;
+    userBytes: number;
   }>> {
     return await this.repository.inspectCognitiveFixedFiles();
   }
@@ -115,9 +142,8 @@ class RepositoryDreamPort implements DreamRepositoryPort {
     extraChanges: readonly Readonly<{ relativePath: string; content: string }>[];
     detail: string;
     expectedMemoryRevision: number;
-    /** Round 6 修复四（身份 CAS）：决策时读到的身份 revision。 */
     expectedAgentIdentityRevision?: number;
-    /** USER.md content hash observed before Provider work began. */
+    expectedAgentProjectionHash?: string;
     expectedUserProjectionHash?: string;
   }>): Promise<Readonly<{ revision: number }>> {
     return await this.repository.applyCognitiveUpdate(input);
@@ -154,7 +180,7 @@ class RepositoryDreamPort implements DreamRepositoryPort {
 
 export class CognitiveSystem {
   readonly repository: PersonalMemoryRepository;
-  readonly personalityStore: PersonalityStateStore;
+  readonly agentSelfMetadataStore: AgentSelfMetadataStore;
   readonly profileStore: UserProfileStateStore;
   readonly dreamStateStore: DreamStateStore;
   readonly secondaryStore: SecondaryMemoryStore;
@@ -162,100 +188,69 @@ export class CognitiveSystem {
   readonly engine: DreamEngine;
   readonly scheduler: DreamScheduler;
   private readonly now: () => number;
-  private personalityTemplateId: string | null;
+  private agentTemplateId: AgentTemplateId | null;
 
   private constructor(options: CognitiveSystemOptions, parts: Readonly<{
-    personalityStore: PersonalityStateStore;
+    agentSelfMetadataStore: AgentSelfMetadataStore;
     profileStore: UserProfileStateStore;
     dreamStateStore: DreamStateStore;
     secondaryStore: SecondaryMemoryStore;
     agentIdentityStore: AgentIdentityStateStore;
     engine: DreamEngine;
     scheduler: DreamScheduler;
-    personalityTemplateId: string | null;
+    agentTemplateId: AgentTemplateId | null;
   }>) {
     this.repository = options.repository;
     this.now = options.now ?? Date.now;
-    this.personalityStore = parts.personalityStore;
+    this.agentSelfMetadataStore = parts.agentSelfMetadataStore;
     this.profileStore = parts.profileStore;
     this.dreamStateStore = parts.dreamStateStore;
     this.secondaryStore = parts.secondaryStore;
     this.agentIdentityStore = parts.agentIdentityStore;
     this.engine = parts.engine;
     this.scheduler = parts.scheduler;
-    this.personalityTemplateId = parts.personalityTemplateId;
+    this.agentTemplateId = parts.agentTemplateId;
   }
 
-  /** 设置页展开时需要重新读取做梦投影后的 AGENT.md / USER.md。 */
   async readFixedFiles(): Promise<Readonly<{ agent: string; user: string }>> {
     const state = await this.repository.readUserControlState();
     return Object.freeze({ agent: state.agent, user: state.user });
   }
 
-  /** Build the system against an initialized repository and attach hooks. */
   static async create(options: CognitiveSystemOptions): Promise<CognitiveSystem> {
-    // One product-wide SecondaryMemoryStore. Hydrate disk records before the
-    // repository's first initialization so Search Index v3 includes clues on
-    // the first query after restart.
     const secondaryStore = new SecondaryMemoryStore(options.repository.layout.history);
     options.repository.setSecondaryRecords(await secondaryStore.loadAll());
     const layout = await options.repository.initialize();
-    // The product initializes PersonalMemoryRepository before constructing the
-    // cognitive system. In that startup order initialize() is already a no-op,
-    // so synchronously reconcile the derived index after mounting disk clues.
     await options.repository.ensureSecondaryIndexFresh();
+
     const root = layout.root;
-    const personalityStore = new PersonalityStateStore(root);
+    const agentSelfMetadataStore = new AgentSelfMetadataStore(root);
     const profileStore = new UserProfileStateStore(root);
     const dreamStateStore = new DreamStateStore(root);
+    const experienceInboxStore = new DreamExperienceInboxStore(root);
     const agentIdentityStore = new AgentIdentityStateStore(root);
-    // 启动时读取一次身份（文件不存在则返回默认运行状态，不写文件），
-    // 让 peek/current 快照可以同步供给 UI；不调用 Provider。
     await agentIdentityStore.read();
 
-    // Round 6 修复三：严格体检落盘人格文件（missing | v2 | v1 | invalid）。
-    // - missing → 合法初始状态，不写任何文件；
-    // - v2 → 直接使用；
-    // - v1 → 一次性本地迁移（单事务、无 Provider）；
-    // - invalid（损坏 / 未知 schema / 字段解析失败）→ 拒绝构造，绝不降级成空状态。
-    // 迁移失败 = fail-closed：抛出稳定错误 personality_migration_blocked，
-    // v1 原样保留，调用方（main.ts 清 flight、设置页提示重试）负责重试。
-    const inspection = await inspectPersonalityFile(personalityStore.filePath);
-    if (inspection.kind === "invalid") {
-      throw new Error(`personality_state_invalid:${inspection.reason}`);
+    const metadataInspection = await agentSelfMetadataStore.inspect();
+    if (metadataInspection.kind === "invalid") {
+      throw new Error(`agent_self_metadata_invalid:${metadataInspection.reason}`);
     }
-    if (inspection.kind === "v2_recoverable") {
-      try {
-        await recoverPersonalityDimensions({
-          repository: options.repository,
-          personalityStore,
-          dreamStateStore,
-          agentIdentityStore,
-          secondaryStore,
-          recovery: inspection.recovery,
-          now: (options.now ?? Date.now)()
-        });
-      } catch {
-        throw new Error("personality_dimension_recovery_blocked:transaction_failed");
-      }
+    if (metadataInspection.kind === "missing") {
+      await migrateLegacyPersonalityToAgentSelf({
+        repository: options.repository,
+        metadataStore: agentSelfMetadataStore,
+        secondaryStore,
+        agentIdentityStore,
+        now: (options.now ?? Date.now)()
+      });
     }
-    if (inspection.kind === "v1") {
-      try {
-        await migratePersonalityV1ToV2({
-          repository: options.repository,
-          personalityStore,
-          dreamStateStore,
-          agentIdentityStore,
-          secondaryStore,
-          now: (options.now ?? Date.now)()
-        });
-      } catch (error) {
-        const reason = error instanceof Error && /identity_revision_conflict/u.test(error.message)
-          ? "identity_revision_conflict"
-          : "transaction_failed";
-        throw new Error(`personality_migration_blocked:${reason}`);
-      }
+
+    const fixed = await options.repository.readUserControlState();
+    const parsedSelf = parseAgentCurrentSelf(fixed.agent);
+    if (parsedSelf.kind !== "ok") {
+      throw new Error(`agent_self_invalid:${parsedSelf.reason}`);
     }
+    const metadata = await agentSelfMetadataStore.read() ?? emptyAgentSelfMetadata();
 
     const profileInspection = await inspectUserProfileStateFile(profileStore.filePath);
     if (profileInspection.kind === "invalid") {
@@ -276,30 +271,27 @@ export class CognitiveSystem {
       }
     }
 
-    // 同步 UI 只读取这个启动时快照；后续模板事务成功后原地更新，消息
-    // 渲染期间不再异步读人格文件，也不把模板复制进 plugin settings。
-    const personalityTemplateId = (await personalityStore.read())?.templateId ?? null;
-
     const engine = new DreamEngine({
       repository: new RepositoryDreamPort(options.repository),
-      personalityStore,
       profileStore,
       secondaryStore,
       dreamStateStore,
+      experienceInboxStore,
+      agentSelfMetadataStore,
       agentIdentityStore,
       llm: options.llm,
       ...(options.now ? { now: options.now } : {})
     });
 
     const system = new CognitiveSystem(options, {
-      personalityStore,
+      agentSelfMetadataStore,
       profileStore,
       dreamStateStore,
       secondaryStore,
       agentIdentityStore,
       engine,
       scheduler: null as unknown as DreamScheduler,
-      personalityTemplateId
+      agentTemplateId: metadata.templateId
     });
 
     const scheduler = new DreamScheduler({
@@ -321,8 +313,6 @@ export class CognitiveSystem {
     options.repository.setMemoryCommittedHook((event) => {
       void system.enqueueForDream([event.recordId]).catch(() => {});
     });
-    // 事务提交后同步 SecondaryMemoryStore 缓存（携带已提交 records），
-    // 不做 fire-and-forget 异步刷新，避免界面读到旧状态的窗口期。
     options.repository.setSecondaryChangedHook((records) => {
       secondaryStore.setCache(records);
     });
@@ -330,47 +320,101 @@ export class CognitiveSystem {
     return system;
   }
 
-  // -------------------------------------------------------------------------
-  // Personality templates (settings → one local transaction, NO Provider)
-  // -------------------------------------------------------------------------
-
-  listTemplates(): readonly PersonalityTemplate[] {
-    return PERSONALITY_TEMPLATES;
+  listTemplates(): readonly AgentTemplate[] {
+    return AGENT_TEMPLATES;
   }
 
-  async readPersonalityState(): Promise<PersonalityState> {
-    const state = (await this.personalityStore.read()) ?? emptyPersonalityShape(this.now());
-    this.personalityTemplateId = state.templateId;
-    return state;
+  async readAgentSelfState(): Promise<AgentSelfSnapshot> {
+    const control = await this.repository.readAgentSelfControlSnapshot();
+    const parsed = parseAgentCurrentSelf(control.agent);
+    if (parsed.kind !== "ok") {
+      throw new Error(`agent_self_invalid:${parsed.reason}`);
+    }
+    const metadata = control.metadata ?? emptyAgentSelfMetadata();
+    this.agentSelfMetadataStore.updateCache(metadata);
+    this.agentTemplateId = metadata.templateId;
+    return Object.freeze({
+      revision: control.revision,
+      metadata,
+      state: parsed.state,
+      agent: control.agent
+    });
   }
 
-  /** create 时已预热、模板事务成功后同步更新，供消息等待态即时读取。 */
-  currentPersonalityTemplateId(): string | null {
-    return this.personalityTemplateId;
+  async readAgentProfile(): Promise<AgentProfileView> {
+    const snapshot = await this.readAgentSelfState();
+    const template = getAgentTemplate(snapshot.metadata.templateId);
+    return Object.freeze({
+      revision: snapshot.revision,
+      templateId: snapshot.metadata.templateId,
+      preferredSkillNames: templatePreferredSkillNames(template),
+      currentSelf: publicAgentSelfProfile(snapshot.state)
+    });
   }
 
-  async renderPersonalitySummary(language: "zh" | "en"): Promise<string> {
-    return renderPersonalitySummary(await this.personalityStore.read(), language);
+  async applyAgentSelfOperations(
+    operations: readonly AgentSelfOperation[],
+    expectedRevision?: number
+  ): Promise<AgentSelfSnapshot> {
+    const snapshot = await this.readAgentSelfState();
+    if (expectedRevision !== undefined && snapshot.revision !== expectedRevision) {
+      throw new Error(`agent_self_revision_conflict:expected=${expectedRevision}:disk=${snapshot.revision}`);
+    }
+    const nextState = applyStructuredAgentSelfOperations(snapshot.state, operations);
+    const nextAgent = replaceAgentCurrentSelf(snapshot.agent, nextState);
+    if (nextAgent === snapshot.agent) return snapshot;
+
+    const identity = await this.agentIdentityStore.read();
+    const now = this.now();
+    const manuallyTouched = new Set<AgentSelfDerivationTarget>(operations.map((operation): AgentSelfDerivationTarget =>
+      operation.operation === "replace"
+        ? operation.field
+        : `habit:${operation.operation === "habit_add"
+          ? stableSelfKey(operation.key || operation.text)
+          : operation.key}`
+    ));
+    const nextMetadata: AgentSelfMetadata = Object.freeze({
+      ...snapshot.metadata,
+      revision: snapshot.metadata.revision + 1,
+      derivations: Object.freeze(snapshot.metadata.derivations.filter(
+        (derivation) => !manuallyTouched.has(derivation.target)
+      )),
+      updatedAt: now
+    });
+    const result = await this.repository.applyCognitiveUpdate({
+      agentContent: nextAgent,
+      secondaryRecords: await this.secondaryStore.loadAll(),
+      extraChanges: [
+        {
+          relativePath: `agents/echoink/history/AGENT-self-r${snapshot.metadata.revision}.md`,
+          content: snapshot.agent
+        },
+        {
+          relativePath: AGENT_SELF_METADATA_RELATIVE_PATH,
+          content: agentSelfMetadataJson(nextMetadata)
+        }
+      ],
+      expectedMemoryRevision: snapshot.revision,
+      expectedAgentIdentityRevision: identity.revision,
+      expectedAgentProjectionHash: agentProjectionHash(snapshot.agent),
+      detail: `agent-self-controlled-update:${operations.map((operation) => operation.operation).join(",")}`
+    });
+    this.agentSelfMetadataStore.updateCache(nextMetadata);
+    return Object.freeze({
+      revision: result.revision,
+      metadata: nextMetadata,
+      state: nextState,
+      agent: nextAgent
+    });
   }
 
-  /**
-   * 选择人格模板（含「重置人格」后重新选择）：单事务完成全部写入，
-   * 不调用任何 Provider（人格草案 §4.2 / §10.3 + 最新决定）。
-   *
-   * reset=true（重置流程的第二步）时，同一事务还会：
-   * - 将旧 observed 与 learnedRequirements 以 reason=reset 标记 superseded；
-   * - 清空尚未成立的候选；
-   * - 把当前有效 Memory 重新标记为待做梦来源（清空 processedSources、
-   *   重置 lastProcessedMemoryRevision 并入队 pending）；
-   * - 重写 AGENT.md、更新人格状态与六边形。
-   *
-   * 取消选择零写入：本方法只在用户真正选中新模板后被调用。
-   */
+  currentPersonalityTemplateId(): AgentTemplateId | null {
+    return this.agentTemplateId;
+  }
+
   async selectPersonalityTemplate(
     templateId: string,
     options?: Readonly<{
-      reset?: boolean;
-      /** 首次选择模板时必须随同提交身份（命名步骤的结果）。 */
       initialIdentity?: Readonly<{
         displayName: string;
         avatar: AgentAvatarState;
@@ -378,31 +422,24 @@ export class CognitiveSystem {
     }>
   ): Promise<Readonly<{
     revision: number;
-    state: PersonalityState;
+    state: AgentSelfState;
+    metadata: AgentSelfMetadata;
     agent: string;
     identity: AgentIdentityState;
   }>> {
-    const template = getPersonalityTemplate(templateId);
+    const template = getAgentTemplate(templateId);
     if (!template) throw new Error(`Unknown personality template: ${templateId}`);
-    const now = this.now();
-    const previous = (await this.personalityStore.read()) ?? emptyPersonalityShape(now);
-    const currentIdentity = await this.agentIdentityStore.read();
 
-    // Round 6 修复二：首次选择只由 templateId === null 判断（人格 revision
-    // 不再参与判断——半初始化状态 revision > 0 但 templateId 仍为空时，同样
-    // 是首次选择）。命名只在身份 revision === 0 时必需；身份已存在则原样保留。
-    // reset 只在已有 templateId 时成立。判定逻辑与设置页共用
-    // initialTemplateSelectionStatus，避免两处语义漂移。
-    const selection = initialTemplateSelectionStatus(previous, currentIdentity);
-    if (options?.reset && previous.templateId === null) {
-      throw new Error("personality_reset_requires_template");
-    }
+    const now = this.now();
+    const snapshot = await this.readAgentSelfState();
+    const currentIdentity = await this.agentIdentityStore.read();
+    const selection = initialTemplateSelectionStatus(snapshot.metadata, currentIdentity);
     if (selection.requiresFirstNaming && !options?.initialIdentity) {
       throw new Error("agent_identity_required");
     }
 
     let nextIdentity = currentIdentity;
-    if (selection.isInitialTemplateSelection && !options?.reset && options?.initialIdentity) {
+    if (selection.isInitialTemplateSelection && options?.initialIdentity) {
       const displayName = normalizeAgentDisplayName(options.initialIdentity.displayName);
       if (!displayName) throw new Error("agent_identity_invalid_name");
       const avatar = normalizeAgentAvatar(options.initialIdentity.avatar)
@@ -415,121 +452,86 @@ export class CognitiveSystem {
         updatedAt: now
       });
     }
-    // reset 或身份已存在的首次选择：身份原样保留，revision 不变。
 
-    const next = applyTemplateToState(previous, {
-      templateId: template.id,
-      now,
-      reset: Boolean(options?.reset),
-      // 首次选择必须清理模板前证据（observed 标记退出、候选与
-      // processedSources 清空、learnedRequirements 保留）。
-      initialSelection: selection.isInitialTemplateSelection && !options?.reset
+    if (snapshot.metadata.templateId === template.id && nextIdentity === currentIdentity) {
+      return Object.freeze({
+        revision: snapshot.revision,
+        state: snapshot.state,
+        metadata: snapshot.metadata,
+        agent: snapshot.agent,
+        identity: currentIdentity
+      });
+    }
+
+    const nextState = agentSelfFromTemplate(template, snapshot.state.currentLearnedHabits);
+    const agentContent = renderAgentMarkdown({
+      identity: nextIdentity,
+      styleName: template.labelZh,
+      self: nextState
     });
-    const agentContent = renderAgentMarkdown(next, nextIdentity);
-
+    const nextMetadata: AgentSelfMetadata = Object.freeze({
+      ...snapshot.metadata,
+      revision: snapshot.metadata.revision + 1,
+      templateId: template.id,
+      derivations: Object.freeze(snapshot.metadata.derivations.filter(
+        (derivation) => derivation.target.startsWith("habit:")
+      )),
+      updatedAt: now
+    });
     const extraChanges: Array<{ relativePath: string; content: string }> = [{
-      relativePath: PERSONALITY_STATE_RELATIVE_PATH,
-      content: personalityStateJson(next)
+      relativePath: AGENT_SELF_METADATA_RELATIVE_PATH,
+      content: agentSelfMetadataJson(nextMetadata)
     }];
+
     if (nextIdentity !== currentIdentity) {
-      // 首次命名与模板在同一个 Repository 事务中落盘，避免「人格已选但
-      // 名字没保存」的半状态。
       extraChanges.push({
         relativePath: AGENT_IDENTITY_RELATIVE_PATH,
         content: agentIdentityStateJson(nextIdentity)
       });
     }
 
-    // 首次选择模板覆盖自定义 AGENT.md 前，保存一份持久、可恢复的本地
-    // 历史版本（事务临时备份提交后会删除，不能冒充历史备份；草案 §12.2）。
-    const controlState = await this.repository.readUserControlState();
-    const fixedAgent = controlState.agent;
     if (selection.isInitialTemplateSelection
-      && fixedAgent.trim().length > 0
-      && fixedAgent !== defaultAgentProfile()) {
+      && snapshot.agent.trim().length > 0
+      && snapshot.agent !== defaultAgentProfile(currentIdentity)) {
       const stamp = new Date(now).toISOString().replace(/[:.]/g, "-");
       extraChanges.push({
         relativePath: `agents/echoink/history/AGENT-${stamp}.md`,
-        content: fixedAgent.endsWith("\n") ? fixedAgent : `${fixedAgent}\n`
+        content: snapshot.agent.endsWith("\n") ? snapshot.agent : `${snapshot.agent}\n`
       });
     }
 
-    // 重置或首次选择：把当前有效 Memory 重新标记为待做梦来源（同一事务），
-    // lastProcessedMemoryRevision 归 0、backfillCursor 置 null，运行时间保留。
-    const requeueDream = Boolean(options?.reset) || selection.isInitialTemplateSelection;
-    let resultRevision: number;
-    if (requeueDream) {
-      const inspected = await this.repository.readUserControlState();
-      const currentIds = inspected.records
-        .filter((record) => record.status === "current")
-        .map((record) => record.id);
-      const dreamState = await this.dreamStateStore.read();
-      let nextDream: DreamState = Object.freeze({
-        ...dreamState,
-        revision: dreamState.revision + 1,
-        lastProcessedMemoryRevision: 0,
-        backfillCursor: null,
-        updatedAt: now
-      });
-      nextDream = enqueuePendingMemoryIds(nextDream, currentIds, now);
-      extraChanges.push({
-        relativePath: DREAM_STATE_RELATIVE_PATH,
-        content: cognitiveJsonText(nextDream)
-      });
-      const result = await this.repository.applyCognitiveUpdate({
-        agentContent,
-        secondaryRecords: await this.secondaryStore.loadAll(),
-        extraChanges,
-        expectedAgentIdentityRevision: currentIdentity.revision,
-        detail: options?.reset
-          ? `personality-reset-template:${template.id}`
-          : `personality-initial-template:${template.id}`
-      });
-      resultRevision = result.revision;
-      this.dreamStateStore.updateCache(nextDream);
-    } else {
-      const result = await this.repository.applyCognitiveUpdate({
-        agentContent,
-        secondaryRecords: await this.secondaryStore.loadAll(),
-        extraChanges,
-        expectedAgentIdentityRevision: currentIdentity.revision,
-        detail: `personality-template:${template.id}`
-      });
-      resultRevision = result.revision;
-    }
-    // 事务成功后才更新身份缓存；失败时保持旧身份与旧 AGENT.md。
-    if (nextIdentity !== currentIdentity) {
-      this.agentIdentityStore.updateCache(nextIdentity);
-    }
-    this.personalityTemplateId = next.templateId;
+    const result = await this.repository.applyCognitiveUpdate({
+      agentContent,
+      secondaryRecords: await this.secondaryStore.loadAll(),
+      extraChanges,
+      expectedMemoryRevision: snapshot.revision,
+      expectedAgentIdentityRevision: currentIdentity.revision,
+      expectedAgentProjectionHash: agentProjectionHash(snapshot.agent),
+      detail: selection.isInitialTemplateSelection
+        ? `agent-self-initial-template:${template.id}`
+        : `agent-self-template:${template.id}`
+    });
+
+    if (nextIdentity !== currentIdentity) this.agentIdentityStore.updateCache(nextIdentity);
+    this.agentSelfMetadataStore.updateCache(nextMetadata);
+    this.agentTemplateId = nextMetadata.templateId;
     return Object.freeze({
-      revision: resultRevision,
-      state: next,
+      revision: result.revision,
+      state: nextState,
+      metadata: nextMetadata,
       agent: agentContent,
       identity: nextIdentity
     });
   }
 
-  // -------------------------------------------------------------------------
-  // Agent identity (名称 + 头像；只能由用户在设置中修改，全程无 Provider)
-  // -------------------------------------------------------------------------
-
-  /** 读取正式身份状态（文件不存在时回退默认 EchoInk/default）。 */
   async readAgentIdentity(): Promise<AgentIdentityState> {
     return await this.agentIdentityStore.read();
   }
 
-  /** 同步快照（create 时已预热缓存），供 UI 即时读取。 */
   currentAgentIdentity(): AgentIdentityState {
     return this.agentIdentityStore.peek();
   }
 
-  /**
-   * 用户修改名称 / 头像：一个 applyCognitiveUpdate 事务保存身份 JSON 与
-   * 必要的 AGENT.md。内容没有变化时不增加 revision、不创建事务；
-   * 头像变化不影响 trait、learnedRequirements、processedSources、Memory
-   * 或 DreamState；全程不调用 Provider。
-   */
   async updateAgentIdentity(
     draft: Readonly<{
       displayName: string;
@@ -546,17 +548,14 @@ export class CognitiveSystem {
       ?? Object.freeze({ kind: "default" as const });
 
     const current = await this.agentIdentityStore.read();
-    const personality = await this.readPersonalityState();
-    const fixedBefore = await this.repository.readUserControlState();
+    const snapshot = await this.readAgentSelfState();
     const nameChanged = displayName !== current.displayName;
-    const avatarChanged = avatar.kind !== current.avatar.kind
-      || JSON.stringify(avatar) !== JSON.stringify(current.avatar);
+    const avatarChanged = JSON.stringify(avatar) !== JSON.stringify(current.avatar);
     if (!nameChanged && !avatarChanged) {
-      // 内容没有变化：不增加 identity revision，也不创建事务。
       return Object.freeze({
-        revision: fixedBefore.revision,
+        revision: snapshot.revision,
         identity: current,
-        agent: fixedBefore.agent
+        agent: snapshot.agent
       });
     }
 
@@ -568,9 +567,12 @@ export class CognitiveSystem {
       avatar,
       updatedAt: now
     });
-    // 名称变化才需要重写 AGENT.md；头像绝不进入模型上下文。
     const agentContent = nameChanged
-      ? renderAgentMarkdown(personality, nextIdentity)
+      ? renderAgentMarkdown({
+          identity: nextIdentity,
+          styleName: templateStyleName(snapshot.metadata.templateId),
+          self: snapshot.state
+        })
       : undefined;
     const result = await this.repository.applyCognitiveUpdate({
       ...(agentContent ? { agentContent } : {}),
@@ -579,32 +581,27 @@ export class CognitiveSystem {
         relativePath: AGENT_IDENTITY_RELATIVE_PATH,
         content: agentIdentityStateJson(nextIdentity)
       }],
-      // Round 6 修复四（身份 CAS）：用决策时读到的 revision 防并发覆盖。
+      expectedMemoryRevision: snapshot.revision,
       expectedAgentIdentityRevision: current.revision,
+      expectedAgentProjectionHash: agentProjectionHash(snapshot.agent),
       detail: `agent-identity:${nameChanged ? "rename" : "avatar"}`
     });
     this.agentIdentityStore.updateCache(nextIdentity);
     return Object.freeze({
       revision: result.revision,
       identity: nextIdentity,
-      agent: agentContent ?? fixedBefore.agent
+      agent: agentContent ?? snapshot.agent
     });
   }
-
-  // -------------------------------------------------------------------------
-  // Secondary facts: user editing / deletion (复盘 → 记忆修正)
-  // -------------------------------------------------------------------------
 
   async listSecondaryForParent(parentId: string): Promise<readonly SecondaryMemoryRecord[]> {
     return await this.secondaryStore.listForParent(parentId);
   }
 
-  /** All secondary facts (current + disabled), cached by the store. */
   async listAllSecondary(): Promise<readonly SecondaryMemoryRecord[]> {
     return await this.secondaryStore.loadAll();
   }
 
-  /** User edits a secondary fact locally (no Provider). */
   async updateSecondaryFact(parentId: string, secondaryId: string, edits: Readonly<{
     title?: string;
     content?: string;
@@ -626,7 +623,6 @@ export class CognitiveSystem {
     return Object.freeze({ revision: result.revision, record: result.record });
   }
 
-  /** User deletes a secondary fact locally (file removed in the transaction). */
   async deleteSecondaryFact(
     parentId: string,
     secondaryId: string,
@@ -641,10 +637,6 @@ export class CognitiveSystem {
     return Object.freeze({ revision: result.revision });
   }
 
-  // -------------------------------------------------------------------------
-  // Dreaming
-  // -------------------------------------------------------------------------
-
   startDreamScheduler(): void {
     this.scheduler.start();
   }
@@ -658,19 +650,14 @@ export class CognitiveSystem {
     await this.repository.dispose();
   }
 
-  /** 串行合并连续/并发入队，防止互相覆盖。 */
   private enqueueLane: Promise<void> = Promise.resolve();
 
-  /** 等待异步入队落定（测试与 UI 的同步点）。 */
   async settleDreamEnqueue(): Promise<void> {
     await this.enqueueLane;
   }
 
   private async enqueueForDream(memoryIds: readonly string[]): Promise<void> {
     const run = async (): Promise<void> => {
-      // 入队前必须读取真实持久状态：插件重启后 peek() 可能仍是默认值，
-      // 直接写会用空队列覆盖已有 pendingMemoryIds/lastRunAt/lastSuccessAt。
-      // enqueuePendingMemoryIds 只追加 pending，不动时间戳和 backfillCursor。
       const state = await this.dreamStateStore.read();
       const next = enqueuePendingMemoryIds(state, memoryIds, this.now());
       if (next !== state) await this.dreamStateStore.write(next);
@@ -680,10 +667,6 @@ export class CognitiveSystem {
     return lane;
   }
 
-  /**
-   * Supersede/forget/close disable the parent's secondary facts; restore
-   * re-enables them. Runs inside the parent write's transaction.
-   */
   private async handleSecondaryLifecycle(
     operation: "supersede" | "forget" | "restore" | "close",
     parentId: string
@@ -699,10 +682,7 @@ export class CognitiveSystem {
       if (record.parentId !== parentId) continue;
       if (operation === "restore") {
         if (record.status !== "disabled") continue;
-        // 因低 confidence 自动停用或被重新做梦替换的事实不随 restore 复活。
-        if (record.disabledReason !== null && record.disabledReason !== "parent_lifecycle") {
-          continue;
-        }
+        if (record.disabledReason !== null && record.disabledReason !== "parent_lifecycle") continue;
         const updated: SecondaryMemoryRecord = Object.freeze({
           ...record,
           status: "current",
@@ -717,7 +697,6 @@ export class CognitiveSystem {
         const updated: SecondaryMemoryRecord = Object.freeze({
           ...record,
           status: "disabled",
-          // restore 只能重新启用 parent forget/close 连带停用的事实。
           disabledReason: "parent_lifecycle",
           revision: record.revision + 1,
           updatedAt: now
@@ -730,26 +709,15 @@ export class CognitiveSystem {
   }
 }
 
-
-/** Empty personality shape for vaults that never selected a template. */
-function emptyPersonalityShape(now: number): PersonalityState {
-  return emptyPersonalityState(now);
-}
-
-/**
- * Round 6 修复二：底层与设置页共用的「首次选择模板」判定，避免两处语义漂移。
- * - 首次选择只由 templateId === null 判断（人格 revision 不参与）；
- * - 只有身份 revision === 0 时才必须完成命名；身份已存在则原样保留。
- */
 export function initialTemplateSelectionStatus(
-  personality: Readonly<{ templateId: string | null }>,
+  metadata: Readonly<{ templateId: string | null }>,
   identity: Readonly<{ revision: number }>
 ): Readonly<{
   isInitialTemplateSelection: boolean;
   needsInitialIdentity: boolean;
   requiresFirstNaming: boolean;
 }> {
-  const isInitialTemplateSelection = personality.templateId === null;
+  const isInitialTemplateSelection = metadata.templateId === null;
   const needsInitialIdentity = isInitialTemplateSelection && identity.revision === 0;
   return Object.freeze({
     isInitialTemplateSelection,
@@ -758,161 +726,411 @@ export function initialTemplateSelectionStatus(
   });
 }
 
-// ---------------------------------------------------------------------------
-// Personality v2 per-dimension recovery (local transaction, NO Provider)
-// ---------------------------------------------------------------------------
-
-export async function recoverPersonalityDimensions(input: Readonly<{
+export async function migrateLegacyPersonalityToAgentSelf(input: Readonly<{
   repository: PersonalMemoryRepository;
-  personalityStore: PersonalityStateStore;
-  dreamStateStore: DreamStateStore;
-  agentIdentityStore: AgentIdentityStateStore;
+  metadataStore: AgentSelfMetadataStore;
   secondaryStore: SecondaryMemoryStore;
-  recovery: RecoverablePersonalityState;
+  agentIdentityStore: AgentIdentityStateStore;
   now: number;
-}>): Promise<void> {
-  const template = getPersonalityTemplate(input.recovery.state.templateId);
-  const explicit = { ...input.recovery.state.explicit };
-  const observed = { ...input.recovery.state.observed };
-  for (const damaged of input.recovery.damaged) {
-    observed[damaged.dimension] = null;
-    explicit[damaged.dimension] = template
-      ? Object.freeze({
-          id: newCognitiveId("trait"),
-          dimension: damaged.dimension,
-          basis: "explicit" as const,
-          status: "current" as const,
-          score: template.scores[damaged.dimension],
-          sourceMemoryIds: Object.freeze([]),
-          evidence: `损坏维度局部恢复：模板「${template.labelZh}」基线`,
-          createdAt: input.now,
-          updatedAt: input.now,
-          revision: input.recovery.state.revision + 1
-        })
-      : null;
+}>): Promise<Readonly<{ migrated: boolean }>> {
+  const fixed = await input.repository.readUserControlState();
+  const personality = await inspectLegacyPersonalityFile(input.repository.layout.personalityState);
+  if (personality.kind === "invalid") {
+    throw new Error(`legacy_personality_invalid:${personality.reason}`);
   }
-  const next: PersonalityState = Object.freeze({
-    ...input.recovery.state,
-    revision: input.recovery.state.revision + 1,
-    explicit: Object.freeze(explicit),
-    observed: Object.freeze(observed),
-    updatedAt: input.now
-  });
-  const dreamState = await input.dreamStateStore.read();
-  const nextDream = enqueuePendingMemoryIds(
-    Object.freeze({
-      ...dreamState,
-      revision: dreamState.revision + 1,
-      updatedAt: input.now
-    }),
-    input.recovery.requeueMemoryIds,
+
+  const personalityTemplate = personality.kind === "valid" && personality.state.templateId
+    ? getAgentTemplate(personality.state.templateId)
+    : null;
+  if (personality.kind === "valid" && personality.state.templateId && !personalityTemplate) {
+    throw new Error("legacy_personality_template_invalid");
+  }
+
+  const currentSelf = parseAgentCurrentSelf(fixed.agent);
+  if (currentSelf.kind === "ok") {
+    const renderedTemplateId = inspectRenderedAgentTemplateId(fixed.agent);
+    if (renderedTemplateId.kind === "invalid") {
+      throw new Error(`agent_self_metadata_recovery_blocked:${renderedTemplateId.reason}`);
+    }
+    if (renderedTemplateId.templateId && personalityTemplate
+      && renderedTemplateId.templateId !== personalityTemplate.id) {
+      throw new Error("legacy_agent_template_conflict");
+    }
+    const legacyImport = importLegacyRequirements(
+      currentSelf.state.currentLearnedHabits,
+      personality.kind === "valid" ? personality.state.learnedRequirements : [],
+      fixed.records,
+      input.now
+    );
+    const habits = legacyImport.habits;
+    const agentContent = habits.length === currentSelf.state.currentLearnedHabits.length
+      ? undefined
+      : replaceAgentCurrentSelf(fixed.agent, {
+          ...currentSelf.state,
+          currentLearnedHabits: habits
+        });
+    const identity = await input.agentIdentityStore.read();
+    const metadata: AgentSelfMetadata = Object.freeze({
+      ...emptyAgentSelfMetadata(input.now),
+      revision: 1,
+      templateId: personalityTemplate?.id ?? renderedTemplateId.templateId,
+      legacyPersonalityImported: personality.kind === "valid",
+      derivations: legacyImport.derivations
+    });
+    const extraChanges: Array<{ relativePath: string; content: string }> = [];
+    if (agentContent !== undefined) {
+      extraChanges.push({
+        relativePath: legacyAgentBackupRelativePath(fixed.agent),
+        content: fixed.agent
+      });
+    }
+    extraChanges.push({
+      relativePath: AGENT_SELF_METADATA_RELATIVE_PATH,
+      content: agentSelfMetadataJson(metadata)
+    });
+    try {
+      await input.repository.applyCognitiveUpdate({
+        ...(agentContent === undefined ? {} : { agentContent }),
+        secondaryRecords: await input.secondaryStore.loadAll(),
+        extraChanges,
+        expectedMemoryRevision: fixed.revision,
+        expectedAgentIdentityRevision: identity.revision,
+        expectedAgentProjectionHash: agentProjectionHash(fixed.agent),
+        detail: personality.kind === "valid"
+          ? "agent-self-current-metadata-with-legacy-import"
+          : "agent-self-current-metadata-recovery"
+      });
+    } catch (error) {
+      const reason = error instanceof Error && /identity_revision_conflict/u.test(error.message)
+        ? "identity_revision_conflict"
+        : "transaction_failed";
+      throw new Error(`agent_self_migration_blocked:${reason}`);
+    }
+    input.metadataStore.updateCache(metadata);
+    return Object.freeze({ migrated: true });
+  }
+
+  const legacyAgent = inspectLegacyAgentMarkdown(fixed.agent);
+  if (legacyAgent.kind === "invalid") {
+    throw new Error(`legacy_agent_invalid:${legacyAgent.reason}`);
+  }
+  if (personality.kind === "valid" && legacyAgent.state.format !== "static_default") {
+    const expectedFormat = personality.state.schema === "echoink.personality.v1"
+      ? "personality_projection_v1"
+      : "personality_projection_v2";
+    if (legacyAgent.state.format !== expectedFormat) {
+      throw new Error("legacy_agent_personality_schema_mismatch");
+    }
+  }
+  if (legacyAgent.state.templateId && personalityTemplate
+    && legacyAgent.state.templateId !== personalityTemplate.id) {
+    throw new Error("legacy_agent_template_conflict");
+  }
+
+  const template = personalityTemplate
+    ?? getAgentTemplate(legacyAgent.state.templateId);
+  const seedTemplate = template ?? getAgentTemplate("advisor")!;
+  const legacyImport = importLegacyProjectionRequirements(
+    legacyAgent.state.habits,
+    personality.kind === "valid" ? personality.state.learnedRequirements : [],
+    fixed.records,
     input.now
   );
+  const habits = legacyImport.habits;
+  const self = agentSelfFromTemplate(seedTemplate, habits);
   const identity = await input.agentIdentityStore.read();
-  const agentContent = next.templateId ? renderAgentMarkdown(next, identity) : undefined;
-  const stamp = new Date(input.now).toISOString().replace(/[:.]/g, "-");
-  await input.repository.applyCognitiveUpdate({
-    ...(agentContent ? { agentContent } : {}),
-    secondaryRecords: await input.secondaryStore.loadAll(),
-    extraChanges: [
-      ...input.recovery.damaged.map((damaged) => ({
-        relativePath: `agents/echoink/history/personality-dimension-${damaged.dimension}-${stamp}.json`,
-        content: cognitiveJsonText(damaged.raw)
-      })),
-      {
-        relativePath: PERSONALITY_STATE_RELATIVE_PATH,
-        content: personalityStateJson(next)
-      },
-      {
-        relativePath: DREAM_STATE_RELATIVE_PATH,
-        content: cognitiveJsonText(nextDream)
-      }
-    ],
-    expectedAgentIdentityRevision: identity.revision,
-    detail: `personality-dimension-recovery:${input.recovery.damaged.map((item) => item.dimension).join(",")}`
+  const agentContent = renderAgentMarkdown({
+    identity,
+    styleName: template?.labelZh ?? "尚未选择",
+    self
   });
-  input.dreamStateStore.updateCache(nextDream);
+  const metadata: AgentSelfMetadata = Object.freeze({
+    ...emptyAgentSelfMetadata(input.now),
+    revision: 1,
+    templateId: template?.id ?? null,
+    legacyPersonalityImported: personality.kind === "valid",
+    derivations: legacyImport.derivations
+  });
+
+  try {
+    await input.repository.applyCognitiveUpdate({
+      agentContent,
+      secondaryRecords: await input.secondaryStore.loadAll(),
+      extraChanges: [
+        {
+          relativePath: legacyAgentBackupRelativePath(fixed.agent),
+          content: fixed.agent
+        },
+        {
+          relativePath: AGENT_SELF_METADATA_RELATIVE_PATH,
+          content: agentSelfMetadataJson(metadata)
+        }
+      ],
+      expectedMemoryRevision: fixed.revision,
+      expectedAgentIdentityRevision: identity.revision,
+      expectedAgentProjectionHash: agentProjectionHash(fixed.agent),
+      detail: personality.kind === "valid"
+        ? "agent-self-legacy-personality-import"
+        : "agent-self-legacy-agent-import"
+    });
+  } catch (error) {
+    const reason = error instanceof Error && /identity_revision_conflict/u.test(error.message)
+      ? "identity_revision_conflict"
+      : "transaction_failed";
+    throw new Error(`agent_self_migration_blocked:${reason}`);
+  }
+
+  input.metadataStore.updateCache(metadata);
+  return Object.freeze({ migrated: true });
 }
 
-// ---------------------------------------------------------------------------
-// Personality v1 → v2 migration (one local transaction, NO Provider)
-//
-// 旧六维（tempo/energy/…）与新六维语义不兼容，不做机械分数映射：
-// - templateId 保留，explicit 用同模板新六维基线重建；
-// - learnedRequirements 保留；observed/history/candidates/processedSources 置空；
-// - 完整旧 v1 JSON 备份到 agents/echoink/history/personality-state-v1-<ts>.json；
-// - dream-state.lastProcessedMemoryRevision 归 0、backfillCursor 置 null，
-//   当前有效一级 Memory 重新进入 pending 队列（每轮仍最多处理 10 条）；
-// - 已选择模板时用当前身份名称重写 AGENT.md；未选择模板不覆盖自定义 AGENT.md；
-// - 身份的 revision、名称和头像不受迁移影响。
-// ---------------------------------------------------------------------------
-
-export interface PersonalityMigrationInput {
-  readonly repository: PersonalMemoryRepository;
-  readonly personalityStore: PersonalityStateStore;
-  readonly dreamStateStore: DreamStateStore;
-  readonly agentIdentityStore: AgentIdentityStateStore;
-  readonly secondaryStore: SecondaryMemoryStore;
-  readonly now: number;
+function inspectRenderedAgentTemplateId(markdown: string):
+  | Readonly<{ kind: "valid"; templateId: AgentTemplateId | null }>
+  | Readonly<{ kind: "invalid"; reason: string }> {
+  const matches = [...markdown.matchAll(/^我的初始风格来自「(.+?)」。$/gmu)];
+  if (matches.length !== 1) return Object.freeze({ kind: "invalid", reason: "style_source_count" });
+  const label = matches[0][1];
+  if (label === "尚未选择") return Object.freeze({ kind: "valid", templateId: null });
+  const template = AGENT_TEMPLATES.find((candidate) => candidate.labelZh === label);
+  return template
+    ? Object.freeze({ kind: "valid", templateId: template.id })
+    : Object.freeze({ kind: "invalid", reason: "style_source_unknown" });
 }
 
-export async function migratePersonalityV1ToV2(
-  input: PersonalityMigrationInput
-): Promise<Readonly<{ migrated: boolean; legacy?: LegacyPersonalityStateV1 }>> {
-  const { repository, personalityStore, dreamStateStore, agentIdentityStore, secondaryStore } = input;
-  const raw = await cognitiveReadJsonOrNull<Record<string, unknown>>(personalityStore.filePath);
-  if (!raw) return Object.freeze({ migrated: false });
-  if (detectPersonalityStateSchema(raw) !== "v1") return Object.freeze({ migrated: false });
-  const legacy = parseLegacyPersonalityStateV1(raw);
-  if (!legacy) return Object.freeze({ migrated: false });
-
-  const next = buildPersonalityV2FromLegacy(legacy, { now: input.now });
-
-  // 身份 revision 供 CAS 使用（Round 6 修复四）；并发写路径抢先落盘更高
-  // revision 的身份时，迁移事务会被 Repository 以 identity_revision_conflict
-  // 干净拒绝，v1 原样保留，绝不静默覆盖。
-  const identity = await agentIdentityStore.read();
-  // 模板尚未选择时，不得因迁移覆盖现有自定义 AGENT.md。
-  const agentContent = next.templateId ? renderAgentMarkdown(next, identity) : undefined;
-
-  const inspected = await repository.readUserControlState();
-  const currentIds = inspected.records
+function importLegacyRequirements(
+  initial: readonly AgentSelfHabit[],
+  requirements: readonly Readonly<{
+    text: string;
+    basis: "explicit_memory" | "observed_memory";
+    status: "current" | "superseded";
+    sourceMemoryIds: readonly string[];
+  }>[],
+  records: readonly PersonalMemoryRecord[],
+  now: number
+): Readonly<{
+  habits: readonly AgentSelfHabit[];
+  derivations: readonly AgentSelfDerivation[];
+}> {
+  const byKey = new Map(initial.map((habit) => [habit.key, habit]));
+  const seenRequirementTexts = new Map<string, string>();
+  const currentRecords = new Map(records
     .filter((record) => record.status === "current")
-    .map((record) => record.id);
-  const dreamState = await dreamStateStore.read();
-  let nextDream: DreamState = Object.freeze({
-    ...dreamState,
-    revision: dreamState.revision + 1,
-    lastProcessedMemoryRevision: 0,
-    backfillCursor: null,
-    updatedAt: input.now
-    // lastRunAt / lastSuccessAt 保留
-  });
-  nextDream = enqueuePendingMemoryIds(nextDream, currentIds, input.now);
+    .map((record) => [record.id, record]));
+  const derivations: AgentSelfDerivation[] = [];
+  for (const requirement of requirements) {
+    if (requirement.status !== "current") continue;
+    let key: string;
+    try {
+      key = stableSelfKey(requirement.text);
+    } catch {
+      throw new Error("legacy_personality_requirement_invalid");
+    }
+    const seenText = seenRequirementTexts.get(key);
+    if (seenText !== undefined && seenText !== requirement.text) {
+      throw new Error("legacy_personality_requirement_conflict");
+    }
+    const existing = byKey.get(key);
+    if (existing && existing.text !== requirement.text) {
+      throw new Error("legacy_personality_requirement_conflict");
+    }
+    if (seenText !== undefined || existing) continue;
+    seenRequirementTexts.set(key, requirement.text);
 
-  const stamp = new Date(input.now).toISOString().replace(/[:.]/g, "-");
-  const result = await repository.applyCognitiveUpdate({
-    ...(agentContent ? { agentContent } : {}),
-    secondaryRecords: await secondaryStore.loadAll(),
-    extraChanges: [
-      {
-        relativePath: `agents/echoink/history/personality-state-v1-${stamp}.json`,
-        content: cognitiveJsonText(legacy.raw)
-      },
-      {
-        relativePath: PERSONALITY_STATE_RELATIVE_PATH,
-        content: personalityStateJson(next)
-      },
-      {
-        relativePath: DREAM_STATE_RELATIVE_PATH,
-        content: cognitiveJsonText(nextDream)
-      }
-    ],
-    expectedAgentIdentityRevision: identity.revision,
-    detail: "personality-v1-v2-migration"
+    const sources = legacyRequirementSources(requirement, currentRecords);
+    const supported = requirement.basis === "explicit_memory"
+      ? sources.length >= 1
+      : new Set(sources.map((source) => source.contextId)).size >= 2;
+    if (!supported) continue;
+
+    byKey.set(key, Object.freeze({ key, text: requirement.text }));
+    derivations.push(Object.freeze({
+      target: `habit:${key}`,
+      operation: "habit_add",
+      basis: requirement.basis === "explicit_memory" ? "explicit" : "inferred",
+      sources,
+      previousValue: null,
+      currentValue: requirement.text,
+      updatedAt: now
+    }));
+  }
+  return Object.freeze({
+    habits: Object.freeze([...byKey.values()]),
+    derivations: Object.freeze(derivations)
   });
-  void result;
-  // 事务成功后才更新缓存；失败时原 v1 与旧 AGENT.md 全部保留。
-  dreamStateStore.updateCache(nextDream);
-  return Object.freeze({ migrated: true, legacy });
+}
+
+function importLegacyProjectionRequirements(
+  initial: readonly AgentSelfHabit[],
+  requirements: readonly Readonly<{
+    text: string;
+    basis: "explicit_memory" | "observed_memory";
+    status: "current" | "superseded";
+    sourceMemoryIds: readonly string[];
+  }>[],
+  records: readonly PersonalMemoryRecord[],
+  now: number
+): Readonly<{
+  habits: readonly AgentSelfHabit[];
+  derivations: readonly AgentSelfDerivation[];
+}> {
+  type RequirementGroup = {
+    key: string;
+    text: string;
+    explicitSourceMemoryIds: string[];
+    observedSourceMemoryIds: string[];
+  };
+
+  const matchedRequirementTexts = new Map<string, string>();
+  const groups = new Map<string, RequirementGroup>();
+  for (const requirement of requirements) {
+    let key: string;
+    try {
+      key = stableSelfKey(requirement.text);
+    } catch {
+      throw new Error("legacy_personality_requirement_invalid");
+    }
+    const matchedText = matchedRequirementTexts.get(key);
+    if (matchedText !== undefined && matchedText !== requirement.text) {
+      throw new Error("legacy_personality_requirement_conflict");
+    }
+    matchedRequirementTexts.set(key, requirement.text);
+    if (requirement.status !== "current") continue;
+    const existing = groups.get(key);
+    if (existing && existing.text !== requirement.text) {
+      throw new Error("legacy_personality_requirement_conflict");
+    }
+    const group = existing ?? {
+      key,
+      text: requirement.text,
+      explicitSourceMemoryIds: [],
+      observedSourceMemoryIds: []
+    };
+    const target = requirement.basis === "explicit_memory"
+      ? group.explicitSourceMemoryIds
+      : group.observedSourceMemoryIds;
+    target.push(...requirement.sourceMemoryIds);
+    if (!existing) groups.set(key, group);
+  }
+
+  const currentRecords = new Map(records
+    .filter((record) => record.status === "current")
+    .map((record) => [record.id, record]));
+  const habits: AgentSelfHabit[] = [];
+  const derivations: AgentSelfDerivation[] = [];
+  const processedKeys = new Set<string>();
+
+  const importGroup = (
+    group: RequirementGroup,
+    initialHabit: AgentSelfHabit | null
+  ): void => {
+    if (initialHabit && initialHabit.text !== group.text) {
+      throw new Error("legacy_personality_requirement_conflict");
+    }
+    const explicitSources = legacyRequirementSources({
+      basis: "explicit_memory",
+      sourceMemoryIds: group.explicitSourceMemoryIds
+    }, currentRecords);
+    const observedSources = explicitSources.length > 0
+      ? []
+      : legacyRequirementSources({
+          basis: "observed_memory",
+          sourceMemoryIds: group.observedSourceMemoryIds
+        }, currentRecords);
+    const basis = explicitSources.length > 0
+      ? "explicit"
+      : observedSources.length >= 2
+        ? "inferred"
+        : null;
+    if (!basis) return;
+    const sources = basis === "explicit" ? explicitSources : observedSources;
+    habits.push(initialHabit ?? Object.freeze({ key: group.key, text: group.text }));
+    derivations.push(Object.freeze({
+      target: `habit:${group.key}`,
+      operation: "habit_add",
+      basis,
+      sources,
+      previousValue: null,
+      currentValue: group.text,
+      updatedAt: now
+    }));
+  };
+
+  for (const habit of initial) {
+    const group = groups.get(habit.key);
+    if (!group) {
+      const matchedText = matchedRequirementTexts.get(habit.key);
+      if (matchedText !== undefined) {
+        if (matchedText !== habit.text) {
+          throw new Error("legacy_personality_requirement_conflict");
+        }
+        continue;
+      }
+      habits.push(habit);
+      continue;
+    }
+    processedKeys.add(habit.key);
+    importGroup(group, habit);
+  }
+  for (const group of groups.values()) {
+    if (processedKeys.has(group.key)) continue;
+    importGroup(group, null);
+  }
+
+  return Object.freeze({
+    habits: Object.freeze(habits),
+    derivations: Object.freeze(derivations)
+  });
+}
+
+function legacyRequirementSources(
+  requirement: Readonly<{
+    basis: "explicit_memory" | "observed_memory";
+    sourceMemoryIds: readonly string[];
+  }>,
+  currentRecords: ReadonlyMap<string, PersonalMemoryRecord>
+): readonly AgentSelfDerivationSource[] {
+  const sources: AgentSelfDerivationSource[] = [];
+  const seenMemoryIds = new Set<string>();
+  const seenContexts = new Set<string>();
+  for (const memoryId of requirement.sourceMemoryIds) {
+    if (seenMemoryIds.has(memoryId)) continue;
+    seenMemoryIds.add(memoryId);
+    const record = currentRecords.get(memoryId);
+    if (!record) continue;
+    const group = memorySourceGroup(record.source, record.id);
+    if (requirement.basis === "observed_memory") {
+      if (!group.independentContext || seenContexts.has(group.contextId)) continue;
+      seenContexts.add(group.contextId);
+    }
+    sources.push(Object.freeze({
+      kind: "memory",
+      id: record.id,
+      revision: record.revision,
+      contextId: group.contextId,
+      evidence: legacyRequirementEvidence(record.content)
+    }));
+    if (sources.length >= 32) break;
+  }
+  return Object.freeze(sources);
+}
+
+function legacyRequirementEvidence(content: string): string {
+  return content.trim().replace(/\s+/gu, " ").slice(0, 1_000).trim();
+}
+
+function templateStyleName(templateId: AgentTemplateId | null): string {
+  return getAgentTemplate(templateId)?.labelZh ?? "尚未选择";
+}
+
+function templatePreferredSkillNames(template: AgentTemplate | null): readonly string[] {
+  if (!template) return Object.freeze([]);
+  return Object.freeze(template.preferredSkillIds.map((skillId) => {
+    const skill = BUILTIN_SKILLS.find((candidate) => candidate.id === skillId);
+    if (!skill) throw new Error(`agent_profile_unknown_builtin_skill:${skillId}`);
+    return skill.title;
+  }));
+}
+
+function agentProjectionHash(markdown: string): string {
+  return createHash("sha256").update(markdown, "utf8").digest("hex");
 }

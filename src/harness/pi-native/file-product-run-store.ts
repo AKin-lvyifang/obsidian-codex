@@ -977,6 +977,7 @@ function requireKnowledgeObservation(value: unknown): PiKnowledgeObservation {
   ] as const;
   if (
     ![
+      "chat",
       "ask",
       "maintain",
       "maintain_preview",

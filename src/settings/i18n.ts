@@ -256,6 +256,7 @@ const ZH_CN = {
     noDesc: "无描述",
     noSkills: "没有读取到 Skills。",
     noSkillMatches: "没有匹配的 Skill。",
+    preset: "预设",
     summary: (label: string, enabled: number, total: number, visible: number, searching: boolean) => searching ? `${label}：已启用 ${enabled} / ${total} · 显示 ${visible}` : `${label}：已启用 ${enabled} / ${total}`,
     toggleAria: (name: string) => `${name} 开关`,
     codexDisconnected: "资源尚未连接"
@@ -510,6 +511,7 @@ const EN: SettingsCopy = {
     noDesc: "No description",
     noSkills: "No Skills loaded.",
     noSkillMatches: "No matching Skills.",
+    preset: "Preset",
     summary: (label, enabled, total, visible, searching) => searching ? `${label}: ${enabled} / ${total} enabled · Showing ${visible}` : `${label}: ${enabled} / ${total} enabled`,
     toggleAria: (name) => `${name} toggle`,
     codexDisconnected: "Resources disconnected"

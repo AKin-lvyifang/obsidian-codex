@@ -82,9 +82,10 @@ limitations under the License.
 ## AnimateIcons
 
 EchoInk includes dependency-free native SVG and CSS adaptations of the
-AnimateIcons Lucide `Upload`, `Mic`, `Send Horizontal`, and `Circle Stop`
-icons. The adaptation replaces React and Motion with the existing Obsidian DOM
-and EchoInk motion tokens, including reduced-motion behavior.
+AnimateIcons Lucide `Upload`, `Mic`, `Send Horizontal`, `Circle Stop`, `Users`,
+and `User Round Pen` icons. The adaptation replaces React and Motion with the
+existing Obsidian DOM and EchoInk motion tokens, including reduced-motion
+behavior.
 
 Adapted upstream sources at commit `e19861bd8e1e214105221040aefb27644fd1362f`:
 
@@ -92,6 +93,8 @@ Adapted upstream sources at commit `e19861bd8e1e214105221040aefb27644fd1362f`:
 - [Mic](https://github.com/Avijit07x/animateicons/blob/e19861bd8e1e214105221040aefb27644fd1362f/icons/lucide/mic-icon.tsx)
 - [Send Horizontal](https://github.com/Avijit07x/animateicons/blob/e19861bd8e1e214105221040aefb27644fd1362f/icons/lucide/send-horizontal-icon.tsx)
 - [Circle Stop](https://github.com/Avijit07x/animateicons/blob/e19861bd8e1e214105221040aefb27644fd1362f/icons/lucide/circle-stop-icon.tsx)
+- [Users](https://github.com/Avijit07x/animateicons/blob/e19861bd8e1e214105221040aefb27644fd1362f/icons/lucide/users-icon.tsx)
+- [User Round Pen](https://github.com/Avijit07x/animateicons/blob/e19861bd8e1e214105221040aefb27644fd1362f/icons/lucide/user-round-pen-icon.tsx)
 
 MIT License
 

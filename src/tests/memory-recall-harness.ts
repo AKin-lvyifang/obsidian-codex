@@ -25,16 +25,11 @@ import {
   type AgentIdentityState
 } from "../harness/memory/agent-identity-state";
 import {
+  agentSelfFromTemplate,
   renderAgentMarkdown,
   renderBaseAgentMarkdown
-} from "../harness/memory/cognitive-projection";
-import {
-  applyTemplateToState,
-  emptyPersonalityState,
-  personalityStateJson,
-  type PersonalityState
-} from "../harness/memory/personality-state";
-import { renderTraitLine } from "../harness/memory/personality-templates";
+} from "../harness/memory/agent-self";
+import { getAgentTemplate } from "../harness/memory/agent-templates";
 import {
   PiPersonalMemoryToolSecurity,
   createPiPersonalMemoryToolDefinitions
@@ -241,48 +236,11 @@ async function scenarioNoMemoryIdentityOnlyAndWarmSnapshotReuse(): Promise<void>
     assert.equal(recordScans, afterCold.recordScans,
       "已知文件事件只刷新该文件，不扫描一级 Memory 目录");
 
-    const templated = applyTemplateToState(emptyPersonalityState(0), {
-      templateId: "advisor",
-      now: fixture.now(),
-      reset: false,
-      idFactory: (() => {
-        let id = 0;
-        return () => `no_memory_template_${++id}`;
-      })()
-    });
-    const personalized: PersonalityState = Object.freeze({
-      ...templated,
-      revision: templated.revision + 1,
-      observed: Object.freeze({
-        ...templated.observed,
-        sharpness: Object.freeze({
-          id: "no_memory_observed_sharpness",
-          dimension: "sharpness",
-          basis: "observed",
-          status: "current",
-          score: 0.95,
-          sourceMemoryIds: Object.freeze([created.record!.id]),
-          evidence: "长期协作观察出的表达强度",
-          createdAt: fixture.now(),
-          updatedAt: fixture.now(),
-          revision: templated.revision + 1
-        })
-      }),
-      learnedRequirements: Object.freeze([Object.freeze({
-        id: "no_memory_learned_requirement",
-        text: "长期协作要求：每次都复述隐藏画像",
-        basis: "explicit_memory",
-        status: "current",
-        sourceMemoryIds: Object.freeze([created.record!.id]),
-        revision: templated.revision + 1
-      })]),
-      processedSources: Object.freeze([Object.freeze({
-        memoryId: created.record!.id,
-        memoryRevision: created.record!.revision,
-        processedAt: fixture.now()
-      })]),
-      updatedAt: fixture.now()
-    });
+    const advisor = getAgentTemplate("advisor")!;
+    const personalized = agentSelfFromTemplate(advisor, [Object.freeze({
+      key: "repeat-hidden-profile",
+      text: "长期协作要求：每次都复述隐藏画像"
+    })]);
     const identity: AgentIdentityState = Object.freeze({
       schema: "echoink.agent-identity.v1",
       revision: 3,
@@ -291,9 +249,13 @@ async function scenarioNoMemoryIdentityOnlyAndWarmSnapshotReuse(): Promise<void>
       updatedAt: fixture.now()
     });
     const hiddenUserText = "只应存在于 USER.md 的隐藏画像";
-    await writeFile(fixture.repository.layout.personalityState, personalityStateJson(personalized), "utf8");
     await writeFile(fixture.repository.layout.agentIdentity, agentIdentityStateJson(identity), "utf8");
-    await writeFile(fixture.repository.layout.agent, renderAgentMarkdown(personalized, identity), "utf8");
+    const personalizedAgent = renderAgentMarkdown({
+      identity,
+      styleName: advisor.labelZh,
+      self: personalized
+    });
+    await writeFile(fixture.repository.layout.agent, personalizedAgent, "utf8");
     await writeFile(fixture.repository.layout.user, `# USER\n\n- ${hiddenUserText}\n`, "utf8");
 
     const beforeNoMemory = { reconcileCalls, recordScans, indexReads };
@@ -302,29 +264,15 @@ async function scenarioNoMemoryIdentityOnlyAndWarmSnapshotReuse(): Promise<void>
       ...input,
       memoryMode: "no_memory"
     });
-    const explicitSharpnessLine = renderTraitLine(
-      "sharpness",
-      personalized.explicit.sharpness!.score,
-      "zh"
-    );
-    const observedSharpnessLine = renderTraitLine(
-      "sharpness",
-      personalized.observed.sharpness!.score,
-      "zh"
-    );
-    assert.notEqual(explicitSharpnessLine, observedSharpnessLine,
-      "fixture must independently distinguish explicit and observed trait output");
-    assert.equal(noMemory.agent, renderBaseAgentMarkdown(personalized, identity));
-    assert.notEqual(noMemory.agent, renderAgentMarkdown(personalized, identity),
-      "no_memory must remove observed personality and learned requirements");
-    assert.ok(noMemory.agent.includes(explicitSharpnessLine),
-      "no_memory keeps the selected template's explicit trait line");
-    assert.ok(!noMemory.agent.includes(observedSharpnessLine),
-      "no_memory excludes the observed trait line independently of learned requirements");
-    assert.match(noMemory.agent, /当前名称：静墨/u,
+    assert.equal(noMemory.agent, renderBaseAgentMarkdown(personalizedAgent));
+    assert.notEqual(noMemory.agent, personalizedAgent,
+      "no_memory removes learned current-self habits");
+    assert.match(noMemory.agent, /我的名字是 静墨/u,
       "no_memory keeps the configured Agent name");
-    assert.match(noMemory.agent, /初始模板：/u,
-      "no_memory keeps the selected personality template baseline");
+    assert.match(noMemory.agent, /我的初始风格来自「严谨睿智的顾问」/u,
+      "no_memory keeps the selected template's base style");
+    assert.match(noMemory.agent, /面对重要、存在真实分歧或信息不足的选择/u,
+      "no_memory keeps the base current-self method");
     assert.doesNotMatch(noMemory.agent, /长期协作要求：每次都复述隐藏画像/u);
     assert.doesNotMatch(noMemory.agent, new RegExp(hiddenUserText, "u"));
     assert.equal(noMemory.user, null);

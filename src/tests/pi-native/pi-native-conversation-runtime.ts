@@ -102,6 +102,9 @@ const QUERY_MAINTENANCE_SCOPE = Object.freeze({
 });
 
 export async function runPiNativeConversationRuntimeTests(): Promise<void> {
+  await assertRuntimeAutoSkillSelectionAndReviewLifecycle();
+  await assertFreshnessRoutesExternalReadToolsAcrossWorkflows();
+  await assertRelatedNormalChatPreflightsAndReadsKnowledge();
   await assertUserQuestionUsesCentralFailClosedSecurity();
   assertReasoningSummaryLifecycleSemantics();
   await assertReasoningSummaryRuntimeLifecycle();
@@ -136,6 +139,458 @@ export async function runPiNativeConversationRuntimeTests(): Promise<void> {
   await assertDerivationExcludesIdentityBoundOperationalState();
   await assertDerivedActivationFailureRemainsAVisibleDurableConversation();
   await runPiNativeTaskPlanRuntimeTests();
+}
+
+async function assertFreshnessRoutesExternalReadToolsAcrossWorkflows(): Promise<void> {
+  let reviewCount = 0;
+  let usageCount = 0;
+  const oldRecordedAt = Date.UTC(2024, 0, 1);
+  const referenceFor = (
+    title: string,
+    excerpt: string,
+    suffix: string
+  ): Readonly<PiKnowledgeReference> => Object.freeze({
+    referenceId: `knowledge-reference:${suffix.repeat(64)}`,
+    vaultRelativePath: `wiki/${suffix}.md`,
+    title,
+    excerpt,
+    contentRevision: `sha256:${suffix.repeat(64)}`,
+    lineStart: 1,
+    lineEnd: 1,
+    sourceType: "wiki" as const,
+    recordedAt: oldRecordedAt,
+    publishedAt: "2024-01-01",
+    verificationStatus: "local_revision_verified" as const
+  });
+  const oldFastReference = referenceFor(
+    "AI SDK 版本说明",
+    "这份 AI 产品 API 说明记录于旧版本。",
+    "c"
+  );
+  const oldStableReference = referenceFor(
+    "勾股定理",
+    "直角三角形两直角边平方和等于斜边平方。",
+    "d"
+  );
+  const knowledge: PiKnowledgeRuntimePort = {
+    async retrieveChat(input) {
+      const reference = /AI SDK/u.test(input.question)
+        ? oldFastReference
+        : /勾股定理/u.test(input.question)
+          ? oldStableReference
+          : null;
+      if (reference) {
+        return Object.freeze({
+          status: "ready" as const,
+          references: Object.freeze([reference]),
+          providerResourceText: "OLD_KNOWLEDGE_REFERENCE",
+          retrieval: Object.freeze({
+            elapsedMs: 1,
+            total: 1,
+            returned: 1,
+            remaining: 0,
+            hasMore: false,
+            exhausted: true
+          })
+        });
+      }
+      return Object.freeze({
+        status: "no_evidence" as const,
+        references: Object.freeze([]),
+        providerResourceText: "NO_PERSONAL_EVIDENCE",
+        retrieval: Object.freeze({
+          elapsedMs: 1,
+          total: 0,
+          returned: 0,
+          remaining: 0,
+          hasMore: false,
+          exhausted: true
+        })
+      });
+    },
+    async retrieveAsk() {
+      return Object.freeze({
+        status: "no_evidence" as const,
+        references: Object.freeze([]),
+        providerResourceText: "NO_ASK_EVIDENCE",
+        retrieval: Object.freeze({
+          elapsedMs: 1,
+          total: 0,
+          returned: 0,
+          remaining: 0,
+          hasMore: false,
+          exhausted: true
+        })
+      });
+    },
+    async verifyAskReferences() {
+      return Object.freeze({
+        status: "valid" as const,
+        references: Object.freeze([])
+      });
+    },
+    async prepareMaintenancePreferences() {
+      return Object.freeze({
+        profileVersion: "echoink-knowledge-preference-profile-v1",
+        state: "default" as const,
+        revision: `sha256:${"a".repeat(64)}`,
+        providerResourceText: "DEFAULT_PREFERENCE"
+      });
+    }
+  };
+  const skills: NonNullable<PiNativeConversationRuntimeOptions["skills"]> = {
+    async selectForTask({ text }) {
+      if (!/最新|当前|核验/u.test(text)) return null;
+      const selected = Object.freeze({
+        id: "evidence-freshness-audit",
+        skillPath: "/fixture/skills/evidence-freshness-audit/SKILL.md",
+        skillName: "evidence-freshness-audit"
+      });
+      return Object.freeze({
+        ...selected,
+        skills: Object.freeze([selected]),
+        applicableSkillIds: Object.freeze([selected.id]),
+        requiresFreshnessVerification: true
+      });
+    },
+    async recordUse() { usageCount += 1; },
+    async reviewCompletedTask() { reviewCount += 1; }
+  };
+  await withFixture([
+    "run-freshness-chat",
+    "run-stable-chat",
+    "run-old-fast-chat",
+    "run-old-stable-chat",
+    "run-freshness-ask",
+    "run-freshness-maintain"
+  ], async (fixture) => {
+    fixture.configureFactoryTools({
+      registered: [
+        "vault_search",
+        "note_read",
+        "knowledge_search",
+        "knowledge_read",
+        "knowledge_maintain",
+        "external_read"
+      ],
+      defaults: ["vault_search", "note_read", "external_read"],
+      planAllowed: [],
+      externalReadAllowed: ["external_read"]
+    });
+    const conversationId = "freshness-tool-routing";
+    await fixture.runtime.createConversation({
+      conversationId,
+      title: "Freshness routing",
+      cwd: fixture.root,
+      defaultMemoryMode: "no_memory",
+      createdAt: 1
+    });
+
+    const chat = await fixture.submit({
+      conversationId,
+      text: "根据我的笔记核验当前 AI 价格",
+      memoryMode: "no_memory",
+      submittedAt: 2
+    });
+    let session = fixture.latestSession();
+    assert.equal(session.activeToolSelections.at(-1)?.includes("external_read"), true);
+    session.finishSuccessful("已核验");
+    await chat.result;
+
+    const stable = await fixture.submit({
+      conversationId,
+      text: "根据我的笔记总结稳定的项目结构",
+      memoryMode: "no_memory",
+      submittedAt: 3
+    });
+    session = fixture.latestSession();
+    assert.equal(session.activeToolSelections.at(-1)?.includes("external_read"), false,
+      "stable normal Chat must not mechanically expose external freshness tools");
+    session.finishSuccessful("已总结");
+    await stable.result;
+
+    const oldFast = await fixture.submit({
+      conversationId,
+      text: "AI SDK 怎么接入这个模型？",
+      memoryMode: "no_memory",
+      submittedAt: 4
+    });
+    session = fixture.latestSession();
+    assert.equal(session.activeToolSelections.at(-1)?.includes("external_read"), true,
+      "an old fast-changing Knowledge hit must enable freshness verification after preflight");
+    session.finishSuccessful("需要核验当前版本");
+    await oldFast.result;
+
+    const oldStable = await fixture.submit({
+      conversationId,
+      text: "勾股定理怎么证明？",
+      memoryMode: "no_memory",
+      submittedAt: 5
+    });
+    session = fixture.latestSession();
+    assert.equal(session.activeToolSelections.at(-1)?.includes("external_read"), false,
+      "an old stable Knowledge hit must not mechanically enable external verification");
+    session.finishSuccessful("稳定知识仍可使用");
+    await oldStable.result;
+
+    const ask = await fixture.submit({
+      conversationId,
+      text: "/ask 核验最新 AI 价格",
+      memoryMode: "no_memory",
+      submittedAt: 6
+    });
+    session = fixture.latestSession();
+    assert.equal(session.activeToolSelections.at(-1)?.includes("external_read"), true);
+    session.finishSuccessful("已核验");
+    await ask.result;
+
+    const maintain = await fixture.submit({
+      conversationId,
+      text: "/maintain raw/a.md",
+      memoryMode: "no_memory",
+      maintenanceScope: QUERY_MAINTENANCE_SCOPE,
+      submittedAt: 7
+    });
+    session = fixture.latestSession();
+    assert.equal(session.activeToolSelections.at(-1)?.includes("external_read"), true);
+    assert.equal(session.activeToolSelections.at(-1)?.includes("knowledge_maintain"), true);
+    assert.deepEqual(fixture.currentSuccessfulExternalReadTools(), []);
+    session.finishTool("failed-external-read", "external_read", {
+      details: { status: "failed" }
+    }, true);
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    assert.deepEqual(fixture.currentSuccessfulExternalReadTools(), [],
+      "a failed external Tool result must not authorize external_verified");
+    session.finishTool("successful-external-read", "external_read", {
+      details: { status: "completed" }
+    }, false);
+    await waitForTestCondition(() =>
+      fixture.currentSuccessfulExternalReadTools().includes("external_read")
+    );
+    session.finishSuccessful("未提交维护动作");
+    await maintain.result;
+    await waitForTestCondition(() => reviewCount === 4);
+    assert.equal(usageCount, 1,
+      "only the successful normal Chat may write Skill usage state");
+    assert.equal(reviewCount, 4,
+      "all normal Chats are reviewed, while ask and maintain never enter Skill learning");
+  }, {
+    knowledge,
+    skills,
+    now: () => Date.UTC(2026, 7, 30)
+  });
+}
+
+async function assertRelatedNormalChatPreflightsAndReadsKnowledge(): Promise<void> {
+  const reference: PiKnowledgeReference = Object.freeze({
+    referenceId: `knowledge-reference:${"a".repeat(64)}`,
+    vaultRelativePath: "projects/echoink.md",
+    title: "EchoInk",
+    excerpt: "项目决定优先使用个人知识。",
+    contentRevision: `sha256:${"b".repeat(64)}`,
+    lineStart: 1,
+    lineEnd: 1,
+    sourceType: "projects",
+    recordedAt: 1_700_000_000_000,
+    publishedAt: "2026-08-30",
+    verificationStatus: "local_revision_verified"
+  });
+  const usage: string[] = [];
+  const knowledge: PiKnowledgeRuntimePort = {
+    async retrieveAsk() {
+      throw new Error("ask_not_expected");
+    },
+    async retrieveChat(input) {
+      assert.equal(input.question, "Transformer 位置编码是什么？");
+      assert.deepEqual(input.explicitPaths, []);
+      return Object.freeze({
+        status: "ready" as const,
+        references: Object.freeze([reference]),
+        providerResourceText: "BOUNDED_PERSONAL_KNOWLEDGE_PREFLIGHT",
+        retrieval: Object.freeze({
+          elapsedMs: 5,
+          total: 1,
+          returned: 1,
+          remaining: 0,
+          hasMore: false,
+          exhausted: true
+        })
+      });
+    },
+    async verifyAskReferences(input) {
+      assert.deepEqual(input.references, [reference]);
+      return Object.freeze({
+        status: "valid" as const,
+        references: Object.freeze([reference])
+      });
+    },
+    async recordUsage(input) {
+      usage.push(input.event.workflow);
+    }
+  };
+  await withFixture(["run-normal-knowledge-preflight"], async (fixture) => {
+    fixture.configureFactoryTools({
+      registered: ["knowledge_search", "knowledge_read", "note_read"],
+      defaults: ["knowledge_search", "knowledge_read", "note_read"],
+      planAllowed: ["note_read"]
+    });
+    const run = await fixture.submit({
+      conversationId: "normal-knowledge-preflight",
+      text: "Transformer 位置编码是什么？",
+      submittedAt: 1
+    });
+    const session = fixture.latestSession();
+    assert.equal(session.knowledgeTurnsBeforeUserEntryAppend[0]?.kind, "chat");
+    assert.deepEqual(
+      session.knowledgeTurnsBeforeUserEntryAppend[0]?.references,
+      [reference]
+    );
+    assert.equal(session.activeToolSelections.at(-1)?.includes("knowledge_search"), true);
+    assert.equal(session.activeToolSelections.at(-1)?.includes("knowledge_read"), true);
+    session.finishSuccessful("依据项目原文，当前决定是优先使用个人知识。");
+    assert.equal((await run.result).terminalState, "completed");
+    assert.deepEqual(usage, ["normal_read"]);
+  }, { knowledge });
+}
+
+async function assertRuntimeAutoSkillSelectionAndReviewLifecycle(): Promise<void> {
+  const selections: string[] = [];
+  const uses: Array<Readonly<{ skillId: string; usedAt: number }>> = [];
+  const reviews: Array<Readonly<{
+    productRunId: string;
+    result: string;
+    terminalState: string;
+    existingCapabilityIds: readonly string[];
+  }>> = [];
+  let releaseFirstReview!: () => void;
+  const firstReviewGate = new Promise<void>((resolve) => {
+    releaseFirstReview = resolve;
+  });
+  let activeFixture: RuntimeFixture | null = null;
+  await withFixture([
+    "run-auto-skill",
+    "run-skill-review-failure",
+    "run-method-only-skill-review"
+  ], async (fixture) => {
+    activeFixture = fixture;
+    fixture.configureFactoryTools({
+      registered: ["knowledge_read", "note_read"],
+      defaults: ["knowledge_read", "note_read"],
+      planAllowed: []
+    });
+    const first = await fixture.submit({
+      conversationId: "skill-runtime",
+      text: "请从第一性原理拆解这个复杂问题",
+      submittedAt: 1
+    });
+    const session = fixture.latestSession();
+    assert.equal(
+      session.promptTexts[0],
+      '<skill name="multi-lens-problem-solving">fixture procedure</skill>\n\n请从第一性原理拆解这个复杂问题'
+    );
+    session.finishTool("skill-used-read", "knowledge_read", {
+      details: { status: "completed" }
+    }, false);
+    session.finishTool("skill-failed-read", "note_read", {
+      details: { status: "failed" }
+    }, true);
+    session.finishSuccessful("已完成复杂问题拆解");
+    const firstResult = await first.result;
+    assert.equal(firstResult.terminalState, "completed");
+    assert.deepEqual(selections, ["请从第一性原理拆解这个复杂问题"]);
+    assert.equal(uses.length, 1);
+    assert.equal(uses[0]?.skillId, "multi-lens-problem-solving");
+    assert.deepEqual(reviews, [],
+      "background Skill review cannot delay the settled ProductRun result");
+    releaseFirstReview();
+    await waitForTestCondition(() => reviews.length === 1);
+    assert.deepEqual(reviews, [{
+      productRunId: "run-auto-skill",
+      result: "已完成复杂问题拆解",
+      terminalState: "completed",
+      existingCapabilityIds: [
+        "knowledge_read",
+        "skill:multi-lens-problem-solving"
+      ]
+    }]);
+
+    const second = await fixture.submit({
+      conversationId: "skill-runtime",
+      text: "请复验这个复杂问题并模拟复盘失败",
+      submittedAt: 2
+    });
+    fixture.latestSession().finishSuccessful("任务本身已经完成");
+    const secondResult = await second.result;
+    assert.equal(secondResult.terminalState, "completed",
+      "post-task Skill review failure cannot reverse a completed ProductRun");
+    await waitForTestCondition(async () =>
+      (await fixture.catalog.diagnostics("skill-runtime"))
+        .some((entry) => entry.message === "skill_review_failed")
+    );
+    const diagnostics = await fixture.catalog.diagnostics("skill-runtime");
+    assert.equal(diagnostics.some((entry) => entry.message === "skill_review_failed"), true);
+
+    const methodOnly = await fixture.submit({
+      conversationId: "skill-runtime",
+      text: "把这次讨论整理成可复用的纯方法",
+      submittedAt: 3
+    });
+    const methodOnlySession = fixture.latestSession();
+    assert.equal(
+      methodOnlySession.promptTexts[0],
+      "把这次讨论整理成可复用的纯方法",
+      "a method-only task can run without a preselected Skill"
+    );
+    methodOnlySession.finishSuccessful("已整理为可复用的说明流程");
+    assert.equal((await methodOnly.result).terminalState, "completed");
+    await waitForTestCondition(() => reviews.length === 2);
+    assert.deepEqual(reviews.at(-1), {
+      productRunId: "run-method-only-skill-review",
+      result: "已整理为可复用的说明流程",
+      terminalState: "completed",
+      existingCapabilityIds: []
+    }, "a successful method-only Chat reaches non-blocking review with an empty capability set");
+  }, {
+    skills: {
+      selectForTask: async ({ text }) => {
+        selections.push(text);
+        if (text.includes("纯方法")) return null;
+        return Object.freeze({
+          id: "multi-lens-problem-solving",
+          skillPath: "/fixture/skills/multi-lens-problem-solving/SKILL.md",
+          skillName: "multi-lens-problem-solving",
+          skills: Object.freeze([Object.freeze({
+            id: "multi-lens-problem-solving",
+            skillPath: "/fixture/skills/multi-lens-problem-solving/SKILL.md",
+            skillName: "multi-lens-problem-solving"
+          })]),
+          applicableSkillIds: Object.freeze(["multi-lens-problem-solving"]),
+          requiresFreshnessVerification: false
+        });
+      },
+      recordUse: async (skillId, usedAt) => {
+        uses.push(Object.freeze({ skillId, usedAt }));
+      },
+      reviewCompletedTask: async (input) => {
+        assert.ok(activeFixture);
+        assert.equal(
+          (await activeFixture.productRuns.read(input.productRunId))?.state,
+          "product_run_settled",
+          "Skill review starts only after the ProductRun is durably settled"
+        );
+        if (input.request.includes("模拟复盘失败")) {
+          throw new Error("fixture_skill_review_failed");
+        }
+        if (input.productRunId === "run-auto-skill") await firstReviewGate;
+        reviews.push(Object.freeze({
+          productRunId: input.productRunId,
+          result: input.result,
+          terminalState: input.terminalState,
+          existingCapabilityIds: Object.freeze([...input.existingCapabilityIds])
+        }));
+      }
+    }
+  });
 }
 
 async function assertDocumentSnapshotsAreTurnBoundAndValidatedBeforePrompt(): Promise<void> {
@@ -1586,7 +2041,8 @@ async function assertKnowledgeAskUsesAgentAndReadOnlyTools(): Promise<void> {
           "knowledge_maintain",
           "memory_search",
           "memory_read",
-          "memory_write"
+          "memory_write",
+          "external_web_read"
         ],
         defaults: [
           "vault_search",
@@ -1596,7 +2052,8 @@ async function assertKnowledgeAskUsesAgentAndReadOnlyTools(): Promise<void> {
           "memory_read",
           "memory_write"
         ],
-        planAllowed: ["vault_search", "note_read"]
+        planAllowed: ["vault_search", "note_read"],
+        externalReadAllowed: ["external_web_read"]
       });
       fixture.setMemoryToolNames([
         "memory_search",
@@ -3171,6 +3628,9 @@ Promise<void> {
 
 async function assertExperienceSourceRefsArePointerOnlyAndDeleteAware():
 Promise<void> {
+  const capturedDreamExperiences: Array<Parameters<NonNullable<
+    PiNativeConversationRuntimeOptions["recordDreamExperience"]
+  >>[0]> = [];
   await withFixture(
     ["run-experience-normal", "run-experience-no-memory"],
     async (fixture) => {
@@ -3192,6 +3652,8 @@ Promise<void> {
       );
       fixture.latestSession().finishSuccessful("normal answer");
       await normal.result;
+      assert.equal(capturedDreamExperiences.length, 1);
+      assert.equal(capturedDreamExperiences[0]?.productRunId, normal.productRunId);
 
       const first = await fixture.runtime.readExperienceSourceRef(
         normal.productRunId
@@ -3251,6 +3713,13 @@ Promise<void> {
         null,
         "no_memory ProductRuns must not publish Experience source pointers"
       );
+      assert.equal(capturedDreamExperiences.length, 1,
+        "no_memory ProductRuns must not enter the Dream public inbox");
+    },
+    {
+      recordDreamExperience: async (experience) => {
+        capturedDreamExperiences.push(experience);
+      }
     }
   );
 }
@@ -3627,10 +4096,12 @@ interface RuntimeFixture {
     registered: readonly string[];
     defaults: readonly string[];
     planAllowed: readonly string[];
+    externalReadAllowed?: readonly string[];
   }>): void;
   currentMemoryTurn(): Readonly<PiNativeMemoryTurnContext> | null;
   currentKnowledgeTurn(): Readonly<PiNativeKnowledgeTurnContext> | null;
   currentDocumentTurn(): Readonly<PiNativeDocumentTurnContext> | null;
+  currentSuccessfulExternalReadTools(): readonly string[];
   reportMemoryRecall(input: Parameters<NonNullable<
     PiNativeAgentSessionFactoryInput["reportMemoryRecallProgress"]
   >>[0]): Promise<void>;
@@ -3653,7 +4124,7 @@ async function withFixture(
   assertion: (fixture: RuntimeFixture) => Promise<void>,
   runtimeOptions: Pick<
     PiNativeConversationRuntimeOptions,
-    "hasPendingProductWork" | "knowledge" | "now"
+    "hasPendingProductWork" | "knowledge" | "now" | "recordDreamExperience" | "skills"
   > = {}
 ): Promise<void> {
   const root = await realpath(await mkdtemp(
@@ -3666,6 +4137,8 @@ async function withFixture(
     (() => Readonly<PiNativeKnowledgeTurnContext> | null) | null = null;
   let currentDocumentTurnReader:
     (() => Readonly<PiNativeDocumentTurnContext> | null) | null = null;
+  let currentSuccessfulExternalReadToolsReader:
+    (() => readonly string[]) | null = null;
   let memoryRecallReporter: PiNativeAgentSessionFactoryInput["reportMemoryRecallProgress"] = undefined;
   let askPersonalMemorySourcesReporter:
     PiNativeAgentSessionFactoryInput["reportAskPersonalMemorySources"] = undefined;
@@ -3675,7 +4148,8 @@ async function withFixture(
   let factoryTools = {
     registered: [] as readonly string[],
     defaults: [] as readonly string[],
-    planAllowed: [] as readonly string[]
+    planAllowed: [] as readonly string[],
+    externalReadAllowed: [] as readonly string[]
   };
   let now = 100_000;
   let runIdIndex = 0;
@@ -3699,6 +4173,8 @@ async function withFixture(
       currentMemoryTurnReader = input.currentMemoryTurnContext ?? null;
       currentKnowledgeTurnReader = input.currentKnowledgeTurnContext ?? null;
       currentDocumentTurnReader = input.currentDocumentTurnContext ?? null;
+      currentSuccessfulExternalReadToolsReader =
+        input.currentSuccessfulExternalReadToolNames;
       memoryRecallReporter = input.reportMemoryRecallProgress;
       askPersonalMemorySourcesReporter = input.reportAskPersonalMemorySources;
       if (nextActivationError) {
@@ -3719,6 +4195,7 @@ async function withFixture(
       return {
         session: session.asAgentSession(),
         planToolNames: [...factoryTools.planAllowed],
+        externalReadToolNames: [...factoryTools.externalReadAllowed],
         memoryToolNames: [...memoryToolNames],
         ...(factoryWarnings.length ? { warnings: [...factoryWarnings] } : {}),
         ...(input.skillName
@@ -3726,6 +4203,13 @@ async function withFixture(
               skillCommandName: input.skillName.includes(" ")
                 ? "echoink-selected-skill"
                 : input.skillName
+          }
+          : {}),
+        ...(input.skillNames?.length
+          ? {
+              skillPromptPrefix: input.skillNames.map((name) =>
+                `<skill name="${name}">fixture procedure</skill>`
+              ).join("\n\n")
             }
           : {})
       };
@@ -3761,12 +4245,15 @@ async function withFixture(
         factoryTools = {
           registered: [...input.registered],
           defaults: [...input.defaults],
-          planAllowed: [...input.planAllowed]
+          planAllowed: [...input.planAllowed],
+          externalReadAllowed: [...(input.externalReadAllowed ?? [])]
         };
       },
       currentMemoryTurn: () => currentMemoryTurnReader?.() ?? null,
       currentKnowledgeTurn: () => currentKnowledgeTurnReader?.() ?? null,
       currentDocumentTurn: () => currentDocumentTurnReader?.() ?? null,
+      currentSuccessfulExternalReadTools: () =>
+        currentSuccessfulExternalReadToolsReader?.() ?? [],
       reportMemoryRecall: async (input) => {
         assert.ok(memoryRecallReporter);
         await memoryRecallReporter(input);
@@ -4241,6 +4728,16 @@ async function withTimeout<T>(
   } finally {
     if (timeout) clearTimeout(timeout);
   }
+}
+
+async function waitForTestCondition(
+  predicate: () => boolean | Promise<boolean>
+): Promise<void> {
+  await withTimeout((async () => {
+    while (!await predicate()) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 1));
+    }
+  })(), "test condition");
 }
 
 function assistantMessage(text: string, timestamp: number): AssistantMessage {

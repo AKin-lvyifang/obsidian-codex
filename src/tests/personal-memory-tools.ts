@@ -323,8 +323,10 @@ function assertOpenAiCompatibleMemoryToolSchemas(): void {
     "fact", "view", "decision", "goal", "task", "open_loop", "episode"
   ]);
   assert.match(String(createProperties.recallWhen.description ?? ""), /未来.*召回/iu);
-  assert.match(String(schemas.memory_write.description ?? ""), /先.*memory_search.*同义.*跳过.*变化.*更新/iu);
-  assert.match(String(schemas.memory_search.description ?? ""), /exhausted=false.*nextCursor/iu);
+  assert.match(String(schemas.memory_write.description ?? ""), /跨轮价值.*新增或更新.*USER 画像.*忘记/iu);
+  assert.doesNotMatch(String(schemas.memory_write.description ?? ""), /nextCursor|revision|outcome=/iu);
+  assert.match(String(schemas.memory_search.description ?? ""), /相关历史可能影响当前回答.*定位现有记录/iu);
+  assert.doesNotMatch(String(schemas.memory_search.description ?? ""), /nextCursor|revision|冲突/iu);
   assert.equal(profileProperties.text.maxLength, 120);
 
   const createRequest = {
@@ -407,14 +409,13 @@ async function scenarioProviderVisibleDescriptionsStayAligned(): Promise<void> {
     >>;
 
     assert.equal(searchDescription, schemas.memory_search.description);
-    assert.match(searchDescription, /相关历史可能影响当前回答.*准备 create、update、profile_update、forget 前/iu);
-    assert.match(searchDescription, /本轮首次 memory_write 前必须完成一次 memory_search.*历史轮搜索不能替代.*exhausted=false.*nextCursor.*exhausted=true.*同轮写入成功后可继续写入.*不必机械重复搜索.*写入失败或 revision 冲突后必须重新搜索/iu);
-    assert.match(searchDescription, /除此之外不机械搜索/iu);
-    assert.doesNotMatch(searchDescription, /只在历史会实质影响当前回答时调用/iu);
+    assert.match(searchDescription, /相关历史可能影响当前回答.*新增、更新、修正画像、忘记前定位现有记录/iu);
+    assert.doesNotMatch(searchDescription, /exhausted|nextCursor|revision|冲突/iu);
 
     assert.equal(writeDescription, schemas.memory_write.description);
-    assert.match(writeDescription, /System Prompt 判断内容值得跨轮保存且对象清楚.*本轮首次写入前完成一次 memory_search.*历史轮搜索不能授权当前轮写入.*同轮写入成功后可继续写入.*写入失败或 revision 冲突后重新搜索/iu);
-    assert.match(writeDescription, /普通文字不会落盘.*真实结构化 Tool 回执/iu);
+    assert.match(writeDescription, /跨轮价值且对象明确.*新增或更新长期 Memory.*修正 USER 画像.*用户当前原话忘记/iu);
+    assert.match(writeDescription, /普通文字不会保存.*真实结果/iu);
+    assert.doesNotMatch(writeDescription, /exhausted|nextCursor|revision|outcome=/iu);
   });
 }
 

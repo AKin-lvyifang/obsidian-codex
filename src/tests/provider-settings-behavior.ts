@@ -1,5 +1,8 @@
 import * as assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { mkdtemp, rm, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { App, TFile, openTestModals } from "obsidian";
 import type {
   Api,
@@ -205,18 +208,15 @@ import {
   AGENT_IDENTITY_STATE_SCHEMA,
   agentIdentityStateJson
 } from "../harness/memory/agent-identity-state";
+import { AGENT_TEMPLATES } from "../harness/memory/agent-templates";
 import {
-  applyTemplateToState,
-  emptyPersonalityState
-} from "../harness/memory/personality-state";
-import {
-  PERSONALITY_TEMPLATES,
-  TRAIT_DIMENSIONS,
-  TRAIT_DIMENSION_META,
-  traitBehaviorBand,
-  type PersonalityTemplate
-} from "../harness/memory/personality-templates";
-import { getDimensionShortLabel } from "../ui/trait-hexagon";
+  parseAgentCurrentSelf,
+  publicAgentSelfProfile
+} from "../harness/memory/agent-self";
+import { AgentSelfMetadataStore } from "../harness/memory/agent-self-metadata";
+import { CognitiveSystem } from "../harness/memory/cognitive-system";
+import { PersonalMemoryRepository } from "../harness/memory/personal-memory-repository";
+import { BUILTIN_SKILL_IDS, BUILTIN_SKILLS } from "../harness/resources/builtin-skills";
 import {
   advanceEchoInkOnboardingTutorial,
   deriveEchoInkOnboardingTruth,
@@ -285,6 +285,7 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   await assertMemoryCorrectionModalContract();
   assertMemoryComposerVisualCssContract();
   await assertMcpPanelUsesTurnResourceTruth();
+  await assertBuiltinSkillPresetLabels();
   await assertSkillToggleNotCommittedRestoresAuthoritativeUi();
   await assertResourceScanErrorsClearAcrossTabs();
   assertProviderBadgeReflowCssContract();
@@ -303,6 +304,8 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   await runHarnessV2PiObsidianSecretStorageTests();
   await runHarnessV2PiProviderSecurityTests();
   await runPiNativeControlledProviderTests();
+  await assertAgentSelfControlSnapshotUsesSharedDiskRevision();
+  await assertAgentProfileDtoUsesOneRevision();
   await assertAgentIdentityCardPlacementAndCopy();
   await assertCustomWelcomeSettingsUi();
   assertCustomWelcomeContract();
@@ -313,13 +316,12 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   await assertIdentityEntryFirstRunKeepsSingleTransaction();
   await assertIdentityEntryWithTemplateOpensEditModal();
   await assertTemplatePickerCardGridStructure();
-  await assertPersonalityResetStillRequiresConfirm();
+  await assertPersonalityReselectionOpensPickerDirectly();
+  await assertPersonalitySelectionRestoresFocusAcrossRenderConsumers();
   await assertIdentityEntryRespectsFailClosedRetry();
   await assertIdentityModalNameValidation();
   await assertAvatarPresetCatalogBehavior();
   await assertAvatarProcessorContract();
-  await assertPersonalityCardUsesNewBehaviorDimensions();
-  await assertHexagonCaptionSurvivesRepeatedAsyncRender();
 }
 
 function replaceProviderModels(
@@ -449,14 +451,7 @@ async function assertAnimatedSettingsTabIcons(): Promise<void> {
     settings,
     saveSettings: async () => undefined,
     getCognitiveSystem: async () => createCognitiveSystemStub(),
-    getEchoInkPersonalMemoryState: async () => ({
-      agent: "# Agent",
-      user: "# User",
-      memory: "# Memory",
-      revision: 0,
-      records: [],
-      forgottenIds: []
-    }),
+    getEchoInkPersonalMemoryState: async () => createIdentityFixtureState({ revision: 0 }),
     listPiConversations: async () => [],
     setPiConversationStatus: async () => undefined,
     getCodexView: () => null
@@ -1087,6 +1082,78 @@ async function assertSkillToggleNotCommittedRestoresAuthoritativeUi(): Promise<v
   assert.equal(row.hasClass("is-disabled"), true);
   assert.equal(plugin.settings.resources.catalog[0]?.enabled, false);
   assert.equal(persisted.resources.catalog[0]?.enabled, false);
+  tab.hide();
+}
+
+async function assertBuiltinSkillPresetLabels(): Promise<void> {
+  installProviderModalDomFixture();
+  const builtinSkills = BUILTIN_SKILL_IDS.map((resourceId) => ({
+    id: `echoink-local:skill:${resourceId}`,
+    kind: "skill" as const,
+    source: "echoink-local" as const,
+    name: resourceId,
+    description: `${resourceId} fixture`,
+    enabled: true,
+    bridgeMode: "prompt-only" as const,
+    contentPath: `.echoink/resources/skills/${resourceId}/SKILL.md`,
+    metadata: { resourceId }
+  }));
+  const customSkill = {
+    id: "echoink-local:skill:user-created",
+    kind: "skill" as const,
+    source: "echoink-local" as const,
+    name: "user-created",
+    description: "User-created Skill fixture",
+    enabled: true,
+    bridgeMode: "prompt-only" as const,
+    contentPath: ".echoink/resources/skills/user-created/SKILL.md",
+    metadata: { resourceId: "user-created" }
+  };
+  const settings = structuredClone(DEFAULT_SETTINGS);
+  settings.settingsLanguage = "zh-CN";
+  settings.settingsTab = "resources";
+  settings.resourceManagementTab = "skills";
+  settings.resources.catalog = [...builtinSkills, customSkill];
+  const plugin = withSettingsTabDefaults({
+    app: new App(),
+    manifest: { id: "codex-echoink" },
+    settings,
+    getCognitiveSystem: async () => createCognitiveSystemStub(),
+    buildRuntimeEchoInkResourceCatalog: async () =>
+      structuredClone(settings.resources.catalog)
+  });
+  const tab = new CodexSettingTab(plugin as never);
+  (tab as unknown as { runtimeEchoInkResources: typeof settings.resources.catalog })
+    .runtimeEchoInkResources = structuredClone(settings.resources.catalog);
+
+  const assertLanguage = (label: string): void => {
+    const badges = tab.containerEl.querySelectorAll<ProviderModalTestElement>(
+      ".codex-resource-preset-badge"
+    );
+    assert.equal(badges.length, BUILTIN_SKILL_IDS.length);
+    assert.deepEqual(badges.map((badge) => badge.textContent),
+      BUILTIN_SKILL_IDS.map(() => label));
+    for (const badge of badges) {
+      assert.equal(badge.getAttribute("data-resource-preset"), "true");
+      const title = badge.parentElement;
+      assert.ok(title?.hasClass("codex-resource-row-title"));
+      assert.equal(title.children[1], badge, "Preset label must follow the Skill name button");
+      assert.equal(title.children[0]?.hasClass("codex-resource-row-name"), true);
+    }
+    const customRow = tab.containerEl.querySelector<ProviderModalTestElement>(
+      `[data-resource-key="${customSkill.id}"]`
+    );
+    assert.ok(customRow);
+    assert.equal(customRow.querySelector(".codex-resource-preset-badge"), null);
+    assert.equal(typeof customRow.querySelector(".codex-resource-row-name")?.onclick, "function");
+    assert.equal(typeof customRow.querySelector(".codex-resource-toggle")?.onchange, "function");
+  };
+
+  tab.display();
+  assertLanguage("预设");
+  settings.settingsLanguage = "en";
+  tab.display();
+  assertLanguage("Preset");
   tab.hide();
 }
 
@@ -1740,22 +1807,55 @@ function relativeLuminance(color: readonly number[]): number {
 
 
 /** Minimal CognitiveSystem stub for settings-tab tests (no Provider, no files). */
-function createCognitiveSystemStub(): Record<string, any> {
+function createAgentProfileViewFixture(
+  revision = 0,
+  templateId: string | null = null,
+  representativeHabits: readonly string[] = []
+): Record<string, any> {
+  const template = AGENT_TEMPLATES.find((candidate) => candidate.id === templateId) ?? null;
   return {
-    listTemplates: async () => [],
-    readPersonalityState: async () => ({
-      schema: "echoink.personality.v1",
+    revision,
+    templateId,
+    preferredSkillNames: template
+      ? template.preferredSkillIds.map((skillId) => {
+          const skill = BUILTIN_SKILLS.find((candidate) => candidate.id === skillId);
+          assert.ok(skill, `fixture template references a real built-in Skill: ${skillId}`);
+          return skill.title;
+        })
+      : [],
+    currentSelf: {
+      thinkingMethod: "我处理重要或复杂问题的方式是：先理解目标，再判断怎样推进。",
+      answerTone: "我的语气会保持自然、清楚、诚实。",
+      answerStructure: "我的回答通常会按结论、依据和下一步来组织。",
+      representativeHabits: [...representativeHabits]
+    }
+  };
+}
+
+function createCognitiveSystemStub(): Record<string, any> {
+  const identity = {
+    schema: "echoink.agent-identity.v1",
+    revision: 0,
+    displayName: "EchoInk",
+    avatar: { kind: "default" },
+    updatedAt: 0
+  };
+  const profile = createAgentProfileViewFixture();
+  return {
+    listTemplates: () => AGENT_TEMPLATES,
+    readAgentSelfState: async () => ({
       revision: 0,
-      templateId: null,
-      explicit: { sharpness: null, dominance: null, rigor: null, structure: null, boldness: null, creativity: null },
-      observed: { sharpness: null, dominance: null, rigor: null, structure: null, boldness: null, creativity: null },
-      history: [],
-      candidates: [],
-      learnedRequirements: [],
-      processedSources: [],
-      updatedAt: 0
+      metadata: { schema: "echoink.agent-self-metadata.v1", revision: 0, templateId: null, updatedAt: 0 },
+      state: {
+        complexProblemMethod: "先理解问题。",
+        tone: "自然。",
+        responseStructure: "直接回答。",
+        currentLearnedHabits: []
+      },
+      agent: "# AGENT"
     }),
-    renderPersonalitySummary: async () => "",
+    readAgentProfile: async () => profile,
+    readAgentIdentity: async () => identity,
     selectPersonalityTemplate: async () => {
       throw new Error("cognitive stub: template selection not available in this test");
     },
@@ -1836,10 +1936,17 @@ async function assertSettingsAccessibleNamesAndOverflow(): Promise<void> {
     }
   });
   const identityState = Object.freeze({
-    agent: "# Agent",
     user: "# User",
     memory: "# Memory",
     revision: 1,
+    agentIdentity: Object.freeze({
+      schema: "echoink.agent-identity.v1",
+      revision: 0,
+      displayName: "EchoInk",
+      avatar: Object.freeze({ kind: "default" }),
+      updatedAt: 0
+    }),
+    agentProfile: Object.freeze({ kind: "ready", ...createAgentProfileViewFixture(1) }),
     records: Object.freeze([Object.freeze({
       schema: "echoink.memory.v1",
       id: "mem_ui_private_id",
@@ -2260,7 +2367,7 @@ async function assertSettingsAccessibleNamesAndOverflow(): Promise<void> {
   assertSettingControlAccessibleName(tab.containerEl, "设置语言", "select");
   assert.match(
     tab.containerEl.textContent,
-    /默认开启.*一级 Memory 仍在对话当轮正常写入和召回.*已有状态与积压保留/u
+    /默认开启.*一级 Memory 仍在对话当轮正常写入和召回.*派生状态与积压会保留/u
   );
   for (const label of [
     "启动时自动打开侧栏",
@@ -9858,9 +9965,216 @@ let providerModalTestDocument: ProviderModalTestDocument;
 // R4: Agent identity — settings card, naming modal, avatar processing
 // ---------------------------------------------------------------------------
 
+async function assertAgentSelfControlSnapshotUsesSharedDiskRevision(): Promise<void> {
+  const vaultPath = await mkdtemp(path.join(tmpdir(), "echoink-agent-profile-snapshot-"));
+  const unrelatedBackupTarget = await mkdtemp(
+    path.join(tmpdir(), "echoink-agent-profile-unrelated-backup-")
+  );
+  const vaultId = `vault-${path.basename(vaultPath)}`;
+  const barrierEntered = deferred<void>();
+  const barrierRelease = deferred<void>();
+  let barrierArmed = false;
+  let barrierReleased = false;
+  let timestamp = 1_900_000_000_000;
+  const now = () => ++timestamp;
+  const writerRepository = new PersonalMemoryRepository({
+    vaultPath,
+    vaultId,
+    now,
+    watchExternalChanges: false,
+    failTransactionAfterChange: async (operation, appliedChanges) => {
+      if (!barrierArmed || operation !== "cognitive-update" || appliedChanges !== 1) return false;
+      barrierEntered.resolve(undefined);
+      await barrierRelease.promise;
+      return false;
+    }
+  });
+  let writerSystem: CognitiveSystem | null = null;
+  let readerSystem: CognitiveSystem | null = null;
+  const unrelatedBackupLink = path.join(
+    writerRepository.layout.backups,
+    "unrelated-profile-snapshot-link"
+  );
+  try {
+    const createSystem = async (repository: PersonalMemoryRepository): Promise<CognitiveSystem> => {
+      const system = await CognitiveSystem.create({
+        repository,
+        llm: () => null,
+        getDreamConfig: () => ({ enabled: false, runsPerDay: 3 }),
+        isForegroundBusy: () => false,
+        registerInterval: () => {},
+        now
+      });
+      system.scheduler.stop();
+      return system;
+    };
+
+    writerSystem = await createSystem(writerRepository);
+    await writerSystem.selectPersonalityTemplate("executor", {
+      initialIdentity: { displayName: "EchoInk", avatar: { kind: "default" } }
+    });
+
+    const readerRepository = new PersonalMemoryRepository({
+      vaultPath,
+      vaultId,
+      now,
+      watchExternalChanges: false
+    });
+    readerSystem = await createSystem(readerRepository);
+    await symlink(unrelatedBackupTarget, unrelatedBackupLink);
+    const snapshotWithUnrelatedBackupSymlink = await readerSystem.readAgentSelfState();
+    assert.equal(snapshotWithUnrelatedBackupSymlink.metadata.templateId, "executor",
+      "an unrelated backups symlink does not block the fixed-path Profile snapshot");
+    await rm(unrelatedBackupLink, { force: true });
+
+    const cachedBeforeWrite = await readerRepository.readUserControlState();
+    const parsedBeforeWrite = parseAgentCurrentSelf(cachedBeforeWrite.agent);
+    assert.equal(parsedBeforeWrite.kind, "ok");
+    if (parsedBeforeWrite.kind === "ok") {
+      assert.equal(
+        parsedBeforeWrite.state.complexProblemMethod,
+        AGENT_TEMPLATES.find((template) => template.id === "executor")!.complexProblemMethod
+      );
+    }
+
+    barrierArmed = true;
+    const write = writerSystem.selectPersonalityTemplate("advisor");
+    await barrierEntered.promise;
+
+    const halfTransactionMetadata = await new AgentSelfMetadataStore(
+      writerRepository.layout.root
+    ).read();
+    assert.equal(halfTransactionMetadata?.templateId, "advisor",
+      "the barrier is after new metadata reaches disk");
+    const staleReaderControl = await readerRepository.readUserControlState();
+    const staleParsed = parseAgentCurrentSelf(staleReaderControl.agent);
+    assert.equal(staleParsed.kind, "ok");
+    if (staleParsed.kind === "ok") {
+      assert.equal(
+        staleParsed.state.complexProblemMethod,
+        AGENT_TEMPLATES.find((template) => template.id === "executor")!.complexProblemMethod,
+        "the pre-hydrated reader still exposes its old AGENT cache during the live transaction"
+      );
+    }
+
+    let snapshotResolved = false;
+    const snapshotRead = readerSystem.readAgentSelfState().then((snapshot) => {
+      snapshotResolved = true;
+      return snapshot;
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(snapshotResolved, false,
+      "the shared-lane disk snapshot waits instead of mixing new metadata with old AGENT");
+
+    barrierReleased = true;
+    barrierRelease.resolve(undefined);
+    const [committed, snapshot] = await Promise.all([write, snapshotRead]);
+    assert.equal(snapshot.revision, committed.revision);
+    assert.equal(snapshot.metadata.templateId, "advisor");
+    assert.equal(
+      snapshot.state.complexProblemMethod,
+      AGENT_TEMPLATES.find((template) => template.id === "advisor")!.complexProblemMethod
+    );
+    assert.equal(snapshot.agent, committed.agent);
+    console.log("PASS settings: Agent Self Profile reads one shared-lane disk revision across two Repositories");
+  } finally {
+    if (!barrierReleased) barrierRelease.resolve(undefined);
+    await rm(unrelatedBackupLink, { force: true });
+    await readerSystem?.dispose();
+    await writerSystem?.dispose();
+    if (!writerSystem) await writerRepository.dispose();
+    await rm(vaultPath, { recursive: true, force: true });
+    await rm(unrelatedBackupTarget, { recursive: true, force: true });
+  }
+}
+
+async function assertAgentProfileDtoUsesOneRevision(): Promise<void> {
+  const control = (revision: number) => ({
+    agent: "# AGENT",
+    user: `# USER ${revision}`,
+    memory: `# MEMORY ${revision}`,
+    revision,
+    records: Object.freeze([]),
+    forgottenIds: Object.freeze([])
+  });
+  const controls = [control(1), control(2), control(3)];
+  let controlRead = 0;
+  let profileRead = 0;
+  const identity = Object.freeze({
+    schema: "echoink.agent-identity.v1",
+    revision: 4,
+    displayName: "小墨",
+    avatar: Object.freeze({ kind: "default" }),
+    updatedAt: 123
+  });
+  const state = await CodexForObsidianPlugin.prototype.getEchoInkPersonalMemoryState.call({
+    ensurePiLocalData: async () => ({
+      personalMemory: {
+        readUserControlState: async () => controls[Math.min(controlRead++, controls.length - 1)]
+      }
+    }),
+    cognitiveSystem: {
+      readAgentProfile: async () => {
+        profileRead += 1;
+        return createAgentProfileViewFixture(profileRead === 1 ? 0 : 3, "executor");
+      },
+      readAgentIdentity: async () => identity
+    }
+  } as never);
+  assert.equal(state.revision, 3);
+  assert.equal(state.user, "# USER 3");
+  assert.equal(state.agentProfile.kind, "ready");
+  if (state.agentProfile.kind === "ready") {
+    assert.equal(state.agentProfile.revision, 3);
+    assert.deepEqual(Object.keys(state.agentProfile.currentSelf), [
+      "thinkingMethod",
+      "answerTone",
+      "answerStructure",
+      "representativeHabits"
+    ]);
+    assert.equal(Object.hasOwn(state.agentProfile, "introduction"), false);
+    assert.equal(Object.hasOwn(state.agentProfile, "styleName"), false);
+  }
+  assert.equal(state.agentIdentity, identity);
+  assert.equal(Object.hasOwn(state, "agent"), false,
+    "settings DTO never returns the full AGENT markdown");
+
+  const conflicted = await CodexForObsidianPlugin.prototype.getEchoInkPersonalMemoryState.call({
+    ensurePiLocalData: async () => ({
+      personalMemory: { readUserControlState: async () => control(9) }
+    }),
+    cognitiveSystem: {
+      readAgentProfile: async () => createAgentProfileViewFixture(8, "executor"),
+      readAgentIdentity: async () => identity
+    }
+  } as never);
+  assert.equal(conflicted.agentProfile.kind, "error",
+    "a persistent revision conflict fails closed instead of mixing snapshots");
+  console.log("PASS settings: Agent Profile DTO retries to one revision and fails closed on conflict");
+}
+
+function assertPublicAgentHabitsUseFirstPerson(): void {
+  const profile = publicAgentSelfProfile({
+    complexProblemMethod: "先理解问题",
+    tone: "自然、清楚",
+    responseStructure: "结论、依据和下一步",
+    currentLearnedHabits: Object.freeze([
+      Object.freeze({ key: "verify-facts", text: "先核对关键事实" }),
+      Object.freeze({ key: "keep-context", text: "我会保留必要上下文。" })
+    ])
+  });
+  assert.equal(
+    profile.thinkingMethod,
+    "我处理重要或复杂问题的方式是：先理解问题。"
+  );
+  assert.deepEqual(profile.representativeHabits, [
+    "我会这样做：先核对关键事实。",
+    "我会保留必要上下文。"
+  ]);
+}
+
 function createIdentityFixtureState(overrides: Record<string, unknown> = {}): Record<string, any> {
   return {
-    agent: "# Agent",
     user: "# User",
     memory: "# Memory",
     revision: 3,
@@ -9873,17 +10187,9 @@ function createIdentityFixtureState(overrides: Record<string, unknown> = {}): Re
       avatar: { kind: "default" },
       updatedAt: 123
     },
-    personalityState: {
-      schema: "echoink.personality.v1",
-      revision: 1,
-      templateId: "executor",
-      explicit: { sharpness: null, dominance: null, rigor: null, structure: null, boldness: null, creativity: null },
-      observed: { sharpness: null, dominance: null, rigor: null, structure: null, boldness: null, creativity: null },
-      history: [],
-      candidates: [],
-      learnedRequirements: [],
-      processedSources: [],
-      updatedAt: 0
+    agentProfile: {
+      kind: "ready",
+      ...createAgentProfileViewFixture(3, "executor", ["我会这样做：先核对关键事实，再给出判断。"])
     },
     ...overrides
   };
@@ -9917,6 +10223,7 @@ function createIdentityTestPlugin(fixtureState: Record<string, any>): {
 }
 
 async function assertAgentIdentityCardPlacementAndCopy(): Promise<void> {
+  assertPublicAgentHabitsUseFirstPerson();
   installProviderModalDomFixture();
   const { plugin } = createIdentityTestPlugin(createIdentityFixtureState());
   const tab = new CodexSettingTab(withSettingsTabDefaults(plugin) as never);
@@ -9924,34 +10231,141 @@ async function assertAgentIdentityCardPlacementAndCopy(): Promise<void> {
   mutable.personalMemoryState = createIdentityFixtureState();
   tab.display();
 
-  const identityCard = tab.containerEl.querySelector<ProviderModalTestElement>(
-    ".echoink-agent-identity-card"
+  const profileCard = tab.containerEl.querySelector<ProviderModalTestElement>(
+    ".echoink-agent-profile-card"
   );
-  assert.ok(identityCard, "identity card must render in the personalization section");
-  assert.match(identityCard.textContent, /小墨/u);
-  assert.match(identityCard.textContent, /名称和头像会显示在 Agent 回复旁/u);
-  assert.ok(identityCard.querySelector(".echoink-agent-identity-edit"), "edit button exists");
-
-  // Identity card must come BEFORE the Agent profile card.
-  const cards = Array.from(
-    tab.containerEl.querySelectorAll<ProviderModalTestElement>(
-      ".echoink-agent-identity-card, .echoink-agent-profile-card"
-    )
+  assert.ok(profileCard, "the merged Agent profile card must render");
+  assert.equal(profileCard.tagName, "SECTION");
+  const cardTitle = profileCard.querySelector<ProviderModalTestElement>(
+    "h4.echoink-agent-profile-card-label"
   );
-  const identityIndex = cards.findIndex((card) => card.hasClass("echoink-agent-identity-card"));
-  const profileIndex = cards.findIndex((card) => card.hasClass("echoink-agent-profile-card"));
-  assert.ok(identityIndex >= 0 && profileIndex >= 0 && identityIndex < profileIndex,
-    "identity card must precede the Agent profile card");
+  assert.ok(cardTitle?.id);
+  assert.equal(profileCard.getAttribute("aria-labelledby"), cardTitle!.id);
+  assert.ok(profileCard.querySelector("h5.echoink-agent-profile-content-title"));
+  assert.equal(profileCard.querySelectorAll("h6.echoink-agent-profile-section-title").length, 2);
+  assert.equal(profileCard.querySelectorAll("dl.echoink-agent-profile-current-fields").length, 1);
+  assert.equal(profileCard.querySelectorAll("dt.echoink-agent-profile-field-label").length, 3);
+  assert.equal(profileCard.querySelectorAll("dd.echoink-agent-profile-field-value").length, 3);
+  assert.equal(
+    tab.containerEl.querySelector(".echoink-agent-identity-card"),
+    null,
+    "the separate identity card is retired"
+  );
+  assert.match(profileCard.textContent, /Agent 画像/u);
+  assert.match(profileCard.textContent, /小墨/u);
+  assert.match(profileCard.textContent, /雷厉风行的执行者/u);
+  assert.doesNotMatch(profileCard.textContent, /初始风格/u);
+  assert.match(profileCard.textContent, /我的公开画像/u);
+  assert.match(profileCard.textContent, /当前方式/u);
+  assert.match(profileCard.textContent, /思考方式/u);
+  assert.match(profileCard.textContent, /我处理重要或复杂问题的方式是/u);
+  assert.match(profileCard.textContent, /长期成长/u);
+  assert.match(profileCard.textContent, /我会这样做：先核对关键事实/u);
+  assert.match(profileCard.textContent, /长期对话持续学习/u);
+  const editIdentity = profileCard.querySelector<ProviderModalTestElement>(
+    ".echoink-agent-identity-edit"
+  );
+  assert.ok(editIdentity, "the icon-only identity edit exists");
+  assert.equal(editIdentity!.getAttribute("aria-label"), "编辑 Agent 身份");
+  assert.equal(editIdentity!.textContent.trim(), "", "the edit control is icon-only");
+  assert.equal(
+    editIdentity!.querySelector("svg")?.getAttribute("data-animateicons-icon"),
+    "user-round-pen"
+  );
+  assert.equal(
+    editIdentity!.querySelector("svg")?.getAttribute("data-animateicons-source"),
+    "lucide"
+  );
+  assert.equal(editIdentity!.querySelector("svg")?.getAttribute("focusable"), "false");
+  const templateTrigger = profileCard.querySelector<ProviderModalTestElement>(
+    ".echoink-agent-profile-reselect"
+  );
+  assert.ok(templateTrigger?.querySelector('[data-animateicons-icon="users"]'));
+  assert.ok(templateTrigger?.querySelector(".echoink-agent-profile-template-chevron"));
+  const expectedSkills = AGENT_TEMPLATES[0].preferredSkillIds.map((skillId) =>
+    BUILTIN_SKILLS.find((skill) => skill.id === skillId)!.title);
+  assert.deepEqual(
+    Array.from(profileCard.querySelectorAll<ProviderModalTestElement>(
+      ".echoink-agent-profile-method-tag"
+    )).map((tag) => tag.textContent),
+    expectedSkills
+  );
+  const avatarImage = profileCard.querySelector<ProviderModalTestElement>(
+    ".echoink-agent-profile-avatar img"
+  );
+  assert.equal(avatarImage?.getAttribute("alt") ?? "", "",
+    "the avatar is decorative beside the already visible Agent name");
 
-  // Copy: Agent 身份 / Agent 画像 / 用户画像；no AGENT.md / USER.md filenames.
+  const emptyState = createIdentityFixtureState({
+    agentProfile: {
+      kind: "ready",
+      ...createAgentProfileViewFixture(3, "executor")
+    }
+  });
+  const { plugin: emptyPlugin } = createIdentityTestPlugin(emptyState);
+  const emptyTab = new CodexSettingTab(withSettingsTabDefaults(emptyPlugin) as never);
+  (emptyTab as unknown as { personalMemoryState: Record<string, any> | null })
+    .personalMemoryState = structuredClone(emptyState);
+  emptyTab.display();
+  assert.match(
+    emptyTab.containerEl.querySelector<ProviderModalTestElement>(
+      ".echoink-agent-profile-growth-empty"
+    )?.textContent ?? "",
+    /还没有形成需要长期展示的相处习惯/u,
+    "the growth section has an explicit empty state"
+  );
+
+  // No numeric/expand/raw profile surface, and no fixed-file names leak into settings.
   const text = tab.containerEl.textContent;
-  assert.match(text, /Agent 身份/u);
   assert.match(text, /Agent 画像/u);
   assert.match(text, /用户画像/u);
   assert.doesNotMatch(text, /AGENT\.md|USER\.md/u);
-  assert.match(text, /查看完整画像/u);
-  assert.doesNotMatch(text, /查看完整描述/u);
-  console.log("PASS settings: identity card placement and profile copy");
+  assert.doesNotMatch(profileCard.textContent, /自动生成|查看完整画像|收起画像|锋利度|主导度|%/u);
+  assert.equal(profileCard.querySelector(".echoink-agent-profile-drawer"), null);
+  assert.equal(profileCard.querySelector(".echoink-trait-hexagon"), null);
+  const css = readFileSync("styles.css", "utf8");
+  const settingsSource = readFileSync("src/settings/settings-tab.ts", "utf8");
+  const animateIconSource = readFileSync("src/ui/animate-icon.ts", "utf8");
+  assert.match(settingsSource, /setTooltip\(editIdentityBtn, editIdentityLabel, \{ placement: "top" \}\)/u);
+  assert.match(animateIconSource, /M16 3\.128a4 4 0 0 1 0 7\.744/u);
+  assert.match(animateIconSource, /M2 21a8 8 0 0 1 10\.821-7\.487/u);
+  assert.match(animateIconSource, /M21\.378 16\.626a1 1 0 0 0-3\.004-3\.004/u);
+  assert.match(css, /\.echoink-agent-profile-card\s*\{[^}]*container-type:\s*inline-size;/su);
+  assert.match(css, /\.echoink-agent-profile-card-label\s*\{[^}]*margin:\s*0;/su);
+  assert.match(css, /\.echoink-agent-profile-card-body\s*\{[^}]*grid-template-columns:\s*minmax\(132px,[^}]*minmax\(0,\s*1fr\);/su);
+  assert.match(css, /\.echoink-agent-profile-field-value\s*\{[^}]*max-width:\s*70ch;[^}]*line-height:\s*1\.6;/su);
+  assert.match(css, /\.echoink-agent-profile-field\s*\{[^}]*border-inline-start:\s*2px solid/su);
+  assert.match(css, /\.echoink-agent-profile-method-tags\s*\{[^}]*flex-wrap:\s*wrap;/su);
+  assert.match(css, /@media\s*\(prefers-reduced-motion:\s*no-preference\)[\s\S]*?\.echoink-agent-profile-template-chevron/u);
+  assert.match(css, /@container\s*\(max-width:\s*420px\)[\s\S]*?\.echoink-agent-profile-card-body\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\);/u);
+  assert.match(css, /outline:\s*1px solid oklch\(0 0 0 \/ 0\.1\);/u);
+  assert.match(css, /\.theme-dark \.echoink-agent-profile-avatar\s*\{[^}]*oklch\(1 0 0 \/ 0\.1\)/su);
+  assert.doesNotMatch(css, /\.echoink-trait-|\.echoink-agent-profile-(?:drawer|expand|collapse|raw)/u);
+  assert.doesNotMatch(css, /transition:\s*all/u);
+
+  for (const template of AGENT_TEMPLATES) {
+    const templateState = createIdentityFixtureState({
+      agentProfile: {
+        kind: "ready",
+        ...createAgentProfileViewFixture(3, template.id)
+      }
+    });
+    const { plugin: templatePlugin } = createIdentityTestPlugin(templateState);
+    const templateTab = new CodexSettingTab(withSettingsTabDefaults(templatePlugin) as never);
+    (templateTab as unknown as { personalMemoryState: Record<string, any> | null })
+      .personalMemoryState = structuredClone(templateState);
+    templateTab.display();
+    const expected = template.preferredSkillIds.map((skillId) =>
+      BUILTIN_SKILLS.find((skill) => skill.id === skillId)!.title);
+    assert.deepEqual(
+      Array.from(templateTab.containerEl.querySelectorAll<ProviderModalTestElement>(
+        ".echoink-agent-profile-method-tag"
+      )).map((tag) => tag.textContent),
+      expected,
+      `${template.id} tags follow preferredSkillIds and BUILTIN_SKILLS titles`
+    );
+  }
+  console.log("PASS settings: merged resume-style Agent profile exposes only the public projection");
 }
 
 async function assertCustomWelcomeSettingsUi(): Promise<void> {
@@ -10161,24 +10575,14 @@ async function assertFirstNamingModalZeroWriteOnCancel(): Promise<void> {
       avatar: { kind: "default" },
       updatedAt: 0
     },
-    personalityState: {
-      schema: "echoink.personality.v1",
-      revision: 0,
-      templateId: null,
-      explicit: { sharpness: null, dominance: null, rigor: null, structure: null, boldness: null, creativity: null },
-      observed: { sharpness: null, dominance: null, rigor: null, structure: null, boldness: null, creativity: null },
-      history: [], candidates: [], learnedRequirements: [], processedSources: [],
-      updatedAt: 0
-    }
+    agentProfile: { kind: "ready", ...createAgentProfileViewFixture() }
   });
   const { plugin } = createIdentityTestPlugin(fixtureState);
   let templateCalls = 0;
   let lastInitialIdentity: unknown = null;
   plugin.getCognitiveSystem = async () => ({
     ...createCognitiveSystemStub(),
-    readPersonalityState: async () => fixtureState.personalityState,
     readAgentIdentity: async () => fixtureState.agentIdentity,
-    renderPersonalitySummary: async () => "summary",
     selectPersonalityTemplate: async (
       templateId: string,
       options?: { initialIdentity?: unknown }
@@ -10187,7 +10591,7 @@ async function assertFirstNamingModalZeroWriteOnCancel(): Promise<void> {
       lastInitialIdentity = options?.initialIdentity ?? null;
       return {
         revision: 1,
-        state: { ...fixtureState.personalityState, templateId },
+        state: { complexProblemMethod: "x", tone: "x", responseStructure: "x", currentLearnedHabits: [] },
         agent: "# Agent",
         identity: fixtureState.agentIdentity
       };
@@ -10224,8 +10628,9 @@ async function assertFirstNamingModalZeroWriteOnCancel(): Promise<void> {
   await settleMicrotasks();
   assert.equal(templateCalls, 0, "cancel must keep zero writes");
 
-  // Re-open and complete the flow: exactly one call with initialIdentity.
-  templateBtn.click();
+  // The picker remains open behind the cancelled naming modal; complete the
+  // flow without toggling the disclosure closed.
+  assert.ok(tab.containerEl.querySelector(".echoink-template-picker.is-visible"));
   const rowAgain = tab.containerEl.querySelector<ProviderModalTestElement>(".echoink-picker-row");
   rowAgain!.click();
   await settleMicrotasks();
@@ -10248,16 +10653,14 @@ async function assertFirstNamingModalZeroWriteOnCancel(): Promise<void> {
 /** 未选择人格模板（冷启动）时的身份卡片固定装置。 */
 function createNoTemplateIdentityFixtureState(): Record<string, any> {
   return createIdentityFixtureState({
-    agentIdentity: null,
-    personalityState: {
-      schema: "echoink.personality.v1",
+    agentIdentity: {
+      schema: "echoink.agent-identity.v1",
       revision: 0,
-      templateId: null,
-      explicit: { sharpness: null, dominance: null, rigor: null, structure: null, boldness: null, creativity: null },
-      observed: { sharpness: null, dominance: null, rigor: null, structure: null, boldness: null, creativity: null },
-      history: [], candidates: [], learnedRequirements: [], processedSources: [],
+      displayName: "EchoInk",
+      avatar: { kind: "default" },
       updatedAt: 0
-    }
+    },
+    agentProfile: { kind: "ready", ...createAgentProfileViewFixture() }
   });
 }
 
@@ -10275,14 +10678,15 @@ async function assertIdentityEntryWithoutTemplateOpensPicker(): Promise<void> {
   );
   assert.ok(editButton, "identity button must exist when no template is chosen");
   assert.equal(editButton.disabled, false, "identity button must NOT be disabled without a template");
-  assert.match(editButton.textContent, /选择风格并设置身份/u, "button copy guides into the main chain");
+  assert.equal(editButton.getAttribute("aria-label"), "选择风格并设置身份",
+    "icon-only button exposes the first-run action name");
 
   // Card copy must tell the user to pick a starting style first (not a dead end).
-  const identityCard = tab.containerEl.querySelector<ProviderModalTestElement>(
-    ".echoink-agent-identity-card"
+  const profileCard = tab.containerEl.querySelector<ProviderModalTestElement>(
+    ".echoink-agent-profile-card"
   );
-  assert.ok(identityCard);
-  assert.match(identityCard.textContent, /先选择一个初始风格/u, "card copy explains the next step");
+  assert.ok(profileCard);
+  assert.match(profileCard.textContent, /尚未选择/u, "card copy explains that no template is selected");
 
   // Clicking opens the template picker with all eight rows.
   editButton.click();
@@ -10291,7 +10695,7 @@ async function assertIdentityEntryWithoutTemplateOpensPicker(): Promise<void> {
   );
   assert.ok(picker, "clicking the identity entry opens the template picker");
   const rows = tab.containerEl.querySelectorAll<ProviderModalTestElement>(".echoink-picker-row");
-  assert.equal(rows.length, PERSONALITY_TEMPLATES.length, "all eight template rows render");
+  assert.equal(rows.length, AGENT_TEMPLATES.length, "all eight template rows render");
   console.log("PASS settings: identity entry without template opens the picker");
 }
 
@@ -10305,15 +10709,7 @@ async function assertIdentityEntryFirstRunKeepsSingleTransaction(): Promise<void
       avatar: { kind: "default" },
       updatedAt: 0
     },
-    personalityState: {
-      schema: "echoink.personality.v1",
-      revision: 0,
-      templateId: null,
-      explicit: { sharpness: null, dominance: null, rigor: null, structure: null, boldness: null, creativity: null },
-      observed: { sharpness: null, dominance: null, rigor: null, structure: null, boldness: null, creativity: null },
-      history: [], candidates: [], learnedRequirements: [], processedSources: [],
-      updatedAt: 0
-    }
+    agentProfile: { kind: "ready", ...createAgentProfileViewFixture() }
   });
   const { plugin } = createIdentityTestPlugin(fixtureState);
   let templateCalls = 0;
@@ -10321,9 +10717,7 @@ async function assertIdentityEntryFirstRunKeepsSingleTransaction(): Promise<void
   let lastInitialIdentity: unknown = null;
   plugin.getCognitiveSystem = async () => ({
     ...createCognitiveSystemStub(),
-    readPersonalityState: async () => fixtureState.personalityState,
     readAgentIdentity: async () => fixtureState.agentIdentity,
-    renderPersonalitySummary: async () => "summary",
     selectPersonalityTemplate: async (
       templateId: string,
       options?: { initialIdentity?: unknown }
@@ -10332,7 +10726,7 @@ async function assertIdentityEntryFirstRunKeepsSingleTransaction(): Promise<void
       lastInitialIdentity = options?.initialIdentity ?? null;
       return {
         revision: 1,
-        state: { ...fixtureState.personalityState, templateId },
+        state: { complexProblemMethod: "x", tone: "x", responseStructure: "x", currentLearnedHabits: [] },
         agent: "# Agent",
         identity: fixtureState.agentIdentity
       };
@@ -10401,8 +10795,6 @@ async function assertIdentityEntryWithTemplateOpensEditModal(): Promise<void> {
   let updated: { displayName: string; avatar: { kind: string } } | null = null;
   plugin.getCognitiveSystem = async () => ({
     ...createCognitiveSystemStub(),
-    readPersonalityState: async () => fixtureState.personalityState,
-    renderPersonalitySummary: async () => "summary",
     updateAgentIdentity: async (draft: { displayName: string; avatar: { kind: string } }) => {
       updated = draft;
       return { revision: 4, identity: { ...fixtureState.agentIdentity, ...draft }, agent: "# Agent" };
@@ -10419,7 +10811,8 @@ async function assertIdentityEntryWithTemplateOpensEditModal(): Promise<void> {
   );
   assert.ok(editButton);
   assert.equal(editButton.disabled, false, "edit identity stays clickable with a template");
-  assert.match(editButton.textContent, /编辑身份/u, "button copy is 编辑身份 once a template exists");
+  assert.equal(editButton.getAttribute("aria-label"), "编辑 Agent 身份",
+    "icon-only button exposes the edit action name once a template exists");
 
   editButton.click();
   // Edit-mode modal opens prefilled; the template picker must NOT open.
@@ -10452,7 +10845,6 @@ async function assertTemplatePickerCardGridStructure(): Promise<void> {
   let templateCalls = 0;
   plugin.getCognitiveSystem = async () => ({
     ...createCognitiveSystemStub(),
-    readPersonalityState: async () => fixtureState.personalityState,
     readAgentIdentity: async () => ({
       schema: "echoink.agent-identity.v1",
       revision: 0,
@@ -10460,7 +10852,6 @@ async function assertTemplatePickerCardGridStructure(): Promise<void> {
       avatar: { kind: "default" },
       updatedAt: 0
     }),
-    renderPersonalitySummary: async () => "summary",
     selectPersonalityTemplate: async () => {
       templateCalls += 1;
       throw new Error("structure test must not write");
@@ -10484,7 +10875,7 @@ async function assertTemplatePickerCardGridStructure(): Promise<void> {
   const introTitle = picker.querySelector(".echoink-picker-intro-title");
   const introCopy = picker.querySelector(".echoink-picker-intro-copy");
   assert.match(introTitle?.textContent ?? "", /选择 Agent 的初始风格/u);
-  assert.match(introCopy?.textContent ?? "", /起点/u);
+  assert.match(introCopy?.textContent ?? "", /只调整基础风格/u);
   assert.equal(
     picker.querySelector(".echoink-picker-columns-header"),
     null,
@@ -10495,8 +10886,8 @@ async function assertTemplatePickerCardGridStructure(): Promise<void> {
   // Each template is one whole-card button carrying a left-aligned hierarchy and
   // a stable action affordance.
   const rows = tab.containerEl.querySelectorAll<ProviderModalTestElement>(".echoink-picker-row");
-  assert.equal(rows.length, PERSONALITY_TEMPLATES.length, "eight template rows");
-  PERSONALITY_TEMPLATES.forEach((template, index) => {
+  assert.equal(rows.length, AGENT_TEMPLATES.length, "eight template rows");
+  AGENT_TEMPLATES.forEach((template, index) => {
     const row = rows[index];
     assert.equal(row.tagName, "BUTTON", `card ${template.id} is a single clickable button`);
     assert.equal(row.querySelectorAll("button").length, 0, `row ${template.id} has no nested buttons`);
@@ -10505,8 +10896,8 @@ async function assertTemplatePickerCardGridStructure(): Promise<void> {
     const indicator = row.querySelector(".echoink-picker-row-indicator");
     assert.ok(name && desc, `row ${template.id} carries name and description nodes`);
     assert.ok(indicator, `row ${template.id} keeps a visible selection affordance`);
-    assert.equal(name!.textContent, template.labelZh, `row order follows PERSONALITY_TEMPLATES (${template.id})`);
-    assert.equal(desc!.textContent, template.richDescZh, `description for ${template.id} comes from the template constant`);
+    assert.equal(name!.textContent, template.labelZh, `row order follows AGENT_TEMPLATES (${template.id})`);
+    assert.equal(desc!.textContent, template.complexProblemMethod, `description for ${template.id} comes from the template constant`);
     assert.equal(row.getAttribute("aria-current"), null, "first selection has no current template badge");
   });
 
@@ -10531,18 +10922,22 @@ async function assertTemplatePickerCardGridStructure(): Promise<void> {
   console.log("PASS settings: template picker renders as a responsive card grid");
 }
 
-async function assertPersonalityResetStillRequiresConfirm(): Promise<void> {
+async function assertPersonalityReselectionOpensPickerDirectly(): Promise<void> {
   installProviderModalDomFixture();
   const fixtureState = createIdentityFixtureState();
   const { plugin } = createIdentityTestPlugin(fixtureState);
   let templateCalls = 0;
   plugin.getCognitiveSystem = async () => ({
     ...createCognitiveSystemStub(),
-    readPersonalityState: async () => fixtureState.personalityState,
-    renderPersonalitySummary: async () => "summary",
+    readAgentSelfState: async () => ({
+      revision: 3,
+      metadata: { schema: "echoink.agent-self-metadata.v1", revision: 1, templateId: "executor", updatedAt: 0 },
+      state: { complexProblemMethod: "x", tone: "x", responseStructure: "x", currentLearnedHabits: [] },
+      agent: "# AGENT"
+    }),
     selectPersonalityTemplate: async () => {
       templateCalls += 1;
-      throw new Error("reset test must not write");
+      throw new Error("reselection test must not write");
     }
   });
 
@@ -10555,89 +10950,172 @@ async function assertPersonalityResetStillRequiresConfirm(): Promise<void> {
   const reselect = tab.containerEl.querySelector<ProviderModalTestElement>(
     ".echoink-agent-profile-reselect"
   );
-  assert.ok(reselect, "reset entry exists when a template is set");
-  assert.equal(reselect.dataset.hasTemplate, "true", "personality load marks the template present");
+  assert.ok(reselect, "reselection entry exists when a template is set");
+  assert.equal(reselect.dataset.templateId, "executor", "the current template is carried into the picker");
+  assert.equal(reselect.getAttribute("aria-expanded"), "false");
+  assert.match(reselect.textContent, /重新选择人格模板/u);
+  const usersIcon = reselect.querySelector<ProviderModalTestElement>(
+    '[data-animateicons-icon="users"]'
+  );
+  assert.equal(usersIcon?.getAttribute("data-animateicons-source"), "lucide");
+  assert.equal(usersIcon?.getAttribute("focusable"), "false");
+  const pickerId = reselect.getAttribute("aria-controls");
+  assert.ok(pickerId, "reselection trigger identifies its disclosure panel");
+  const modalCountBefore = openTestModals.length;
 
-  // Clicking must open the confirmation modal, NOT the picker directly.
+  // Switching a template is not a reset: the picker opens directly.
   reselect!.click();
-  await settleMicrotasks();
-  assert.equal(
-    tab.containerEl.querySelector(".echoink-template-picker.is-visible"),
-    null,
-    "reset must stay gated behind the confirmation modal"
-  );
-  const confirmDialog = openTestModals[openTestModals.length - 1];
-  assert.ok(confirmDialog, "confirmation modal opens for personality reset");
-  const resetBody = (confirmDialog.contentEl as unknown as ProviderModalTestElement)
-    .querySelector<ProviderModalTestElement>(".echoink-confirm-modal-preformatted");
-  assert.ok(resetBody, "reset consequences use a scan-friendly preformatted body");
-  assert.match(resetBody!.textContent, /选择新模板后：/u);
-  assert.match(resetBody!.textContent, /• 当前自动演化的人格会被替换。/u);
-  assert.match(resetBody!.textContent, /• 长期 Memory 不会删除。/u);
-  assert.match(resetBody!.textContent, /「复盘」/u);
-  assert.doesNotMatch(resetBody!.textContent, /重置会把 Agent 当前人格恢复到你重新选择的模板/u);
-  const dialogButtons = (confirmDialog.contentEl as unknown as ProviderModalTestElement)
-    .querySelectorAll<ProviderModalTestElement>("button");
-  const decline = dialogButtons.find((button) => button.textContent === "取消");
-  assert.ok(
-    dialogButtons.some((button) => button.textContent === "选择新模板"),
-    "the primary action says what happens next"
-  );
-  assert.ok(decline, "confirm dialog offers cancel");
-  decline!.click();
-  await settleMicrotasks();
-  assert.equal(
-    tab.containerEl.querySelector(".echoink-template-picker.is-visible"),
-    null,
-    "declining keeps the picker closed"
-  );
-  assert.equal(templateCalls, 0, "declining writes nothing");
-
-  // Accepting opens the template list (still no write until a row is chosen).
-  reselect!.click();
-  await settleMicrotasks();
-  const confirmDialog2 = openTestModals[openTestModals.length - 1];
-  const accept = (confirmDialog2.contentEl as unknown as ProviderModalTestElement)
-    .querySelectorAll<ProviderModalTestElement>("button")
-    .find((button) => button.hasClass("mod-cta"));
-  assert.ok(accept, "confirm dialog offers an accept action");
-  accept!.click();
   await settleMicrotasks();
   assert.ok(
     tab.containerEl.querySelector(".echoink-template-picker.is-visible"),
-    "accepting opens the template list"
+    "reselection opens the template list directly"
   );
+  const picker = tab.containerEl.querySelector<ProviderModalTestElement>(
+    ".echoink-template-picker.is-visible"
+  );
+  assert.equal(reselect.getAttribute("aria-expanded"), "true");
+  assert.match(reselect.textContent, /收起人格模板/u);
+  assert.ok(reselect.hasClass("is-expanded"));
+  assert.equal(picker?.id, pickerId);
+  assert.equal(picker?.getAttribute("aria-labelledby"), reselect.id);
+  assert.equal(openTestModals.length, modalCountBefore, "reselection does not open a reset confirmation modal");
   const currentCard = tab.containerEl.querySelector<ProviderModalTestElement>(
     '.echoink-picker-row[data-template-id="executor"]'
   );
   assert.ok(currentCard, "the current template card remains present during reset");
   assert.equal(currentCard!.getAttribute("aria-current"), "true");
+  assert.equal(
+    providerModalTestDocument.activeElement,
+    currentCard,
+    "opening the picker focuses the current template"
+  );
   assert.match(
     currentCard!.querySelector(".echoink-picker-current-badge")?.textContent ?? "",
     /当前模板/u
   );
-  assert.equal(templateCalls, 0, "opening the reset list writes nothing");
-  const css = readFileSync("styles.css", "utf8");
-  assert.match(
-    css,
-    /\.echoink-confirm-modal-preformatted\s*\{[\s\S]*?line-height:\s*1\.6/u
+  const cancel = tab.containerEl.querySelector<ProviderModalTestElement>(".echoink-picker-cancel-btn");
+  assert.ok(cancel);
+  cancel!.click();
+  assert.equal(templateCalls, 0, "cancelling reselection writes nothing");
+  assert.equal(providerModalTestDocument.activeElement, reselect, "closing the picker restores focus to the trigger");
+  assert.match(reselect.textContent, /重新选择人格模板/u);
+  assert.equal(reselect.hasClass("is-expanded"), false);
+
+  reselect.click();
+  const reopenedPicker = tab.containerEl.querySelector<ProviderModalTestElement>(
+    ".echoink-template-picker.is-visible"
   );
-  console.log("PASS settings: personality reset still requires the confirmation modal");
+  assert.ok(reopenedPicker);
+  reopenedPicker.fireEvent("keydown", { key: "Escape" });
+  assert.equal(reselect.getAttribute("aria-expanded"), "false");
+  assert.match(reselect.textContent, /重新选择人格模板/u);
+  assert.equal(
+    tab.containerEl.querySelector(".echoink-template-picker.is-visible"),
+    null,
+    "Escape closes the disclosure"
+  );
+  assert.equal(providerModalTestDocument.activeElement, reselect, "Escape restores trigger focus");
+  console.log("PASS settings: personality reselection opens directly and cancel restores focus");
+}
+
+async function assertPersonalitySelectionRestoresFocusAcrossRenderConsumers(): Promise<void> {
+  installProviderModalDomFixture();
+  const fixtureState = createIdentityFixtureState();
+  const { plugin } = createIdentityTestPlugin(fixtureState);
+  plugin.getCognitiveSystem = async () => ({
+    ...createCognitiveSystemStub(),
+    readAgentSelfState: async () => ({
+      revision: 3,
+      metadata: {
+        schema: "echoink.agent-self-metadata.v1",
+        revision: 1,
+        templateId: "executor",
+        updatedAt: 0
+      },
+      state: {
+        complexProblemMethod: "x",
+        tone: "x",
+        responseStructure: "x",
+        currentLearnedHabits: []
+      },
+      agent: "# AGENT"
+    }),
+    selectPersonalityTemplate: async (templateId: string) => {
+      fixtureState.agentProfile = {
+        kind: "ready",
+        ...createAgentProfileViewFixture(4, templateId)
+      };
+      return {
+        revision: 4,
+        state: {
+          complexProblemMethod: "x",
+          tone: "x",
+          responseStructure: "x",
+          currentLearnedHabits: []
+        },
+        agent: "# AGENT",
+        identity: fixtureState.agentIdentity
+      };
+    }
+  });
+
+  const initiator = new CodexSettingTab(withSettingsTabDefaults(plugin) as never);
+  const initiatorMutable = initiator as unknown as {
+    personalMemoryState: Record<string, any> | null;
+    scheduleDisplay(): void;
+  };
+  initiatorMutable.personalMemoryState = structuredClone(fixtureState);
+  initiator.display();
+  initiatorMutable.scheduleDisplay = () => undefined;
+
+  const oldTrigger = initiator.containerEl.querySelector<ProviderModalTestElement>(
+    '[data-echoink-focus-key="general:personality-template"]'
+  );
+  assert.ok(oldTrigger);
+  oldTrigger.click();
+  const advisor = initiator.containerEl.querySelector<ProviderModalTestElement>(
+    '.echoink-picker-row[data-template-id="advisor"]'
+  );
+  assert.ok(advisor);
+  advisor.click();
+  await settleMicrotasks();
+  assert.equal(oldTrigger.isConnected, true, "the initiating render remains mounted before handoff");
+
+  const consumer = new CodexSettingTab(withSettingsTabDefaults(plugin) as never);
+  (consumer as unknown as { containerEl: ProviderModalTestElement }).containerEl =
+    initiator.containerEl as unknown as ProviderModalTestElement;
+  (consumer as unknown as { personalMemoryState: Record<string, any> | null })
+    .personalMemoryState = structuredClone(fixtureState);
+  consumer.display();
+
+  const newTrigger = consumer.containerEl.querySelector<ProviderModalTestElement>(
+    '[data-echoink-focus-key="general:personality-template"]'
+  );
+  assert.ok(newTrigger);
+  assert.notEqual(newTrigger, oldTrigger, "the final render creates a new trigger node");
+  assert.equal(oldTrigger.isConnected, false, "the initiating trigger is detached by final render");
+  assert.equal(newTrigger.isConnected, true, "the final trigger is connected");
+  assert.equal(
+    providerModalTestDocument.activeElement,
+    newTrigger,
+    "the final render consumer focuses the new trigger"
+  );
+  assert.equal(
+    newTrigger.getAttribute("data-echoink-focus-key"),
+    "general:personality-template"
+  );
+  assert.equal(newTrigger.getAttribute("aria-expanded"), "false");
+  console.log("PASS settings: personality selection restores focus across final render consumers");
 }
 
 async function assertIdentityEntryRespectsFailClosedRetry(): Promise<void> {
   installProviderModalDomFixture();
-  const fixtureState = createNoTemplateIdentityFixtureState();
+  const fixtureState = createIdentityFixtureState({ agentProfile: { kind: "error" } });
   const { plugin } = createIdentityTestPlugin(fixtureState);
   let templateCalls = 0;
   let updateCalls = 0;
   plugin.getCognitiveSystem = async () => ({
     ...createCognitiveSystemStub(),
-    readPersonalityState: async () => {
-      throw new Error("personality-state-corrupt");
-    },
-    readAgentIdentity: async () => null,
-    renderPersonalitySummary: async () => "summary",
     selectPersonalityTemplate: async () => { templateCalls += 1; },
     updateAgentIdentity: async () => { updateCalls += 1; }
   });
@@ -10655,25 +11133,25 @@ async function assertIdentityEntryRespectsFailClosedRetry(): Promise<void> {
   assert.ok(reselect);
   assert.equal(reselect.dataset.failClosed, "true", "profile card enters fail-closed on read failure");
 
-  // Identity entry stays clickable but must route into the retry gate,
-  // never into identity creation under an unknown personality state.
+  // Error state exposes one explicit recovery action only. Identity editing is
+  // unavailable because the current Self is unknown and must remain untouched.
   const editButton = tab.containerEl.querySelector<ProviderModalTestElement>(
     ".echoink-agent-identity-edit"
   );
-  assert.ok(editButton, "identity entry exists in fail-closed mode");
-  assert.equal(editButton.disabled, false, "identity entry stays clickable in fail-closed mode");
-  editButton!.click();
+  assert.equal(editButton, null, "fail-closed mode does not render a misleading identity edit action");
+  assert.match(reselect.textContent, /重新读取人格/u);
+  reselect.click();
   await settleMicrotasks();
 
   assert.equal(
     tab.containerEl.querySelector(".echoink-template-picker.is-visible"),
     null,
-    "fail-closed: identity entry must not open the picker"
+    "fail-closed: recovery action must not open the picker"
   );
   assert.equal(
     findLatestModalElement<ProviderModalTestElement>("name-input"),
     null,
-    "fail-closed: identity entry must not open an identity modal"
+    "fail-closed: recovery action must not open an identity modal"
   );
   assert.equal(templateCalls, 0, "fail-closed: no template write");
   assert.equal(updateCalls, 0, "fail-closed: no identity write");
@@ -10938,174 +11416,6 @@ async function settleMicrotasks(): Promise<void> {
   for (let i = 0; i < 4; i += 1) await Promise.resolve();
 }
 
-
-// ---------------------------------------------------------------------------
-// R5: settings UI — new six behavioral dimensions (bars, bands, hexagon copy)
-// ---------------------------------------------------------------------------
-
-async function assertPersonalityCardUsesNewBehaviorDimensions(): Promise<void> {
-  installProviderModalDomFixture();
-  const { plugin } = createIdentityTestPlugin(createIdentityFixtureState());
-  // executor template: sharpness 0.75 → band 犀利.
-  const executorState = applyTemplateToState(emptyPersonalityState(0), {
-    templateId: "executor",
-    now: 1,
-    reset: false
-  });
-  plugin.getCognitiveSystem = async () => ({
-    ...createCognitiveSystemStub(),
-    readPersonalityState: async () => executorState,
-    renderPersonalitySummary: async () => "summary"
-  });
-
-  const tab = new CodexSettingTab(withSettingsTabDefaults(plugin) as never);
-  const mutable = tab as unknown as { personalMemoryState: Record<string, any> | null };
-  mutable.personalMemoryState = createIdentityFixtureState();
-  tab.display();
-  await settleMicrotasks();
-
-  const card = tab.containerEl.querySelector<ProviderModalTestElement>(
-    ".echoink-agent-profile-card"
-  );
-  assert.ok(card, "personality card renders");
-  const text = card!.textContent;
-
-  // 1. New dimension labels; 2. no legacy labels anywhere in the card.
-  for (const dimension of TRAIT_DIMENSIONS) {
-    assert.ok(text.includes(TRAIT_DIMENSION_META[dimension].labelZh),
-      `card must show ${dimension} label`);
-  }
-  for (const legacy of ["节奏", "能量", "思维", "温度", "秩序", "立场"]) {
-    assert.ok(!text.includes(legacy), `legacy label ${legacy} must be gone`);
-  }
-
-  // 3/5. Value format "75 · 犀利"; no percent signs.
-  const sharpRow = card!.querySelectorAll<ProviderModalTestElement>(".echoink-trait-value");
-  assert.equal(sharpRow.length, 6, "six trait value labels");
-  assert.equal(sharpRow[0].textContent, "75 · 犀利",
-    "executor sharpness 0.75 renders as 75 · 犀利");
-  for (const valueEl of sharpRow) {
-    assert.ok(!valueEl.textContent.includes("%"), "no percent signs");
-    assert.match(valueEl.textContent, /^\d+ · /u, "value uses 'N · band' format");
-  }
-  assert.ok(!text.includes("30%"), "old percent copy must be gone");
-
-  // 4. No two-pole arrows.
-  assert.ok(!text.includes("←→") && !text.includes("↔"), "no bidirectional pole arrows");
-  assert.ok(!text.includes("偏左") && !text.includes("偏右") && !text.includes("靠右极"));
-
-  // 6. Description line comes from the shared band Meta.
-  const descs = card!.querySelectorAll<ProviderModalTestElement>(".echoink-trait-band-desc");
-  assert.equal(descs.length, 6);
-  const sharpBand = traitBehaviorBand("sharpness", 0.75);
-  assert.equal(descs[0].textContent, sharpBand.uiDescriptionZh);
-
-  // 7. Bar order matches TRAIT_DIMENSIONS; hexagon short labels come from the
-  //    same Meta in the same order.
-  const dimSpans = card!.querySelectorAll<ProviderModalTestElement>(".echoink-trait-dim");
-  assert.deepEqual(
-    dimSpans.map((span) => span.textContent),
-    TRAIT_DIMENSIONS.map((dimension) => TRAIT_DIMENSION_META[dimension].labelZh)
-  );
-  assert.deepEqual(
-    TRAIT_DIMENSIONS.map((dimension) => getDimensionShortLabel(dimension)),
-    ["锋利", "主导", "较真", "条理", "果敢", "创意"]
-  );
-
-  // 8. Baseline + current layers use the new dimensions (hexagon input keys).
-  for (const template of PERSONALITY_TEMPLATES) {
-    assert.deepEqual(
-      Object.keys((template as PersonalityTemplate).scores).sort(),
-      [...TRAIT_DIMENSIONS].sort()
-    );
-  }
-
-  // 9. Still no direct score editor on the personality card.
-  assert.ok(!card!.querySelectorAll("input").some((input) => input.type === "range"),
-    "no slider score editor");
-
-  // 10. Round-4 identity card and Agent画像 copy are not regressed.
-  const identityCard = tab.containerEl.querySelector<ProviderModalTestElement>(
-    ".echoink-agent-identity-card"
-  );
-  assert.ok(identityCard, "identity card still present");
-  assert.match(tab.containerEl.textContent, /Agent 画像/u);
-  assert.match(tab.containerEl.textContent, /用户画像/u);
-
-  // Template picker descriptions come from the shared template constants.
-  const executorTemplate = PERSONALITY_TEMPLATES.find((template) => template.id === "executor")!;
-  assert.equal(executorTemplate.richDescZh, executorTemplate.cardZh,
-    "picker and card read the same description constant");
-  console.log("PASS settings: personality card uses new behavior dimensions and bands");
-}
-
-// Round 6 修复八：人格轮廓说明（caption）不得被异步六边形重渲染删除。
-// 连续刷新两次后 caption 仍只有一份、文案不变；SVG 被替换而不是累积。
-async function assertHexagonCaptionSurvivesRepeatedAsyncRender(): Promise<void> {
-  installProviderModalDomFixture();
-  const { plugin } = createIdentityTestPlugin(createIdentityFixtureState());
-  const executorState = applyTemplateToState(emptyPersonalityState(0), {
-    templateId: "executor",
-    now: 1,
-    reset: false
-  });
-  plugin.getCognitiveSystem = async () => ({
-    ...createCognitiveSystemStub(),
-    readPersonalityState: async () => executorState,
-    renderPersonalitySummary: async () => "summary",
-    readFixedFiles: async () => ({ agent: "# AGENT" })
-  });
-
-  const tab = new CodexSettingTab(withSettingsTabDefaults(plugin) as never);
-  const mutable = tab as unknown as { personalMemoryState: Record<string, any> | null };
-  mutable.personalMemoryState = createIdentityFixtureState();
-  tab.display();
-  await settleMicrotasks();
-
-  const card = tab.containerEl.querySelector<ProviderModalTestElement>(
-    ".echoink-agent-profile-card"
-  );
-  assert.ok(card, "personality card renders");
-  const captionText = "人格轮廓表示六种行为特质的强弱组合，不代表 Agent 能力高低。";
-  const captions = () =>
-    card!.querySelectorAll<ProviderModalTestElement>(".echoink-trait-hexagon-caption");
-  const svgs = () =>
-    card!.querySelectorAll<ProviderModalTestElement>(".echoink-trait-hexagon");
-
-  // 1. 首次异步渲染完成后：caption 存在且只有一份，文案正确。
-  assert.equal(captions().length, 1, "caption exists after first async render");
-  assert.equal(captions()[0].textContent, captionText, "caption copy is intact");
-
-  // 3. SVG 渲染在独立挂载节点内，baseline/current 两层都在。
-  const mount = card!.querySelector<ProviderModalTestElement>(".echoink-trait-hexagon-mount");
-  assert.ok(mount, "dedicated SVG mount node exists");
-  assert.equal(svgs().length, 1, "hexagon SVG rendered");
-  assert.ok(mount!.contains(svgs()[0]), "SVG must live inside the mount node");
-  assert.ok(!mount!.contains(captions()[0]),
-    "caption must be a sibling of the mount, never inside it");
-  assert.equal(card!.querySelectorAll(".echoink-trait-hexagon-baseline").length, 1,
-    "baseline polygon present");
-  assert.equal(card!.querySelectorAll(".echoink-trait-hexagon-score").length, 1,
-    "current score polygon present");
-
-  // 2. 连续两次异步刷新（展开抽屉会重新 loadPersonalityIntoCard）：
-  //    caption 不重复、不被删除；SVG 被替换而不是累积。
-  const expandBtn = card!.querySelector<ProviderModalTestElement>(
-    ".echoink-agent-profile-expand-btn"
-  )!;
-  expandBtn.click(); // 展开 → 触发第二次异步渲染
-  await settleMicrotasks();
-  expandBtn.click(); // 收起
-  expandBtn.click(); // 再展开 → 触发第三次异步渲染
-  await settleMicrotasks();
-
-  assert.equal(captions().length, 1, "caption must not duplicate or vanish across re-renders");
-  assert.equal(captions()[0].textContent, captionText, "caption copy unchanged after re-renders");
-  assert.equal(svgs().length, 1, "SVG must be replaced, not accumulated");
-  assert.equal(card!.querySelectorAll(".echoink-trait-hexagon-baseline").length, 1);
-  assert.equal(card!.querySelectorAll(".echoink-trait-hexagon-score").length, 1);
-  console.log("PASS settings: personality profile caption survives repeated async renders");
-}
 
 function installProviderModalDomFixture(): void {
   if (providerModalTestDocument) return;

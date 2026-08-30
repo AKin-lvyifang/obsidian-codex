@@ -3,13 +3,11 @@ import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import knowledgeGuideBody from "./assets/guide/knowledge-guide.zh-CN.md";
 import knowledgeFlowImageDataUrl from "./assets/guide/knowledge-flow-v1.webp";
-import memoryPersonalityImageDataUrl from "./assets/guide/memory-personality-v1.webp";
 
 export const KNOWLEDGE_BASE_TEMPLATE_VERSION = "onboarding-v1";
 export const KNOWLEDGE_INITIALIZATION_GUIDE_PATH = "wiki/开始使用 EchoInk 知识库.md";
 export const KNOWLEDGE_INITIALIZATION_GUIDE_ASSET_PATHS = Object.freeze([
-  "assets/echoink-guide/knowledge-flow-v1.webp",
-  "assets/echoink-guide/memory-personality-v1.webp"
+  "assets/echoink-guide/knowledge-flow-v1.webp"
 ] as const);
 export const KNOWLEDGE_INITIALIZATION_INDEX_PATH = "wiki/index.md";
 export const KNOWLEDGE_INITIALIZATION_TRACKER_PATH = "outputs/.ingest-tracker.md";
@@ -220,8 +218,7 @@ interface KnowledgeInitializationGuideAsset {
 
 const KNOWLEDGE_INITIALIZATION_GUIDE_ASSETS:
 readonly KnowledgeInitializationGuideAsset[] = Object.freeze([
-  guideAsset(KNOWLEDGE_INITIALIZATION_GUIDE_ASSET_PATHS[0], knowledgeFlowImageDataUrl),
-  guideAsset(KNOWLEDGE_INITIALIZATION_GUIDE_ASSET_PATHS[1], memoryPersonalityImageDataUrl)
+  guideAsset(KNOWLEDGE_INITIALIZATION_GUIDE_ASSET_PATHS[0], knowledgeFlowImageDataUrl)
 ]);
 
 export class KnowledgeBaseInitializer {
