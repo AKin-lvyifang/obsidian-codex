@@ -19,6 +19,8 @@ await esbuild.build({
       'import { runPiKnowledgeReadToolTests } from "./src/tests/pi-native/knowledge-read-tools";',
       'import { runPhase3KnowledgeMaintenanceServiceTests } from "./src/tests/pi-native/phase3-maintenance-service";',
       'import { runKnowledgeInitializationTests } from "./src/tests/knowledge-initialization";',
+      'import { runHomeWorkbenchTests } from "./src/tests/home-workbench";',
+      "await runHomeWorkbenchTests();",
       "await runKnowledgeAgentIndexTests();",
       "await runKnowledgeMaintenancePreferenceTests();",
       "await runPiKnowledgeReadToolTests();",

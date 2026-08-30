@@ -1,59 +1,97 @@
-import { ItemView, Menu, Notice, TFile, WorkspaceLeaf, normalizePath, setIcon } from "obsidian";
+import { ItemView, Notice, TFile, WorkspaceLeaf, normalizePath, setIcon } from "obsidian";
 import type CodexForObsidianPlugin from "../main";
-import type { KnowledgeBaseDashboardFile, KnowledgeBaseDashboardRecommendationCard, KnowledgeBaseDashboardSnapshot } from "../knowledge-base/dashboard";
-import { rawDigestStateForRecord, rawDigestStateLabel } from "../knowledge-base/digest-status";
+import type { KnowledgeBaseDashboardSnapshot } from "../knowledge-base/dashboard";
+import {
+  HomeWorkbenchDataService,
+  type HomeEntrySummary,
+  type HomeWorkbenchData
+} from "./home-workbench-data";
+import {
+  EMPTY_HOME_GRAPH_FILTERS,
+  HOME_CONTRIBUTION_DAYS,
+  HOME_CONTRIBUTION_WEEKS,
+  buildHomeContributionGrid,
+  buildHomeJournalDays,
+  dateKey,
+  hasActiveHomeGraphFilters,
+  homePropertyFilterIdentity,
+  journalPathForDate,
+  mergeHomeActivityDays,
+  toggleHomeFilterValue,
+  toggleHomePropertyFilter,
+  type HomeGraphFilters,
+  type HomePropertyFilter,
+} from "./home-workbench-model";
+import { HomeGraphController, type HomeGraphFallback } from "./home-graph-controller";
+import { JournalTemplateModal } from "./journal-template-modal";
+import { NativeFlickeringGrid } from "./magic-ui-adapters";
+import { openObsidianGraphLeaf } from "./open-native-graph";
 
 export const VIEW_TYPE_ECHOINK_HOME = "codex-echoink-home";
 
-export type HomeFilter = "all" | "recent" | "stale" | "raw" | "wiki" | "suggested";
-export type HomeSort = "relevance" | "updated" | "folder";
-export type HomeFolderFilter = typeof HOME_FOLDER_ALL | string;
-export type HomeCardKind = "raw" | "wiki" | "inbox" | "outputs";
-type HeatmapLevel = "none" | "low" | "mid" | "high" | "bad";
-
-export interface HomeCard {
-  id: string;
-  title: string;
-  path: string;
-  kind: HomeCardKind;
-  summary: string;
-  tags: string[];
-  status: string;
-  touchedAt: number;
-}
-
-const WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
-const MONTH_LABELS = ["1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"];
-export const HOME_CARD_ACTION_LABELS = ["打开"] as const;
-export const HOME_CARDS_PAGE_SIZE = 24;
-export const HOME_FOLDER_ALL = "all";
-const HOME_RAW_ACTION_STATUSES = new Set(["Raw 待提炼", "待重新提炼", "提炼失败"]);
-export const HOME_SORT_OPTIONS: ReadonlyArray<{ id: HomeSort; label: string; icon: string }> = [
-  { id: "relevance", label: "按相关度", icon: "sparkles" },
-  { id: "updated", label: "按更新时间", icon: "clock-3" },
-  { id: "folder", label: "按文件夹", icon: "folder-tree" }
-];
-
-export interface HomeRawBatchPreview {
-  count: number;
-  previewPaths: string[];
-  remainingCount: number;
-  command: string;
-}
+const ENTRY_ICON: Record<HomeEntrySummary["id"], string> = {
+  wiki: "library",
+  outputs: "package-open",
+  projects: "kanban-square",
+  inbox: "inbox",
+  journal: "notebook-pen",
+  review: "chart-no-axes-combined"
+};
+const ENTRY_ACTION: Record<HomeEntrySummary["id"], string> = {
+  wiki: "打开 Wiki",
+  outputs: "查看成果",
+  projects: "继续项目",
+  inbox: "处理输入",
+  journal: "写日记",
+  review: "开始复盘"
+};
 
 export class EchoInkHomeView extends ItemView {
+  private readonly dataService: HomeWorkbenchDataService;
   private snapshot: KnowledgeBaseDashboardSnapshot | null = null;
+  private data: HomeWorkbenchData | null = null;
   private loading = false;
   private error = "";
-  private activeFilter: HomeFilter | null = null;
-  private filterTouched = false;
-  private activeSort: HomeSort = "relevance";
-  private activeFolderFilter: HomeFolderFilter = HOME_FOLDER_ALL;
-  private visibleCardLimit = HOME_CARDS_PAGE_SIZE;
   private calendarMonthOffset = 0;
+  private recentPaused = false;
+  private graphFilters: HomeGraphFilters = cloneGraphFilters(EMPTY_HOME_GRAPH_FILTERS);
+  private selectedGraphNodeId: string | null = null;
+  private graphFallback: HomeGraphFallback = "none";
+  private graphFallbackReason = "";
+  private graphGrid: NativeFlickeringGrid | null = null;
+  private readonly graphController: HomeGraphController;
+
+  private pageEl!: HTMLElement;
+  private headerStatusEl!: HTMLElement;
+  private overviewEl!: HTMLElement;
+  private graphFiltersEl!: HTMLElement;
+  private graphCountEl!: HTMLElement;
+  private graphFallbackEl!: HTMLElement;
+  private graphRuntimeEl!: HTMLElement;
+  private graphSelectionEl!: HTMLElement;
+  private graphListEl!: HTMLDetailsElement;
+  private graphListBodyEl!: HTMLElement;
+  private recentEl!: HTMLElement;
+  private entriesEl!: HTMLElement;
+  private heatmapEl!: HTMLElement;
+  private calendarEl!: HTMLElement;
 
   constructor(leaf: WorkspaceLeaf, private readonly plugin: CodexForObsidianPlugin) {
     super(leaf);
+    this.dataService = new HomeWorkbenchDataService(plugin.app);
+    this.graphController = new HomeGraphController({
+      onSelect: (nodeId) => {
+        this.selectedGraphNodeId = nodeId;
+        this.renderGraphSelection();
+        this.syncGraphListSelection();
+      },
+      onOpen: (nodeId) => void this.openVaultFile(nodeId),
+      onFallbackChange: (fallback, reason) => {
+        this.graphFallback = fallback;
+        this.graphFallbackReason = reason;
+        this.renderGraphState();
+      }
+    });
   }
 
   getViewType(): string {
@@ -69,780 +107,745 @@ export class EchoInkHomeView extends ItemView {
   }
 
   async onOpen(): Promise<void> {
-    this.contentEl.addClass("codex-home-view");
-    this.render();
+    this.contentEl.addClass("codex-home-view", "echoink-home-view");
+    this.renderShell();
+    this.registerDomEvent(document, "visibilitychange", () => {
+      this.pageEl.toggleClass("is-document-hidden", document.visibilityState === "hidden");
+    });
+    await this.graphController.mount(this.graphRuntimeEl);
     await this.refresh();
   }
 
+  async onClose(): Promise<void> {
+    this.graphGrid?.dispose();
+    this.graphGrid = null;
+    this.graphController.dispose();
+    this.contentEl.removeClass("codex-home-view", "echoink-home-view");
+    this.contentEl.empty();
+  }
+
   async refresh(): Promise<void> {
-    const manager = this.plugin.getKnowledgeSurfaceService();
-    if (!manager) {
-      this.error = "知识库管理器还没有准备好。";
-      this.render();
-      return;
-    }
+    if (this.loading) return;
     this.loading = true;
     this.error = "";
-    this.render();
-    try {
-      this.snapshot = await manager.getDashboardSnapshot();
-    } catch (error) {
-      this.error = error instanceof Error ? error.message : String(error);
-    } finally {
-      this.loading = false;
-      this.render();
+    this.renderHeaderState();
+    const visibleMonth = this.visibleMonth();
+    const manager = this.plugin.getKnowledgeSurfaceService();
+    const [dataResult, snapshotResult] = await Promise.allSettled([
+      this.dataService.build(visibleMonth),
+      manager ? manager.getDashboardSnapshot() : Promise.reject(new Error("知识库管理器尚未准备好"))
+    ]);
+    if (dataResult.status === "fulfilled") {
+      this.data = dataResult.value;
+    } else {
+      this.error = `本地知识数据读取失败：${errorMessage(dataResult.reason)}`;
+    }
+    if (snapshotResult.status === "fulfilled") {
+      this.snapshot = snapshotResult.value;
+    } else if (!this.error) {
+      this.error = `维护快照暂不可用：${errorMessage(snapshotResult.reason)}`;
+    }
+    if (this.data && snapshotResult.status === "fulfilled") {
+      this.data.activity = mergeHomeActivityDays(this.data.activity, snapshotResult.value.activity.days);
+      this.data.journalDays = buildHomeJournalDays(this.data.records, this.data.activity, visibleMonth);
+    }
+    this.loading = false;
+    this.renderHeaderState();
+    this.renderOverview();
+    this.renderRecentThoughts();
+    this.renderEntries();
+    this.renderHeatmap();
+    this.renderCalendar();
+  }
+
+  private renderShell(): void {
+    this.contentEl.empty();
+    this.pageEl = this.contentEl.createDiv({ cls: "echoink-home-page" });
+    this.renderHeader();
+
+    this.overviewEl = this.pageEl.createEl("section", {
+      cls: "echoink-home-overview",
+      attr: { "aria-labelledby": "echoink-home-overview-title" }
+    });
+    this.renderOverviewShell();
+
+    this.recentEl = this.pageEl.createEl("section", { cls: "echoink-home-recent" });
+    this.entriesEl = this.pageEl.createEl("section", { cls: "echoink-home-entries-section" });
+    const rhythm = this.pageEl.createDiv({ cls: "echoink-home-rhythm-grid" });
+    this.heatmapEl = rhythm.createEl("section", { cls: "echoink-home-heatmap" });
+    this.calendarEl = rhythm.createEl("section", { cls: "echoink-home-calendar-panel" });
+  }
+
+  private renderHeader(): void {
+    const header = this.pageEl.createEl("header", { cls: "echoink-home-header" });
+    const brand = header.createDiv({ cls: "echoink-home-brand" });
+    const mark = brand.createSpan({ cls: "echoink-home-brand-mark" });
+    setIcon(mark, "feather");
+    const text = brand.createDiv();
+    text.createEl("h1", { text: "个人知识工作台" });
+    this.headerStatusEl = header.createDiv({ cls: "echoink-home-header-status" });
+    const actions = header.createDiv({ cls: "echoink-home-header-actions" });
+    this.iconButton(actions, "refresh-cw", "刷新本地数据", () => void this.refresh());
+    this.iconButton(actions, "settings", "插件设置", () => void this.plugin.openWorkspaceResourceSettings());
+  }
+
+  private renderHeaderState(): void {
+    if (!this.headerStatusEl) return;
+    this.headerStatusEl.empty();
+    const vault = this.snapshot?.vaultName || this.app.vault.getName?.() || "当前知识库";
+    this.headerStatusEl.createSpan({ cls: "echoink-home-vault", text: vault });
+    const state = this.headerStatusEl.createSpan({
+      cls: `echoink-home-health is-${this.snapshot?.health.status ?? "unknown"}`,
+      attr: { role: "status", "aria-live": "polite" },
+      text: this.loading
+        ? "正在读取本地知识…"
+        : this.snapshot
+          ? `${this.snapshot.health.label} ${this.snapshot.health.score}/100`
+          : "本地模式"
+    });
+    if (this.error) {
+      state.addClass("is-error");
+      state.setAttribute("role", "alert");
+      state.setText(this.error);
     }
   }
 
-  private render(): void {
-    const { contentEl } = this;
-    contentEl.empty();
-    contentEl.addClass("codex-home-view");
-
-    const page = contentEl.createDiv({ cls: "codex-home-page" });
-    this.renderHeader(page);
-    if (this.error) page.createDiv({ cls: "codex-home-error", text: this.error });
-    this.renderDashboard(page);
-    this.renderFeed(page);
-  }
-
-  private renderHeader(container: HTMLElement): void {
-    const snapshot = this.snapshot;
-    const header = container.createDiv({ cls: "codex-home-header" });
-
-    const brand = header.createDiv({ cls: "codex-home-brand" });
-    const logo = brand.createSpan({ cls: "codex-home-logo" });
-    setIcon(logo, "feather");
-    brand.createEl("h1", { text: "EchoInk 首页" });
-
-    const vault = header.createDiv({ cls: "codex-home-vault" });
-    vault.createSpan({ text: snapshot?.vaultName || this.plugin.app.vault.getName?.() || "当前知识库" });
-    const vaultIcon = vault.createSpan();
-    setIcon(vaultIcon, "chevron-down");
-
-    const health = header.createDiv({ cls: `codex-home-health-pill is-${snapshot?.health.status ?? "unknown"}` });
-    const healthIcon = health.createSpan();
-    setIcon(healthIcon, "shield-check");
-    health.createSpan({ text: snapshot?.health.label ?? (this.loading ? "扫描中" : "等待") });
-    health.createEl("strong", { text: snapshot ? `${snapshot.health.score}/100` : "--/100" });
-
-    header.createDiv({
-      cls: "codex-home-last-check",
-      text: `最后体检：${snapshot?.checkFreshness.lastCheckAt ? formatDateTime(snapshot.checkFreshness.lastCheckAt) : "无记录"}`
+  private renderOverviewShell(): void {
+    const head = this.overviewEl.createDiv({ cls: "echoink-home-section-head" });
+    const copy = head.createDiv();
+    copy.createEl("h2", { text: "知识图谱", attr: { id: "echoink-home-overview-title" } });
+    copy.createDiv({
+      cls: "echoink-home-section-note",
+      text: "来自当前 Vault 的 Markdown 与已解析双链"
     });
-
-    const actions = header.createDiv({ cls: "codex-home-actions" });
-    this.addIconButton(actions, "settings", "插件设置", () => void this.plugin.openWorkspaceResourceSettings());
-  }
-
-  private addIconButton(container: HTMLElement, iconName: string, label: string, onClick: (event: MouseEvent) => void, disabled = false): void {
-    const button = container.createEl("button", {
-      cls: "codex-home-icon-button",
-      attr: { type: "button", title: label, "aria-label": label }
+    const actions = head.createDiv({ cls: "echoink-home-graph-head-actions" });
+    const reset = actions.createEl("button", {
+      cls: "echoink-home-graph-secondary",
+      attr: { type: "button" }
     });
-    setIcon(button, iconName);
-    button.disabled = disabled;
-    button.onclick = onClick;
-  }
-
-  private addCalendarMonthButton(container: HTMLElement, iconName: string, label: string, onClick: () => void): void {
-    const button = container.createEl("button", {
-      cls: "codex-home-month-button",
-      attr: { type: "button", title: label, "aria-label": label }
+    setIcon(reset.createSpan(), "scan");
+    reset.createSpan({ text: "重置视角" });
+    reset.onclick = () => this.graphController.resetCamera();
+    const open = actions.createEl("button", {
+      cls: "echoink-home-graph-secondary",
+      attr: { type: "button" }
     });
-    setIcon(button, iconName);
-    button.onclick = onClick;
+    setIcon(open.createSpan(), "git-fork");
+    open.createSpan({ text: "打开 Obsidian 原生图谱" });
+    open.onclick = () => void openObsidianGraphLeaf(this.app);
+
+    this.graphFiltersEl = this.overviewEl.createDiv({ cls: "echoink-home-graph-filters" });
+    const status = this.overviewEl.createDiv({ cls: "echoink-home-graph-status" });
+    this.graphCountEl = status.createDiv({
+      cls: "echoink-home-graph-count",
+      attr: { role: "status", "aria-live": "polite" }
+    });
+    this.graphFallbackEl = status.createDiv({ cls: "echoink-home-graph-fallback", attr: { role: "status" } });
+
+    const frame = this.overviewEl.createDiv({ cls: "echoink-home-graph-frame" });
+    const grid = frame.createDiv({ cls: "echoink-home-graph-grid", attr: { "aria-hidden": "true" } });
+    this.graphGrid = new NativeFlickeringGrid(grid, {
+      squareSize: 4,
+      gridGap: 7,
+      flickerChance: 0.22,
+      maxOpacity: 0.18
+    });
+    this.graphRuntimeEl = frame.createDiv({ cls: "echoink-home-graph-host" });
+    this.graphSelectionEl = frame.createDiv({ cls: "echoink-home-graph-selection" });
+
+    this.graphListEl = this.overviewEl.createEl("details", { cls: "echoink-home-graph-list" });
+    this.graphListEl.createEl("summary", { text: "浏览筛选后的笔记" });
+    this.graphListBodyEl = this.graphListEl.createDiv({ cls: "echoink-home-graph-list-body" });
   }
 
-  private shiftCalendarMonth(offset: number): void {
-    this.calendarMonthOffset += offset;
-    this.render();
+  private renderOverview(): void {
+    const graph = this.data?.graph;
+    if (graph) this.graphController.updateData(graph);
+    this.renderGraphFilters();
+    this.applyGraphFilters();
   }
 
-  private resetCalendarMonth(): void {
-    if (this.calendarMonthOffset === 0) return;
-    this.calendarMonthOffset = 0;
-    this.render();
-  }
-
-  private renderDashboard(container: HTMLElement): void {
-    const grid = container.createDiv({ cls: "codex-home-top-grid" });
-    const main = grid.createDiv({ cls: "codex-home-main-column" });
-    const side = grid.createDiv({ cls: "codex-home-side-column" });
-    this.renderCalendar(main);
-    this.renderHeatmap(main);
-    this.renderTodayReview(side);
-    this.renderSidePanels(side);
-  }
-
-  private renderCalendar(container: HTMLElement): void {
-    const snapshot = this.snapshot;
-    const now = snapshot ? new Date(snapshot.generatedAt) : new Date();
-    const visibleMonth = shiftCalendarMonth(now, this.calendarMonthOffset);
-    const section = container.createDiv({ cls: "codex-home-panel codex-home-calendar-panel" });
-    const head = section.createDiv({ cls: "codex-home-section-head" });
-    head.createDiv({ cls: "codex-home-section-title", text: "知识活动日历" });
-
-    const monthNav = head.createDiv({ cls: "codex-home-month-nav" });
-    this.addCalendarMonthButton(monthNav, "chevron-left", "上个月", () => this.shiftCalendarMonth(-1));
-    monthNav.createSpan({ cls: "codex-home-month-label", text: calendarMonthLabel(visibleMonth) });
-    this.addCalendarMonthButton(monthNav, "chevron-right", "下个月", () => this.shiftCalendarMonth(1));
-    const today = head.createEl("button", { cls: "codex-home-today-chip", text: "今天", attr: { type: "button", title: "回到本月" } });
-    today.onclick = () => this.resetCalendarMonth();
-
-    const calendar = section.createDiv({ cls: "codex-home-calendar" });
-    for (const day of WEEKDAYS) calendar.createDiv({ cls: "codex-home-calendar-weekday", text: day });
-
-    const year = visibleMonth.getFullYear();
-    const month = visibleMonth.getMonth();
-    const first = new Date(year, month, 1);
-    const firstOffset = (first.getDay() + 6) % 7;
-    const displayOffset = firstOffset === 0 ? 7 : firstOffset;
-    const statusByDay = new Map((snapshot?.checkHeatmap ?? []).map((day) => [day.date, day.status]));
-    const activityByDay = new Map((snapshot?.activity?.days ?? []).map((day) => [day.date, day]));
-    const todayKey = dateKeyForLocal(new Date());
-
-    for (let index = 0; index < 42; index++) {
-      const cellDate = new Date(year, month, index - displayOffset + 1);
-      const dateKey = dateKeyForLocal(cellDate);
-      const activityDay = activityByDay.get(dateKey);
-      const status = activityDay?.status ?? statusByDay.get(dateKey) ?? "none";
-      const isCurrentMonth = cellDate.getMonth() === month;
-      const activity = activityDay?.total ?? 0;
-      const level = activityLevel(activity, status);
-      const cell = calendar.createDiv({
-        cls: [
-          "codex-home-calendar-cell",
-          `is-${level}`,
-          isCurrentMonth ? "" : "is-outside",
-          dateKey === todayKey ? "is-today" : ""
-        ].filter(Boolean).join(" "),
-        attr: { title: `${dateKey}：${activity} 条知识活动${status === "failed" ? "，体检异常" : ""}` }
-      });
-      cell.createSpan({ cls: "codex-home-calendar-day", text: String(cellDate.getDate()) });
-      const marker = cell.createSpan({ cls: "codex-home-calendar-marker" });
-      if (activity > 0) {
-        marker.createSpan({ cls: `codex-home-calendar-dot is-${level}` });
-        marker.createSpan({ cls: "codex-home-calendar-count", text: String(activity) });
+  private renderGraphFilters(): void {
+    this.graphFiltersEl.empty();
+    const searchLabel = this.graphFiltersEl.createEl("label", { cls: "echoink-home-graph-search" });
+    searchLabel.createSpan({ text: "搜索" });
+    const search = searchLabel.createEl("input", {
+      attr: {
+        type: "search",
+        value: this.graphFilters.search,
+        placeholder: "文件名或路径",
+        autocomplete: "off"
       }
-    }
-
-    const legend = section.createDiv({ cls: "codex-home-calendar-legend" });
-    this.addLegendItem(legend, "高活动 (≥6)", "high");
-    this.addLegendItem(legend, "中活动 (3-5)", "mid");
-    this.addLegendItem(legend, "低活动 (1-2)", "low");
-    this.addLegendItem(legend, "无活动 (0)", "none");
-    this.addLegendItem(legend, "已体检", "checked");
-    this.addLegendItem(legend, "待维护", "maintenance");
-    this.addLegendItem(legend, "有异常", "bad");
-  }
-
-  private addLegendItem(container: HTMLElement, label: string, level: string): void {
-    const item = container.createSpan({ cls: "codex-home-legend-item" });
-    item.createSpan({ cls: `codex-home-legend-dot is-${level}` });
-    item.createSpan({ text: label });
-  }
-
-  private renderTodayReview(container: HTMLElement): void {
-    const snapshot = this.snapshot;
-    const section = container.createDiv({ cls: "codex-home-panel codex-home-review-board" });
-    section.createDiv({ cls: "codex-home-section-title", text: "今日复盘" });
-    const metrics = section.createDiv({ cls: "codex-home-review-metrics" });
-    const todayPending = snapshot ? snapshot.raw.changedCount + snapshot.inbox.fileCount + snapshot.wiki.todayCount : 0;
-    this.renderMetricCard(metrics, {
-      cls: "is-orange",
-      title: "今日待处理",
-      value: snapshot ? String(todayPending) : "--",
-      unit: "项",
-      lines: [
-        `${snapshot?.wiki.todayCount ?? 0} 条 Wiki 建议`,
-        `${snapshot?.raw.changedCount ?? 0} 条 Raw 待处理`,
-        `${Math.max(snapshot?.warnings.length ?? 0, snapshot?.checkFreshness.reasons.length ?? 0)} 条维护任务`
-      ],
-      icon: "file-search"
     });
-    this.renderMetricCard(metrics, {
-      cls: "is-blue",
-      title: "Raw 待提炼",
-      value: snapshot ? String(snapshot.raw.changedCount) : "--",
-      unit: "条",
-      lines: [`较昨日 +${snapshot?.raw.todayCount ?? 0}`],
-      icon: "file-text"
+    search.addEventListener("input", () => {
+      this.graphFilters.search = search.value;
+      this.applyGraphFilters();
     });
-    this.renderMetricCard(metrics, {
-      cls: "is-purple",
-      title: "Inbox",
-      value: snapshot ? String(snapshot.inbox.fileCount) : "--",
-      unit: "条待处理",
-      lines: [`较昨日 +${snapshot?.inbox.todayCount ?? 0}`],
-      icon: "mail"
+
+    const options = this.data?.graph.options ?? { folders: [], properties: [], tags: [] };
+    this.renderGraphChecklist(
+      "文件夹",
+      options.folders.map((value) => ({ label: value, identity: value })),
+      new Set(this.graphFilters.folders),
+      (identity, checked) => {
+        this.graphFilters.folders = toggleHomeFilterValue(this.graphFilters.folders, identity, checked);
+        this.applyGraphFilters();
+      }
+    );
+    this.renderGraphPropertyChecklist(options.properties);
+    this.renderGraphChecklist(
+      "标签",
+      options.tags.map((value) => ({ label: `#${value}`, identity: value })),
+      new Set(this.graphFilters.tags),
+      (identity, checked) => {
+        this.graphFilters.tags = toggleHomeFilterValue(this.graphFilters.tags, identity, checked);
+        this.applyGraphFilters();
+      }
+    );
+    const clear = this.graphFiltersEl.createEl("button", {
+      cls: "echoink-home-graph-clear",
+      text: "清空筛选",
+      attr: { type: "button" }
     });
-    this.renderMetricCard(metrics, {
-      cls: "is-cyan",
-      title: "Wiki 今日更新",
-      value: snapshot ? String(snapshot.wiki.todayCount) : "--",
-      unit: "条",
-      lines: [`较昨日 +${snapshot?.wiki.todayCount ?? 0}`],
-      icon: "book-open"
-    });
+    clear.disabled = !hasActiveHomeGraphFilters(this.graphFilters);
+    clear.onclick = () => {
+      this.graphFilters = cloneGraphFilters(EMPTY_HOME_GRAPH_FILTERS);
+      this.renderGraphFilters();
+      this.applyGraphFilters();
+    };
   }
 
-  private renderMetricCard(container: HTMLElement, item: { cls: string; title: string; value: string; unit: string; lines: string[]; icon: string }): void {
-    const card = container.createDiv({ cls: `codex-home-metric ${item.cls}` });
-    const text = card.createDiv({ cls: "codex-home-metric-copy" });
-    text.createDiv({ cls: "codex-home-metric-title", text: item.title });
-    const value = text.createDiv({ cls: "codex-home-metric-value" });
-    value.createSpan({ text: item.value });
-    value.createEl("small", { text: item.unit });
-    const list = text.createDiv({ cls: "codex-home-metric-lines" });
-    for (const line of item.lines) list.createDiv({ text: line });
-    const icon = card.createSpan({ cls: "codex-home-metric-icon" });
-    setIcon(icon, item.icon);
-  }
-
-  private renderSidePanels(container: HTMLElement): void {
-    const panels = container.createDiv({ cls: "codex-home-side-panels" });
-    this.renderLatestReport(panels);
-    this.renderActionLog(panels);
-  }
-
-  private renderLatestReport(container: HTMLElement): void {
-    const snapshot = this.snapshot;
-    const panel = container.createDiv({ cls: "codex-home-panel codex-home-report-panel" });
-    panel.createDiv({ cls: "codex-home-section-title", text: "最近维护报告" });
-    const body = panel.createDiv({ cls: "codex-home-report-card" });
-    body.createDiv({ cls: "codex-home-report-title", text: titleFromPath(snapshot?.outputs.latestReportPath || "暂无维护报告") });
-    body.createSpan({ cls: `codex-home-report-status is-${snapshot?.lastRun.status === "success" ? "done" : "risk"}`, text: snapshot?.lastRun.status === "success" ? "已完成" : "待确认" });
-    body.createDiv({ cls: "codex-home-report-line", text: `开始时间：${snapshot?.lastRun.at ? formatDateTime(snapshot.lastRun.at) : "无记录"}` });
-    body.createDiv({ cls: "codex-home-report-line", text: `报告路径：${snapshot?.outputs.latestReportPath || "暂无"}` });
-    const stats = body.createDiv({ cls: "codex-home-report-stats" });
-    stats.createSpan({ text: `新增 ${snapshot?.raw.todayCount ?? 0}` });
-    stats.createSpan({ text: `变更 ${snapshot?.raw.changedCount ?? 0}` });
-    stats.createSpan({ text: `校准 ${snapshot?.raw.digestStatus.calibration ?? 0}` });
-    stats.createSpan({ text: `跳过 ${snapshot?.warnings.length ?? 0}` });
-    const link = panel.createEl("button", { cls: "codex-home-text-link", text: "查看完整维护报告 →", attr: { type: "button" } });
-    link.onclick = () => void this.openVaultFile(snapshot?.outputs.latestReportPath || "");
-  }
-
-  private renderActionLog(container: HTMLElement): void {
-    const snapshot = this.snapshot;
-    const panel = container.createDiv({ cls: "codex-home-panel codex-home-log-panel" });
-    panel.createDiv({ cls: "codex-home-section-title", text: "Codex 行动日志" });
-    const list = panel.createDiv({ cls: "codex-home-log-list" });
-    const logs = snapshot?.activity?.logs ?? [];
-    if (!logs.length) {
-      this.addLogItem(list, "--:--", "等待扫描：还没有可展示的知识库行动记录。", "muted");
-    } else {
-      for (const log of logs) this.addLogItem(list, formatClock(log.at), `${log.label}：${log.text}`, log.tone);
-    }
-  }
-
-  private addLogItem(container: HTMLElement, time: string, text: string, tone: string): void {
-    const item = container.createDiv({ cls: "codex-home-log-item" });
-    item.createSpan({ cls: "codex-home-log-time", text: time });
-    item.createSpan({ cls: `codex-home-log-dot is-${tone}` });
-    item.createSpan({ cls: "codex-home-log-text", text });
-  }
-
-  private renderHeatmap(container: HTMLElement): void {
-    const snapshot = this.snapshot;
-    const section = container.createDiv({ cls: "codex-home-panel codex-home-heatmap-panel" });
-    const head = section.createDiv({ cls: "codex-home-section-head" });
-    head.createDiv({ cls: "codex-home-section-title", text: "年度体检热力图" });
-    head.createDiv({ cls: "codex-home-section-note", text: snapshot ? `${(snapshot.checkHeatmap ?? []).filter((day) => day.status !== "none").length} 次记录` : "等待扫描" });
-
-    const monthLabels = section.createDiv({ cls: "codex-home-heatmap-months" });
-    for (const month of MONTH_LABELS) monthLabels.createSpan({ text: month });
-
-    const rows = section.createDiv({ cls: "codex-home-heatmap-rows" });
-    const heatmapRows = snapshot?.activity?.heatmapRows ?? [];
-    if (heatmapRows.length) {
-      for (const row of heatmapRows) this.renderHeatmapRow(rows, row.label, row.cells);
-    } else {
-      this.renderHeatmapRow(rows, "知识健康度");
-      this.renderHeatmapRow(rows, "Wiki 变更");
-      this.renderHeatmapRow(rows, "Raw 变更");
-      this.renderHeatmapRow(rows, "维护完成");
-    }
-
-    const footer = section.createDiv({ cls: "codex-home-heatmap-footer" });
-    footer.createEl("button", { cls: "codex-home-text-link", text: "查看完整体检报告 →", attr: { type: "button" } }).onclick = () => void this.openVaultFile(snapshot?.outputs.latestReportPath || "");
-    const legend = footer.createSpan({ cls: "codex-home-heatmap-legend" });
-    this.addLegendItem(legend, "高", "high");
-    this.addLegendItem(legend, "中", "mid");
-    this.addLegendItem(legend, "低", "low");
-    this.addLegendItem(legend, "无", "none");
-  }
-
-  private renderHeatmapRow(container: HTMLElement, label: string, cellsData?: KnowledgeBaseDashboardSnapshot["activity"]["heatmapRows"][number]["cells"]): void {
-    const row = container.createDiv({ cls: "codex-home-heatmap-row" });
-    row.createSpan({ cls: "codex-home-heatmap-label", text: label });
-    const cells = row.createSpan({ cls: "codex-home-heatmap-cells" });
-    for (let index = 0; index < 52; index++) {
-      const cell = cellsData?.[index];
-      cells.createSpan({
-        cls: `codex-home-heatmap-cell is-${cell?.level ?? "none"}`,
-        attr: cell ? { title: `${cell.startDate} - ${cell.endDate}：${cell.count}` } : undefined
-      });
-    }
-  }
-
-  private renderFeed(container: HTMLElement): void {
-    const snapshot = this.snapshot;
-    const allCards = buildHomeCards(snapshot);
-    const nextFilter = resolveActiveHomeFilter(this.activeFilter, this.filterTouched, allCards, Boolean(snapshot));
-    if (nextFilter !== this.activeFilter) {
-      this.activeFilter = nextFilter;
-      this.visibleCardLimit = HOME_CARDS_PAGE_SIZE;
-    }
-    const activeFilter = this.activeFilter;
-    const filteredCards = filterHomeCards(allCards, activeFilter);
-    const folderFilters = buildHomeFolderFilterItems(filteredCards);
-    if (!folderFilters.some((filter) => filter.id === this.activeFolderFilter)) this.activeFolderFilter = HOME_FOLDER_ALL;
-    const cards = sortHomeCards(filterHomeCardsByFolder(filteredCards, this.activeFolderFilter), this.activeSort);
-    const visibleCards = cards.slice(0, this.visibleCardLimit);
-    const section = container.createDiv({ cls: "codex-home-feed" });
-    const filters = section.createDiv({ cls: "codex-home-filters" });
-    for (const filter of filterItems(snapshot, allCards)) {
-      const button = filters.createEl("button", {
-        cls: `codex-home-filter ${activeFilter === filter.id ? "is-active" : ""}`.trim(),
-        attr: { type: "button" }
-      });
-      button.createSpan({ text: filter.label });
-      button.createEl("strong", { text: String(filter.count) });
-      button.onclick = () => {
-        this.filterTouched = true;
-        this.activeFilter = filter.id;
-        this.activeFolderFilter = HOME_FOLDER_ALL;
-        this.visibleCardLimit = HOME_CARDS_PAGE_SIZE;
-        this.render();
-      };
-    }
-    const activeSortOption = HOME_SORT_OPTIONS.find((option) => option.id === this.activeSort) ?? HOME_SORT_OPTIONS[0];
-    const sort = filters.createEl("button", {
-      cls: "codex-home-sort",
-      attr: { type: "button", "aria-label": "切换卡片排序", title: "切换卡片排序" }
-    });
-    sort.createSpan({ text: activeSortOption.label });
-    setIcon(sort.createSpan(), "chevron-down");
-    sort.onclick = (event) => this.openHomeSortMenu(event);
-    const activeFolder = folderFilters.find((filter) => filter.id === this.activeFolderFilter) ?? folderFilters[0];
-    const folder = filters.createEl("button", {
-      cls: "codex-home-folder-filter",
-      attr: { type: "button", "aria-label": "文件夹筛选", title: "文件夹筛选" }
-    });
-    folder.createSpan({ text: activeFolder?.label ?? "全部文件夹" });
-    setIcon(folder.createSpan(), "chevron-down");
-    folder.onclick = (event) => this.openHomeFolderMenu(event, folderFilters);
-
-    const grid = section.createDiv({ cls: "codex-home-card-grid" });
-    if (!cards.length) {
-      grid.createDiv({ cls: "codex-home-empty", text: snapshot ? "这个筛选下暂时没有卡片。" : "扫描后会展示最近 Raw、Wiki、Inbox 和输出记录。" });
+  private renderGraphChecklist(
+    label: string,
+    options: readonly { label: string; identity: string }[],
+    selected: ReadonlySet<string>,
+    onChange: (identity: string, checked: boolean) => void
+  ): void {
+    const details = this.graphFiltersEl.createEl("details", { cls: "echoink-home-graph-filter" });
+    const summary = details.createEl("summary", { text: selected.size ? `${label} ${selected.size}` : label });
+    const panel = details.createDiv({ cls: "echoink-home-graph-filter-panel" });
+    if (!options.length) {
+      panel.createDiv({ cls: "echoink-home-empty", text: `当前没有可筛选的${label}` });
       return;
     }
-    for (const card of visibleCards) this.renderCard(grid, card);
-    if (visibleCards.length < cards.length) {
-      const more = section.createEl("button", {
-        cls: "codex-home-load-more",
-        text: `显示更多 ${Math.min(HOME_CARDS_PAGE_SIZE, cards.length - visibleCards.length)} 张 · 已显示 ${visibleCards.length}/${cards.length}`,
-        attr: { type: "button" }
-      });
-      more.onclick = () => {
-        this.visibleCardLimit += HOME_CARDS_PAGE_SIZE;
-        this.render();
+    for (const option of options) {
+      const row = panel.createEl("label");
+      const input = row.createEl("input", { attr: { type: "checkbox" } });
+      input.checked = selected.has(option.identity);
+      input.onchange = () => {
+        onChange(option.identity, input.checked);
+        const count = panel.querySelectorAll<HTMLInputElement>('input[type="checkbox"]:checked').length;
+        summary.setText(count ? `${label} ${count}` : label);
       };
+      row.createSpan({ text: option.label });
     }
   }
 
-  private renderCard(container: HTMLElement, card: HomeCard): void {
-    const item = container.createDiv({ cls: `codex-home-card is-${card.kind}` });
-    const head = item.createDiv({ cls: "codex-home-card-head" });
-    head.createDiv({ cls: "codex-home-card-title", text: card.title });
-    head.createSpan({ cls: "codex-home-card-time", text: relativeDayText(card.touchedAt) });
-    item.createDiv({ cls: "codex-home-card-path", text: compactPath(card.path) });
-    const tags = item.createDiv({ cls: "codex-home-card-tags" });
-    for (const tag of card.tags) tags.createSpan({ cls: "codex-home-card-tag", text: tag });
-    item.createDiv({ cls: "codex-home-card-summary", text: card.summary });
-    const status = item.createDiv({ cls: `codex-home-card-status is-${card.kind}` });
-    status.createSpan();
-    status.createEl("strong", { text: card.status });
-    const actions = item.createDiv({ cls: "codex-home-card-actions" });
-    this.addCardAction(actions, HOME_CARD_ACTION_LABELS[0], "external-link", () => void this.openVaultFile(card.path));
-    this.addIconButton(actions, "more-horizontal", "更多", (event) => this.openHomeCardMenu(event, card));
+  private renderGraphPropertyChecklist(options: readonly HomePropertyFilter[]): void {
+    const selected = new Set(this.graphFilters.properties.map(homePropertyFilterIdentity));
+    const details = this.graphFiltersEl.createEl("details", { cls: "echoink-home-graph-filter" });
+    const summary = details.createEl("summary", { text: selected.size ? `属性 ${selected.size}` : "属性" });
+    const panel = details.createDiv({ cls: "echoink-home-graph-filter-panel" });
+    if (!options.length) {
+      panel.createDiv({ cls: "echoink-home-empty", text: "当前没有可筛选的属性" });
+      return;
+    }
+    for (const option of options) {
+      const row = panel.createEl("label");
+      const input = row.createEl("input", { attr: { type: "checkbox" } });
+      input.checked = selected.has(homePropertyFilterIdentity(option));
+      input.onchange = () => {
+        this.graphFilters.properties = toggleHomePropertyFilter(this.graphFilters.properties, option, input.checked);
+        const count = this.graphFilters.properties.length;
+        summary.setText(count ? `属性 ${count}` : "属性");
+        this.applyGraphFilters();
+      };
+      row.createSpan({ text: option.value ? `${option.key}: ${option.value}` : option.key });
+    }
   }
 
-  private addCardAction(container: HTMLElement, label: string, iconName: string, onClick: () => void): void {
-    const button = container.createEl("button", { cls: "codex-home-card-action", attr: { type: "button" } });
-    setIcon(button.createSpan(), iconName);
-    button.createSpan({ text: label });
-    button.onclick = onClick;
+  private applyGraphFilters(): void {
+    const result = this.graphController.updateFilters(this.graphFilters);
+    if (this.selectedGraphNodeId && !result.matchedIds.has(this.selectedGraphNodeId)) {
+      this.selectedGraphNodeId = null;
+      this.graphController.setSelected(null);
+    }
+    const clear = this.graphFiltersEl.querySelector<HTMLButtonElement>(".echoink-home-graph-clear");
+    if (clear) clear.disabled = !hasActiveHomeGraphFilters(this.graphFilters);
+    this.renderGraphState();
   }
 
-  private openHomeCardMenu(event: MouseEvent, card: HomeCard): void {
-    event.preventDefault();
-    const menu = new Menu();
-    menu.addItem((item) => item.setTitle("复制链接").setIsLabel(true));
-    menu.addItem((item) =>
-      item
-        .setTitle("复制 Obsidian 内链")
-        .setIcon("brackets")
-        .onClick(() => void this.copyHomeCardText(homeCardObsidianLinkToCopy(card), "已复制 Obsidian 内链"))
+  private renderGraphState(): void {
+    if (!this.graphCountEl || !this.graphListBodyEl) return;
+    const result = this.graphController.getFilterResult();
+    this.graphCountEl.setText(`${result.nodes.length} / ${result.totalCount} 篇笔记`);
+    this.graphFallbackEl.setText(
+      this.graphFallback === "list"
+        ? `互动图谱暂不可用。${this.graphFallbackReason || "已切换到笔记列表。"}`
+        : "拖动旋转 · 滚动缩放 · 选择节点打开笔记"
     );
-    menu.addItem((item) =>
-      item
-        .setTitle("复制相对路径")
-        .setIcon("copy")
-        .onClick(() => void this.copyHomeCardText(homeCardPathToCopy(card), "已复制相对路径"))
-    );
-    menu.addItem((item) =>
-      item
-        .setTitle("复制 Markdown 链接")
-        .setIcon("link")
-        .onClick(() => void this.copyHomeCardText(homeCardMarkdownLinkToCopy(card), "已复制 Markdown 链接"))
-    );
-    menu.showAtMouseEvent(event);
+    this.graphFallbackEl.toggleClass("is-error", this.graphFallback === "list");
+    this.graphListEl.toggleClass("is-fallback", this.graphFallback === "list");
+    this.graphListEl.open = this.graphFallback === "list";
+    this.graphListBodyEl.empty();
+    if (!result.nodes.length) {
+      this.graphListBodyEl.createDiv({
+        cls: "echoink-home-empty",
+        text: result.totalCount ? "当前筛选没有匹配笔记。可取消一项条件或清空筛选。" : "当前 Vault 还没有 Markdown 笔记。"
+      });
+      this.renderGraphSelection();
+      return;
+    }
+    const list = this.graphListBodyEl.createEl("ul");
+    for (const node of result.nodes) {
+      const item = list.createEl("li");
+      const focus = item.createEl("button", {
+        cls: "echoink-home-graph-list-focus",
+        attr: {
+          type: "button",
+          "aria-pressed": String(node.id === this.selectedGraphNodeId),
+          "data-node-id": node.id
+        }
+      });
+      focus.createEl("strong", { text: node.title });
+      focus.createSpan({ text: node.path });
+      focus.onclick = () => {
+        this.selectedGraphNodeId = node.id;
+        if (!this.graphController.focusNode(node.id)) {
+          this.graphController.setSelected(node.id);
+          this.renderGraphSelection();
+          this.syncGraphListSelection();
+        }
+      };
+      const open = item.createEl("button", { text: "打开笔记", attr: { type: "button" } });
+      open.onclick = () => void this.openVaultFile(node.id);
+    }
+    this.renderGraphSelection();
   }
 
-  private async copyHomeCardText(text: string, successMessage: string): Promise<void> {
-    try {
-      await navigator.clipboard.writeText(text);
-      new Notice(successMessage);
-    } catch (error) {
-      new Notice(`复制失败：${error instanceof Error ? error.message : String(error)}`);
+  private syncGraphListSelection(): void {
+    if (!this.graphListBodyEl) return;
+    for (const button of Array.from(
+      this.graphListBodyEl.querySelectorAll<HTMLButtonElement>(".echoink-home-graph-list-focus")
+    )) {
+      button.setAttribute("aria-pressed", String(button.dataset.nodeId === this.selectedGraphNodeId));
     }
   }
 
-  private openHomeSortMenu(event: MouseEvent): void {
-    event.preventDefault();
-    const menu = new Menu();
-    menu.addItem((item) => item.setTitle("排序方式").setIsLabel(true));
-    for (const option of HOME_SORT_OPTIONS) {
-      menu.addItem((item) =>
-        item
-          .setTitle(option.label)
-          .setIcon(option.icon)
-          .setChecked(this.activeSort === option.id)
-          .onClick(() => {
-            this.activeSort = option.id;
-            this.visibleCardLimit = HOME_CARDS_PAGE_SIZE;
-            this.render();
-          })
-      );
+  private renderGraphSelection(): void {
+    if (!this.graphSelectionEl) return;
+    this.graphSelectionEl.empty();
+    const node = this.selectedGraphNodeId
+      ? this.data?.graph.nodeById.get(this.selectedGraphNodeId)
+      : null;
+    if (!node) {
+      this.graphSelectionEl.createSpan({ text: "选择一个节点查看路径与连接数" });
+      return;
     }
-    menu.showAtMouseEvent(event);
+    this.graphSelectionEl.createEl("strong", { text: node.title });
+    this.graphSelectionEl.createSpan({ text: node.path });
+    this.graphSelectionEl.createEl("small", { text: `${node.degree} 个已解析连接` });
+    const open = this.graphSelectionEl.createEl("button", { text: "打开笔记", attr: { type: "button" } });
+    open.onclick = () => void this.openVaultFile(node.id);
   }
 
-  private openHomeFolderMenu(event: MouseEvent, folderFilters: Array<{ id: HomeFolderFilter; label: string; count: number }>): void {
-    event.preventDefault();
-    const menu = new Menu();
-    menu.addItem((item) => item.setTitle("文件夹筛选").setIsLabel(true));
-    for (const folder of folderFilters) {
-      menu.addItem((item) =>
-        item
-          .setTitle(`${folder.label} (${folder.count})`)
-          .setIcon(folder.id === HOME_FOLDER_ALL ? "folders" : "folder")
-          .setChecked(this.activeFolderFilter === folder.id)
-          .onClick(() => {
-            this.activeFolderFilter = folder.id;
-            this.visibleCardLimit = HOME_CARDS_PAGE_SIZE;
-            this.render();
-          })
-      );
+  /**
+   * Native Magic UI Marquee adapter.
+   * Upstream: https://github.com/magicuidesign/magicui/blob/2d671cc6c0e0f40e28682c9cbddd16694dcfe627/apps/www/registry/magicui/marquee.tsx
+   * Demo behavior: https://github.com/magicuidesign/magicui/blob/2d671cc6c0e0f40e28682c9cbddd16694dcfe627/apps/www/registry/example/marquee-demo.tsx
+   * Mapping: two horizontal tracks, reverse second row, repeat=4, 1rem gap,
+   * 20s linear loop and 25% edge fades; host pauses add focus, drag and visibility.
+   */
+  private renderRecentThoughts(): void {
+    this.recentEl.empty();
+    const head = this.sectionTitle(this.recentEl, "继续最近的思路");
+    const controls = head.createDiv({ cls: "echoink-home-section-controls" });
+    controls.createSpan({ cls: "echoink-home-section-note", text: "来自本地最近编辑" });
+    const pause = controls.createEl("button", {
+      cls: "echoink-home-marquee-toggle",
+      text: this.recentPaused ? "继续" : "暂停",
+      attr: { type: "button", "aria-pressed": String(this.recentPaused) }
+    });
+    pause.onclick = () => {
+      this.recentPaused = !this.recentPaused;
+      this.recentEl.toggleClass("is-user-paused", this.recentPaused);
+      pause.setAttribute("aria-pressed", String(this.recentPaused));
+      pause.setText(this.recentPaused ? "继续" : "暂停");
+    };
+    this.recentEl.toggleClass("is-user-paused", this.recentPaused);
+    const viewport = this.recentEl.createDiv({ cls: "echoink-home-marquee", attr: { "aria-label": "最近编辑的本地思路" } });
+    const recent = this.data?.recentThoughts ?? [];
+    if (!recent.length) {
+      viewport.createDiv({ cls: "echoink-home-empty", text: "还没有可继续的 Markdown 思路。" });
+      pause.disabled = true;
+      return;
     }
-    menu.showAtMouseEvent(event);
+    const split = Math.max(1, Math.ceil(recent.length / 2));
+    const rows = [recent.slice(0, split), recent.slice(split)];
+    if (!rows[1].length) rows[1] = [...rows[0]];
+    rows.forEach((records, rowIndex) => {
+      const track = viewport.createDiv({ cls: `echoink-home-marquee-track ${rowIndex === 1 ? "is-reverse" : ""}` });
+      for (let repeat = 0; repeat < 4; repeat += 1) {
+        const accessible = repeat === 0 && (rowIndex === 0 || recent.length > 1);
+        const group = track.createDiv({ cls: "echoink-home-marquee-group" });
+        if (!accessible) {
+          group.setAttribute("aria-hidden", "true");
+        }
+        for (const record of records) {
+          const item = accessible
+            ? group.createEl("button", {
+              cls: "echoink-home-thought",
+              attr: { type: "button", title: record.title, "data-path": record.path }
+            })
+            : group.createDiv({ cls: "echoink-home-thought is-duplicate", attr: { "data-path": record.path } });
+          item.createSpan({ cls: "echoink-home-thought-folder", text: record.folder });
+          item.createEl("strong", { text: record.title });
+          item.createSpan({ text: formatRelativeTime(record.mtime) });
+        }
+      }
+    });
+    viewport.createDiv({ cls: "echoink-home-marquee-fade is-left", attr: { "aria-hidden": "true" } });
+    viewport.createDiv({ cls: "echoink-home-marquee-fade is-right", attr: { "aria-hidden": "true" } });
+    bindHorizontalDrag(viewport);
+    viewport.addEventListener("click", (event) => {
+      const item = (event.target as HTMLElement).closest<HTMLElement>(".echoink-home-thought[data-path]");
+      const path = item?.dataset.path;
+      if (path) void this.openVaultFile(path);
+    });
+  }
+
+  /**
+   * Native Magic UI Bento Grid and Animated Shiny Text adapter.
+   * Upstream Bento: https://github.com/magicuidesign/magicui/blob/2d671cc6c0e0f40e28682c9cbddd16694dcfe627/apps/www/registry/magicui/bento-grid.tsx
+   * Upstream Shiny Text: https://github.com/magicuidesign/magicui/blob/2d671cc6c0e0f40e28682c9cbddd16694dcfe627/apps/www/registry/magicui/animated-shiny-text.tsx
+   * Mapping: one button per card, overflow clipping, 40px content/CTA motion,
+   * icon scale, 100px shimmer width and the upstream 8s shiny-text animation.
+   */
+  private renderEntries(): void {
+    this.entriesEl.empty();
+    const head = this.sectionTitle(this.entriesEl, "知识工作入口");
+    head.createSpan({ cls: "echoink-home-section-note", text: "从真实状态继续阅读、整理、写作与复盘" });
+    const grid = this.entriesEl.createDiv({ cls: "echoink-home-bento-grid" });
+    for (const entry of this.data?.entries ?? []) {
+      const card = grid.createEl("button", {
+        cls: `echoink-home-entry is-${entry.id}`,
+        attr: { type: "button", "aria-label": `${ENTRY_ACTION[entry.id]}：${entry.label}` }
+      });
+      const icon = card.createSpan({ cls: "echoink-home-entry-icon" });
+      setIcon(icon, ENTRY_ICON[entry.id]);
+      const copy = card.createDiv({ cls: "echoink-home-entry-copy" });
+      copy.createSpan({ cls: "echoink-home-entry-kicker", text: entry.description });
+      copy.createEl("strong", { text: entry.label });
+      this.renderEntryDetails(copy, entry);
+      const cta = card.createSpan({ cls: "echoink-home-entry-cta" });
+      cta.createSpan({ cls: "echoink-home-shiny-text", text: `${ENTRY_ACTION[entry.id]} →` });
+      card.onclick = () => void this.openEntry(entry);
+    }
+  }
+
+  private renderEntryDetails(container: HTMLElement, entry: HomeEntrySummary): void {
+    const target = entry.targetPath ? this.data?.graph.nodeById.get(entry.targetPath) : null;
+    const today = new Date();
+    const journalExists = this.app.vault.getAbstractFileByPath(journalPathForDate(today)) instanceof TFile;
+    if (entry.id === "wiki") {
+      const row = container.createDiv({ cls: "echoink-home-entry-stat-row" });
+      row.createSpan({ text: `${entry.count} 篇知识` });
+      row.createSpan({ text: `今日更新 ${this.snapshot?.wiki.todayCount ?? 0}` });
+      container.createEl("small", { cls: "echoink-home-entry-path", text: target?.path ?? "等待建立 Wiki 索引" });
+      return;
+    }
+    if (entry.id === "outputs") {
+      container.createSpan({ cls: "echoink-home-entry-value", text: target?.title ?? "还没有本地成果" });
+      container.createEl("small", {
+        text: target ? `最近更新 ${formatRelativeTime(target.mtime)}` : "完成一次知识维护后会在这里出现"
+      });
+      return;
+    }
+    if (entry.id === "projects") {
+      container.createSpan({ cls: "echoink-home-entry-value", text: target?.title ?? "还没有项目笔记" });
+      container.createEl("small", { text: target ? "从最近项目继续下一步" : "可在 Projects 目录建立项目" });
+      return;
+    }
+    if (entry.id === "inbox") {
+      container.createSpan({ cls: "echoink-home-entry-number", text: String(entry.count) });
+      container.createEl("small", { text: entry.count ? `最近输入：${target?.title ?? "待整理"}` : "当前没有待整理输入" });
+      return;
+    }
+    if (entry.id === "journal") {
+      container.createSpan({ cls: "echoink-home-entry-date", text: formatFullDate(today) });
+      container.createSpan({
+        cls: "echoink-home-entry-value",
+        text: journalExists ? "今日日记已建立" : "默认使用“此刻速记”"
+      });
+      container.createEl("small", { text: journalExists ? "继续打开，不覆盖已有内容" : "也可进入模板选择或导入 Markdown" });
+      return;
+    }
+    const score = this.snapshot?.health.score;
+    const row = container.createDiv({ cls: "echoink-home-entry-review-row" });
+    row.createSpan({ cls: "echoink-home-entry-number", text: score === undefined ? "—" : String(score) });
+    row.createSpan({ text: this.snapshot?.health.label ?? "等待本地维护快照" });
+    container.createEl("small", {
+      text: this.snapshot?.lastRun.at
+        ? `最近维护 ${formatRelativeTime(this.snapshot.lastRun.at)}`
+        : "尚无维护记录，可开始一次复盘"
+    });
+  }
+
+  private renderHeatmap(): void {
+    this.heatmapEl.empty();
+    const head = this.sectionTitle(this.heatmapEl, "本地维护活动");
+    const year = new Date().getFullYear();
+    const contribution = buildHomeContributionGrid(this.data?.activity ?? [], year);
+    const activityDays = contribution.weeks.flat().filter((day) => day.count > 0).length;
+    head.createSpan({ cls: "echoink-home-section-note", text: `${activityDays} 个活动日 · 文件最后修改时间 + 维护检查` });
+
+    /**
+     * Native SmoothUI Contribution Graph adapter.
+     * Upstream: https://github.com/educlopez/smoothui/blob/1143ba66738566e8acb9a3f8a7db9eab3f10f2d4/packages/smoothui/components/contribution-graph/index.tsx
+     * Mapping: semantic table/caption/axes, 53x7 cells, 10px five-level squares,
+     * native title tooltips and legend. Cells are informational, not buttons.
+     */
+    const scroll = this.heatmapEl.createDiv({ cls: "echoink-home-heatmap-scroll" });
+    const table = scroll.createEl("table", { cls: "echoink-home-heatmap-table" });
+    table.createEl("caption", { text: `${year} 年本地 Markdown 修改与知识维护活动` });
+    const thead = table.createEl("thead");
+    const monthRow = thead.createEl("tr");
+    monthRow.createEl("th", { cls: "echoink-home-heatmap-corner", attr: { scope: "col" } });
+    const firstMonthStartWeek = contribution.months[0]?.startWeek ?? 0;
+    if (firstMonthStartWeek > 0) {
+      monthRow.createEl("th", {
+        attr: { colspan: String(firstMonthStartWeek), "aria-hidden": "true" }
+      });
+    }
+    for (const month of contribution.months) {
+      monthRow.createEl("th", {
+        text: month.label,
+        attr: { scope: "colgroup", colspan: String(month.colSpan) }
+      });
+    }
+    const tbody = table.createEl("tbody");
+    const weekdays = ["日", "一", "二", "三", "四", "五", "六"];
+    for (let dayIndex = 0; dayIndex < HOME_CONTRIBUTION_DAYS; dayIndex += 1) {
+      const row = tbody.createEl("tr");
+      row.createEl("th", { text: weekdays[dayIndex], attr: { scope: "row", title: `星期${weekdays[dayIndex]}` } });
+      for (let weekIndex = 0; weekIndex < HOME_CONTRIBUTION_WEEKS; weekIndex += 1) {
+        const day = contribution.weeks[weekIndex][dayIndex];
+        const description = `${day.date}：${day.fileCount} 个文件最后修改，${day.checkCount} 次维护检查`;
+        const cell = row.createEl("td", { attr: { title: description, "aria-label": description } });
+        cell.createSpan({
+          cls: `echoink-home-heatmap-cell is-level-${day.level}`,
+          attr: { "aria-hidden": "true" }
+        });
+      }
+    }
+    const legend = this.heatmapEl.createDiv({ cls: "echoink-home-heatmap-legend" });
+    legend.createSpan({ text: "少" });
+    for (const level of [0, 1, 2, 3, 4]) {
+      legend.createSpan({ cls: `echoink-home-heatmap-cell is-level-${level}`, attr: { "aria-hidden": "true" } });
+    }
+    legend.createSpan({ text: "多" });
+  }
+
+  private renderCalendar(): void {
+    this.calendarEl.empty();
+    const visibleMonth = this.visibleMonth();
+    const head = this.sectionTitle(this.calendarEl, "日记日历");
+    const nav = head.createDiv({ cls: "echoink-home-calendar-nav" });
+    this.iconButton(nav, "chevron-left", "上个月", () => this.shiftCalendar(-1));
+    nav.createSpan({ text: `${visibleMonth.getFullYear()}年${visibleMonth.getMonth() + 1}月` });
+    this.iconButton(nav, "chevron-right", "下个月", () => this.shiftCalendar(1));
+    const weekdays = this.calendarEl.createDiv({ cls: "echoink-home-calendar-weekdays" });
+    for (const day of ["一", "二", "三", "四", "五", "六", "日"]) weekdays.createSpan({ text: day });
+    const grid = this.calendarEl.createDiv({ cls: "echoink-home-calendar-grid", attr: { "aria-label": "日记月历" } });
+    const journalByDate = new Map((this.data?.journalDays ?? []).map((day) => [day.date, day]));
+    const activityByDate = new Map((this.data?.activity ?? []).map((day) => [day.date, day.count]));
+    const first = new Date(visibleMonth.getFullYear(), visibleMonth.getMonth(), 1);
+    const offset = (first.getDay() + 6) % 7;
+    for (let index = 0; index < 42; index += 1) {
+      const date = new Date(first.getFullYear(), first.getMonth(), index - offset + 1);
+      const key = dateKey(date);
+      const currentMonth = date.getMonth() === visibleMonth.getMonth();
+      const record = journalByDate.get(key);
+      const activity = activityByDate.get(key) ?? 0;
+      const button = grid.createEl("button", {
+        cls: `echoink-home-calendar-day ${currentMonth ? "" : "is-outside"} ${record?.exists ? "has-journal" : ""} ${key === dateKey(new Date()) ? "is-today" : ""}`,
+        attr: {
+          type: "button",
+          "aria-label": `${formatFullDate(date)}，${record?.exists ? "已有日记" : "没有日记"}，${activity} 条更新`,
+          title: `${formatFullDate(date)} · ${record?.exists ? "已有日记" : "没有日记"} · ${activity} 条更新`
+        }
+      });
+      button.createSpan({ cls: "echoink-home-calendar-number", text: String(date.getDate()) });
+      if (record?.firstImageUrl) {
+        const image = button.createEl("img", { cls: "echoink-home-calendar-image", attr: { src: record.firstImageUrl, alt: "" } });
+        image.onerror = () => image.remove();
+      }
+      if (record?.exists) button.createSpan({ cls: "echoink-home-calendar-journal-dot", attr: { "aria-hidden": "true" } });
+      button.onclick = () => void this.openJournal(date);
+    }
+  }
+
+  private async openEntry(entry: HomeEntrySummary): Promise<void> {
+    if (entry.id === "journal") {
+      await this.openJournal(new Date());
+      return;
+    }
+    if (entry.targetPath) {
+      await this.openVaultFile(entry.targetPath);
+      return;
+    }
+    if (entry.id === "review") {
+      const manager = this.plugin.getReviewManager();
+      if (!manager) {
+        new Notice("Review 还没有准备好，请稍后再试");
+        return;
+      }
+      const result = await manager.runReview("knowledge-base");
+      if (result.status === "success" && result.markdownPath) await this.openVaultFile(result.markdownPath);
+      return;
+    }
+    const message: Record<HomeEntrySummary["id"], string> = {
+      wiki: "Wiki 还没有索引，请先在知识库设置中完成初始化。",
+      outputs: "Outputs 还没有成果；运行一次知识维护后会在这里出现。",
+      projects: "Projects 还没有项目笔记，可在当前 Vault 的 projects 目录创建。",
+      inbox: "Inbox 目前为空，可通过现有记录流程收集新输入。",
+      journal: "",
+      review: ""
+    };
+    new Notice(message[entry.id]);
+  }
+
+  private async openJournal(date: Date): Promise<void> {
+    const path = normalizePath(journalPathForDate(date));
+    const existing = this.app.vault.getAbstractFileByPath(path);
+    if (existing instanceof TFile) {
+      await this.app.workspace.getLeaf("tab").openFile(existing, { active: true });
+      return;
+    }
+    const customTemplates = this.dataService.listCustomTemplates();
+    if (this.data) this.data.customTemplates = customTemplates;
+    new JournalTemplateModal(this.app, {
+      service: this.dataService,
+      customTemplates: [...customTemplates],
+      date,
+      onCreated: () => void this.refresh()
+    }).open();
   }
 
   private async openVaultFile(relativePath: string): Promise<void> {
-    if (!relativePath) {
-      new Notice("暂无可打开的文件");
-      return;
-    }
     const file = this.app.vault.getAbstractFileByPath(normalizePath(relativePath));
-    if (file instanceof TFile) {
-      await this.app.workspace.getLeaf("tab").openFile(file, { active: true });
+    if (!(file instanceof TFile)) {
+      new Notice(`没有在当前 Vault 找到：${relativePath}`);
       return;
     }
-    new Notice(`没有在当前 Obsidian 仓库找到：${relativePath}`);
+    try {
+      await this.app.workspace.getLeaf("tab").openFile(file, { active: true });
+    } catch (error) {
+      console.warn("[EchoInk] Failed to open a Home workbench note:", error);
+      new Notice(`暂时无法打开“${file.basename}”，请稍后重试。`);
+    }
+  }
+
+  private shiftCalendar(offset: number): void {
+    this.calendarMonthOffset += offset;
+    if (this.data) {
+      this.data.journalDays = buildHomeJournalDays(this.data.records, this.data.activity, this.visibleMonth());
+    }
+    this.renderCalendar();
+  }
+
+  private visibleMonth(): Date {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth() + this.calendarMonthOffset, 1);
+  }
+
+  private sectionTitle(container: HTMLElement, title: string): HTMLElement {
+    const head = container.createDiv({ cls: "echoink-home-section-head" });
+    const copy = head.createDiv();
+    copy.createEl("h2", { text: title });
+    return head;
+  }
+
+  private metric(container: HTMLElement, label: string, value: string | number, detail: string): void {
+    const metric = container.createDiv({ cls: "echoink-home-metric" });
+    metric.createSpan({ text: label });
+    metric.createEl("strong", { text: String(value) });
+    metric.createEl("small", { text: detail });
+  }
+
+  private iconButton(container: HTMLElement, icon: string, label: string, onClick: () => void): HTMLButtonElement {
+    const button = container.createEl("button", {
+      cls: "echoink-home-icon-button",
+      attr: { type: "button", title: label, "aria-label": label }
+    });
+    setIcon(button.createSpan(), icon);
+    button.createSpan({ text: label });
+    button.onclick = onClick;
+    return button;
   }
 }
 
-export function buildHomeCards(snapshot: KnowledgeBaseDashboardSnapshot | null): HomeCard[] {
-  if (!snapshot) return [];
-  if (snapshot.recommendations?.cards?.length) {
-    return snapshot.recommendations.cards.map(recommendationToHomeCard).filter((card) => !isSystemHomeCardPath(card.path));
-  }
-  const cards: HomeCard[] = [
-    ...visibleHomeFiles(snapshot.raw.recentFiles).map((file) => fileToCard(file, "raw")),
-    ...visibleHomeFiles(snapshot.wiki.recentFiles).map((file) => fileToCard(file, "wiki")),
-    ...visibleHomeFiles(snapshot.inbox.recentFiles).map((file) => fileToCard(file, "inbox")),
-    ...visibleHomeFiles(snapshot.outputs.recentFiles).map((file) => fileToCard(file, "outputs"))
-  ];
-  return cards
-    .sort((a, b) => b.touchedAt - a.touchedAt)
-    .slice(0, 18);
+function formatRelativeTime(timestamp: number): string {
+  const delta = Math.max(0, Date.now() - timestamp);
+  const minutes = Math.floor(delta / 60_000);
+  if (minutes < 1) return "刚刚";
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days} 天前`;
+  return new Date(timestamp).toLocaleDateString();
 }
 
-export function shiftCalendarMonth(date: Date, offset: number): Date {
-  return new Date(date.getFullYear(), date.getMonth() + offset, 1);
+function formatFullDate(date: Date): string {
+  return date.toLocaleDateString("zh-CN", { year: "numeric", month: "long", day: "numeric", weekday: "short" });
 }
 
-export function calendarMonthLabel(date: Date): string {
-  return `${date.getFullYear()}年${date.getMonth() + 1}月`;
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
-function recommendationToHomeCard(card: KnowledgeBaseDashboardRecommendationCard): HomeCard {
+function cloneGraphFilters(filters: HomeGraphFilters): HomeGraphFilters {
   return {
-    id: card.id,
-    title: card.title,
-    path: card.path,
-    kind: card.kind,
-    summary: card.summary,
-    tags: card.tags,
-    status: card.status,
-    touchedAt: card.touchedAt
+    search: filters.search,
+    folders: [...filters.folders],
+    properties: filters.properties.map((filter) => ({ ...filter })),
+    tags: [...filters.tags]
   };
 }
 
-function visibleHomeFiles(files: KnowledgeBaseDashboardFile[]): KnowledgeBaseDashboardFile[] {
-  return files.filter((file) => !isSystemHomeCardPath(file.path));
-}
-
-export function isSystemHomeCardPath(relativePath: string): boolean {
-  const parts = relativePath.split("/").filter(Boolean);
-  const basename = parts.at(-1) ?? relativePath;
-  if (parts.some((part) => part.startsWith("."))) return true;
-  if (basename.startsWith(".")) return true;
-  if (/^(index|raw\/index|wiki\/index)\.(md|markdown|json)$/i.test(relativePath)) return true;
-  if (/^(index|00-索引)\.(md|markdown)$/i.test(basename)) return true;
-  if (/(\.ingest-tracker|\.raw-digest-registry)\.(md|json)$/i.test(basename)) return true;
-  return false;
-}
-
-function fileToCard(file: KnowledgeBaseDashboardFile, kind: HomeCardKind): HomeCard {
-  return {
-    id: `${kind}:${file.path}`,
-    title: titleFromPath(file.path),
-    path: file.path,
-    kind,
-    summary: cardSummary(file, kind),
-    tags: cardTags(file.path, kind),
-    status: cardStatus(file, kind),
-    touchedAt: file.mtime
+function bindHorizontalDrag(viewport: HTMLElement): void {
+  let pointerId: number | null = null;
+  let startX = 0;
+  let startScroll = 0;
+  let moved = false;
+  let suppressClick = false;
+  viewport.addEventListener("pointerdown", (event) => {
+    pointerId = event.pointerId;
+    startX = event.clientX;
+    startScroll = viewport.scrollLeft;
+    moved = false;
+    viewport.setPointerCapture(event.pointerId);
+    viewport.addClass("is-dragging");
+  });
+  viewport.addEventListener("pointermove", (event) => {
+    if (pointerId !== event.pointerId) return;
+    const distance = event.clientX - startX;
+    if (Math.abs(distance) >= 6) moved = true;
+    if (moved) viewport.scrollLeft = startScroll - distance;
+  });
+  const stop = (event: PointerEvent) => {
+    if (pointerId !== event.pointerId) return;
+    suppressClick = moved;
+    pointerId = null;
+    viewport.removeClass("is-dragging");
+    window.setTimeout(() => { suppressClick = false; }, 0);
   };
-}
-
-function filterItems(snapshot: KnowledgeBaseDashboardSnapshot | null, cards: HomeCard[]): Array<{ id: HomeFilter; label: string; count: number }> {
-  return [
-    { id: "all", label: "全部", count: cards.length },
-    { id: "recent", label: "最近常看", count: filterHomeCards(cards, "recent").length },
-    { id: "stale", label: "很久未看", count: filterHomeCards(cards, "stale").length },
-    { id: "raw", label: "Raw 待提炼", count: filterHomeCards(cards, "raw").length },
-    { id: "wiki", label: "Wiki 更新", count: filterHomeCards(cards, "wiki").length },
-    { id: "suggested", label: "猜你想看", count: filterHomeCards(cards, "suggested").length }
-  ];
-}
-
-export function resolveDefaultHomeFilter(cards: HomeCard[]): HomeFilter {
-  if (filterHomeCards(cards, "wiki").length > 0) return "wiki";
-  if (filterHomeCards(cards, "suggested").length > 0) return "suggested";
-  return "all";
-}
-
-export function resolveActiveHomeFilter(current: HomeFilter | null, userSelected: boolean, cards: HomeCard[], hasSnapshot: boolean): HomeFilter {
-  if (!hasSnapshot) return current ?? "all";
-  if (userSelected) return current ?? resolveDefaultHomeFilter(cards);
-  return resolveDefaultHomeFilter(cards);
-}
-
-export function filterHomeCards(cards: HomeCard[], filter: HomeFilter): HomeCard[] {
-  if (filter === "all") return cards;
-  if (filter === "recent") return cards.slice(0, 8);
-  if (filter === "stale") return [...cards].sort((a, b) => a.touchedAt - b.touchedAt).slice(0, 8);
-  if (filter === "raw") return cards.filter(isActionableHomeRawCard);
-  if (filter === "wiki") return cards.filter((card) => card.kind === "wiki" && card.status === "Wiki 更新");
-  return cards.filter((card) => card.kind === "raw" || card.kind === "inbox").slice(0, 8);
-}
-
-export function homeRefineCommandForCard(card: Pick<HomeCard, "kind" | "path">): string {
-  return card.kind === "raw"
-    ? `/maintain ${card.path}`
-    : `/ask 提炼这条知识卡片：${card.path}`;
-}
-
-export function buildHomeRawBatchPreview(cards: readonly HomeCard[], previewLimit = 20): HomeRawBatchPreview | null {
-  const rawCards = cards.filter(isActionableHomeRawCard);
-  if (!rawCards.length) return null;
-  const previewPaths = rawCards.slice(0, previewLimit).map((card) => card.path);
-  return {
-    count: rawCards.length,
-    previewPaths,
-    remainingCount: Math.max(0, rawCards.length - previewPaths.length),
-    command: "/maintain"
-  };
-}
-
-function isActionableHomeRawCard(card: Pick<HomeCard, "kind" | "status">): boolean {
-  return card.kind === "raw" && HOME_RAW_ACTION_STATUSES.has(card.status);
-}
-
-export function homeCardPathToCopy(card: Pick<HomeCard, "path">): string {
-  return card.path;
-}
-
-export function homeCardObsidianLinkToCopy(card: Pick<HomeCard, "path">): string {
-  return `[[${stripMarkdownExtension(card.path)}]]`;
-}
-
-export function homeCardMarkdownLinkToCopy(card: Pick<HomeCard, "path" | "title">): string {
-  return `[${escapeMarkdownLinkText(card.title)}](<${escapeMarkdownDestination(card.path)}>)`;
-}
-
-function stripMarkdownExtension(relativePath: string): string {
-  return relativePath.replace(/\.(md|markdown)$/i, "");
-}
-
-function escapeMarkdownLinkText(text: string): string {
-  return text.replace(/([\\[\]])/g, "\\$1");
-}
-
-function escapeMarkdownDestination(destination: string): string {
-  return destination.replace(/([<>])/g, "\\$1");
-}
-
-export function buildHomeFolderFilterItems(cards: readonly HomeCard[]): Array<{ id: HomeFolderFilter; label: string; count: number }> {
-  const counts = new Map<string, number>();
-  for (const card of cards) {
-    const folder = homeCardFolderScope(card.path);
-    counts.set(folder, (counts.get(folder) ?? 0) + 1);
-  }
-  const folders = [...counts.entries()]
-    .sort(([left], [right]) => left.localeCompare(right, "zh-Hans"))
-    .map(([id, count]) => ({ id, label: id, count }));
-  return [{ id: HOME_FOLDER_ALL, label: "全部文件夹", count: cards.length }, ...folders];
-}
-
-export function filterHomeCardsByFolder(cards: readonly HomeCard[], folder: HomeFolderFilter): HomeCard[] {
-  if (folder === HOME_FOLDER_ALL) return [...cards];
-  return cards.filter((card) => homeCardFolderScope(card.path) === folder);
-}
-
-export function sortHomeCards(cards: readonly HomeCard[], sort: HomeSort): HomeCard[] {
-  if (sort === "relevance") return [...cards];
-  if (sort === "updated") return [...cards].sort(compareHomeCardsByUpdated);
-  return [...cards].sort((left, right) => {
-    const folder = homeCardFolder(left.path).localeCompare(homeCardFolder(right.path), "zh-Hans");
-    if (folder !== 0) return folder;
-    return compareHomeCardsByUpdated(left, right);
-  });
-}
-
-function compareHomeCardsByUpdated(left: HomeCard, right: HomeCard): number {
-  return right.touchedAt - left.touchedAt || left.path.localeCompare(right.path, "zh-Hans");
-}
-
-function homeCardFolder(relativePath: string): string {
-  const index = relativePath.lastIndexOf("/");
-  return index >= 0 ? relativePath.slice(0, index) : "";
-}
-
-export function homeCardFolderScope(relativePath: string): string {
-  const parts = relativePath.split("/").filter(Boolean);
-  if (parts.length >= 3) return `${parts[0]}/${parts[1]}`;
-  return parts[0] ?? "根目录";
-}
-
-function cardStatus(file: KnowledgeBaseDashboardFile, kind: HomeCardKind): string {
-  if (kind === "raw") {
-    return rawDigestStateLabel(rawDigestStateForRecord({
-      fingerprint: file.fingerprint ?? "",
-      frontmatter: file.rawDigest ?? null,
-      hasTrackerHint: false
-    }));
-  }
-  if (kind === "inbox") return "Inbox 待分流";
-  if (kind === "outputs") return "维护报告";
-  return "Wiki 更新";
-}
-
-function cardSummary(file: KnowledgeBaseDashboardFile, kind: HomeCardKind): string {
-  if (kind === "raw") {
-    const status = cardStatus(file, kind);
-    if (status === "已提炼") return "原始来源已登记，可作为后续引用和复盘依据。";
-    if (status === "待校准") return "历史记录显示可能已提炼，但仍需要校准可信证据。";
-    if (status === "待重新提炼") return "这条来源内容变化，需要重新进入四步提炼。";
-    if (status === "提炼失败") return "上次提炼失败，需要重新写入 Wiki / Projects 并验证来源证据。";
-    return "这条来源还需要进入 Wiki / Projects 的结构化知识。";
-  }
-  if (kind === "wiki") return "结构化知识页，适合作为问答、复盘和关联推荐的长期依据。";
-  if (kind === "inbox") return "临时收集内容，需要判断是进入 Raw、Wiki、Journal 还是项目区。";
-  return "近期输出记录，可用于复盘、沉淀和追踪 Agent 工作结果。";
-}
-
-function cardTags(relativePath: string, kind: HomeCardKind): string[] {
-  const parts = relativePath.split("/").filter(Boolean);
-  const tags = [kindLabel(kind)];
-  if (parts.length > 1) tags.push(parts[1].replace(/\.(md|markdown)$/i, ""));
-  if (/reddit|github|wechat|公众号|小红书|xhs/i.test(relativePath)) tags.push("来源");
-  return tags.slice(0, 3);
-}
-
-function kindLabel(kind: HomeCardKind): string {
-  if (kind === "raw") return "Raw";
-  if (kind === "wiki") return "Wiki";
-  if (kind === "inbox") return "Inbox";
-  return "Output";
-}
-
-function titleFromPath(relativePath: string): string {
-  const basename = relativePath.split("/").pop() ?? relativePath;
-  return basename.replace(/\.(md|markdown|txt|pdf|docx|png|jpe?g|webp|gif)$/i, "") || relativePath;
-}
-
-function compactPath(relativePath: string): string {
-  const parts = relativePath.split("/").filter(Boolean);
-  if (parts.length <= 2) return relativePath;
-  return `${parts[0]}/${parts[1]}`;
-}
-
-function formatDateTime(timestamp: number): string {
-  if (!timestamp) return "无记录";
-  return new Date(timestamp).toLocaleString(undefined, {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit"
-  });
-}
-
-function formatClock(timestamp: number): string {
-  if (!timestamp) return "--:--";
-  return new Date(timestamp).toLocaleTimeString(undefined, {
-    hour: "2-digit",
-    minute: "2-digit"
-  });
-}
-
-function relativeDayText(timestamp: number): string {
-  if (!timestamp) return "未知";
-  const days = Math.max(0, Math.floor((Date.now() - timestamp) / 86400000));
-  if (days === 0) return "今天";
-  if (days === 1) return "1 天前";
-  if (days < 7) return `${days} 天前`;
-  return `${Math.max(1, Math.floor(days / 7))} 周前`;
-}
-
-function dateKeyForLocal(date: Date): string {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-function activityLevel(count: number, status: string): HeatmapLevel {
-  if (status === "failed") return "bad";
-  if (count >= 6) return "high";
-  if (count >= 3) return "mid";
-  if (count >= 1) return "low";
-  return "none";
+  viewport.addEventListener("pointerup", stop);
+  viewport.addEventListener("pointercancel", stop);
+  viewport.addEventListener("click", (event) => {
+    if (!suppressClick) return;
+    event.preventDefault();
+    event.stopPropagation();
+  }, { capture: true });
 }
