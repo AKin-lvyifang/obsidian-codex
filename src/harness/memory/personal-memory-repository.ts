@@ -3281,29 +3281,17 @@ export class PersonalMemoryRepository {
       throw new PersonalMemoryAccessError("unsafe_path", "Active Vault root must not be a symlink");
     }
     const vaultRealPath = await realpath(this.vaultPath);
-    const assertSafeNode = async (target: string) => {
-      const stat = await lstat(target);
-      if (stat.isSymbolicLink()) {
-        throw new PersonalMemoryAccessError("unsafe_path", `Managed Memory path must not be a symlink: ${target}`);
-      }
-      const targetRealPath = await realpath(target);
-      const relative = path.relative(vaultRealPath, targetRealPath);
-      if (relative.startsWith("..") || path.isAbsolute(relative)) {
-        throw new PersonalMemoryAccessError("unsafe_path", "Managed Memory realpath escapes the active Vault");
-      }
-      return stat;
-    };
-    const visit = async (target: string): Promise<void> => {
-      const stat = await assertSafeNode(target);
-      if (!stat.isDirectory()) return;
+    const visit = async (target: string, allowMissing: boolean): Promise<void> => {
+      const stat = await inspectManagedTreeNodeSafety(target, vaultRealPath, { allowMissing });
+      if (!stat || !stat.isDirectory()) return;
       const entries = await readdir(target, { withFileTypes: true });
-      for (const entry of entries) await visit(path.join(target, entry.name));
+      for (const entry of entries) await visit(path.join(target, entry.name), true);
     };
     for (const parent of [this.layout.root, path.join(this.layout.root, "agents")]) {
-      if (await pathExists(parent)) await assertSafeNode(parent);
+      if (await pathExists(parent)) await inspectManagedTreeNodeSafety(parent, vaultRealPath);
     }
     for (const managedRoot of [path.dirname(this.layout.agent), this.layout.sharedUser]) {
-      if (await pathExists(managedRoot)) await visit(managedRoot);
+      if (await pathExists(managedRoot)) await visit(managedRoot, false);
     }
   }
 
@@ -4372,6 +4360,82 @@ function dedupeChanges(changes: readonly TransactionChange[]): TransactionChange
 
 function compareText(left: string, right: string): number {
   return left.localeCompare(right);
+}
+
+export interface ManagedTreeNodeSafetyFileSystem {
+  readonly lstat: (target: string) => Promise<Stats>;
+  readonly realpath: (target: string) => Promise<string>;
+}
+
+export interface ManagedTreeNodeSafetyOptions {
+  /** Only recursive child entries observed by readdir may disappear normally. */
+  readonly allowMissing?: boolean;
+  readonly fileSystem?: ManagedTreeNodeSafetyFileSystem;
+}
+
+const MANAGED_TREE_NODE_SAFETY_FILE_SYSTEM: ManagedTreeNodeSafetyFileSystem = Object.freeze({
+  lstat,
+  realpath
+});
+
+/**
+ * Validate one node observed during a managed-tree walk. Atomic writers may
+ * rename a UUID temporary file after readdir/lstat but before realpath. Only a
+ * second ENOENT confirming that the same node is now absent is treated as a
+ * harmless disappearance; every extant replacement is still fail-closed.
+ */
+export async function inspectManagedTreeNodeSafety(
+  target: string,
+  vaultRealPath: string,
+  options: ManagedTreeNodeSafetyOptions = {}
+): Promise<Stats | null> {
+  const fileSystem = options.fileSystem ?? MANAGED_TREE_NODE_SAFETY_FILE_SYSTEM;
+  const allowMissing = options.allowMissing ?? false;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let stat: Stats;
+    try {
+      stat = await fileSystem.lstat(target);
+    } catch (error) {
+      if (allowMissing && isFileSystemErrorCode(error, "ENOENT")) return null;
+      throw error;
+    }
+    if (stat.isSymbolicLink()) {
+      throw new PersonalMemoryAccessError("unsafe_path", `Managed Memory path must not be a symlink: ${target}`);
+    }
+    let targetRealPath: string;
+    try {
+      targetRealPath = await fileSystem.realpath(target);
+    } catch (error) {
+      if (!isFileSystemErrorCode(error, "ENOENT")) throw error;
+      try {
+        const replacement = await fileSystem.lstat(target);
+        if (replacement.isSymbolicLink()) {
+          throw new PersonalMemoryAccessError(
+            "unsafe_path",
+            `Managed Memory path must not be a symlink: ${target}`
+          );
+        }
+      } catch (recheckError) {
+        if (isFileSystemErrorCode(recheckError, "ENOENT")) {
+          if (allowMissing) return null;
+          throw error;
+        }
+        throw recheckError;
+      }
+      if (attempt === 0) continue;
+      throw error;
+    }
+    const relative = path.relative(vaultRealPath, targetRealPath);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) {
+      throw new PersonalMemoryAccessError("unsafe_path", "Managed Memory realpath escapes the active Vault");
+    }
+    return stat;
+  }
+  throw new PersonalMemoryAccessError("unsafe_path", "Managed Memory path changed during safety validation");
+}
+
+function isFileSystemErrorCode(error: unknown, code: string): boolean {
+  return (error as NodeJS.ErrnoException | null)?.code === code;
 }
 
 async function atomicWrite(target: string, content: string): Promise<void> {
