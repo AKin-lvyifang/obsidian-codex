@@ -10153,7 +10153,7 @@ async function assertAgentProfileDtoUsesOneRevision(): Promise<void> {
   console.log("PASS settings: Agent Profile DTO retries to one revision and fails closed on conflict");
 }
 
-function assertPublicAgentHabitsUseFirstPerson(): void {
+function assertPublicAgentHabitsPreserveTheirVoice(): void {
   const profile = publicAgentSelfProfile({
     complexProblemMethod: "先理解问题",
     tone: "自然、清楚",
@@ -10168,7 +10168,7 @@ function assertPublicAgentHabitsUseFirstPerson(): void {
     "我处理重要或复杂问题的方式是：先理解问题。"
   );
   assert.deepEqual(profile.representativeHabits, [
-    "我会这样做：先核对关键事实。",
+    "先核对关键事实。",
     "我会保留必要上下文。"
   ]);
 }
@@ -10189,7 +10189,7 @@ function createIdentityFixtureState(overrides: Record<string, unknown> = {}): Re
     },
     agentProfile: {
       kind: "ready",
-      ...createAgentProfileViewFixture(3, "executor", ["我会这样做：先核对关键事实，再给出判断。"])
+      ...createAgentProfileViewFixture(3, "executor", ["先核对关键事实，再给出判断。"])
     },
     ...overrides
   };
@@ -10223,7 +10223,7 @@ function createIdentityTestPlugin(fixtureState: Record<string, any>): {
 }
 
 async function assertAgentIdentityCardPlacementAndCopy(): Promise<void> {
-  assertPublicAgentHabitsUseFirstPerson();
+  assertPublicAgentHabitsPreserveTheirVoice();
   installProviderModalDomFixture();
   const { plugin } = createIdentityTestPlugin(createIdentityFixtureState());
   const tab = new CodexSettingTab(withSettingsTabDefaults(plugin) as never);
@@ -10260,7 +10260,8 @@ async function assertAgentIdentityCardPlacementAndCopy(): Promise<void> {
   assert.match(profileCard.textContent, /思考方式/u);
   assert.match(profileCard.textContent, /我处理重要或复杂问题的方式是/u);
   assert.match(profileCard.textContent, /长期成长/u);
-  assert.match(profileCard.textContent, /我会这样做：先核对关键事实/u);
+  assert.match(profileCard.textContent, /先核对关键事实/u);
+  assert.doesNotMatch(profileCard.textContent, /我会这样做：/u);
   assert.match(profileCard.textContent, /长期对话持续学习/u);
   const editIdentity = profileCard.querySelector<ProviderModalTestElement>(
     ".echoink-agent-identity-edit"

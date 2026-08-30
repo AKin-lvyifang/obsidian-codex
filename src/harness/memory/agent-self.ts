@@ -355,10 +355,9 @@ export function publicAgentSelfProfile(state: AgentSelfState): PublicAgentSelfPr
 function publicHabitNarration(value: string): string {
   const habit = value.trim();
   const withoutTrailingPause = habit.replace(/[，、；;：:]+$/u, "");
-  const sentence = /[。！？!?]$/u.test(withoutTrailingPause)
+  return /[。！？!?]$/u.test(withoutTrailingPause)
     ? withoutTrailingPause
     : `${withoutTrailingPause}。`;
-  return habit.startsWith("我") ? sentence : `我会这样做：${sentence}`;
 }
 
 export function assertUtf8HardLimit(value: string, maxBytes: number, name: string): void {
