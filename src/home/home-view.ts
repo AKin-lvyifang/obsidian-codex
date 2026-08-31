@@ -22,21 +22,21 @@ import {
   type HomeGraphFilters,
   type HomePropertyFilter,
 } from "./home-workbench-model";
-import { HomeGraphController, type HomeGraphFallback } from "./home-graph-controller";
+import {
+  HomeGraphController,
+  type HomeGraphFallback,
+  type HomeGraphRuntimeStats
+} from "./home-graph-controller";
+import {
+  createHomeBentoIsland,
+  type HomeBentoDetailNode,
+  type HomeBentoIsland
+} from "./home-bento-island";
+import { createHomeRecentIsland, type HomeRecentIsland } from "./home-recent-island";
 import { JournalTemplateModal } from "./journal-template-modal";
-import { NativeFlickeringGrid } from "./magic-ui-adapters";
-import { openObsidianGraphLeaf } from "./open-native-graph";
 
 export const VIEW_TYPE_ECHOINK_HOME = "codex-echoink-home";
 
-const ENTRY_ICON: Record<HomeEntrySummary["id"], string> = {
-  wiki: "library",
-  outputs: "package-open",
-  projects: "kanban-square",
-  inbox: "inbox",
-  journal: "notebook-pen",
-  review: "chart-no-axes-combined"
-};
 const ENTRY_ACTION: Record<HomeEntrySummary["id"], string> = {
   wiki: "打开 Wiki",
   outputs: "查看成果",
@@ -53,12 +53,10 @@ export class EchoInkHomeView extends ItemView {
   private loading = false;
   private error = "";
   private calendarMonthOffset = 0;
-  private recentPaused = false;
   private graphFilters: HomeGraphFilters = cloneGraphFilters(EMPTY_HOME_GRAPH_FILTERS);
   private selectedGraphNodeId: string | null = null;
   private graphFallback: HomeGraphFallback = "none";
   private graphFallbackReason = "";
-  private graphGrid: NativeFlickeringGrid | null = null;
   private readonly graphController: HomeGraphController;
 
   private pageEl!: HTMLElement;
@@ -67,14 +65,26 @@ export class EchoInkHomeView extends ItemView {
   private graphFiltersEl!: HTMLElement;
   private graphCountEl!: HTMLElement;
   private graphFallbackEl!: HTMLElement;
+  private graphRuntimeHudEl!: HTMLElement;
   private graphRuntimeEl!: HTMLElement;
   private graphSelectionEl!: HTMLElement;
+  private graphRelatedEl!: HTMLElement;
+  private graphScopeButtons = new Map<"local" | "global", HTMLButtonElement>();
+  private graphHopsButtons = new Map<"1" | "2" | "3", HTMLButtonElement>();
+  private graphNodesStatEl!: HTMLElement;
+  private graphLinksStatEl!: HTMLElement;
+  private graphTotalStatEl!: HTMLElement;
+  private graphFpsStatEl!: HTMLElement;
+  private graphSleepValueEl!: HTMLOutputElement;
   private graphListEl!: HTMLDetailsElement;
   private graphListBodyEl!: HTMLElement;
   private recentEl!: HTMLElement;
+  private recentIsland: HomeRecentIsland | null = null;
   private entriesEl!: HTMLElement;
+  private bentoIsland: HomeBentoIsland | null = null;
   private heatmapEl!: HTMLElement;
   private calendarEl!: HTMLElement;
+  private graphRefreshTimer: number | null = null;
 
   constructor(leaf: WorkspaceLeaf, private readonly plugin: CodexForObsidianPlugin) {
     super(leaf);
@@ -85,11 +95,13 @@ export class EchoInkHomeView extends ItemView {
         this.renderGraphSelection();
         this.syncGraphListSelection();
       },
-      onOpen: (nodeId) => void this.openVaultFile(nodeId),
       onFallbackChange: (fallback, reason) => {
         this.graphFallback = fallback;
         this.graphFallbackReason = reason;
         this.renderGraphState();
+      },
+      onStatsChange: (stats) => {
+        this.renderGraphRuntimeStats(stats);
       }
     });
   }
@@ -112,13 +124,21 @@ export class EchoInkHomeView extends ItemView {
     this.registerDomEvent(document, "visibilitychange", () => {
       this.pageEl.toggleClass("is-document-hidden", document.visibilityState === "hidden");
     });
+    this.registerEvent(this.app.metadataCache.on("resolved", () => this.scheduleGraphRefresh()));
+    this.registerEvent(this.app.vault.on("rename", () => this.scheduleGraphRefresh()));
+    this.registerEvent(this.app.vault.on("delete", () => this.scheduleGraphRefresh()));
+    this.registerEvent(this.app.workspace.on("css-change", () => this.graphController.refreshTheme()));
     await this.graphController.mount(this.graphRuntimeEl);
     await this.refresh();
   }
 
   async onClose(): Promise<void> {
-    this.graphGrid?.dispose();
-    this.graphGrid = null;
+    if (this.graphRefreshTimer !== null) window.clearTimeout(this.graphRefreshTimer);
+    this.graphRefreshTimer = null;
+    this.recentIsland?.unmount();
+    this.recentIsland = null;
+    this.bentoIsland?.unmount();
+    this.bentoIsland = null;
     this.graphController.dispose();
     this.contentEl.removeClass("codex-home-view", "echoink-home-view");
     this.contentEl.empty();
@@ -158,6 +178,14 @@ export class EchoInkHomeView extends ItemView {
     this.renderCalendar();
   }
 
+  private scheduleGraphRefresh(): void {
+    if (this.graphRefreshTimer !== null) window.clearTimeout(this.graphRefreshTimer);
+    this.graphRefreshTimer = window.setTimeout(() => {
+      this.graphRefreshTimer = null;
+      void this.refresh();
+    }, 180);
+  }
+
   private renderShell(): void {
     this.contentEl.empty();
     this.pageEl = this.contentEl.createDiv({ cls: "echoink-home-page" });
@@ -170,7 +198,14 @@ export class EchoInkHomeView extends ItemView {
     this.renderOverviewShell();
 
     this.recentEl = this.pageEl.createEl("section", { cls: "echoink-home-recent" });
+    this.sectionTitle(this.recentEl, "继续最近的思路");
+    const recentHost = this.recentEl.createDiv({ cls: "echoink-home-magic-ui" });
+    this.recentIsland = createHomeRecentIsland(recentHost, (path) => this.openVaultFile(path));
     this.entriesEl = this.pageEl.createEl("section", { cls: "echoink-home-entries-section" });
+    const entriesHead = this.sectionTitle(this.entriesEl, "知识工作入口");
+    entriesHead.createSpan({ cls: "echoink-home-section-note", text: "从真实状态继续阅读、整理、写作与复盘" });
+    const bentoHost = this.entriesEl.createDiv({ cls: "echoink-home-magic-ui" });
+    this.bentoIsland = createHomeBentoIsland(bentoHost);
     const rhythm = this.pageEl.createDiv({ cls: "echoink-home-rhythm-grid" });
     this.heatmapEl = rhythm.createEl("section", { cls: "echoink-home-heatmap" });
     this.calendarEl = rhythm.createEl("section", { cls: "echoink-home-calendar-panel" });
@@ -219,6 +254,13 @@ export class EchoInkHomeView extends ItemView {
       text: "来自当前 Vault 的 Markdown 与已解析双链"
     });
     const actions = head.createDiv({ cls: "echoink-home-graph-head-actions" });
+    this.graphScopeButtons = this.graphButtonGroup(actions, [
+      ["local", "局部图谱"],
+      ["global", "全局聚合"]
+    ], "local", "图谱层级", (scope) => {
+      this.graphController.setScope(scope);
+      this.renderGraphSelection();
+    }, "is-scope");
     const reset = actions.createEl("button", {
       cls: "echoink-home-graph-secondary",
       attr: { type: "button" }
@@ -226,13 +268,6 @@ export class EchoInkHomeView extends ItemView {
     setIcon(reset.createSpan(), "scan");
     reset.createSpan({ text: "重置视角" });
     reset.onclick = () => this.graphController.resetCamera();
-    const open = actions.createEl("button", {
-      cls: "echoink-home-graph-secondary",
-      attr: { type: "button" }
-    });
-    setIcon(open.createSpan(), "git-fork");
-    open.createSpan({ text: "打开 Obsidian 原生图谱" });
-    open.onclick = () => void openObsidianGraphLeaf(this.app);
 
     this.graphFiltersEl = this.overviewEl.createDiv({ cls: "echoink-home-graph-filters" });
     const status = this.overviewEl.createDiv({ cls: "echoink-home-graph-status" });
@@ -243,26 +278,163 @@ export class EchoInkHomeView extends ItemView {
     this.graphFallbackEl = status.createDiv({ cls: "echoink-home-graph-fallback", attr: { role: "status" } });
 
     const frame = this.overviewEl.createDiv({ cls: "echoink-home-graph-frame" });
-    const grid = frame.createDiv({ cls: "echoink-home-graph-grid", attr: { "aria-hidden": "true" } });
-    this.graphGrid = new NativeFlickeringGrid(grid, {
-      squareSize: 4,
-      gridGap: 7,
-      flickerChance: 0.22,
-      maxOpacity: 0.18
-    });
-    this.graphRuntimeEl = frame.createDiv({ cls: "echoink-home-graph-host" });
-    this.graphSelectionEl = frame.createDiv({ cls: "echoink-home-graph-selection" });
+    const stage = frame.createDiv({ cls: "echoink-home-graph-stage" });
+    this.graphRuntimeEl = stage.createDiv({ cls: "echoink-home-graph-host" });
+    this.graphRuntimeHudEl = stage.createDiv({ cls: "echoink-home-graph-runtime-hud", attr: { "aria-live": "polite" } });
+    const side = frame.createEl("aside", { cls: "echoink-home-graph-side", attr: { "aria-label": "图谱当前节点与关联笔记" } });
+    this.renderGraphControls(side);
 
     this.graphListEl = this.overviewEl.createEl("details", { cls: "echoink-home-graph-list" });
     this.graphListEl.createEl("summary", { text: "浏览筛选后的笔记" });
     this.graphListBodyEl = this.graphListEl.createDiv({ cls: "echoink-home-graph-list-body" });
   }
 
+  private renderGraphControls(side: HTMLElement): void {
+    const depthSection = side.createDiv({ cls: "echoink-home-graph-side-section" });
+    depthSection.createEl("h3", { text: "邻居深度" });
+    this.graphHopsButtons = this.graphButtonGroup(depthSection, [
+      ["1", "1 跳"],
+      ["2", "2 跳"],
+      ["3", "3 跳"]
+    ], "2", "邻居深度", (value) => {
+      this.graphController.setHops(Number(value) as 1 | 2 | 3);
+      if (this.graphController.getScope() !== "local") this.graphController.setScope("local");
+      this.renderGraphSelection();
+    });
+
+    const stats = side.createDiv({ cls: "echoink-home-graph-side-section" });
+    stats.createEl("h3", { text: "当前视图" });
+    this.graphNodesStatEl = this.graphStat(stats, "渲染节点");
+    this.graphLinksStatEl = this.graphStat(stats, "渲染连线");
+    this.graphTotalStatEl = this.graphStat(stats, "全库笔记");
+    this.graphFpsStatEl = this.graphStat(stats, "帧率");
+
+    const motionSection = side.createDiv({ cls: "echoink-home-graph-side-section" });
+    motionSection.createEl("h3", { text: "运动模式" });
+    this.graphButtonGroup(motionSection, [
+      ["stable", "收敛停机"],
+      ["breathe", "恒温呼吸"],
+      ["free", "自由飘动"]
+    ], "breathe", "运动模式", (mode) => {
+      this.graphController.setMotionMode(mode);
+    });
+
+    const amplitudeLabel = motionSection.createEl("label", { cls: "echoink-home-graph-control is-range" });
+    amplitudeLabel.createSpan({ text: "幅度" });
+    const amplitude = amplitudeLabel.createEl("input", {
+      attr: { type: "range", min: "0", max: "300", step: "10", value: "100", "aria-label": "图谱运动幅度" }
+    });
+    const amplitudeValue = amplitudeLabel.createEl("output", { text: "1.0x", attr: { "aria-live": "polite" } });
+    amplitude.oninput = () => {
+      const value = Number(amplitude.value) / 100;
+      amplitudeValue.setText(`${value.toFixed(1)}x`);
+      this.graphController.setAmplitude(value);
+    };
+
+    const sleepSteps = [0, 10_000, 60_000, 180_000, 300_000] as const;
+    const sleepLabel = motionSection.createEl("label", { cls: "echoink-home-graph-control is-range" });
+    sleepLabel.createSpan({ text: "休眠" });
+    const sleep = sleepLabel.createEl("input", {
+      attr: { type: "range", min: "0", max: "4", step: "1", value: "3", "aria-label": "图谱无操作休眠" }
+    });
+    this.graphSleepValueEl = sleepLabel.createEl("output", { text: "3:00", attr: { "aria-live": "polite" } });
+    sleep.oninput = () => {
+      const index = Number(sleep.value);
+      this.graphController.setSleepAfter(sleepSteps[index] ?? 180_000);
+    };
+
+    const hover = motionSection.createEl("label", { cls: "echoink-home-graph-control is-check" });
+    const hoverInput = hover.createEl("input", { attr: { type: "checkbox" } });
+    hoverInput.checked = true;
+    hoverInput.onchange = () => this.graphController.setPauseOnHover(hoverInput.checked);
+    hover.createSpan({ text: "悬停节点时暂停" });
+    const blur = motionSection.createEl("label", { cls: "echoink-home-graph-control is-check" });
+    const blurInput = blur.createEl("input", { attr: { type: "checkbox" } });
+    blurInput.checked = true;
+    blurInput.onchange = () => this.graphController.setBlurSleep(blurInput.checked);
+    blur.createSpan({ text: "窗口失焦即休眠" });
+
+    const legendSection = side.createDiv({ cls: "echoink-home-graph-side-section" });
+    legendSection.createEl("h3", { text: "图例" });
+    const legend = legendSection.createDiv({ cls: "echoink-home-graph-legend" });
+    legend.createSpan({ cls: "is-current", text: "当前笔记" });
+    legend.createSpan({ cls: "is-one-hop", text: "1 跳邻居" });
+    legend.createSpan({ cls: "is-two-hop", text: "2 跳邻居" });
+    legend.createSpan({ cls: "is-three-hop", text: "3 跳邻居" });
+
+    const selectionSection = side.createDiv({ cls: "echoink-home-graph-side-section is-selection" });
+    this.graphSelectionEl = selectionSection.createDiv({ cls: "echoink-home-graph-selection" });
+    this.graphRelatedEl = selectionSection.createDiv({ cls: "echoink-home-graph-related" });
+    side.createDiv({
+      cls: "echoink-home-graph-side-note",
+      text: "Shift + 拖节点固定 · 滚轮缩放 · 拖背景平移 · 点节点换中心"
+    });
+  }
+
+  private graphStat(container: HTMLElement, label: string): HTMLElement {
+    const row = container.createDiv({ cls: "echoink-home-graph-stat" });
+    row.createSpan({ text: label });
+    return row.createEl("b", { text: "0" });
+  }
+
+  private graphButtonGroup<T extends string>(
+    container: HTMLElement,
+    options: readonly (readonly [T, string])[],
+    selected: T,
+    label: string,
+    onSelect: (value: T) => void,
+    extraClass = ""
+  ): Map<T, HTMLButtonElement> {
+    const group = container.createDiv({
+      cls: `echoink-home-graph-segment ${extraClass}`.trim(),
+      attr: { role: "group", "aria-label": label }
+    });
+    const buttons = new Map<T, HTMLButtonElement>();
+    for (const [value, text] of options) {
+      const button = group.createEl("button", {
+        cls: value === selected ? "is-on" : "",
+        text,
+        attr: { type: "button", "aria-pressed": String(value === selected) }
+      });
+      button.onclick = () => {
+        this.syncGraphButtons(buttons, value);
+        onSelect(value);
+      };
+      buttons.set(value, button);
+    }
+    return buttons;
+  }
+
+  private syncGraphButtons<T extends string>(buttons: Map<T, HTMLButtonElement>, selected: T): void {
+    for (const [value, button] of buttons) {
+      const active = value === selected;
+      button.toggleClass("is-on", active);
+      button.setAttribute("aria-pressed", String(active));
+    }
+  }
+
+  private renderGraphRuntimeStats(stats: HomeGraphRuntimeStats): void {
+    if (this.graphCountEl) {
+      this.graphCountEl.setText(`${stats.nodes} 节点 · ${stats.links} 连线 · ${stats.totalNotes} 全库笔记 · ${stats.fps} FPS`);
+    }
+    if (this.graphRuntimeHudEl) {
+      this.graphRuntimeHudEl.setText(stats.status);
+      this.graphRuntimeHudEl.toggleClass("is-sleeping", stats.state === "sleeping");
+    }
+    this.graphNodesStatEl?.setText(String(stats.nodes));
+    this.graphLinksStatEl?.setText(String(stats.links));
+    this.graphTotalStatEl?.setText(String(stats.totalNotes));
+    this.graphFpsStatEl?.setText(String(stats.fps));
+    this.graphSleepValueEl?.setText(stats.sleepStatus);
+    this.syncGraphButtons(this.graphScopeButtons, stats.scope);
+    this.syncGraphButtons(this.graphHopsButtons, String(stats.hops) as "1" | "2" | "3");
+  }
+
   private renderOverview(): void {
     const graph = this.data?.graph;
     if (graph) this.graphController.updateData(graph);
     this.renderGraphFilters();
-    this.applyGraphFilters();
+    this.renderGraphState();
   }
 
   private renderGraphFilters(): void {
@@ -365,11 +537,7 @@ export class EchoInkHomeView extends ItemView {
   }
 
   private applyGraphFilters(): void {
-    const result = this.graphController.updateFilters(this.graphFilters);
-    if (this.selectedGraphNodeId && !result.matchedIds.has(this.selectedGraphNodeId)) {
-      this.selectedGraphNodeId = null;
-      this.graphController.setSelected(null);
-    }
+    this.graphController.updateFilters(this.graphFilters);
     const clear = this.graphFiltersEl.querySelector<HTMLButtonElement>(".echoink-home-graph-clear");
     if (clear) clear.disabled = !hasActiveHomeGraphFilters(this.graphFilters);
     this.renderGraphState();
@@ -378,11 +546,11 @@ export class EchoInkHomeView extends ItemView {
   private renderGraphState(): void {
     if (!this.graphCountEl || !this.graphListBodyEl) return;
     const result = this.graphController.getFilterResult();
-    this.graphCountEl.setText(`${result.nodes.length} / ${result.totalCount} 篇笔记`);
+    if (!this.graphCountEl.textContent) this.graphCountEl.setText(`${result.nodes.length} / ${result.totalCount} 篇笔记`);
     this.graphFallbackEl.setText(
       this.graphFallback === "list"
         ? `互动图谱暂不可用。${this.graphFallbackReason || "已切换到笔记列表。"}`
-        : "拖动旋转 · 滚动缩放 · 选择节点打开笔记"
+        : "Shift + 拖动固定节点 · 拖动背景平移 · 单击节点换中心"
     );
     this.graphFallbackEl.toggleClass("is-error", this.graphFallback === "list");
     this.graphListEl.toggleClass("is-fallback", this.graphFallback === "list");
@@ -435,11 +603,32 @@ export class EchoInkHomeView extends ItemView {
   private renderGraphSelection(): void {
     if (!this.graphSelectionEl) return;
     this.graphSelectionEl.empty();
+    this.graphRelatedEl?.empty();
+    const global = this.graphController.getScope() === "global";
     const node = this.selectedGraphNodeId
       ? this.data?.graph.nodeById.get(this.selectedGraphNodeId)
       : null;
+    const sidebarItems = this.graphController.getSidebarItems();
+    if (global) {
+      this.graphSelectionEl.createEl("strong", { text: "全局主题簇" });
+      this.graphSelectionEl.createSpan({ text: "按顶层目录聚合当前筛选结果" });
+      this.graphRelatedEl.createEl("strong", { text: `主题簇 ${sidebarItems.length}` });
+      const list = this.graphRelatedEl.createEl("ul");
+      for (const itemData of sidebarItems) {
+        const item = list.createEl("li", { cls: "is-cluster" });
+        const focus = item.createEl("button", {
+          cls: "echoink-home-graph-related-focus",
+          attr: { type: "button", title: `进入 ${itemData.title}` }
+        });
+        focus.createSpan({ text: itemData.title });
+        focus.createEl("em", { text: itemData.detail });
+        focus.onclick = () => this.graphController.focusNode(itemData.noteId);
+      }
+      return;
+    }
     if (!node) {
       this.graphSelectionEl.createSpan({ text: "选择一个节点查看路径与连接数" });
+      this.graphRelatedEl?.createSpan({ cls: "echoink-home-empty", text: "局部图谱默认从连接最多的笔记开始。" });
       return;
     }
     this.graphSelectionEl.createEl("strong", { text: node.title });
@@ -447,148 +636,127 @@ export class EchoInkHomeView extends ItemView {
     this.graphSelectionEl.createEl("small", { text: `${node.degree} 个已解析连接` });
     const open = this.graphSelectionEl.createEl("button", { text: "打开笔记", attr: { type: "button" } });
     open.onclick = () => void this.openVaultFile(node.id);
+    this.graphRelatedEl.createEl("strong", { text: `关联笔记 ${sidebarItems.length}` });
+    if (!sidebarItems.length) {
+      this.graphRelatedEl.createSpan({ cls: "echoink-home-empty", text: "当前节点没有已解析关联。" });
+      return;
+    }
+    const list = this.graphRelatedEl.createEl("ul");
+    for (const itemData of sidebarItems) {
+      const item = list.createEl("li");
+      const focus = item.createEl("button", {
+        cls: "echoink-home-graph-related-focus",
+        attr: { type: "button", title: itemData.detail },
+        text: itemData.title
+      });
+      focus.onclick = () => this.graphController.focusNode(itemData.noteId);
+      const openRelated = item.createEl("button", {
+        cls: "echoink-home-graph-related-open",
+        attr: { type: "button", "aria-label": `打开笔记：${itemData.title}`, title: `打开笔记：${itemData.detail}` }
+      });
+      setIcon(openRelated, "external-link");
+      openRelated.onclick = () => void this.openVaultFile(itemData.noteId);
+    }
   }
 
   /**
-   * Native Magic UI Marquee adapter.
+   * Official Magic UI Marquee React island.
    * Upstream: https://github.com/magicuidesign/magicui/blob/2d671cc6c0e0f40e28682c9cbddd16694dcfe627/apps/www/registry/magicui/marquee.tsx
    * Demo behavior: https://github.com/magicuidesign/magicui/blob/2d671cc6c0e0f40e28682c9cbddd16694dcfe627/apps/www/registry/example/marquee-demo.tsx
    * Mapping: two horizontal tracks, reverse second row, repeat=4, 1rem gap,
-   * 20s linear loop and 25% edge fades; host pauses add focus, drag and visibility.
+   * 20s linear loop and the upstream Demo's paired 25% edge fades.
    */
   private renderRecentThoughts(): void {
-    this.recentEl.empty();
-    const head = this.sectionTitle(this.recentEl, "继续最近的思路");
-    const controls = head.createDiv({ cls: "echoink-home-section-controls" });
-    controls.createSpan({ cls: "echoink-home-section-note", text: "来自本地最近编辑" });
-    const pause = controls.createEl("button", {
-      cls: "echoink-home-marquee-toggle",
-      text: this.recentPaused ? "继续" : "暂停",
-      attr: { type: "button", "aria-pressed": String(this.recentPaused) }
-    });
-    pause.onclick = () => {
-      this.recentPaused = !this.recentPaused;
-      this.recentEl.toggleClass("is-user-paused", this.recentPaused);
-      pause.setAttribute("aria-pressed", String(this.recentPaused));
-      pause.setText(this.recentPaused ? "继续" : "暂停");
-    };
-    this.recentEl.toggleClass("is-user-paused", this.recentPaused);
-    const viewport = this.recentEl.createDiv({ cls: "echoink-home-marquee", attr: { "aria-label": "最近编辑的本地思路" } });
-    const recent = this.data?.recentThoughts ?? [];
-    if (!recent.length) {
-      viewport.createDiv({ cls: "echoink-home-empty", text: "还没有可继续的 Markdown 思路。" });
-      pause.disabled = true;
-      return;
-    }
-    const split = Math.max(1, Math.ceil(recent.length / 2));
-    const rows = [recent.slice(0, split), recent.slice(split)];
-    if (!rows[1].length) rows[1] = [...rows[0]];
-    rows.forEach((records, rowIndex) => {
-      const track = viewport.createDiv({ cls: `echoink-home-marquee-track ${rowIndex === 1 ? "is-reverse" : ""}` });
-      for (let repeat = 0; repeat < 4; repeat += 1) {
-        const accessible = repeat === 0 && (rowIndex === 0 || recent.length > 1);
-        const group = track.createDiv({ cls: "echoink-home-marquee-group" });
-        if (!accessible) {
-          group.setAttribute("aria-hidden", "true");
-        }
-        for (const record of records) {
-          const item = accessible
-            ? group.createEl("button", {
-              cls: "echoink-home-thought",
-              attr: { type: "button", title: record.title, "data-path": record.path }
-            })
-            : group.createDiv({ cls: "echoink-home-thought is-duplicate", attr: { "data-path": record.path } });
-          item.createSpan({ cls: "echoink-home-thought-folder", text: record.folder });
-          item.createEl("strong", { text: record.title });
-          item.createSpan({ text: formatRelativeTime(record.mtime) });
-        }
-      }
-    });
-    viewport.createDiv({ cls: "echoink-home-marquee-fade is-left", attr: { "aria-hidden": "true" } });
-    viewport.createDiv({ cls: "echoink-home-marquee-fade is-right", attr: { "aria-hidden": "true" } });
-    bindHorizontalDrag(viewport);
-    viewport.addEventListener("click", (event) => {
-      const item = (event.target as HTMLElement).closest<HTMLElement>(".echoink-home-thought[data-path]");
-      const path = item?.dataset.path;
-      if (path) void this.openVaultFile(path);
-    });
+    this.recentIsland?.render((this.data?.recentThoughts ?? []).map((record) => ({
+      path: record.path,
+      folder: record.folder,
+      title: record.title,
+      relativeTime: formatRelativeTime(record.mtime)
+    })));
   }
 
   /**
-   * Native Magic UI Bento Grid and Animated Shiny Text adapter.
+   * Official Magic UI BentoGrid and AnimatedShinyText React island.
    * Upstream Bento: https://github.com/magicuidesign/magicui/blob/2d671cc6c0e0f40e28682c9cbddd16694dcfe627/apps/www/registry/magicui/bento-grid.tsx
    * Upstream Shiny Text: https://github.com/magicuidesign/magicui/blob/2d671cc6c0e0f40e28682c9cbddd16694dcfe627/apps/www/registry/magicui/animated-shiny-text.tsx
-   * Mapping: one button per card, overflow clipping, 40px content/CTA motion,
-   * icon scale, 100px shimmer width and the upstream 8s shiny-text animation.
+   * Mapping: BentoGrid receives six business buttons as direct children; each
+   * card keeps one native button and renders the official text animation.
    */
   private renderEntries(): void {
-    this.entriesEl.empty();
-    const head = this.sectionTitle(this.entriesEl, "知识工作入口");
-    head.createSpan({ cls: "echoink-home-section-note", text: "从真实状态继续阅读、整理、写作与复盘" });
-    const grid = this.entriesEl.createDiv({ cls: "echoink-home-bento-grid" });
-    for (const entry of this.data?.entries ?? []) {
-      const card = grid.createEl("button", {
-        cls: `echoink-home-entry is-${entry.id}`,
-        attr: { type: "button", "aria-label": `${ENTRY_ACTION[entry.id]}：${entry.label}` }
-      });
-      const icon = card.createSpan({ cls: "echoink-home-entry-icon" });
-      setIcon(icon, ENTRY_ICON[entry.id]);
-      const copy = card.createDiv({ cls: "echoink-home-entry-copy" });
-      copy.createSpan({ cls: "echoink-home-entry-kicker", text: entry.description });
-      copy.createEl("strong", { text: entry.label });
-      this.renderEntryDetails(copy, entry);
-      const cta = card.createSpan({ cls: "echoink-home-entry-cta" });
-      cta.createSpan({ cls: "echoink-home-shiny-text", text: `${ENTRY_ACTION[entry.id]} →` });
-      card.onclick = () => void this.openEntry(entry);
-    }
+    this.bentoIsland?.render((this.data?.entries ?? []).map((entry) => {
+      let kicker: string | undefined;
+      if (entry.id !== "review") kicker = entry.description;
+      return {
+        id: entry.id,
+        label: entry.label,
+        ariaLabel: `${ENTRY_ACTION[entry.id]}：${entry.label}`,
+        kicker,
+        details: this.entryDetailNodes(entry),
+        cta: ENTRY_ACTION[entry.id],
+        onActivate: () => this.openEntry(entry)
+      };
+    }));
   }
 
-  private renderEntryDetails(container: HTMLElement, entry: HomeEntrySummary): void {
+  private entryDetailNodes(entry: HomeEntrySummary): readonly HomeBentoDetailNode[] {
     const target = entry.targetPath ? this.data?.graph.nodeById.get(entry.targetPath) : null;
     const today = new Date();
     const journalExists = this.app.vault.getAbstractFileByPath(journalPathForDate(today)) instanceof TFile;
     if (entry.id === "wiki") {
-      const row = container.createDiv({ cls: "echoink-home-entry-stat-row" });
-      row.createSpan({ text: `${entry.count} 篇知识` });
-      row.createSpan({ text: `今日更新 ${this.snapshot?.wiki.todayCount ?? 0}` });
-      container.createEl("small", { cls: "echoink-home-entry-path", text: target?.path ?? "等待建立 Wiki 索引" });
-      return;
+      return [
+        {
+          tag: "div",
+          className: "echoink-home-entry-stat-row",
+          children: [
+            { tag: "span", text: `${entry.count} 篇知识` },
+            { tag: "span", text: `今日更新 ${this.snapshot?.wiki.todayCount ?? 0}` }
+          ]
+        },
+        { tag: "small", className: "echoink-home-entry-path", text: target?.path ?? "等待建立 Wiki 索引" }
+      ];
     }
     if (entry.id === "outputs") {
-      container.createSpan({ cls: "echoink-home-entry-value", text: target?.title ?? "还没有本地成果" });
-      container.createEl("small", {
-        text: target ? `最近更新 ${formatRelativeTime(target.mtime)}` : "完成一次知识维护后会在这里出现"
-      });
-      return;
+      return [
+        { tag: "span", className: "echoink-home-entry-value", text: target?.title ?? "还没有本地成果" },
+        { tag: "small", text: target ? `最近更新 ${formatRelativeTime(target.mtime)}` : "完成一次知识维护后会在这里出现" }
+      ];
     }
     if (entry.id === "projects") {
-      container.createSpan({ cls: "echoink-home-entry-value", text: target?.title ?? "还没有项目笔记" });
-      container.createEl("small", { text: target ? "从最近项目继续下一步" : "可在 Projects 目录建立项目" });
-      return;
+      return [
+        { tag: "span", className: "echoink-home-entry-value", text: target?.title ?? "还没有项目笔记" },
+        { tag: "small", text: target ? "从最近项目继续下一步" : "可在 Projects 目录建立项目" }
+      ];
     }
     if (entry.id === "inbox") {
-      container.createSpan({ cls: "echoink-home-entry-number", text: String(entry.count) });
-      container.createEl("small", { text: entry.count ? `最近输入：${target?.title ?? "待整理"}` : "当前没有待整理输入" });
-      return;
+      return [
+        { tag: "span", className: "echoink-home-entry-number", text: String(entry.count) },
+        { tag: "small", text: entry.count ? `最近输入：${target?.title ?? "待整理"}` : "当前没有待整理输入" }
+      ];
     }
     if (entry.id === "journal") {
-      container.createSpan({ cls: "echoink-home-entry-date", text: formatFullDate(today) });
-      container.createSpan({
-        cls: "echoink-home-entry-value",
-        text: journalExists ? "今日日记已建立" : "默认使用“此刻速记”"
-      });
-      container.createEl("small", { text: journalExists ? "继续打开，不覆盖已有内容" : "也可进入模板选择或导入 Markdown" });
-      return;
+      return [
+        { tag: "span", className: "echoink-home-entry-date", text: formatFullDate(today) },
+        { tag: "span", className: "echoink-home-entry-value", text: journalExists ? "今日日记已建立" : "默认使用“此刻速记”" },
+        { tag: "small", text: journalExists ? "继续打开，不覆盖已有内容" : "也可进入模板选择或导入 Markdown" }
+      ];
     }
     const score = this.snapshot?.health.score;
-    const row = container.createDiv({ cls: "echoink-home-entry-review-row" });
-    row.createSpan({ cls: "echoink-home-entry-number", text: score === undefined ? "—" : String(score) });
-    row.createSpan({ text: this.snapshot?.health.label ?? "等待本地维护快照" });
-    container.createEl("small", {
-      text: this.snapshot?.lastRun.at
-        ? `最近维护 ${formatRelativeTime(this.snapshot.lastRun.at)}`
-        : "尚无维护记录，可开始一次复盘"
-    });
+    return [
+      {
+        tag: "div",
+        className: "echoink-home-entry-review-row",
+        children: [
+          { tag: "span", className: "echoink-home-entry-number", text: score === undefined ? "—" : String(score) },
+          { tag: "span", text: this.snapshot?.health.label ?? "等待本地维护快照" }
+        ]
+      },
+      {
+        tag: "small",
+        text: this.snapshot?.lastRun.at
+          ? `最近维护 ${formatRelativeTime(this.snapshot.lastRun.at)}`
+          : "尚无维护记录，可开始一次复盘"
+      }
+    ];
   }
 
   private renderHeatmap(): void {
@@ -812,40 +980,4 @@ function cloneGraphFilters(filters: HomeGraphFilters): HomeGraphFilters {
     properties: filters.properties.map((filter) => ({ ...filter })),
     tags: [...filters.tags]
   };
-}
-
-function bindHorizontalDrag(viewport: HTMLElement): void {
-  let pointerId: number | null = null;
-  let startX = 0;
-  let startScroll = 0;
-  let moved = false;
-  let suppressClick = false;
-  viewport.addEventListener("pointerdown", (event) => {
-    pointerId = event.pointerId;
-    startX = event.clientX;
-    startScroll = viewport.scrollLeft;
-    moved = false;
-    viewport.setPointerCapture(event.pointerId);
-    viewport.addClass("is-dragging");
-  });
-  viewport.addEventListener("pointermove", (event) => {
-    if (pointerId !== event.pointerId) return;
-    const distance = event.clientX - startX;
-    if (Math.abs(distance) >= 6) moved = true;
-    if (moved) viewport.scrollLeft = startScroll - distance;
-  });
-  const stop = (event: PointerEvent) => {
-    if (pointerId !== event.pointerId) return;
-    suppressClick = moved;
-    pointerId = null;
-    viewport.removeClass("is-dragging");
-    window.setTimeout(() => { suppressClick = false; }, 0);
-  };
-  viewport.addEventListener("pointerup", stop);
-  viewport.addEventListener("pointercancel", stop);
-  viewport.addEventListener("click", (event) => {
-    if (!suppressClick) return;
-    event.preventDefault();
-    event.stopPropagation();
-  }, { capture: true });
 }

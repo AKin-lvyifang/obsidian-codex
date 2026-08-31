@@ -263,7 +263,7 @@ export class CodexView extends ItemView {
   }
 
   getIcon(): string {
-    return "bot";
+    return "feather";
   }
 
   refreshPersonalizationUi(): void {

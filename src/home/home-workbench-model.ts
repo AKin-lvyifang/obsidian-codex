@@ -23,6 +23,13 @@ export interface HomeGraphLink {
   source: string;
   target: string;
   count: number;
+  directions: HomeGraphLinkDirection[];
+}
+
+export interface HomeGraphLinkDirection {
+  source: string;
+  target: string;
+  count: number;
 }
 
 export interface HomePropertyFilter {
@@ -55,6 +62,21 @@ export interface HomeGraphFilterResult {
   links: HomeGraphLink[];
   matchedIds: Set<string>;
   totalCount: number;
+}
+
+export interface HomeGraphAggregateNode {
+  id: string;
+  title: string;
+  cluster: string;
+  count: number;
+  degree: number;
+  noteIds: string[];
+}
+
+export interface HomeGraphAggregateResult {
+  nodes: HomeGraphAggregateNode[];
+  links: HomeGraphLink[];
+  totalNotes: number;
 }
 
 export interface HomeActivityDay {
@@ -219,21 +241,31 @@ export function buildHomeGraph(
     properties: normalizeProperties(record.properties)
   }));
   const nodeById = new Map(nodes.map((node) => [node.id, node]));
-  const links: HomeGraphLink[] = [];
+  const linkByPair = new Map<string, HomeGraphLink>();
+  const neighbors = new Map(nodes.map((node) => [node.id, new Set<string>()]));
   for (const [source, targets] of Object.entries(resolvedLinks)) {
-    const sourceNode = nodeById.get(source);
-    if (!sourceNode) continue;
+    if (!nodeById.has(source)) continue;
     for (const [target, count] of Object.entries(targets)) {
-      const targetNode = nodeById.get(target);
-      if (!targetNode || source === target || count <= 0) continue;
-      links.push({ source, target, count });
-      sourceNode.degree += count;
-      targetNode.degree += count;
+      if (!nodeById.has(target) || source === target || count <= 0) continue;
+      const [left, right] = source < target ? [source, target] : [target, source];
+      const identity = `${left}\0${right}`;
+      const link = linkByPair.get(identity) ?? {
+        source: left,
+        target: right,
+        count: 0,
+        directions: []
+      };
+      link.count += count;
+      link.directions.push({ source, target, count });
+      linkByPair.set(identity, link);
+      neighbors.get(source)?.add(target);
+      neighbors.get(target)?.add(source);
     }
   }
+  for (const node of nodes) node.degree = neighbors.get(node.id)?.size ?? 0;
   return {
     nodes,
-    links,
+    links: [...linkByPair.values()],
     nodeById,
     options: buildHomeGraphFilterOptions(nodes)
   };
@@ -259,6 +291,95 @@ export function filterHomeGraph(data: HomeGraphData, filters: HomeGraphFilters):
   const matchedIds = new Set(nodes.map((node) => node.id));
   const links = data.links.filter((link) => matchedIds.has(link.source) && matchedIds.has(link.target));
   return { nodes, links, matchedIds, totalCount: data.nodes.length };
+}
+
+/** Select an undirected, bounded neighborhood for the local Canvas view. */
+export function selectHomeGraphNeighborhood(
+  nodes: readonly HomeGraphNode[],
+  links: readonly HomeGraphLink[],
+  centerId: string | null,
+  hops: 1 | 2 | 3,
+  maxNodes = 260
+): HomeGraphFilterResult {
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  const fallbackCenter = [...nodes].sort((left, right) => right.degree - left.degree || right.mtime - left.mtime)[0]?.id;
+  const startId = centerId && nodeById.has(centerId) ? centerId : fallbackCenter;
+  if (!startId) return { nodes: [], links: [], matchedIds: new Set(), totalCount: nodes.length };
+  const adjacency = new Map<string, string[]>();
+  for (const link of links) {
+    if (!nodeById.has(link.source) || !nodeById.has(link.target)) continue;
+    adjacency.set(link.source, [...(adjacency.get(link.source) ?? []), link.target]);
+    adjacency.set(link.target, [...(adjacency.get(link.target) ?? []), link.source]);
+  }
+  const distance = new Map<string, number>([[startId, 0]]);
+  const queue = [startId];
+  let head = 0;
+  while (head < queue.length) {
+    const current = queue[head++];
+    const depth = distance.get(current) ?? 0;
+    if (depth >= hops) continue;
+    for (const neighbor of adjacency.get(current) ?? []) {
+      if (distance.has(neighbor)) continue;
+      distance.set(neighbor, depth + 1);
+      queue.push(neighbor);
+    }
+  }
+  const limit = Math.max(1, Math.min(260, Math.floor(maxNodes)));
+  const orderedIds = queue.slice(0, limit);
+  const matchedIds = new Set(orderedIds);
+  return {
+    nodes: orderedIds.map((id) => nodeById.get(id)).filter((node): node is HomeGraphNode => Boolean(node)),
+    links: links.filter((link) => matchedIds.has(link.source) && matchedIds.has(link.target)),
+    matchedIds,
+    totalCount: nodes.length
+  };
+}
+
+/** Collapse the filtered graph into top-level-folder nodes for the global view. */
+export function aggregateHomeGraph(
+  nodes: readonly HomeGraphNode[],
+  links: readonly HomeGraphLink[]
+): HomeGraphAggregateResult {
+  const groups = new Map<string, HomeGraphAggregateNode>();
+  const clusterByNode = new Map<string, string>();
+  for (const node of nodes) {
+    const cluster = node.cluster || "根目录";
+    clusterByNode.set(node.id, cluster);
+    const group = groups.get(cluster) ?? {
+      id: `cluster:${cluster}`,
+      title: cluster,
+      cluster,
+      count: 0,
+      degree: 0,
+      noteIds: []
+    };
+    group.count += 1;
+    group.noteIds.push(node.id);
+    group.degree = group.noteIds.length;
+    groups.set(cluster, group);
+  }
+  const linkCounts = new Map<string, HomeGraphLink>();
+  for (const link of links) {
+    const sourceCluster = clusterByNode.get(link.source);
+    const targetCluster = clusterByNode.get(link.target);
+    if (!sourceCluster || !targetCluster || sourceCluster === targetCluster) continue;
+    const [left, right] = [sourceCluster, targetCluster].sort();
+    const identity = `${left}\0${right}`;
+    const current = linkCounts.get(identity) ?? {
+      source: `cluster:${left}`,
+      target: `cluster:${right}`,
+      count: 0,
+      directions: []
+    };
+    current.count += link.count;
+    current.directions.push(...link.directions);
+    linkCounts.set(identity, current);
+  }
+  return {
+    nodes: [...groups.values()].sort((left, right) => right.count - left.count || left.title.localeCompare(right.title)),
+    links: [...linkCounts.values()],
+    totalNotes: nodes.length
+  };
 }
 
 export function hasActiveHomeGraphFilters(filters: HomeGraphFilters): boolean {

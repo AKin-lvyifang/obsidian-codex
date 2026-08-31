@@ -1,5 +1,47 @@
 # Third-Party Notices
 
+## Magic UI
+
+EchoInk vendors the official Magic UI `Marquee`, `BentoGrid`,
+`AnimatedShinyText`, shared `cn` utility, and shadcn-compatible `Button`
+sources at commit `2d671cc6c0e0f40e28682c9cbddd16694dcfe627`.
+The upstream Marquee demo and global animation declarations are retained
+locally as provenance for the isolated build-time Tailwind CSS output.
+
+- Repository: https://github.com/magicuidesign/magicui
+- Source manifest: `src/home/magic-ui/SOURCE.json`
+- License copy: `src/home/magic-ui/LICENSE.md`
+- `apps/www/registry/magicui/marquee.tsx` — SHA-256 `779f360a107409bfa35cda13bcef7d54cd620a15ab4a0ee50412442a4dd6b9c7`
+- `apps/www/registry/magicui/bento-grid.tsx` — SHA-256 `9c2abcb2a4e51519e56d510299771a2d0e170ab9927a9a792a58614b1837ed47`
+- `apps/www/registry/magicui/animated-shiny-text.tsx` — SHA-256 `3743a0a0b4894840a96bacd839e493872bac484a940684f91fd23a1784c00fbb`
+- `apps/www/registry/lib/utils.ts` — SHA-256 `7c8c3dfc0cdd370d44932828eb067ef771c8fe7996693221d5d4b90af6d54f2d`
+- `apps/www/components/ui/button.tsx` — SHA-256 `881fabaf889450b7c671ffabe455bd4b4d101c36f80868f1bf4819ba5f4f4886`
+- `apps/www/registry/example/marquee-demo.tsx` — SHA-256 `7ed4e929bbf6c54b6464cea98cc29fd1b4da16f1ab4cdcc7a49e2ef98ec19536`
+- `apps/www/styles/globals.css` — SHA-256 `b290ad71358829d043a8453924e0b97878596294849de34ea08451412fd760f2`
+- `LICENSE.md` — SHA-256 `0147b84235ed916b8b4e89c1f80655351c5afe7d211b629be61f553a227b34ba`
+
+MIT License
+
+Copyright (c) Magic UI
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
 ## SmoothUI
 
 EchoInk includes native TypeScript DOM and CSS adaptations of the official
