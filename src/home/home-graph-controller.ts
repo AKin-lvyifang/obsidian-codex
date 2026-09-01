@@ -11,9 +11,8 @@ import {
   type HomeGraphNode
 } from "./home-workbench-model";
 
-export type HomeGraphFallback = "none" | "list";
+export type HomeGraphFallback = "none" | "error";
 export type HomeGraphScope = "local" | "global";
-export type HomeGraphMotionMode = "stable" | "breathe" | "free";
 export type HomeGraphRuntimeState = "running" | "paused" | "sleeping";
 
 export interface HomeGraphRuntimeStats {
@@ -25,7 +24,6 @@ export interface HomeGraphRuntimeStats {
   hops: 1 | 2 | 3;
   state: HomeGraphRuntimeState;
   status: string;
-  sleepStatus: string;
 }
 
 export interface HomeGraphControllerOptions {
@@ -40,11 +38,6 @@ export interface HomeGraphSidebarItem {
   detail: string;
   noteId: string;
   aggregate: boolean;
-}
-
-export interface HomeGraphSleepStep {
-  fade: number;
-  deepSleep: boolean;
 }
 
 interface VisualNode {
@@ -76,7 +69,8 @@ const EMPTY_GRAPH: HomeGraphData = {
 };
 const ALPHA_DECAY = 0.984;
 const ALPHA_STOP = 0.004;
-const SLEEP_FADE_MS = 2_000;
+const IDLE_SLEEP_MS = 3_000;
+const MAX_JITTER_CSS_PX = 1;
 
 /** Dependency-free Canvas graph with bounded force simulation and real sleep. */
 export class HomeGraphController {
@@ -95,14 +89,7 @@ export class HomeGraphController {
   private fallbackReason = "";
   private scope: HomeGraphScope = "local";
   private hops: 1 | 2 | 3 = 2;
-  private motionMode: HomeGraphMotionMode = "breathe";
-  private amplitude = 1;
-  private sleepAfterMs = 180_000;
-  private pauseOnHover = true;
-  private blurSleep = true;
   private blurred = false;
-  private focusGraceUntil = 0;
-  private sleepFade = 1;
   private deepSleep = false;
   private alpha = 1;
   private scale = 1;
@@ -131,7 +118,6 @@ export class HomeGraphController {
   private startOffsetY = 0;
   private draggedNode: VisualNode | null = null;
   private pointerMoved = false;
-  private sleepTimer: number | null = null;
   private sleepReason = "长时间无操作";
 
   constructor(private readonly options: HomeGraphControllerOptions) {}
@@ -152,7 +138,7 @@ export class HomeGraphController {
     });
     const context = canvas.getContext("2d", { alpha: true });
     if (!context) {
-      this.failToList("浏览器没有提供 Canvas 2D 上下文");
+      this.failCanvas("浏览器没有提供 Canvas 2D 上下文");
       return this.fallback;
     }
     this.canvas = canvas;
@@ -194,32 +180,6 @@ export class HomeGraphController {
     this.hops = hops;
     if (this.scope === "local") this.rebuildProjection();
     else this.emitStats();
-  }
-
-  setMotionMode(mode: HomeGraphMotionMode): void {
-    this.motionMode = mode;
-    this.alpha = Math.max(this.alpha, mode === "free" ? 0.6 : 0.35);
-    this.wake();
-  }
-
-  setAmplitude(amplitude: number): void {
-    this.amplitude = Math.max(0, Math.min(3, amplitude));
-    this.wake();
-  }
-
-  setSleepAfter(ms: number): void {
-    this.sleepAfterMs = Math.max(0, ms);
-    this.wake();
-  }
-
-  setPauseOnHover(enabled: boolean): void {
-    this.pauseOnHover = enabled;
-    if (!enabled && this.runtimeState === "paused") this.wake();
-  }
-
-  setBlurSleep(enabled: boolean): void {
-    this.blurSleep = enabled;
-    if (!enabled && this.blurred) this.wake();
   }
 
   setSelected(nodeId: string | null): void {
@@ -298,8 +258,6 @@ export class HomeGraphController {
     this.intersectionObserver?.disconnect();
     this.resizeObserver = null;
     this.intersectionObserver = null;
-    if (this.sleepTimer !== null) window.clearTimeout(this.sleepTimer);
-    this.sleepTimer = null;
     this.reducedMotion?.removeEventListener("change", this.handleReducedMotionChange);
     document.removeEventListener("visibilitychange", this.handleVisibilityChange);
     window.removeEventListener("blur", this.handleWindowBlur);
@@ -402,15 +360,10 @@ export class HomeGraphController {
   private stepSimulation(): void {
     if (this.alpha < ALPHA_STOP || this.prefersReducedMotion()) return;
     const kRep = this.scope === "local" ? 1400 : 9000;
-    let rest = this.scope === "local" ? 74 : 150;
-    let kSpr = 0.045;
-    let kCen = 0.010;
+    const rest = this.scope === "local" ? 74 : 150;
+    const kSpr = 0.045;
+    const kCen = 0.010;
     const damp = 0.84;
-    if (this.motionMode === "free") {
-      kSpr = 0.014;
-      rest = this.scope === "local" ? 100 : 190;
-      kCen = 0.004;
-    }
     for (let leftIndex = 0; leftIndex < this.visualNodes.length; leftIndex += 1) {
       const left = this.visualNodes[leftIndex];
       for (let rightIndex = leftIndex + 1; rightIndex < this.visualNodes.length; rightIndex += 1) {
@@ -439,9 +392,7 @@ export class HomeGraphController {
       const fy = dy / distance * force;
       link.source.vx += fx; link.source.vy += fy; link.target.vx -= fx; link.target.vy -= fy;
     }
-    const floor = this.motionMode === "stable" ? 0 : this.motionMode === "breathe" ? 0.05 : 0.15;
-    const jitter = (this.motionMode === "stable" ? 0 : this.motionMode === "breathe" ? 0.46 : 1.40)
-      * this.amplitude * this.sleepFade;
+    const jitter = MAX_JITTER_CSS_PX * Math.min(1, this.alpha) / Math.max(1, this.scale);
     const bound = this.scope === "local" ? 330 : 430;
     for (const node of this.visualNodes) {
       node.vx -= node.x * kCen;
@@ -465,12 +416,10 @@ export class HomeGraphController {
         node.vx = node.vx / speed * 24;
         node.vy = node.vy / speed * 24;
       }
-      node.x += node.vx * this.alpha + (Math.random() - 0.5) * jitter;
-      node.y += node.vy * this.alpha + (Math.random() - 0.5) * jitter;
+      node.x += node.vx * this.alpha + (Math.random() * 2 - 1) * jitter;
+      node.y += node.vy * this.alpha + (Math.random() * 2 - 1) * jitter;
     }
-    this.alpha = this.motionMode === "stable"
-      ? this.alpha * ALPHA_DECAY
-      : Math.max(this.alpha * ALPHA_DECAY, floor);
+    this.alpha *= ALPHA_DECAY;
   }
 
   private draw(): void {
@@ -535,7 +484,6 @@ export class HomeGraphController {
   private readonly frame = (now: number): void => {
     this.rafId = null;
     if (this.disposed) return;
-    const delta = Math.min(now - this.lastFrame, 100);
     this.lastFrame = now;
     this.frameCount += 1;
     if (now - this.fpsWindowStarted >= 500) {
@@ -544,40 +492,41 @@ export class HomeGraphController {
       this.fpsWindowStarted = now;
       this.emitStats();
     }
-    const drowsy = this.isDrowsy(now);
-    const sleepStep = advanceHomeGraphSleep(this.sleepFade, delta, drowsy, this.prefersReducedMotion());
-    this.sleepFade = sleepStep.fade;
-    if (drowsy) this.ensureSleepTimer();
-    else this.clearSleepTimer();
-    if (sleepStep.deepSleep) {
+    if (this.shouldDeepSleep(now)) {
       this.enterDeepSleep();
       return;
     }
     this.deepSleep = false;
-    if (!this.visible || !this.inViewport) {
-      this.rafId = requestAnimationFrame(this.frame);
-      return;
-    }
     if (this.prefersReducedMotion()) {
       this.runtimeState = "paused";
+      this.fps = 0;
       this.draw();
       this.emitStats();
       return;
     }
-    const frozen = this.pauseOnHover && Boolean(this.hoveredId || this.draggedNode);
+    const frozen = Boolean(this.hoveredId || this.draggedNode);
     if (!frozen && this.alpha > ALPHA_STOP) this.stepSimulation();
     this.draw();
-    this.runtimeState = frozen || (this.motionMode === "stable" && this.alpha <= ALPHA_STOP) ? "paused" : "running";
+    this.runtimeState = frozen || this.alpha <= ALPHA_STOP ? "paused" : "running";
+    if (!frozen && this.alpha <= ALPHA_STOP) {
+      this.fps = 0;
+      this.emitStats();
+      return;
+    }
     this.rafId = requestAnimationFrame(this.frame);
   };
 
   private wake(): void {
     if (this.disposed) return;
-    this.lastInteraction = performance.now();
-    this.clearSleepTimer();
+    const now = performance.now();
+    this.lastInteraction = now;
+    if (!this.visible || !this.inViewport || this.blurred) {
+      this.shouldDeepSleep(now);
+      this.enterDeepSleep();
+      return;
+    }
     this.deepSleep = false;
     this.runtimeState = "running";
-    const now = performance.now();
     if (shouldRestartHomeGraphLoop(this.rafId, this.lastFrame, now)) {
       if (this.rafId !== null) cancelAnimationFrame(this.rafId);
       this.lastFrame = now;
@@ -588,7 +537,7 @@ export class HomeGraphController {
     this.emitStats();
   }
 
-  private isDrowsy(now: number): boolean {
+  private shouldDeepSleep(now: number): boolean {
     if (!this.visible) {
       this.sleepReason = "页面不可见";
       return true;
@@ -597,37 +546,20 @@ export class HomeGraphController {
       this.sleepReason = "图谱离开可视区";
       return true;
     }
-    if (now < this.focusGraceUntil) return false;
-    if (this.blurSleep && this.blurred) {
+    if (this.blurred) {
       this.sleepReason = "窗口未激活";
       return true;
     }
-    if (this.sleepAfterMs > 0 && now - this.lastInteraction > this.sleepAfterMs) {
+    if (now - this.lastInteraction >= IDLE_SLEEP_MS) {
       this.sleepReason = "长时间无操作";
       return true;
     }
     return false;
   }
 
-  private ensureSleepTimer(): void {
-    if (this.sleepTimer !== null || this.deepSleep) return;
-    this.sleepTimer = window.setTimeout(() => {
-      this.sleepTimer = null;
-      if (this.isDrowsy(performance.now())) this.enterDeepSleep();
-    }, SLEEP_FADE_MS);
-  }
-
-  private clearSleepTimer(): void {
-    if (this.sleepTimer === null) return;
-    window.clearTimeout(this.sleepTimer);
-    this.sleepTimer = null;
-  }
-
   private enterDeepSleep(): void {
-    this.clearSleepTimer();
     this.stopAnimation();
     this.deepSleep = true;
-    this.sleepFade = 0;
     this.runtimeState = "sleeping";
     this.fps = 0;
     this.draw();
@@ -649,25 +581,17 @@ export class HomeGraphController {
       scope: this.scope,
       hops: this.hops,
       state: this.runtimeState,
-      status: this.runtimeStatus(),
-      sleepStatus: formatHomeGraphSleepStatus(
-        this.sleepAfterMs,
-        this.lastInteraction,
-        performance.now(),
-        this.deepSleep
-      )
+      status: this.runtimeStatus()
     });
   }
 
   private runtimeStatus(): string {
     if (this.deepSleep) return `已休眠（${this.sleepReason}）· 任意输入唤醒`;
-    if (this.pauseOnHover && this.hoveredId) return "已暂停 · 移开节点恢复";
-    if (this.motionMode === "stable" && this.alpha <= ALPHA_STOP) {
+    if (this.hoveredId) return "已暂停 · 移开节点恢复";
+    if (this.alpha <= ALPHA_STOP) {
       return `已凝固 · ${this.visualNodes.length} 节点 · 停止计算`;
     }
-    const warm = this.motionMode === "stable" ? 0.05 : this.motionMode === "breathe" ? 0.055 : 0.16;
-    if (this.alpha > warm) return `降温排列中 ${Math.round((1 - this.alpha) * 100)}%`;
-    return `${this.motionMode === "breathe" ? "恒温呼吸中" : "自由飘动中"} · ${this.visualNodes.length} 节点`;
+    return `降温排列中 ${Math.round((1 - this.alpha) * 100)}%`;
   }
 
   private bindLifecycle(): void {
@@ -677,7 +601,10 @@ export class HomeGraphController {
     this.intersectionObserver = new IntersectionObserver(([entry]) => {
       this.inViewport = Boolean(entry?.isIntersecting);
       if (this.inViewport) this.wake();
-      else this.ensureSleepTimer();
+      else {
+        this.sleepReason = "图谱离开可视区";
+        this.enterDeepSleep();
+      }
     }, { threshold: 0 });
     this.intersectionObserver.observe(this.host);
     this.reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -836,9 +763,9 @@ export class HomeGraphController {
 
   private prefersReducedMotion(): boolean { return Boolean(this.reducedMotion?.matches); }
 
-  private failToList(reason: string): void {
-    if (reason) console.warn("[EchoInk] Home graph switched to the accessible list:", reason);
-    this.setFallback("list", "已切换到可筛选的笔记列表，仍可继续选择和打开笔记。");
+  private failCanvas(reason: string): void {
+    if (reason) console.warn("[EchoInk] Home graph Canvas is unavailable:", reason);
+    this.setFallback("error", "Canvas 暂不可用，仍可从右栏选择和打开笔记。");
     this.canvas?.hide();
   }
 
@@ -852,45 +779,34 @@ export class HomeGraphController {
 
   private readonly handleVisibilityChange = (): void => {
     this.visible = document.visibilityState !== "hidden";
-    this.blurred = !this.visible;
     if (this.visible) {
-      this.focusGraceUntil = performance.now() + 2_500;
-      this.wake();
+      this.blurred = !document.hasFocus();
+      if (!this.blurred) this.wake();
     } else {
-      this.ensureSleepTimer();
+      this.blurred = true;
+      this.sleepReason = "页面不可见";
+      this.enterDeepSleep();
     }
   };
   private readonly handleWindowBlur = (): void => {
     this.blurred = true;
-    this.ensureSleepTimer();
+    this.sleepReason = "窗口未激活";
+    this.enterDeepSleep();
   };
   private readonly handleWindowFocus = (): void => {
     this.blurred = false;
-    this.focusGraceUntil = performance.now() + 2_500;
     this.wake();
   };
   private readonly handleActivity = (): void => this.wake();
   private readonly handleReducedMotionChange = (): void => {
     if (this.prefersReducedMotion()) {
       this.alpha = 0;
-    } else if (this.motionMode !== "stable") {
-      this.alpha = Math.max(this.alpha, this.motionMode === "breathe" ? 0.05 : 0.15);
+    } else {
+      this.alpha = Math.max(this.alpha, 0.2);
       this.wake();
     }
     this.draw();
   };
-}
-
-export function advanceHomeGraphSleep(
-  fade: number,
-  deltaMs: number,
-  drowsy: boolean,
-  reducedMotion: boolean
-): HomeGraphSleepStep {
-  if (reducedMotion) return { fade: drowsy ? 0 : 1, deepSleep: drowsy };
-  const delta = Math.max(0, deltaMs) / SLEEP_FADE_MS;
-  const next = drowsy ? Math.max(0, fade - delta) : Math.min(1, fade + delta);
-  return { fade: next, deepSleep: drowsy && next <= 0.002 };
 }
 
 export function shouldRestartHomeGraphLoop(
@@ -901,19 +817,6 @@ export function shouldRestartHomeGraphLoop(
   return rafId === null || now - lastFrame > 250;
 }
 
-export function formatHomeGraphSleepStatus(
-  sleepAfterMs: number,
-  lastInteraction: number,
-  now: number,
-  deepSleep: boolean
-): string {
-  if (sleepAfterMs <= 0) return "关闭";
-  if (deepSleep) return "休眠中";
-  const seconds = Math.max(0, Math.ceil((sleepAfterMs - (now - lastInteraction)) / 1_000));
-  return seconds >= 60
-    ? `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`
-    : `${seconds}s`;
-}
 
 function cloneFilters(filters: HomeGraphFilters): HomeGraphFilters {
   return {

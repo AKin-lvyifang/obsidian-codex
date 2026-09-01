@@ -75,9 +75,6 @@ export class EchoInkHomeView extends ItemView {
   private graphLinksStatEl!: HTMLElement;
   private graphTotalStatEl!: HTMLElement;
   private graphFpsStatEl!: HTMLElement;
-  private graphSleepValueEl!: HTMLOutputElement;
-  private graphListEl!: HTMLDetailsElement;
-  private graphListBodyEl!: HTMLElement;
   private recentEl!: HTMLElement;
   private recentIsland: HomeRecentIsland | null = null;
   private entriesEl!: HTMLElement;
@@ -93,7 +90,6 @@ export class EchoInkHomeView extends ItemView {
       onSelect: (nodeId) => {
         this.selectedGraphNodeId = nodeId;
         this.renderGraphSelection();
-        this.syncGraphListSelection();
       },
       onFallbackChange: (fallback, reason) => {
         this.graphFallback = fallback;
@@ -123,6 +119,16 @@ export class EchoInkHomeView extends ItemView {
     this.renderShell();
     this.registerDomEvent(document, "visibilitychange", () => {
       this.pageEl.toggleClass("is-document-hidden", document.visibilityState === "hidden");
+    });
+    this.registerDomEvent(document, "pointerdown", (event) => {
+      if (!(event.target instanceof Node)) return;
+      const openMenu = this.graphFiltersEl.querySelector<HTMLDetailsElement>(".echoink-home-graph-filter[open]");
+      if (!openMenu || openMenu.contains(event.target)) return;
+      this.closeGraphFilterMenus();
+    });
+    this.registerDomEvent(document, "keydown", (event) => {
+      if (event.key !== "Escape" || !this.closeGraphFilterMenus(true)) return;
+      event.preventDefault();
     });
     this.registerEvent(this.app.metadataCache.on("resolved", () => this.scheduleGraphRefresh()));
     this.registerEvent(this.app.vault.on("rename", () => this.scheduleGraphRefresh()));
@@ -283,10 +289,6 @@ export class EchoInkHomeView extends ItemView {
     this.graphRuntimeHudEl = stage.createDiv({ cls: "echoink-home-graph-runtime-hud", attr: { "aria-live": "polite" } });
     const side = frame.createEl("aside", { cls: "echoink-home-graph-side", attr: { "aria-label": "图谱当前节点与关联笔记" } });
     this.renderGraphControls(side);
-
-    this.graphListEl = this.overviewEl.createEl("details", { cls: "echoink-home-graph-list" });
-    this.graphListEl.createEl("summary", { text: "浏览筛选后的笔记" });
-    this.graphListBodyEl = this.graphListEl.createDiv({ cls: "echoink-home-graph-list-body" });
   }
 
   private renderGraphControls(side: HTMLElement): void {
@@ -309,51 +311,6 @@ export class EchoInkHomeView extends ItemView {
     this.graphTotalStatEl = this.graphStat(stats, "全库笔记");
     this.graphFpsStatEl = this.graphStat(stats, "帧率");
 
-    const motionSection = side.createDiv({ cls: "echoink-home-graph-side-section" });
-    motionSection.createEl("h3", { text: "运动模式" });
-    this.graphButtonGroup(motionSection, [
-      ["stable", "收敛停机"],
-      ["breathe", "恒温呼吸"],
-      ["free", "自由飘动"]
-    ], "breathe", "运动模式", (mode) => {
-      this.graphController.setMotionMode(mode);
-    });
-
-    const amplitudeLabel = motionSection.createEl("label", { cls: "echoink-home-graph-control is-range" });
-    amplitudeLabel.createSpan({ text: "幅度" });
-    const amplitude = amplitudeLabel.createEl("input", {
-      attr: { type: "range", min: "0", max: "300", step: "10", value: "100", "aria-label": "图谱运动幅度" }
-    });
-    const amplitudeValue = amplitudeLabel.createEl("output", { text: "1.0x", attr: { "aria-live": "polite" } });
-    amplitude.oninput = () => {
-      const value = Number(amplitude.value) / 100;
-      amplitudeValue.setText(`${value.toFixed(1)}x`);
-      this.graphController.setAmplitude(value);
-    };
-
-    const sleepSteps = [0, 10_000, 60_000, 180_000, 300_000] as const;
-    const sleepLabel = motionSection.createEl("label", { cls: "echoink-home-graph-control is-range" });
-    sleepLabel.createSpan({ text: "休眠" });
-    const sleep = sleepLabel.createEl("input", {
-      attr: { type: "range", min: "0", max: "4", step: "1", value: "3", "aria-label": "图谱无操作休眠" }
-    });
-    this.graphSleepValueEl = sleepLabel.createEl("output", { text: "3:00", attr: { "aria-live": "polite" } });
-    sleep.oninput = () => {
-      const index = Number(sleep.value);
-      this.graphController.setSleepAfter(sleepSteps[index] ?? 180_000);
-    };
-
-    const hover = motionSection.createEl("label", { cls: "echoink-home-graph-control is-check" });
-    const hoverInput = hover.createEl("input", { attr: { type: "checkbox" } });
-    hoverInput.checked = true;
-    hoverInput.onchange = () => this.graphController.setPauseOnHover(hoverInput.checked);
-    hover.createSpan({ text: "悬停节点时暂停" });
-    const blur = motionSection.createEl("label", { cls: "echoink-home-graph-control is-check" });
-    const blurInput = blur.createEl("input", { attr: { type: "checkbox" } });
-    blurInput.checked = true;
-    blurInput.onchange = () => this.graphController.setBlurSleep(blurInput.checked);
-    blur.createSpan({ text: "窗口失焦即休眠" });
-
     const legendSection = side.createDiv({ cls: "echoink-home-graph-side-section" });
     legendSection.createEl("h3", { text: "图例" });
     const legend = legendSection.createDiv({ cls: "echoink-home-graph-legend" });
@@ -365,10 +322,6 @@ export class EchoInkHomeView extends ItemView {
     const selectionSection = side.createDiv({ cls: "echoink-home-graph-side-section is-selection" });
     this.graphSelectionEl = selectionSection.createDiv({ cls: "echoink-home-graph-selection" });
     this.graphRelatedEl = selectionSection.createDiv({ cls: "echoink-home-graph-related" });
-    side.createDiv({
-      cls: "echoink-home-graph-side-note",
-      text: "Shift + 拖节点固定 · 滚轮缩放 · 拖背景平移 · 点节点换中心"
-    });
   }
 
   private graphStat(container: HTMLElement, label: string): HTMLElement {
@@ -425,7 +378,6 @@ export class EchoInkHomeView extends ItemView {
     this.graphLinksStatEl?.setText(String(stats.links));
     this.graphTotalStatEl?.setText(String(stats.totalNotes));
     this.graphFpsStatEl?.setText(String(stats.fps));
-    this.graphSleepValueEl?.setText(stats.sleepStatus);
     this.syncGraphButtons(this.graphScopeButtons, stats.scope);
     this.syncGraphButtons(this.graphHopsButtons, String(stats.hops) as "1" | "2" | "3");
   }
@@ -495,6 +447,7 @@ export class EchoInkHomeView extends ItemView {
   ): void {
     const details = this.graphFiltersEl.createEl("details", { cls: "echoink-home-graph-filter" });
     const summary = details.createEl("summary", { text: selected.size ? `${label} ${selected.size}` : label });
+    this.bindGraphFilterMenu(details);
     const panel = details.createDiv({ cls: "echoink-home-graph-filter-panel" });
     if (!options.length) {
       panel.createDiv({ cls: "echoink-home-empty", text: `当前没有可筛选的${label}` });
@@ -508,6 +461,8 @@ export class EchoInkHomeView extends ItemView {
         onChange(option.identity, input.checked);
         const count = panel.querySelectorAll<HTMLInputElement>('input[type="checkbox"]:checked').length;
         summary.setText(count ? `${label} ${count}` : label);
+        details.open = false;
+        summary.focus();
       };
       row.createSpan({ text: option.label });
     }
@@ -517,6 +472,7 @@ export class EchoInkHomeView extends ItemView {
     const selected = new Set(this.graphFilters.properties.map(homePropertyFilterIdentity));
     const details = this.graphFiltersEl.createEl("details", { cls: "echoink-home-graph-filter" });
     const summary = details.createEl("summary", { text: selected.size ? `属性 ${selected.size}` : "属性" });
+    this.bindGraphFilterMenu(details);
     const panel = details.createDiv({ cls: "echoink-home-graph-filter-panel" });
     if (!options.length) {
       panel.createDiv({ cls: "echoink-home-empty", text: "当前没有可筛选的属性" });
@@ -531,9 +487,33 @@ export class EchoInkHomeView extends ItemView {
         const count = this.graphFilters.properties.length;
         summary.setText(count ? `属性 ${count}` : "属性");
         this.applyGraphFilters();
+        details.open = false;
+        summary.focus();
       };
       row.createSpan({ text: option.value ? `${option.key}: ${option.value}` : option.key });
     }
+  }
+
+  private bindGraphFilterMenu(details: HTMLDetailsElement): void {
+    details.addEventListener("toggle", () => {
+      if (!details.open) return;
+      for (const other of Array.from(
+        this.graphFiltersEl.querySelectorAll<HTMLDetailsElement>(".echoink-home-graph-filter[open]")
+      )) {
+        if (other !== details) other.open = false;
+      }
+    });
+  }
+
+  private closeGraphFilterMenus(restoreFocus = false): boolean {
+    const openMenus = Array.from(
+      this.graphFiltersEl.querySelectorAll<HTMLDetailsElement>(".echoink-home-graph-filter[open]")
+    );
+    if (!openMenus.length) return false;
+    const focusTarget = restoreFocus ? openMenus[openMenus.length - 1]?.querySelector("summary") : null;
+    for (const details of openMenus) details.open = false;
+    if (focusTarget instanceof HTMLElement) focusTarget.focus();
+    return true;
   }
 
   private applyGraphFilters(): void {
@@ -544,66 +524,23 @@ export class EchoInkHomeView extends ItemView {
   }
 
   private renderGraphState(): void {
-    if (!this.graphCountEl || !this.graphListBodyEl) return;
+    if (!this.graphCountEl) return;
     const result = this.graphController.getFilterResult();
     if (!this.graphCountEl.textContent) this.graphCountEl.setText(`${result.nodes.length} / ${result.totalCount} 篇笔记`);
     this.graphFallbackEl.setText(
-      this.graphFallback === "list"
-        ? `互动图谱暂不可用。${this.graphFallbackReason || "已切换到笔记列表。"}`
-        : "Shift + 拖动固定节点 · 拖动背景平移 · 单击节点换中心"
+      this.graphFallback === "error"
+        ? `互动图谱暂不可用。${this.graphFallbackReason || "仍可从右栏选择和打开笔记。"}`
+        : ""
     );
-    this.graphFallbackEl.toggleClass("is-error", this.graphFallback === "list");
-    this.graphListEl.toggleClass("is-fallback", this.graphFallback === "list");
-    this.graphListEl.open = this.graphFallback === "list";
-    this.graphListBodyEl.empty();
-    if (!result.nodes.length) {
-      this.graphListBodyEl.createDiv({
-        cls: "echoink-home-empty",
-        text: result.totalCount ? "当前筛选没有匹配笔记。可取消一项条件或清空筛选。" : "当前 Vault 还没有 Markdown 笔记。"
-      });
-      this.renderGraphSelection();
-      return;
-    }
-    const list = this.graphListBodyEl.createEl("ul");
-    for (const node of result.nodes) {
-      const item = list.createEl("li");
-      const focus = item.createEl("button", {
-        cls: "echoink-home-graph-list-focus",
-        attr: {
-          type: "button",
-          "aria-pressed": String(node.id === this.selectedGraphNodeId),
-          "data-node-id": node.id
-        }
-      });
-      focus.createEl("strong", { text: node.title });
-      focus.createSpan({ text: node.path });
-      focus.onclick = () => {
-        this.selectedGraphNodeId = node.id;
-        if (!this.graphController.focusNode(node.id)) {
-          this.graphController.setSelected(node.id);
-          this.renderGraphSelection();
-          this.syncGraphListSelection();
-        }
-      };
-      const open = item.createEl("button", { text: "打开笔记", attr: { type: "button" } });
-      open.onclick = () => void this.openVaultFile(node.id);
-    }
+    this.graphFallbackEl.toggleClass("is-error", this.graphFallback === "error");
     this.renderGraphSelection();
-  }
-
-  private syncGraphListSelection(): void {
-    if (!this.graphListBodyEl) return;
-    for (const button of Array.from(
-      this.graphListBodyEl.querySelectorAll<HTMLButtonElement>(".echoink-home-graph-list-focus")
-    )) {
-      button.setAttribute("aria-pressed", String(button.dataset.nodeId === this.selectedGraphNodeId));
-    }
   }
 
   private renderGraphSelection(): void {
     if (!this.graphSelectionEl) return;
     this.graphSelectionEl.empty();
     this.graphRelatedEl?.empty();
+    const result = this.graphController.getFilterResult();
     const global = this.graphController.getScope() === "global";
     const node = this.selectedGraphNodeId
       ? this.data?.graph.nodeById.get(this.selectedGraphNodeId)
@@ -627,15 +564,22 @@ export class EchoInkHomeView extends ItemView {
       return;
     }
     if (!node) {
-      this.graphSelectionEl.createSpan({ text: "选择一个节点查看路径与连接数" });
-      this.graphRelatedEl?.createSpan({ cls: "echoink-home-empty", text: "局部图谱默认从连接最多的笔记开始。" });
+      this.graphSelectionEl.createSpan({
+        cls: "echoink-home-empty",
+        text: result.totalCount
+          ? "当前筛选没有匹配笔记。可取消一项条件或清空筛选。"
+          : "当前 Vault 还没有 Markdown 笔记。"
+      });
       return;
     }
-    this.graphSelectionEl.createEl("strong", { text: node.title });
-    this.graphSelectionEl.createSpan({ text: node.path });
-    this.graphSelectionEl.createEl("small", { text: `${node.degree} 个已解析连接` });
-    const open = this.graphSelectionEl.createEl("button", { text: "打开笔记", attr: { type: "button" } });
-    open.onclick = () => void this.openVaultFile(node.id);
+    const current = this.graphSelectionEl.createDiv({ cls: "echoink-home-graph-related-row is-current" });
+    const currentFocus = current.createEl("button", {
+      cls: "echoink-home-graph-related-focus",
+      text: formatGraphRelationLabel(node.cluster, node.title),
+      attr: { type: "button", "aria-current": "true", title: node.path }
+    });
+    currentFocus.onclick = () => this.graphController.focusNode(node.id);
+    this.renderGraphPopoutButton(current, node.id, node.title);
     this.graphRelatedEl.createEl("strong", { text: `关联笔记 ${sidebarItems.length}` });
     if (!sidebarItems.length) {
       this.graphRelatedEl.createSpan({ cls: "echoink-home-empty", text: "当前节点没有已解析关联。" });
@@ -647,16 +591,20 @@ export class EchoInkHomeView extends ItemView {
       const focus = item.createEl("button", {
         cls: "echoink-home-graph-related-focus",
         attr: { type: "button", title: itemData.detail },
-        text: itemData.title
+        text: formatGraphRelationLabel(itemData.detail, itemData.title)
       });
       focus.onclick = () => this.graphController.focusNode(itemData.noteId);
-      const openRelated = item.createEl("button", {
-        cls: "echoink-home-graph-related-open",
-        attr: { type: "button", "aria-label": `打开笔记：${itemData.title}`, title: `打开笔记：${itemData.detail}` }
-      });
-      setIcon(openRelated, "external-link");
-      openRelated.onclick = () => void this.openVaultFile(itemData.noteId);
+      this.renderGraphPopoutButton(item, itemData.noteId, itemData.title);
     }
+  }
+
+  private renderGraphPopoutButton(container: HTMLElement, noteId: string, title: string): void {
+    const button = container.createEl("button", {
+      cls: "echoink-home-graph-related-open",
+      attr: { type: "button", "aria-label": `在 Popout 打开：${title}`, title: `在 Popout 打开：${title}` }
+    });
+    setIcon(button, "arrow-up-right");
+    button.onclick = () => void this.openGraphPopout(noteId);
   }
 
   /**
@@ -914,6 +862,20 @@ export class EchoInkHomeView extends ItemView {
     }
   }
 
+  private async openGraphPopout(relativePath: string): Promise<void> {
+    const file = this.app.vault.getAbstractFileByPath(normalizePath(relativePath));
+    if (!(file instanceof TFile)) {
+      new Notice(`没有在当前 Vault 找到：${relativePath}`);
+      return;
+    }
+    try {
+      await this.app.workspace.getLeaf("window").openFile(file, { active: true });
+    } catch (error) {
+      console.warn("[EchoInk] Failed to open a Home graph Popout:", error);
+      new Notice(`暂时无法在 Popout 打开“${file.basename}”，请稍后重试。`);
+    }
+  }
+
   private shiftCalendar(offset: number): void {
     this.calendarMonthOffset += offset;
     if (this.data) {
@@ -971,6 +933,14 @@ function formatFullDate(date: Date): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function formatGraphRelationLabel(cluster: string, title: string): string {
+  const parent = cluster.trim();
+  const child = title.trim();
+  if (!parent || parent === "根目录" || parent === child) return child || parent;
+  if (!child) return parent;
+  return `${parent} · ${child}`;
 }
 
 function cloneGraphFilters(filters: HomeGraphFilters): HomeGraphFilters {

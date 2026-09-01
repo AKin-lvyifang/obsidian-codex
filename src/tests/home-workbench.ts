@@ -31,8 +31,6 @@ import {
 import { openObsidianGraphLeaf } from "../home/open-native-graph";
 import {
   HomeGraphController,
-  advanceHomeGraphSleep,
-  formatHomeGraphSleepStatus,
   shouldRestartHomeGraphLoop
 } from "../home/home-graph-controller";
 import { openTestNoticeMessages } from "./obsidian-shim";
@@ -77,16 +75,37 @@ function assertHomeGraphProjection(): void {
 }
 
 function assertHomeGraphLifecycleBehavior(): void {
-  assert.deepEqual(advanceHomeGraphSleep(1, 1_000, true, false), { fade: 0.5, deepSleep: false });
-  assert.deepEqual(advanceHomeGraphSleep(0.5, 1_000, true, false), { fade: 0, deepSleep: true });
-  assert.deepEqual(advanceHomeGraphSleep(0, 1_000, false, false), { fade: 0.5, deepSleep: false });
-  assert.deepEqual(advanceHomeGraphSleep(1, 16, true, true), { fade: 0, deepSleep: true });
   assert.equal(shouldRestartHomeGraphLoop(null, 1_000, 1_010), true);
   assert.equal(shouldRestartHomeGraphLoop(7, 1_000, 1_249), false);
   assert.equal(shouldRestartHomeGraphLoop(7, 1_000, 1_251), true);
-  assert.equal(formatHomeGraphSleepStatus(0, 1_000, 1_000, false), "关闭");
-  assert.equal(formatHomeGraphSleepStatus(180_000, 10_000, 70_000, false), "2:00");
-  assert.equal(formatHomeGraphSleepStatus(180_000, 10_000, 70_000, true), "休眠中");
+  const controller = Object.create(HomeGraphController.prototype) as {
+    visible: boolean;
+    inViewport: boolean;
+    blurred: boolean;
+    lastInteraction: number;
+    sleepReason: string;
+    shouldDeepSleep: (now: number) => boolean;
+  };
+  controller.visible = true;
+  controller.inViewport = true;
+  controller.blurred = false;
+  controller.lastInteraction = 1_000;
+  controller.sleepReason = "";
+  assert.equal(controller.shouldDeepSleep(3_999), false);
+  assert.equal(controller.shouldDeepSleep(4_000), true);
+  assert.equal(controller.sleepReason, "长时间无操作");
+  controller.lastInteraction = 4_000;
+  controller.blurred = true;
+  assert.equal(controller.shouldDeepSleep(4_001), true);
+  assert.equal(controller.sleepReason, "窗口未激活");
+  controller.blurred = false;
+  controller.inViewport = false;
+  assert.equal(controller.shouldDeepSleep(4_001), true);
+  assert.equal(controller.sleepReason, "图谱离开可视区");
+  controller.inViewport = true;
+  controller.visible = false;
+  assert.equal(controller.shouldDeepSleep(4_001), true);
+  assert.equal(controller.sleepReason, "页面不可见");
 }
 
 function assertHomeGraphStatsTruth(): void {
@@ -101,9 +120,6 @@ function assertHomeGraphStatsTruth(): void {
     scope: "local";
     hops: 2;
     runtimeState: "running";
-    sleepAfterMs: number;
-    lastInteraction: number;
-    deepSleep: boolean;
     runtimeStatus: () => string;
     emitStats: () => void;
   };
@@ -116,9 +132,6 @@ function assertHomeGraphStatsTruth(): void {
   controller.scope = "local";
   controller.hops = 2;
   controller.runtimeState = "running";
-  controller.sleepAfterMs = 0;
-  controller.lastInteraction = 0;
-  controller.deepSleep = false;
   controller.runtimeStatus = () => "运行中";
 
   controller.emitStats();
@@ -133,8 +146,7 @@ function assertHomeGraphStatsTruth(): void {
     scope: "local",
     hops: 2,
     state: "running",
-    status: "运行中",
-    sleepStatus: "关闭"
+    status: "运行中"
   });
 }
 
@@ -222,7 +234,7 @@ function assertHomeGraphAndMagicUiContracts(): void {
   const fixedCommit = "2d671cc6c0e0f40e28682c9cbddd16694dcfe627";
   const smoothUiCommit = "1143ba66738566e8acb9a3f8a7db9eab3f10f2d4";
   const heatmapSource = view.match(/private renderHeatmap\(\): void \{[\s\S]*?private renderCalendar/u)?.[0] ?? "";
-  const wakeSource = controller.match(/private wake\(\): void \{[\s\S]*?private isDrowsy/u)?.[0] ?? "";
+  const wakeSource = controller.match(/private wake\(\): void \{[\s\S]*?private shouldDeepSleep/u)?.[0] ?? "";
 
   assert.match(bootstrap, /addRibbonIcon\("feather"/u);
   assert.match(codexView, /getIcon\(\): string \{\s*return "feather";/u);
@@ -243,8 +255,7 @@ function assertHomeGraphAndMagicUiContracts(): void {
   assert.match(data, /buildHomeGraph\(records, this\.app\.metadataCache\.resolvedLinks\)/u);
   assert.match(view, /HomeGraphController/u);
   assert.doesNotMatch(view, /NativeFlickeringGrid|FlickeringGrid/u);
-  assert.match(view, /syncGraphListSelection/u);
-  assert.match(view, /"data-node-id": node\.id/u);
+  assert.doesNotMatch(view, /syncGraphListSelection|graphListEl|graphListBodyEl|浏览筛选后的笔记/u);
   assert.match(view, /知识图谱/u);
   for (const label of ["搜索", "文件夹", "属性", "标签", "清空筛选"]) assert.match(view, new RegExp(label, "u"));
   assert.doesNotMatch(view, /打开 Obsidian 原生图谱/u);
@@ -257,55 +268,62 @@ function assertHomeGraphAndMagicUiContracts(): void {
   assert.match(view, /this\.registerEvent\(this\.app\.vault\.on\("delete"/u);
   assert.match(view, /this\.registerEvent\(this\.app\.workspace\.on\("css-change"/u);
   assert.doesNotMatch(controller, /3d-force-graph|WebGL|webglcontextlost|_destructor/u);
-  assert.match(controller, /setFallback\("list"/u);
-  assert.match(controller, /已切换到可筛选的笔记列表，仍可继续选择和打开笔记/u);
+  assert.match(controller, /setFallback\("error"/u);
+  assert.match(controller, /Canvas 暂不可用，仍可从右栏选择和打开笔记/u);
   assert.doesNotMatch(controller, /this\.options\.onOpen/u);
   for (const contract of [
     /this\.scope === "local" \? 1400 : 9000/u,
     /this\.scope === "local" \? 74 : 150/u,
-    /let kSpr = 0\.045/u,
-    /kSpr = 0\.014/u,
-    /let kCen = 0\.010/u,
-    /kCen = 0\.004/u,
+    /const kSpr = 0\.045/u,
+    /const kCen = 0\.010/u,
     /const damp = 0\.84/u,
     /speed > 24/u,
     /ALPHA_DECAY = 0\.984/u,
-    /0\.46 : 1\.40/u,
+    /IDLE_SLEEP_MS = 3_000/u,
+    /MAX_JITTER_CSS_PX = 1/u,
+    /Math\.min\(1, this\.alpha\) \/ Math\.max\(1, this\.scale\)/u,
+    /\(Math\.random\(\) \* 2 - 1\) \* jitter/u,
+    /now - this\.lastInteraction >= IDLE_SLEEP_MS/u,
     /this\.scope === "local" \? 330 : 430/u,
     /event\.shiftKey/u,
     /event\.deltaY < 0 \? 1\.12 : 0\.89/u,
     /Math\.max\(0\.25, Math\.min\(4/u,
-    /now - lastFrame > 250/u,
-    /performance\.now\(\) \+ 2_500/u
+    /now - lastFrame > 250/u
   ]) assert.match(controller, contract);
-  assert.match(controller, /Math\.min\(3, amplitude\)/u);
+  assert.doesNotMatch(controller, /HomeGraphMotionMode|motionMode|"breathe"|"free"|setMotionMode|setAmplitude|setSleepAfter|setPauseOnHover|setBlurSleep|sleepFade|SLEEP_FADE_MS/u);
   assert.match(controller, /totalNotes: this\.filterResult\.totalCount/u);
   assert.doesNotMatch(controller, /totalNotes: this\.graphData\.nodes\.length/u);
   assert.match(controller, /\["mousemove", "mousedown", "wheel", "keydown"\]/u);
   assert.doesNotMatch(wakeSource, /this\.alpha\s*=/u);
   assert.doesNotMatch(controller, /setCssProps\(\{ opacity/u);
   assert.doesNotMatch(controller, /old\?\.fx|old\?\.fy/u);
-  assert.match(view, /setBlurSleep/u);
+  assert.match(view, /details\.open = false;[\s\S]*summary\.focus\(\)/u);
+  assert.match(view, /bindGraphFilterMenu\(details\)/u);
+  assert.match(view, /\.echoink-home-graph-filter\[open\]/u);
+  assert.match(view, /this\.registerDomEvent\(document, "pointerdown"[\s\S]*closeGraphFilterMenus\(\)/u);
+  assert.match(view, /this\.registerDomEvent\(document, "keydown"[\s\S]*event\.key !== "Escape"[\s\S]*closeGraphFilterMenus\(true\)/u);
+  assert.doesNotMatch(view, /运动模式|恒温呼吸|自由飘动|图谱运动幅度|图谱无操作休眠|悬停节点时暂停|窗口失焦即休眠/u);
   assert.match(view, /echoink-home-graph-related-open/u);
-  for (const label of ["图谱层级", "邻居深度", "当前视图", "运动模式", "图例", "当前笔记", "1 跳邻居", "2 跳邻居", "3 跳邻居"]) {
+  for (const label of ["图谱层级", "邻居深度", "当前视图", "图例", "当前笔记", "1 跳邻居", "2 跳邻居", "3 跳邻居"]) {
     assert.match(view, new RegExp(label, "u"));
   }
   assert.match(view, /graphButtonGroup\(actions,[\s\S]*\["local", "局部图谱"\][\s\S]*\["global", "全局聚合"\]/u);
   assert.match(view, /text: "邻居深度"[\s\S]*\["1", "1 跳"\][\s\S]*\["2", "2 跳"\][\s\S]*\["3", "3 跳"\]/u);
   assert.match(view, /setHops\(Number\(value\)[\s\S]*getScope\(\) !== "local"[\s\S]*setScope\("local"\)/u);
-  assert.match(view, /\["stable", "收敛停机"\][\s\S]*\["breathe", "恒温呼吸"\][\s\S]*\["free", "自由飘动"\]/u);
-  assert.match(view, /type: "range", min: "0", max: "300", step: "10", value: "100"/u);
-  assert.match(view, /amplitudeValue\.setText\(`\$\{value\.toFixed\(1\)\}x`\)[\s\S]*setAmplitude\(value\)/u);
-  assert.match(view, /sleepSteps = \[0, 10_000, 60_000, 180_000, 300_000\]/u);
-  assert.match(view, /type: "range", min: "0", max: "4", step: "1", value: "3"/u);
-  assert.match(view, /graphSleepValueEl = sleepLabel\.createEl\("output", \{ text: "3:00"/u);
-  assert.match(view, /graphSleepValueEl\?\.setText\(stats\.sleepStatus\)/u);
-  assert.match(view, /setSleepAfter\(sleepSteps\[index\]/u);
+  assert.match(view, /formatGraphRelationLabel\(node\.cluster, node\.title\)/u);
+  assert.match(view, /formatGraphRelationLabel\(itemData\.detail, itemData\.title\)/u);
+  assert.match(view, /focus\.onclick = \(\) => this\.graphController\.focusNode\(itemData\.noteId\)/u);
+  assert.match(view, /setIcon\(button, "arrow-up-right"\)/u);
+  assert.match(view, /getLeaf\("window"\)\.openFile\(file, \{ active: true \}\)/u);
+  assert.match(view, /暂时无法在 Popout 打开/u);
+  assert.match(view, /getLeaf\("tab"\)\.openFile\(file, \{ active: true \}\)/u);
+  assert.doesNotMatch(view, /echoink-home-graph-side-note|Shift \+ 拖节点固定|浏览筛选后的笔记/u);
   assert.match(view, /button\.toggleClass\("is-on", active\)[\s\S]*button\.setAttribute\("aria-pressed", String\(active\)\)/u);
   assert.doesNotMatch(view, /graphScopeSelectEl|graphHopsSelectEl|private graphSelect\(/u);
   assert.match(styles, /\.echoink-home-graph-segment\s*\{[^}]*display: flex;/u);
   assert.match(styles, /\.echoink-home-graph-segment button\.is-on\s*\{[^}]*border-color: var\(--echoink-home-teal\);/u);
-  assert.match(styles, /\.echoink-home-graph-control\.is-range\s*\{[^}]*grid-template-columns: auto minmax\(0, 1fr\) 44px;/u);
+  assert.match(styles, /\.echoink-home-graph-related button,[\s\S]*\.echoink-home-graph-related-row button\s*\{[^}]*border: 0;[^}]*background: transparent;/u);
+  assert.doesNotMatch(styles, /echoink-home-graph-control|echoink-home-graph-side-note|echoink-home-graph-list/u);
   assert.match(view, /try \{[\s\S]*openFile\(file, \{ active: true \}\)[\s\S]*暂时无法打开/u);
   assert.doesNotMatch(view + data + controller, /internalPlugins|dataEngine|GraphView|iframe/u);
 
