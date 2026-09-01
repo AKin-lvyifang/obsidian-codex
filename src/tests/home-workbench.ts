@@ -73,6 +73,11 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
     styles.indexOf(".echoink-home-entry {"),
     styles.indexOf("@container echoink-home (max-width: 1100px)")
   );
+  const mobile520EntryStart = styles.indexOf("@container echoink-home (max-width: 520px)");
+  const mobile520EntryStyles = styles.slice(
+    mobile520EntryStart,
+    styles.indexOf("@media (prefers-reduced-motion: reduce)", mobile520EntryStart)
+  );
 
   for (const deletedPath of [
     "src/home/home-graph-controller.ts",
@@ -150,6 +155,13 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
   assert.match(view, /createHomeBentoIsland\(bentoHost\)/u);
   assert.match(view, /this\.bentoIsland\?\.render/u);
   assert.match(view, /this\.bentoIsland\?\.unmount\(\)/u);
+  assert.match(view, /kicker: entry\.description/u);
+  assert.doesNotMatch(view, /entry\.id !== "review"/u);
+  assert.match(data, /projects: \{ label: "Projects", description: "正在推进的项目知识"/u);
+  assert.match(data, /inbox: \{ label: "Inbox", description: "等待归类的输入"/u);
+  assert.match(data, /review: \{ label: "Review", description: "知识库复盘与报告"/u);
+  assert.match(view, /可在 Projects 目录建立项目/u);
+  assert.match(view, /当前没有待整理输入/u);
 
   assert.equal(tsconfig.compilerOptions.jsx, "react-jsx");
   assert.deepEqual(tsconfig.compilerOptions.paths, {
@@ -193,6 +205,15 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
     desktopEntryStyles,
     /\.echoink-home-entry\.is-outputs \.echoink-home-entry-copy,[\s\S]*\.echoink-home-entry\.is-review \.echoink-home-entry-copy\s*\{[^}]*margin-top: auto;/u
   );
+  assert.match(
+    desktopEntryStyles,
+    /\.echoink-home-entry\.is-outputs \.echoink-home-entry-icon,[\s\S]*\.echoink-home-entry\.is-projects \.echoink-home-entry-icon,[\s\S]*\.echoink-home-entry\.is-inbox \.echoink-home-entry-icon,[\s\S]*\.echoink-home-entry\.is-journal \.echoink-home-entry-icon,[\s\S]*\.echoink-home-entry\.is-review \.echoink-home-entry-icon\s*\{[^}]*align-self: flex-end;/u
+  );
+  assert.match(desktopEntryStyles, /\.echoink-home-entry\.is-projects \.echoink-home-entry-copy\s*\{[^}]*margin-top: auto;/u);
+  assert.doesNotMatch(
+    desktopEntryStyles,
+    /\.echoink-home-entry\.is-projects \.echoink-home-entry-copy\s*\{[^}]*(?:padding-left|border-left)/u
+  );
   assert.doesNotMatch(desktopEntryStyles, /\.echoink-home-entry\.is-review:(?:hover|focus-visible)/u);
   assert.doesNotMatch(desktopEntryStyles, /\.echoink-home-entry\.is-review \.echoink-home-entry-cta\s*\{/u);
   assert.match(desktopEntryStyles, /\.echoink-home-entry:hover \.echoink-home-entry-icon,[\s\S]*translateY\(-40px\) scale\(0\.75\)/u);
@@ -224,7 +245,9 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
   assert.match(bentoIsland, /shimmerWidth = 100|AnimatedShinyText/u);
   assert.doesNotMatch(styles, /@keyframes echoink-home-shiny-text|animation: echoink-home-shiny-text/u);
   assert.match(styles, /@container echoink-home \(max-width: 800px\)[\s\S]*\.echoink-home-entry-cta\s*\{[^}]*opacity: 1;[^}]*transform: translateY\(0\);/u);
-  assert.match(styles, /@container echoink-home \(max-width: 520px\)[\s\S]*\.echoink-home-entry\.is-review\s*\{[^}]*grid-template-columns: 40px minmax\(0, 1fr\);/u);
+  assert.doesNotMatch(mobile520EntryStyles, /\.echoink-home-entry\.is-review\s*\{[^}]*(?:display: grid|grid-template-columns)/u);
+  assert.doesNotMatch(mobile520EntryStyles, /\.echoink-home-entry\.is-review \.echoink-home-entry-(?:copy|cta)\s*\{/u);
+  assert.match(mobile520EntryStyles, /\.echoink-home-entry-cta\s*\{[^}]*position: static;[^}]*opacity: 1;[^}]*transform: none;/u);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.echoink-home-entry-cta[\s\S]*opacity: 1/u);
   assert.match(styles, /@container echoink-home \(min-width: 1260px\)[\s\S]*minmax\(760px, 1fr\) minmax\(340px, 0\.44fr\)/u);
 }

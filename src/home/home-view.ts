@@ -180,13 +180,11 @@ export class EchoInkHomeView extends ItemView {
    */
   private renderEntries(): void {
     this.bentoIsland?.render((this.data?.entries ?? []).map((entry) => {
-      let kicker: string | undefined;
-      if (entry.id !== "review") kicker = entry.description;
       return {
         id: entry.id,
         label: entry.label,
         ariaLabel: `${ENTRY_ACTION[entry.id]}：${entry.label}`,
-        kicker,
+        kicker: entry.description,
         details: this.entryDetailNodes(entry),
         cta: ENTRY_ACTION[entry.id],
         onActivate: () => this.openEntry(entry)
