@@ -8216,15 +8216,45 @@ button.echoink-settings-navigation-row:focus-visible {
 }
 
 .echoink-home-rhythm-grid {
-  align-items: start;
+  align-items: stretch;
   gap: 24px;
+  grid-template-areas:
+    "actions"
+    "heatmap"
+    "calendar";
   grid-template-columns: minmax(0, 1fr);
-  margin-top: 40px;
+}
+
+.echoink-home-conversation-island {
+  grid-area: actions;
+  min-width: 0;
+}
+
+.echoink-home-heatmap {
+  grid-area: heatmap;
+}
+
+.echoink-home-calendar-panel {
+  grid-area: calendar;
 }
 
 @container echoink-home (min-width: 1260px) {
   .echoink-home-rhythm-grid {
+    grid-template-areas:
+      "actions calendar"
+      "heatmap calendar";
     grid-template-columns: minmax(760px, 1fr) minmax(340px, 0.44fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .echoink-home-heatmap {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .echoink-home-heatmap-legend {
+    margin-top: auto;
+    padding-top: 9px;
   }
 }
 

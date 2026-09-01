@@ -107,6 +107,10 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
   const smoothUiCommit = "1143ba66738566e8acb9a3f8a7db9eab3f10f2d4";
   const heatmapSource = view.match(/private renderHeatmap\(\): void \{[\s\S]*?private renderCalendar/u)?.[0] ?? "";
   const shellSource = view.match(/private renderShell\(\): void \{[\s\S]*?private renderHeader/u)?.[0] ?? "";
+  const rhythmStyles = styles.slice(
+    styles.indexOf(".echoink-home-rhythm-grid {"),
+    styles.indexOf(".echoink-home-today-hero {")
+  );
   const desktopEntryStyles = styles.slice(
     styles.indexOf(".echoink-home-entry {"),
     styles.indexOf("@container echoink-home (max-width: 1100px)")
@@ -149,6 +153,11 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
   assert.ok(shellSource.indexOf("this.renderHeader();") < shellSource.indexOf("echoink-home-entries-section"));
   assert.ok(shellSource.indexOf("echoink-home-conversation-section") < shellSource.indexOf("echoink-home-rhythm-grid"));
   assert.ok(shellSource.indexOf("echoink-home-rhythm-grid") < shellSource.indexOf("echoink-home-entries-section"));
+  assert.match(
+    shellSource,
+    /const rhythm = conversationSection\.createDiv\([\s\S]*const conversationHost = rhythm\.createDiv\([\s\S]*this\.heatmapEl = rhythm\.createEl\([\s\S]*this\.calendarEl = rhythm\.createEl\(/u
+  );
+  assert.doesNotMatch(shellSource, /getBoundingClientRect|offsetHeight|clientHeight|ResizeObserver/u);
   assert.doesNotMatch(shellSource, /overview|graph|recent|marquee|thought/u);
   assert.match(view, /await this\.plugin\.activateView\(\)[\s\S]*this\.plugin\.getCodexView\(\)[\s\S]*view\.createDraftSession\(title, draft\)/u);
   assert.doesNotMatch(
@@ -303,8 +312,14 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
   assert.match(styles, /@keyframes shiny-text/u);
   assert.doesNotMatch(styles, /echoink-home-(?:overview|graph|recent|marquee|thought)|animate-marquee|@keyframes marquee/u);
   assert.match(styles, /\.echoink-home-entries-section\s*\{[^}]*margin-top: 56px;/u);
-  assert.match(styles, /\.echoink-home-rhythm-grid\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\);/u);
-  assert.match(styles, /\.echoink-home-rhythm-grid\s*\{[^}]*align-items: start;[^}]*gap: 24px;[^}]*margin-top: 40px;/u);
+  assert.match(styles, /\.echoink-home-rhythm-grid\s*\{[^}]*align-items: stretch;[^}]*gap: 24px;[^}]*grid-template-areas:\s*"actions"\s*"heatmap"\s*"calendar";[^}]*grid-template-columns: minmax\(0, 1fr\);/u);
+  assert.match(styles, /\.echoink-home-conversation-island\s*\{[^}]*grid-area: actions;[^}]*min-width: 0;/u);
+  assert.match(styles, /\.echoink-home-heatmap\s*\{[^}]*grid-area: heatmap;/u);
+  assert.match(styles, /\.echoink-home-calendar-panel\s*\{[^}]*grid-area: calendar;/u);
+  assert.match(styles, /@container echoink-home \(min-width: 1260px\)[\s\S]*\.echoink-home-rhythm-grid\s*\{[^}]*grid-template-areas:\s*"actions calendar"\s*"heatmap calendar";[^}]*grid-template-columns: minmax\(760px, 1fr\) minmax\(340px, 0\.44fr\);[^}]*grid-template-rows: auto minmax\(0, 1fr\);/u);
+  assert.match(styles, /@container echoink-home \(min-width: 1260px\)[\s\S]*\.echoink-home-heatmap\s*\{[^}]*display: flex;[^}]*flex-direction: column;/u);
+  assert.match(styles, /@container echoink-home \(min-width: 1260px\)[\s\S]*\.echoink-home-heatmap-legend\s*\{[^}]*margin-top: auto;[^}]*padding-top: 9px;/u);
+  assert.doesNotMatch(rhythmStyles, /\bheight\s*:|position:\s*absolute|display:\s*contents/u);
   assert.match(styles, /\.echoink-home-heatmap,[\s\S]*\.echoink-home-calendar-panel\s*\{[^}]*padding: 20px;[^}]*border: 1px solid/u);
   assert.match(view, /echoink-home-calendar-summary[\s\S]*有日记 · \$\{journalCount\} 天/u);
   assert.doesNotMatch(styles, /\.echoink-home-magic-ui &/u);

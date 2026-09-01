@@ -145,11 +145,11 @@ export class EchoInkHomeView extends ItemView {
     const conversationSection = this.pageEl.createEl("section", { cls: "echoink-home-conversation-section" });
     const conversationHead = this.sectionTitle(conversationSection, "从一段对话开始");
     conversationHead.createSpan({ cls: "echoink-home-section-note", text: "先说出来，再决定要不要留下" });
-    const conversationHost = conversationSection.createDiv({ cls: "echoink-home-conversation-island" });
+    const rhythm = conversationSection.createDiv({ cls: "echoink-home-rhythm-grid" });
+    const conversationHost = rhythm.createDiv({ cls: "echoink-home-conversation-island" });
     this.conversationActionsIsland = createHomeConversationActionsIsland(conversationHost);
     this.renderConversationActions();
 
-    const rhythm = this.pageEl.createDiv({ cls: "echoink-home-rhythm-grid" });
     this.heatmapEl = rhythm.createEl("section", { cls: "echoink-home-heatmap" });
     this.calendarEl = rhythm.createEl("section", { cls: "echoink-home-calendar-panel" });
 
