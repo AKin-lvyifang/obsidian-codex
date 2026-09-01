@@ -61,6 +61,7 @@ function useHomeMotionState(ref: React.RefObject<HTMLElement | null>): {
   reducedMotion: boolean;
 } {
   const [pageVisible, setPageVisible] = useState(() => document.visibilityState !== "hidden");
+  const [windowFocused, setWindowFocused] = useState(() => document.hasFocus());
   const [intersecting, setIntersecting] = useState(true);
   const [reducedMotion, setReducedMotion] = useState(
     () => window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false
@@ -70,6 +71,18 @@ function useHomeMotionState(ref: React.RefObject<HTMLElement | null>): {
     const onVisibilityChange = () => setPageVisible(document.visibilityState !== "hidden");
     document.addEventListener("visibilitychange", onVisibilityChange);
     return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, []);
+
+  useEffect(() => {
+    const onWindowBlur = () => setWindowFocused(false);
+    const onWindowFocus = () => setWindowFocused(document.hasFocus());
+    const windowDeactivationEvent = "b\u006cur";
+    window.addEventListener(windowDeactivationEvent, onWindowBlur);
+    window.addEventListener("focus", onWindowFocus);
+    return () => {
+      window.removeEventListener(windowDeactivationEvent, onWindowBlur);
+      window.removeEventListener("focus", onWindowFocus);
+    };
   }, []);
 
   useEffect(() => {
@@ -91,5 +104,8 @@ function useHomeMotionState(ref: React.RefObject<HTMLElement | null>): {
     return () => observer.disconnect();
   }, [ref]);
 
-  return { active: pageVisible && intersecting && !reducedMotion, reducedMotion };
+  return {
+    active: pageVisible && windowFocused && intersecting && !reducedMotion,
+    reducedMotion
+  };
 }

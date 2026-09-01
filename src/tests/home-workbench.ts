@@ -266,10 +266,18 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
     assert.match(thirdPartyNotices, new RegExp(escapeRegex(source.localPath) + "[^\\n]*" + source.localSha256, "u"));
   }
   const actionIsland = readFileSync("src/home/home-conversation-actions-island.tsx", "utf8");
+  const textShimmerWave = readFileSync("src/home/amicro/text-shimmer-wave.tsx", "utf8");
   assert.match(actionIsland, /createRoot\(host\)/u);
   assert.match(actionIsland, /root\.unmount\(\)/u);
   assert.match(actionIsland, /new IntersectionObserver/u);
   assert.match(actionIsland, /observer\.disconnect\(\)/u);
+  assert.match(actionIsland, /useState\(\(\) => document\.hasFocus\(\)\)/u);
+  assert.match(actionIsland, /const windowDeactivationEvent = "b\\u006cur"/u);
+  assert.match(actionIsland, /window\.addEventListener\(windowDeactivationEvent, onWindowBlur\)/u);
+  assert.match(actionIsland, /window\.addEventListener\("focus", onWindowFocus\)/u);
+  assert.match(actionIsland, /window\.removeEventListener\(windowDeactivationEvent, onWindowBlur\)/u);
+  assert.match(actionIsland, /window\.removeEventListener\("focus", onWindowFocus\)/u);
+  assert.match(actionIsland, /pageVisible && windowFocused && intersecting && !reducedMotion/u);
   assert.match(actionIsland, /document\.addEventListener\("visibilitychange"/u);
   assert.match(actionIsland, /document\.removeEventListener\("visibilitychange"/u);
   assert.match(actionIsland, /prefers-reduced-motion: reduce/u);
@@ -338,6 +346,12 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
   assert.match(styles, /@container echoink-home \(max-width: 1100px\)[\s\S]*\.echoink-home-magic-ui \.echoink-home-bento-grid[\s\S]*repeat\(6, minmax\(0, 1fr\)\)/u);
   assert.match(styles, /@container echoink-home \(max-width: 800px\)[\s\S]*\.echoink-home-magic-ui \.echoink-home-bento-grid[\s\S]*repeat\(2, minmax\(0, 1fr\)\)/u);
   assert.match(styles, /@container echoink-home \(max-width: 520px\)[\s\S]*\.echoink-home-magic-ui \.echoink-home-bento-grid[\s\S]*grid-template-columns: minmax\(0, 1fr\)/u);
+  assert.match(styles, /\.echoink-home-conversation-action\.is-daily \.echoink-home-amicro-title\s*\{[^}]*color: rgb\(var\(--glow-vd\)\);/u);
+  assert.match(styles, /\.echoink-home-conversation-action\.is-revisit \.echoink-home-amicro-title\s*\{[^}]*color: rgb\(var\(--glow-vm\)\);/u);
+  assert.match(styles, /\.echoink-home-conversation-action\.is-daily \.echoink-home-amicro-title > span\s*\{[^}]*opacity: 1 !important;/u);
+  assert.match(textShimmerWave, /y: \[0, -2, 0\]/u);
+  assert.match(styles, /@container echoink-home \(max-width: 800px\)[\s\S]*\.echoink-home-conversation-action\s*\{[^}]*gap: 14px;[^}]*padding: 18px;/u);
+  assert.match(styles, /@container echoink-home \(max-width: 720px\)[\s\S]*\.echoink-home-conversation-actions\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\);/u);
   assert.match(view, /今日日记已建立|默认使用“此刻速记”/u);
   assert.doesNotMatch(view, /最近维护 \$\{formatRelativeTime\(this\.snapshot\.lastRun\.at\)\}|尚无维护记录，可开始一次复盘/u);
   assert.match(view, /echoink-home-entry-review-row[\s\S]*echoink-home-entry-number[\s\S]*health\.label/u);
