@@ -8219,7 +8219,8 @@ button.echoink-settings-navigation-row:focus-visible {
 
 .echoink-home-entry.is-wiki .echoink-home-entry-copy,
 .echoink-home-entry.is-journal .echoink-home-entry-copy,
-.echoink-home-entry.is-outputs .echoink-home-entry-copy {
+.echoink-home-entry.is-outputs .echoink-home-entry-copy,
+.echoink-home-entry.is-review .echoink-home-entry-copy {
   margin-top: auto;
 }
 
@@ -8286,16 +8287,6 @@ button.echoink-settings-navigation-row:focus-visible {
 .echoink-home-entry:hover .echoink-home-entry-copy,
 .echoink-home-entry:focus-visible .echoink-home-entry-copy {
   transform: translateY(-40px);
-}
-
-.echoink-home-entry.is-review:hover .echoink-home-entry-icon,
-.echoink-home-entry.is-review:focus-visible .echoink-home-entry-icon {
-  transform: translateY(-40px);
-}
-
-.echoink-home-entry.is-review:hover .echoink-home-entry-copy,
-.echoink-home-entry.is-review:focus-visible .echoink-home-entry-copy {
-  transform: none;
 }
 
 .echoink-home-entry-icon {
@@ -8384,32 +8375,8 @@ button.echoink-settings-navigation-row:focus-visible {
   white-space: nowrap;
 }
 
-.echoink-home-entry.is-review {
-  display: grid;
-  grid-template-columns: 40px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 16px;
-}
-
-.echoink-home-entry.is-review .echoink-home-entry-copy {
-  width: 100%;
-  margin-top: 0;
-  padding-inline-end: 0;
-}
-
 .echoink-home-entry.is-review .echoink-home-entry-review-row {
   margin-top: 8px;
-}
-
-.echoink-home-entry.is-review .echoink-home-entry-cta {
-  position: static;
-  right: auto;
-  bottom: auto;
-  left: auto;
-  align-self: center;
-  justify-content: flex-end;
-  opacity: 1;
-  transform: none;
 }
 
 .echoink-home-entry-cta {
@@ -8864,9 +8831,6 @@ button.echoink-settings-navigation-row:focus-visible {
     grid-row: 4;
   }
 
-  .echoink-home-entry.is-review .echoink-home-entry-copy {
-    padding-inline-end: 0;
-  }
 }
 
 @container echoink-home (max-width: 800px) {

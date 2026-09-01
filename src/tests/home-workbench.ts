@@ -69,6 +69,10 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
   const smoothUiCommit = "1143ba66738566e8acb9a3f8a7db9eab3f10f2d4";
   const heatmapSource = view.match(/private renderHeatmap\(\): void \{[\s\S]*?private renderCalendar/u)?.[0] ?? "";
   const shellSource = view.match(/private renderShell\(\): void \{[\s\S]*?private renderHeader/u)?.[0] ?? "";
+  const desktopEntryStyles = styles.slice(
+    styles.indexOf(".echoink-home-entry {"),
+    styles.indexOf("@container echoink-home (max-width: 1100px)")
+  );
 
   for (const deletedPath of [
     "src/home/home-graph-controller.ts",
@@ -185,6 +189,16 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
   assert.match(styles, /\.echoink-home-rhythm-grid\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\);/u);
   assert.match(styles, /\.echoink-home-daily-grid,[\s\S]*\.echoink-home-rhythm-grid\s*\{[^}]*margin-top: 56px;/u);
   assert.doesNotMatch(styles, /\.echoink-home-magic-ui &/u);
+  assert.match(
+    desktopEntryStyles,
+    /\.echoink-home-entry\.is-outputs \.echoink-home-entry-copy,[\s\S]*\.echoink-home-entry\.is-review \.echoink-home-entry-copy\s*\{[^}]*margin-top: auto;/u
+  );
+  assert.doesNotMatch(desktopEntryStyles, /\.echoink-home-entry\.is-review:(?:hover|focus-visible)/u);
+  assert.doesNotMatch(desktopEntryStyles, /\.echoink-home-entry\.is-review \.echoink-home-entry-cta\s*\{/u);
+  assert.match(desktopEntryStyles, /\.echoink-home-entry:hover \.echoink-home-entry-icon,[\s\S]*translateY\(-40px\) scale\(0\.75\)/u);
+  assert.match(desktopEntryStyles, /\.echoink-home-entry:hover \.echoink-home-entry-copy,[\s\S]*translateY\(-40px\)/u);
+  assert.match(desktopEntryStyles, /\.echoink-home-entry-cta\s*\{[^}]*position: absolute;[^}]*opacity: 0;[^}]*translateY\(40px\)/u);
+  assert.doesNotMatch(view + bentoIsland, /onMouseEnter|onMouseLeave|mouseenter|mouseleave|pointerenter|pointerleave/u);
 
   assert.match(view, new RegExp(smoothUiCommit, "u"));
   assert.match(heatmapSource, /createEl\("table"/u);
@@ -205,10 +219,12 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
   assert.match(styles, /@container echoink-home \(max-width: 800px\)[\s\S]*\.echoink-home-magic-ui \.echoink-home-bento-grid[\s\S]*repeat\(2, minmax\(0, 1fr\)\)/u);
   assert.match(styles, /@container echoink-home \(max-width: 520px\)[\s\S]*\.echoink-home-magic-ui \.echoink-home-bento-grid[\s\S]*grid-template-columns: minmax\(0, 1fr\)/u);
   assert.match(view, /今日日记已建立|默认使用“此刻速记”/u);
-  assert.match(view, /最近维护 \$\{formatRelativeTime\(this\.snapshot\.lastRun\.at\)\}/u);
-  assert.match(view, /尚无维护记录，可开始一次复盘/u);
+  assert.doesNotMatch(view, /最近维护 \$\{formatRelativeTime\(this\.snapshot\.lastRun\.at\)\}|尚无维护记录，可开始一次复盘/u);
+  assert.match(view, /echoink-home-entry-review-row[\s\S]*echoink-home-entry-number[\s\S]*health\.label/u);
   assert.match(bentoIsland, /shimmerWidth = 100|AnimatedShinyText/u);
   assert.doesNotMatch(styles, /@keyframes echoink-home-shiny-text|animation: echoink-home-shiny-text/u);
+  assert.match(styles, /@container echoink-home \(max-width: 800px\)[\s\S]*\.echoink-home-entry-cta\s*\{[^}]*opacity: 1;[^}]*transform: translateY\(0\);/u);
+  assert.match(styles, /@container echoink-home \(max-width: 520px\)[\s\S]*\.echoink-home-entry\.is-review\s*\{[^}]*grid-template-columns: 40px minmax\(0, 1fr\);/u);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.echoink-home-entry-cta[\s\S]*opacity: 1/u);
   assert.match(styles, /@container echoink-home \(min-width: 1260px\)[\s\S]*minmax\(760px, 1fr\) minmax\(340px, 0\.44fr\)/u);
 }

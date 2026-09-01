@@ -247,12 +247,6 @@ export class EchoInkHomeView extends ItemView {
           { tag: "span", className: "echoink-home-entry-number", text: score === undefined ? "—" : String(score) },
           { tag: "span", text: this.snapshot?.health.label ?? "等待本地维护快照" }
         ]
-      },
-      {
-        tag: "small",
-        text: this.snapshot?.lastRun.at
-          ? `最近维护 ${formatRelativeTime(this.snapshot.lastRun.at)}`
-          : "尚无维护记录，可开始一次复盘"
       }
     ];
   }
