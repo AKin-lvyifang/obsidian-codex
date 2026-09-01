@@ -7816,6 +7816,11 @@ button.echoink-settings-navigation-row:focus-visible {
   --echoink-home-teal-ink: #123835;
   --echoink-home-accent: var(--echoink-home-teal);
   --echoink-home-accent-hover: var(--echoink-home-teal-deep);
+  --glow-vd: 46,122,116;
+  --glow-vm: 196,70,32;
+  --glow-vl: 143,184,177;
+  --glow-a1: .10;
+  --glow-a2: .06;
   container: echoink-home / inline-size;
   padding: 0;
   overflow: auto;
@@ -7842,6 +7847,11 @@ button.echoink-settings-navigation-row:focus-visible {
   --echoink-home-teal: var(--interactive-accent);
   --echoink-home-teal-deep: var(--interactive-accent-hover);
   --echoink-home-teal-ink: var(--text-normal);
+  --glow-vd: 88,167,158;
+  --glow-vm: 226,102,60;
+  --glow-vl: 58,122,116;
+  --glow-a1: .17;
+  --glow-a2: .11;
 }
 
 .echoink-home-page {
@@ -8173,6 +8183,10 @@ button.echoink-settings-navigation-row:focus-visible {
   --echoink-home-entry-icon-color: var(--echoink-home-ink);
   grid-column: 1 / 5;
   grid-row: 1 / 3;
+  background:
+    radial-gradient(ellipse 320px 220px at 100% 0%, rgba(var(--glow-vd), var(--glow-a1)), transparent 72%),
+    radial-gradient(ellipse 280px 200px at 0% 100%, rgba(var(--glow-vd), var(--glow-a2)), transparent 70%),
+    var(--echoink-home-entry-tint);
 }
 
 .echoink-home-entry.is-outputs {
@@ -8180,6 +8194,9 @@ button.echoink-settings-navigation-row:focus-visible {
   --echoink-home-entry-icon-color: var(--echoink-home-teal);
   grid-column: 5 / 9;
   grid-row: 1;
+  background:
+    radial-gradient(ellipse 280px 180px at 0% 0%, rgba(var(--glow-vm), var(--glow-a2)), transparent 70%),
+    var(--echoink-home-entry-tint);
 }
 
 .echoink-home-entry.is-projects {
@@ -8187,6 +8204,10 @@ button.echoink-settings-navigation-row:focus-visible {
   --echoink-home-entry-icon-color: var(--echoink-home-teal-ink);
   grid-column: 9 / 13;
   grid-row: 1;
+  background:
+    radial-gradient(ellipse 320px 220px at 100% 100%, rgba(var(--glow-vm), var(--glow-a1)), transparent 70%),
+    radial-gradient(ellipse 240px 180px at 0% 0%, rgba(var(--glow-vl), var(--glow-a2)), transparent 72%),
+    var(--echoink-home-entry-tint);
 }
 
 .echoink-home-entry.is-inbox {
@@ -8194,6 +8215,9 @@ button.echoink-settings-navigation-row:focus-visible {
   --echoink-home-entry-icon-color: var(--echoink-home-ink);
   grid-column: 5 / 9;
   grid-row: 2;
+  background:
+    radial-gradient(ellipse 280px 200px at 100% 100%, rgba(var(--glow-vl), var(--glow-a1)), transparent 70%),
+    var(--echoink-home-entry-tint);
 }
 
 .echoink-home-entry.is-journal {
@@ -8201,6 +8225,10 @@ button.echoink-settings-navigation-row:focus-visible {
   --echoink-home-entry-icon-color: var(--echoink-home-vermilion);
   grid-column: 9 / 13;
   grid-row: 2 / 4;
+  background:
+    radial-gradient(ellipse 280px 200px at 100% 0%, rgba(var(--glow-vm), var(--glow-a2)), transparent 70%),
+    radial-gradient(ellipse 320px 220px at 0% 100%, rgba(var(--glow-vl), var(--glow-a2)), transparent 72%),
+    var(--echoink-home-entry-tint);
 }
 
 .echoink-home-entry.is-review {
@@ -8208,6 +8236,9 @@ button.echoink-settings-navigation-row:focus-visible {
   --echoink-home-entry-icon-color: var(--echoink-home-teal-deep);
   grid-column: 1 / 9;
   grid-row: 3;
+  background:
+    radial-gradient(ellipse 380px 220px at 100% 0%, rgba(var(--glow-vd), var(--glow-a1)), transparent 72%),
+    var(--echoink-home-entry-tint);
 }
 
 /* Keep the six entries in one shared grid while giving each card its own
