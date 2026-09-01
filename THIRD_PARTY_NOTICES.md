@@ -40,6 +40,42 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+## Amicro Micro Transitions
+
+EchoInk includes product-copy and lifecycle adaptations of four official
+Amicro loading components from commit
+`86b55340bfb939b8e93bb53aa46ba017c3449f1c`. The adaptations preserve the
+upstream motion algorithms while adding Chinese text props, EchoInk class
+hooks, reduced-motion behavior, visibility pausing, and React-root cleanup.
+
+- `registry/ui/loading/text-shimmer-wave.tsx`: upstream SHA-256 `30c3d97fb98214283b760734c4331677bfccba77e02a5ba09b5fea42183ea489`; local `src/home/amicro/text-shimmer-wave.tsx`: `04e9f7914a6ec82d21b21bf7651dfe38d97c3e55771e3be3eb4af244d5a38601`
+- `registry/ui/loading/morphing-shape.tsx`: upstream SHA-256 `ad2bb3627d8c332a199f656413aa8dc2604ea39226011d5bb326518c4522f317`; local `src/home/amicro/morphing-shape.tsx`: `5cf2101ae48601e247e46774ee3808ed97f022d2539e7f209e532a57f5cc9dfa`
+- `registry/ui/loading/typing.tsx`: upstream SHA-256 `0cc94473f7b97885f64a946a189a8c1d641bb6efccdc75ac05607606013faa83`; local `src/home/amicro/typing.tsx`: `a83ff8833ce11374441f982ba74b08fcf34e8963f44bdcb251660f479f62c955`
+- `registry/ui/loading/origami-shape.tsx`: upstream SHA-256 `7800305ad25cb6962aef752a8dc57fba28fed3544ba2dbfdb2a4752eb912baa5`; local `src/home/amicro/origami-shape.tsx`: `2e0bb583a734b79d357b0a56184e089b1f677b4f8b0fc0fc65a14c5abd12791b`
+- `LICENSE`: upstream SHA-256 `4b2e0abfc3fdc8722545c3772ee7c6fd0bcdbe8af76112af50066689fca4a9c2`; local `src/home/amicro/LICENSE.md`: `4b2e0abfc3fdc8722545c3772ee7c6fd0bcdbe8af76112af50066689fca4a9c2`
+
+MIT License
+
+Copyright (c) 2026 SYED  SUBHAN UDDIN
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
 ## SmoothUI
 
 EchoInk includes native TypeScript DOM and CSS adaptations of the official

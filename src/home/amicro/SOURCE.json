@@ -1,0 +1,37 @@
+{
+  "repository": "https://github.com/Subhan-code/Amicro--Micro-transitions-",
+  "commit": "86b55340bfb939b8e93bb53aa46ba017c3449f1c",
+  "license": "MIT",
+  "files": [
+    {
+      "upstreamPath": "registry/ui/loading/text-shimmer-wave.tsx",
+      "localPath": "text-shimmer-wave.tsx",
+      "upstreamSha256": "30c3d97fb98214283b760734c4331677bfccba77e02a5ba09b5fea42183ea489",
+      "localSha256": "04e9f7914a6ec82d21b21bf7651dfe38d97c3e55771e3be3eb4af244d5a38601"
+    },
+    {
+      "upstreamPath": "registry/ui/loading/morphing-shape.tsx",
+      "localPath": "morphing-shape.tsx",
+      "upstreamSha256": "ad2bb3627d8c332a199f656413aa8dc2604ea39226011d5bb326518c4522f317",
+      "localSha256": "5cf2101ae48601e247e46774ee3808ed97f022d2539e7f209e532a57f5cc9dfa"
+    },
+    {
+      "upstreamPath": "registry/ui/loading/typing.tsx",
+      "localPath": "typing.tsx",
+      "upstreamSha256": "0cc94473f7b97885f64a946a189a8c1d641bb6efccdc75ac05607606013faa83",
+      "localSha256": "a83ff8833ce11374441f982ba74b08fcf34e8963f44bdcb251660f479f62c955"
+    },
+    {
+      "upstreamPath": "registry/ui/loading/origami-shape.tsx",
+      "localPath": "origami-shape.tsx",
+      "upstreamSha256": "7800305ad25cb6962aef752a8dc57fba28fed3544ba2dbfdb2a4752eb912baa5",
+      "localSha256": "2e0bb583a734b79d357b0a56184e089b1f677b4f8b0fc0fc65a14c5abd12791b"
+    },
+    {
+      "upstreamPath": "LICENSE",
+      "localPath": "LICENSE.md",
+      "upstreamSha256": "4b2e0abfc3fdc8722545c3772ee7c6fd0bcdbe8af76112af50066689fca4a9c2",
+      "localSha256": "4b2e0abfc3fdc8722545c3772ee7c6fd0bcdbe8af76112af50066689fca4a9c2"
+    }
+  ]
+}

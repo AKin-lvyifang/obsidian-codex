@@ -24,6 +24,13 @@ import {
   type HomeVaultFileRecord
 } from "../home/home-workbench-model";
 import { openObsidianGraphLeaf } from "../home/open-native-graph";
+import {
+  buildDailyConversationDraft,
+  buildRevisitConversationDraft,
+  HOME_DAILY_TITLES,
+  HOME_REVISIT_TITLES,
+  homeConversationTitle
+} from "../home/home-conversation-actions";
 import { openTestNoticeMessages } from "./obsidian-shim";
 
 export async function runHomeWorkbenchTests(): Promise<void> {
@@ -33,8 +40,37 @@ export async function runHomeWorkbenchTests(): Promise<void> {
   assertImageExtraction();
   assertTemplateImportAndPlaceholderPreservation();
   assertReviewRecognitionAndUtf8Import();
+  assertHomeConversationActions();
   assertHomeWorkbenchRemovalAndMagicUiContracts();
   await assertNativeGraphBehavior();
+}
+
+function assertHomeConversationActions(): void {
+  const now = new Date(2026, 8, 2, 9, 7);
+  const dailyDraft = buildDailyConversationDraft(now);
+  const revisitDraft = buildRevisitConversationDraft();
+
+  assert.equal(HOME_DAILY_TITLES.length, 6);
+  assert.equal(HOME_REVISIT_TITLES.length, 6);
+  assert.equal(
+    homeConversationTitle("daily", "EchoInk 测试库", now),
+    homeConversationTitle("daily", "EchoInk 测试库", new Date(2026, 8, 2, 22, 30))
+  );
+  assert.ok(HOME_DAILY_TITLES.includes(
+    homeConversationTitle("daily", "EchoInk 测试库", now) as (typeof HOME_DAILY_TITLES)[number]
+  ));
+  assert.ok(HOME_REVISIT_TITLES.includes(
+    homeConversationTitle("revisit", "EchoInk 测试库", now) as (typeof HOME_REVISIT_TITLES)[number]
+  ));
+
+  assert.match(dailyDraft, /^\/daily\n/u);
+  assert.match(dailyDraft, /2026-09-02 此刻速记/u);
+  assert.match(dailyDraft, /在我明确确认生成前，不要创建或改写任何文件/u);
+  assert.match(dailyDraft, /目标文件已经存在，先读取并保留原内容/u);
+  assert.match(revisitDraft, /^\/revisit\n/u);
+  assert.match(revisitDraft, /3–5 个仍未完成的 goal、task 或 open_loop/u);
+  assert.match(revisitDraft, /在我选择前不要修改 Memory/u);
+  assert.match(revisitDraft, /Memory 已关闭、不可用或没有结果/u);
 }
 
 function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
@@ -45,6 +81,7 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
   const viewService = readFileSync("src/plugin/view-service.ts", "utf8");
   const brandIcons = readFileSync("src/home/home-brand-icons.ts", "utf8");
   const bentoIsland = readFileSync("src/home/home-bento-island.tsx", "utf8");
+  const conversationActions = readFileSync("src/home/home-conversation-actions.ts", "utf8");
   const magicSource = JSON.parse(readFileSync("src/home/magic-ui/SOURCE.json", "utf8")) as {
     commit: string;
     files: Array<{ upstreamPath: string; localPath: string; sha256: string }>;
@@ -63,6 +100,7 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
   const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
     dependencies?: Record<string, string>;
     devDependencies?: Record<string, string>;
+    overrides?: Record<string, Record<string, string>>;
   };
   const packageLock = readFileSync("package-lock.json", "utf8");
   const fixedCommit = "2d671cc6c0e0f40e28682c9cbddd16694dcfe627";
@@ -88,7 +126,10 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
 
   const homeSourceFiles = sourceFilesUnder("src/home").filter((path) => /\.[cm]?[jt]sx?$/u.test(path));
   const createRootFiles = homeSourceFiles.filter((path) => /\bcreateRoot\b/u.test(readFileSync(path, "utf8")));
-  assert.deepEqual(createRootFiles, ["src/home/home-bento-island.tsx"]);
+  assert.deepEqual(createRootFiles.sort(), [
+    "src/home/home-bento-island.tsx",
+    "src/home/home-conversation-actions-island.tsx"
+  ]);
 
   assert.doesNotMatch(
     [view, data, model].join("\n"),
@@ -106,8 +147,15 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
   assert.match(view, /entry\.targetPath[\s\S]*this\.data\?\.records\.find\(\(record\) => record\.path === entry\.targetPath\)/u);
   assert.match(view, /formatRelativeTime\(target\.mtime\)/u);
   assert.ok(shellSource.indexOf("this.renderHeader();") < shellSource.indexOf("echoink-home-entries-section"));
-  assert.ok(shellSource.indexOf("echoink-home-entries-section") < shellSource.indexOf("echoink-home-rhythm-grid"));
+  assert.ok(shellSource.indexOf("echoink-home-conversation-section") < shellSource.indexOf("echoink-home-rhythm-grid"));
+  assert.ok(shellSource.indexOf("echoink-home-rhythm-grid") < shellSource.indexOf("echoink-home-entries-section"));
   assert.doesNotMatch(shellSource, /overview|graph|recent|marquee|thought/u);
+  assert.match(view, /await this\.plugin\.activateView\(\)[\s\S]*this\.plugin\.getCodexView\(\)[\s\S]*view\.createDraftSession\(title, draft\)/u);
+  assert.doesNotMatch(
+    view.match(/private async openConversationAction\([\s\S]*?\n  \}/u)?.[0] ?? "",
+    /sendMessage|Provider|\.create\(|\.modify\(/u
+  );
+  assert.doesNotMatch(conversationActions, /app\.vault|adapter\.|\.create\(|\.modify\(|sendMessage|Provider/u);
 
   assert.match(bootstrap, /addRibbonIcon\("feather"/u);
   assert.match(codexView, /getIcon\(\): string \{\s*return "feather";/u);
@@ -175,10 +223,59 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
     "react-dom": "19.1.1",
     clsx: "2.1.1",
     "tailwind-merge": "3.3.1",
+    "framer-motion": "12.23.24",
     "@radix-ui/react-icons": "1.3.2",
     "@radix-ui/react-slot": "1.2.3",
     "class-variance-authority": "0.7.1"
   })) assert.equal(packageJson.dependencies?.[name], version);
+  assert.match(packageLock, /"framer-motion": "12\.23\.24"/u);
+  assert.deepEqual(packageJson.overrides?.["framer-motion"], {
+    "motion-dom": "12.23.23",
+    "motion-utils": "12.23.6"
+  });
+  assert.match(packageLock, /"node_modules\/framer-motion\/node_modules\/motion-dom": \{[\s\S]*?"version": "12\.23\.23"/u);
+  assert.match(packageLock, /"node_modules\/framer-motion\/node_modules\/motion-utils": \{[\s\S]*?"version": "12\.23\.6"/u);
+
+  const amicroCommit = "86b55340bfb939b8e93bb53aa46ba017c3449f1c";
+  const amicroSource = JSON.parse(readFileSync("src/home/amicro/SOURCE.json", "utf8")) as {
+    commit: string;
+    files: Array<{
+      upstreamPath: string;
+      localPath: string;
+      upstreamSha256: string;
+      localSha256: string;
+    }>;
+  };
+  const expectedAmicroHashes = new Map([
+    ["text-shimmer-wave.tsx", ["30c3d97fb98214283b760734c4331677bfccba77e02a5ba09b5fea42183ea489", "04e9f7914a6ec82d21b21bf7651dfe38d97c3e55771e3be3eb4af244d5a38601"]],
+    ["morphing-shape.tsx", ["ad2bb3627d8c332a199f656413aa8dc2604ea39226011d5bb326518c4522f317", "5cf2101ae48601e247e46774ee3808ed97f022d2539e7f209e532a57f5cc9dfa"]],
+    ["typing.tsx", ["0cc94473f7b97885f64a946a189a8c1d641bb6efccdc75ac05607606013faa83", "a83ff8833ce11374441f982ba74b08fcf34e8963f44bdcb251660f479f62c955"]],
+    ["origami-shape.tsx", ["7800305ad25cb6962aef752a8dc57fba28fed3544ba2dbfdb2a4752eb912baa5", "2e0bb583a734b79d357b0a56184e089b1f677b4f8b0fc0fc65a14c5abd12791b"]],
+    ["LICENSE.md", ["4b2e0abfc3fdc8722545c3772ee7c6fd0bcdbe8af76112af50066689fca4a9c2", "4b2e0abfc3fdc8722545c3772ee7c6fd0bcdbe8af76112af50066689fca4a9c2"]]
+  ]);
+  assert.equal(amicroSource.commit, amicroCommit);
+  assert.equal(amicroSource.files.length, expectedAmicroHashes.size);
+  for (const source of amicroSource.files) {
+    const expected = expectedAmicroHashes.get(source.localPath);
+    assert.deepEqual([source.upstreamSha256, source.localSha256], expected);
+    const actual = createHash("sha256")
+      .update(readFileSync(`src/home/amicro/${source.localPath}`))
+      .digest("hex");
+    assert.equal(actual, source.localSha256);
+    assert.match(thirdPartyNotices, new RegExp(escapeRegex(source.upstreamPath) + "[^\\n]*" + source.upstreamSha256, "u"));
+    assert.match(thirdPartyNotices, new RegExp(escapeRegex(source.localPath) + "[^\\n]*" + source.localSha256, "u"));
+  }
+  const actionIsland = readFileSync("src/home/home-conversation-actions-island.tsx", "utf8");
+  assert.match(actionIsland, /createRoot\(host\)/u);
+  assert.match(actionIsland, /root\.unmount\(\)/u);
+  assert.match(actionIsland, /new IntersectionObserver/u);
+  assert.match(actionIsland, /observer\.disconnect\(\)/u);
+  assert.match(actionIsland, /document\.addEventListener\("visibilitychange"/u);
+  assert.match(actionIsland, /document\.removeEventListener\("visibilitychange"/u);
+  assert.match(actionIsland, /prefers-reduced-motion: reduce/u);
+  assert.match(actionIsland, /aria-label=\{action\.accessibleName\}/u);
+  assert.match(actionIsland, /echoink-home-conversation-action-art" aria-hidden="true"/u);
+  assert.equal((actionIsland.match(/<button\b/gu) ?? []).length, 1);
   for (const [name, version] of Object.entries({
     "@types/react": "19.1.1",
     "@types/react-dom": "19.1.1",
@@ -197,9 +294,11 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
   assert.match(styles, /\.echoink-home-magic-ui \.animate-shiny-text/u);
   assert.match(styles, /@keyframes shiny-text/u);
   assert.doesNotMatch(styles, /echoink-home-(?:overview|graph|recent|marquee|thought)|animate-marquee|@keyframes marquee/u);
-  assert.match(styles, /\.echoink-home-entries-section\s*\{[^}]*margin-top: 0;/u);
+  assert.match(styles, /\.echoink-home-entries-section\s*\{[^}]*margin-top: 56px;/u);
   assert.match(styles, /\.echoink-home-rhythm-grid\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\);/u);
-  assert.match(styles, /\.echoink-home-daily-grid,[\s\S]*\.echoink-home-rhythm-grid\s*\{[^}]*margin-top: 56px;/u);
+  assert.match(styles, /\.echoink-home-rhythm-grid\s*\{[^}]*align-items: start;[^}]*gap: 24px;[^}]*margin-top: 40px;/u);
+  assert.match(styles, /\.echoink-home-heatmap,[\s\S]*\.echoink-home-calendar-panel\s*\{[^}]*padding: 20px;[^}]*border: 1px solid/u);
+  assert.match(view, /echoink-home-calendar-summary[\s\S]*有日记 · \$\{journalCount\} 天/u);
   assert.doesNotMatch(styles, /\.echoink-home-magic-ui &/u);
   assert.match(
     desktopEntryStyles,

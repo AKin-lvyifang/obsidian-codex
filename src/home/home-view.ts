@@ -20,6 +20,16 @@ import {
   type HomeBentoDetailNode,
   type HomeBentoIsland
 } from "./home-bento-island";
+import {
+  buildDailyConversationDraft,
+  buildRevisitConversationDraft,
+  homeConversationTitle,
+  type HomeConversationAction
+} from "./home-conversation-actions";
+import {
+  createHomeConversationActionsIsland,
+  type HomeConversationActionsIsland
+} from "./home-conversation-actions-island";
 import { JournalTemplateModal } from "./journal-template-modal";
 
 export const VIEW_TYPE_ECHOINK_HOME = "codex-echoink-home";
@@ -43,6 +53,7 @@ export class EchoInkHomeView extends ItemView {
 
   private pageEl!: HTMLElement;
   private headerStatusEl!: HTMLElement;
+  private conversationActionsIsland: HomeConversationActionsIsland | null = null;
   private entriesEl!: HTMLElement;
   private bentoIsland: HomeBentoIsland | null = null;
   private heatmapEl!: HTMLElement;
@@ -77,6 +88,8 @@ export class EchoInkHomeView extends ItemView {
   async onClose(): Promise<void> {
     if (this.homeRefreshTimer !== null) window.clearTimeout(this.homeRefreshTimer);
     this.homeRefreshTimer = null;
+    this.conversationActionsIsland?.unmount();
+    this.conversationActionsIsland = null;
     this.bentoIsland?.unmount();
     this.bentoIsland = null;
     this.contentEl.removeClass("codex-home-view", "echoink-home-view");
@@ -110,6 +123,7 @@ export class EchoInkHomeView extends ItemView {
     }
     this.loading = false;
     this.renderHeaderState();
+    this.renderConversationActions();
     this.renderEntries();
     this.renderHeatmap();
     this.renderCalendar();
@@ -127,14 +141,23 @@ export class EchoInkHomeView extends ItemView {
     this.contentEl.empty();
     this.pageEl = this.contentEl.createDiv({ cls: "echoink-home-page" });
     this.renderHeader();
+
+    const conversationSection = this.pageEl.createEl("section", { cls: "echoink-home-conversation-section" });
+    const conversationHead = this.sectionTitle(conversationSection, "从一段对话开始");
+    conversationHead.createSpan({ cls: "echoink-home-section-note", text: "先说出来，再决定要不要留下" });
+    const conversationHost = conversationSection.createDiv({ cls: "echoink-home-conversation-island" });
+    this.conversationActionsIsland = createHomeConversationActionsIsland(conversationHost);
+    this.renderConversationActions();
+
+    const rhythm = this.pageEl.createDiv({ cls: "echoink-home-rhythm-grid" });
+    this.heatmapEl = rhythm.createEl("section", { cls: "echoink-home-heatmap" });
+    this.calendarEl = rhythm.createEl("section", { cls: "echoink-home-calendar-panel" });
+
     this.entriesEl = this.pageEl.createEl("section", { cls: "echoink-home-entries-section" });
     const entriesHead = this.sectionTitle(this.entriesEl, "知识工作入口");
     entriesHead.createSpan({ cls: "echoink-home-section-note", text: "从真实状态继续阅读、整理、写作与复盘" });
     const bentoHost = this.entriesEl.createDiv({ cls: "echoink-home-magic-ui" });
     this.bentoIsland = createHomeBentoIsland(bentoHost);
-    const rhythm = this.pageEl.createDiv({ cls: "echoink-home-rhythm-grid" });
-    this.heatmapEl = rhythm.createEl("section", { cls: "echoink-home-heatmap" });
-    this.calendarEl = rhythm.createEl("section", { cls: "echoink-home-calendar-panel" });
   }
 
   private renderHeader(): void {
@@ -169,6 +192,27 @@ export class EchoInkHomeView extends ItemView {
       state.setAttribute("role", "alert");
       state.setText(this.error);
     }
+  }
+
+  private renderConversationActions(): void {
+    const vaultName = this.snapshot?.vaultName || this.app.vault.getName?.() || "当前知识库";
+    const now = new Date();
+    this.conversationActionsIsland?.render([
+      {
+        id: "daily",
+        accessibleName: "写日记：新建会话并预填日记草稿",
+        title: homeConversationTitle("daily", vaultName, now),
+        description: "把今天说出来，确认后再整理成日记",
+        onActivate: () => void this.openConversationAction("daily")
+      },
+      {
+        id: "revisit",
+        accessibleName: "未完想法：新建会话并寻找一件未完成的事",
+        title: homeConversationTitle("revisit", vaultName, now),
+        description: "从长期记忆里，捡起一件还没说完的事",
+        onActivate: () => void this.openConversationAction("revisit")
+      }
+    ]);
   }
 
   /**
@@ -340,6 +384,31 @@ export class EchoInkHomeView extends ItemView {
       }
       if (record?.exists) button.createSpan({ cls: "echoink-home-calendar-journal-dot", attr: { "aria-hidden": "true" } });
       button.onclick = () => void this.openJournal(date);
+    }
+    const monthPrefix = `${visibleMonth.getFullYear()}-${String(visibleMonth.getMonth() + 1).padStart(2, "0")}-`;
+    const journalCount = [...journalByDate.values()].filter(
+      (day) => day.exists && day.date.startsWith(monthPrefix)
+    ).length;
+    this.calendarEl.createDiv({
+      cls: "echoink-home-calendar-summary",
+      text: `有日记 · ${journalCount} 天`
+    });
+  }
+
+  private async openConversationAction(action: HomeConversationAction): Promise<void> {
+    try {
+      await this.plugin.activateView();
+      const view = this.plugin.getCodexView();
+      if (!view) throw new Error("右侧会话视图尚未准备好");
+      const now = new Date();
+      const title = action === "daily" ? `写日记 · ${dateKey(now)}` : `未完想法 · ${dateKey(now)}`;
+      const draft = action === "daily"
+        ? buildDailyConversationDraft(now)
+        : buildRevisitConversationDraft();
+      await view.createDraftSession(title, draft);
+    } catch (error) {
+      console.warn("[EchoInk] Failed to prepare Home conversation draft:", error);
+      new Notice(`暂时无法新建会话：${errorMessage(error)}`);
     }
   }
 

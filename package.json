@@ -68,11 +68,18 @@
     "@xenova/transformers": "2.17.2",
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",
+    "framer-motion": "12.23.24",
     "pinyin-pro": "3.29.3",
     "react": "19.1.1",
     "react-dom": "19.1.1",
     "tailwind-merge": "3.3.1",
     "unpdf": "1.8.1",
     "word-extractor": "1.0.4"
+  },
+  "overrides": {
+    "framer-motion": {
+      "motion-dom": "12.23.23",
+      "motion-utils": "12.23.6"
+    }
   }
 }

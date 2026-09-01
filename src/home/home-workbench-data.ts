@@ -1,4 +1,4 @@
-import { App, TFile, TFolder, normalizePath } from "obsidian";
+import { App, TFile, normalizePath } from "obsidian";
 import {
   BUILT_IN_JOURNAL_TEMPLATES,
   HOME_ENTRY_IDS,
@@ -163,8 +163,8 @@ export class HomeWorkbenchDataService {
     for (const part of parts) {
       current = current ? `${current}/${part}` : part;
       const existing = this.app.vault.getAbstractFileByPath(current);
-      if (existing instanceof TFolder) continue;
-      if (existing) throw new Error(`无法创建目录，路径已被文件占用：${current}`);
+      if (existing instanceof TFile) throw new Error(`无法创建目录，路径已被文件占用：${current}`);
+      if (existing) continue;
       await this.app.vault.createFolder(current);
     }
   }
