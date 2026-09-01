@@ -192,6 +192,7 @@ export class CodexSettingTab extends PluginSettingTab {
   private settingsFocusIntent: string | null = null;
   private settingsActionErrors: Partial<Record<SettingsActionContext, string>> = {};
   private settingsDetail: SettingsDetail = null;
+  private knowledgeMaintenanceHistoryDate = "";
   private archivedConversations: readonly Readonly<PiConversationCatalogEntry>[] | null = null;
   private archivedConversationsLoading = false;
   private archivedConversationsError = "";
@@ -1434,15 +1435,103 @@ export class CodexSettingTab extends PluginSettingTab {
     const section = createSettingsSection(page, {
       title: zh ? "维护日志" : "Maintenance log",
       description: zh
-        ? "每次维护都沿用现有记录；打开报告可查看本轮新增、移动与提炼明细。"
-        : "Each run uses the existing history. Open its report to inspect added, moved, and refined items.",
+        ? "查看每次知识维护的记录和报告明细。"
+        : "View every Knowledge maintenance record and its report details.",
       surface: "group"
     });
     const group = createSettingsGroup(section);
-    const entries = [...this.plugin.settings.knowledgeBase.maintenanceHistory]
+    const count = this.plugin.settings.knowledgeBase.maintenanceHistory.length;
+    createSettingsNavigationRow(group, {
+      title: zh ? "维护日志" : "Maintenance log",
+      description: zh
+        ? "打开完整记录，按日期查看每次知识维护。"
+        : "Open the complete history and view Knowledge maintenance by date.",
+      value: zh
+        ? `${count} 条记录`
+        : `${count} ${count === 1 ? "record" : "records"}`,
+      actionLabel: zh ? "查看" : "View",
+      focusKey: "knowledge:maintenance-history",
+      onActivate: () => this.openSettingsDetail("knowledge-maintenance-history")
+    });
+  }
+
+  private renderKnowledgeMaintenanceHistoryDetail(container: HTMLElement, zh: boolean): void {
+    const page = createSettingsPage(container, {
+      title: zh ? "维护日志" : "Maintenance log",
+      description: zh
+        ? "每次维护都沿用现有记录；打开报告可查看本轮新增、移动与提炼明细。"
+        : "Each run uses the existing history. Open its report to inspect added, moved, and refined items.",
+      detail: true,
+      backLabel: zh ? "返回知识库" : "Back to Knowledge",
+      onBack: () => void this.closeSettingsDetail()
+    });
+    const filterSection = createSettingsSection(page, {
+      title: zh ? "按日期筛选" : "Filter by date",
+      description: zh
+        ? "选择一个日期只查看当天的维护记录。"
+        : "Select one date to view maintenance records from that day only.",
+      surface: "group"
+    });
+    const filterGroup = createSettingsGroup(filterSection);
+    const selectedDate = this.knowledgeMaintenanceHistoryDate;
+    applySettingsRow(new Setting(filterGroup)
+      .setName(zh ? "维护日志日期" : "Maintenance log date")
+      .setDesc(zh ? "未选择时显示全部记录。" : "Show all records when no date is selected.")
+      .addText((text) => {
+        text
+          .setValue(selectedDate)
+          .onChange((value) => {
+            this.knowledgeMaintenanceHistoryDate = value;
+            this.scheduleDisplay();
+          });
+        text.inputEl.type = "date";
+        text.inputEl.setAttr(
+          "aria-label",
+          zh ? "维护日志日期筛选" : "Maintenance log date filter"
+        );
+        text.inputEl.setAttr(
+          "data-echoink-focus-key",
+          "knowledge:maintenance-history:date"
+        );
+      })
+      .addButton((button) => {
+        const label = zh ? "清除日期筛选" : "Clear date filter";
+        button
+          .setButtonText(zh ? "清除" : "Clear")
+          .onClick(() => {
+            this.knowledgeMaintenanceHistoryDate = "";
+            this.settingsFocusIntent = "explicit:knowledge:maintenance-history:date";
+            this.scheduleDisplay();
+          });
+        button.buttonEl.disabled = !selectedDate;
+        button.buttonEl.setAttr("aria-label", label);
+        button.buttonEl.setAttr(
+          "data-echoink-focus-key",
+          "knowledge:maintenance-history:clear"
+        );
+      }));
+    const section = createSettingsSection(page, {
+      title: zh ? "全部记录" : "All records",
+      description: zh
+        ? "按最近一次维护优先显示。"
+        : "Newest maintenance runs appear first.",
+      surface: "group"
+    });
+    const group = createSettingsGroup(section);
+    const allEntries = [...this.plugin.settings.knowledgeBase.maintenanceHistory]
       .sort((left, right) => right.at - left.at || right.date.localeCompare(left.date));
-    if (!entries.length) {
+    if (!allEntries.length) {
       createSettingsState(group, zh ? "还没有知识库维护记录。" : "No Knowledge maintenance runs yet.");
+      return;
+    }
+    const entries = selectedDate
+      ? allEntries.filter((entry) => entry.date === selectedDate)
+      : allEntries;
+    if (!entries.length) {
+      createSettingsState(
+        group,
+        zh ? "所选日期没有维护记录。" : "No maintenance runs on the selected date."
+      );
       return;
     }
     for (const entry of entries) {
@@ -1479,6 +1568,10 @@ export class CodexSettingTab extends PluginSettingTab {
   private renderKnowledgeBaseSettings(container: HTMLElement): void {
     const copy = this.copy;
     const zh = this.plugin.settings.settingsLanguage !== "en";
+    if (this.settingsDetail === "knowledge-maintenance-history") {
+      this.renderKnowledgeMaintenanceHistoryDetail(container, zh);
+      return;
+    }
     if (this.settingsDetail === "knowledge-preferences") {
       this.renderKnowledgeMaintenancePreferences(container);
       return;
@@ -2601,6 +2694,9 @@ export class CodexSettingTab extends PluginSettingTab {
   private openSettingsDetail(detail: Exclude<SettingsDetail, null>): void {
     this.settingsDetail = detail;
     this.settingsFocusIntent = "explicit:settings-detail:back";
+    if (detail === "knowledge-maintenance-history") {
+      this.knowledgeMaintenanceHistoryDate = "";
+    }
     if (detail === "knowledge-preferences") {
       void this.loadKnowledgePreferenceState();
     }
@@ -2640,6 +2736,8 @@ export class CodexSettingTab extends PluginSettingTab {
       this.settingsFocusIntent = `explicit:review:memory:${detail.category}`;
     } else if (detail === "knowledge-preferences") {
       this.settingsFocusIntent = "explicit:knowledge:preferences";
+    } else if (detail === "knowledge-maintenance-history") {
+      this.settingsFocusIntent = "explicit:knowledge:maintenance-history";
     } else if (detail === "review-archives") {
       this.settingsFocusIntent = "explicit:review:archives";
     } else if (detail === "review-memory") {
@@ -4084,6 +4182,7 @@ type SettingsActionContext = "knowledge" | "review" | "resources";
 
 type SettingsDetail =
   | "knowledge-preferences"
+  | "knowledge-maintenance-history"
   | "review-archives"
   | "review-memory"
   | { readonly kind: "resource"; readonly resourceId: string }

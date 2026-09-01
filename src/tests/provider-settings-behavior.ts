@@ -1906,26 +1906,42 @@ async function assertSettingsAccessibleNamesAndOverflow(): Promise<void> {
   settings.settingsTab = "providers";
   settings.settingsLanguage = "zh-CN";
   const maintenanceReportPath = "outputs/maintenance-2026-08-25.md";
+  const previousMaintenanceReportPath = "outputs/maintenance-2026-08-24.md";
   const maintenanceAt = Date.UTC(2026, 7, 25, 6, 30);
-  settings.knowledgeBase.maintenanceHistory = [{
-    date: "2026-08-25",
-    status: "success",
-    at: maintenanceAt,
-    runId: "run-settings-dashboard",
-    mode: "maintain",
-    reportPath: maintenanceReportPath,
-    completion: "partial",
-    pendingSources: ["raw/pending.md"]
-  }];
+  const previousMaintenanceAt = Date.UTC(2026, 7, 24, 6, 30);
+  settings.knowledgeBase.maintenanceHistory = [
+    {
+      date: "2026-08-25",
+      status: "success",
+      at: maintenanceAt,
+      runId: "run-settings-dashboard",
+      mode: "maintain",
+      reportPath: maintenanceReportPath,
+      completion: "partial",
+      pendingSources: ["raw/pending.md"]
+    },
+    {
+      date: "2026-08-24",
+      status: "success",
+      at: previousMaintenanceAt,
+      runId: "run-settings-dashboard-previous",
+      mode: "lint",
+      reportPath: previousMaintenanceReportPath,
+      completion: "noop"
+    }
+  ];
   const openedReports: string[] = [];
-  const reportFile = Object.assign(Object.create(TFile.prototype) as TFile, {
-    path: maintenanceReportPath
-  });
+  const reportFiles = new Map<string, TFile>([
+    [maintenanceReportPath, Object.assign(Object.create(TFile.prototype) as TFile, {
+      path: maintenanceReportPath
+    })],
+    [previousMaintenanceReportPath, Object.assign(Object.create(TFile.prototype) as TFile, {
+      path: previousMaintenanceReportPath
+    })]
+  ]);
   const app = Object.assign(new App(), {
     vault: {
-      getAbstractFileByPath: (value: string) => value === maintenanceReportPath
-        ? reportFile
-        : null
+      getAbstractFileByPath: (value: string) => reportFiles.get(value) ?? null
     },
     workspace: {
       getLeaf: () => ({
@@ -2464,17 +2480,132 @@ async function assertSettingsAccessibleNamesAndOverflow(): Promise<void> {
     true,
     "the settings Dashboard is expanded by default"
   );
-  assert.match(tab.containerEl.textContent, /维护日志/u);
+  const maintenanceNavigation = tab.containerEl.querySelector<ProviderModalTestElement>(
+    '[data-echoink-focus-key="knowledge:maintenance-history"]'
+  );
+  assert.ok(maintenanceNavigation);
+  assert.equal(maintenanceNavigation.getAttribute("aria-label"), "维护日志，查看");
+  assert.match(maintenanceNavigation.textContent, /2 条记录/u);
+  assert.equal(
+    tab.containerEl.querySelectorAll<ProviderModalTestElement>("button")
+      .some((button) => button.textContent === "查看明细"),
+    false,
+    "the Knowledge main page keeps maintenance rows and report actions inside the detail page"
+  );
   assert.match(tab.containerEl.textContent, /部分完成/u);
   assert.match(tab.containerEl.textContent, /1 项待处理/u);
-  assert.match(tab.containerEl.textContent, new RegExp(maintenanceReportPath, "u"));
+  maintenanceNavigation.focus();
+  maintenanceNavigation.click();
+  await settleMicrotasks();
+  const backToKnowledge = tab.containerEl.querySelector<ProviderModalTestElement>(
+    '[data-echoink-focus-key="settings-detail:back"]'
+  );
+  assert.ok(backToKnowledge);
+  assert.equal(
+    providerModalTestDocument.activeElement,
+    backToKnowledge,
+    "opening the maintenance log follows the existing detail-page focus convention"
+  );
+  const maintenanceDate = tab.containerEl.querySelector<ProviderModalTestElement>(
+    'input[aria-label="维护日志日期筛选"]'
+  );
+  const clearMaintenanceDate = tab.containerEl.querySelector<ProviderModalTestElement>(
+    'button[aria-label="清除日期筛选"]'
+  );
+  assert.ok(maintenanceDate);
+  assert.ok(clearMaintenanceDate);
+  assert.equal(maintenanceDate.type, "date");
+  assert.equal(clearMaintenanceDate.disabled, true);
+  const allMaintenanceText = tab.containerEl.textContent;
+  assert.ok(
+    allMaintenanceText.indexOf(maintenanceReportPath)
+      < allMaintenanceText.indexOf(previousMaintenanceReportPath),
+    "the complete maintenance history remains newest-first"
+  );
   const detailsButton = tab.containerEl
     .querySelectorAll<ProviderModalTestElement>("button")
     .find((button) => button.textContent === "查看明细");
   assert.ok(detailsButton);
-  detailsButton!.click();
+  detailsButton.click();
   await settleMicrotasks();
   assert.deepEqual(openedReports, [maintenanceReportPath]);
+
+  maintenanceDate.value = "2026-08-24";
+  maintenanceDate.onchange?.();
+  // The fixture runs requestAnimationFrame synchronously, so clear its
+  // scheduled-frame sentinel before observing the rerendered filter state.
+  tab.display();
+  await settleMicrotasks();
+  assert.match(tab.containerEl.textContent, new RegExp(previousMaintenanceReportPath, "u"));
+  assert.doesNotMatch(tab.containerEl.textContent, new RegExp(maintenanceReportPath, "u"));
+
+  const filteredDate = tab.containerEl.querySelector<ProviderModalTestElement>(
+    'input[aria-label="维护日志日期筛选"]'
+  );
+  assert.ok(filteredDate);
+  filteredDate.value = "2026-08-23";
+  filteredDate.onchange?.();
+  tab.display();
+  await settleMicrotasks();
+  assert.match(tab.containerEl.textContent, /所选日期没有维护记录/u);
+  const clearNoMatch = tab.containerEl.querySelector<ProviderModalTestElement>(
+    'button[aria-label="清除日期筛选"]'
+  );
+  assert.ok(clearNoMatch);
+  assert.equal(clearNoMatch.disabled, false);
+  clearNoMatch.click();
+  tab.display();
+  await settleMicrotasks();
+  assert.match(tab.containerEl.textContent, new RegExp(maintenanceReportPath, "u"));
+  assert.match(tab.containerEl.textContent, new RegExp(previousMaintenanceReportPath, "u"));
+  const clearedDate = tab.containerEl.querySelector<ProviderModalTestElement>(
+    'input[aria-label="维护日志日期筛选"]'
+  );
+  const clearAfterReset = tab.containerEl.querySelector<ProviderModalTestElement>(
+    'button[aria-label="清除日期筛选"]'
+  );
+  assert.ok(clearedDate);
+  assert.ok(clearAfterReset);
+  assert.equal(clearedDate.value, "");
+  assert.equal(clearAfterReset.disabled, true);
+  assert.equal(
+    providerModalTestDocument.activeElement,
+    clearedDate,
+    "clearing the date filter restores focus to the date control"
+  );
+
+  const currentBackToKnowledge = tab.containerEl.querySelector<ProviderModalTestElement>(
+    '[data-echoink-focus-key="settings-detail:back"]'
+  );
+  assert.ok(currentBackToKnowledge);
+  currentBackToKnowledge.click();
+  await settleMicrotasks();
+  const restoredMaintenanceNavigation = tab.containerEl.querySelector<ProviderModalTestElement>(
+    '[data-echoink-focus-key="knowledge:maintenance-history"]'
+  );
+  assert.ok(restoredMaintenanceNavigation);
+  assert.equal(
+    providerModalTestDocument.activeElement,
+    restoredMaintenanceNavigation,
+    "returning from the maintenance log restores focus to its main-page entry"
+  );
+  settings.knowledgeBase.maintenanceHistory = [];
+  tab.display();
+  const emptyMaintenanceNavigation = tab.containerEl.querySelector<ProviderModalTestElement>(
+    '[data-echoink-focus-key="knowledge:maintenance-history"]'
+  );
+  assert.ok(emptyMaintenanceNavigation);
+  assert.match(emptyMaintenanceNavigation.textContent, /0 条记录/u);
+  emptyMaintenanceNavigation.click();
+  await settleMicrotasks();
+  assert.match(tab.containerEl.textContent, /还没有知识库维护记录/u);
+  assert.doesNotMatch(tab.containerEl.textContent, /所选日期没有维护记录/u);
+  settings.settingsLanguage = "en";
+  tab.display();
+  assert.match(tab.containerEl.textContent, /No Knowledge maintenance runs yet/u);
+  assert.ok(tab.containerEl.querySelector('input[aria-label="Maintenance log date filter"]'));
+  assert.ok(tab.containerEl.querySelector('button[aria-label="Clear date filter"]'));
+  settings.settingsLanguage = "zh-CN";
   assert.doesNotMatch(tab.containerEl.textContent, /长期记忆|Personal Memory/u);
   for (const retiredAction of ["导出", "恢复", "忘记"]) {
     assert.equal(
