@@ -546,6 +546,7 @@ export class EchoInkHomeView extends ItemView {
       ? this.data?.graph.nodeById.get(this.selectedGraphNodeId)
       : null;
     const sidebarItems = this.graphController.getSidebarItems();
+    this.graphRelatedEl.toggleClass("is-note", !global && Boolean(node));
     if (global) {
       this.graphSelectionEl.createEl("strong", { text: "全局主题簇" });
       this.graphSelectionEl.createSpan({ text: "按顶层目录聚合当前筛选结果" });
@@ -572,28 +573,34 @@ export class EchoInkHomeView extends ItemView {
       });
       return;
     }
-    const current = this.graphSelectionEl.createDiv({ cls: "echoink-home-graph-related-row is-current" });
+    const current = this.graphSelectionEl.createDiv({ cls: "echoink-home-graph-related-row is-current is-note" });
     const currentFocus = current.createEl("button", {
       cls: "echoink-home-graph-related-focus",
-      text: formatGraphRelationLabel(node.cluster, node.title),
+      text: `当前：${formatGraphRelationLabel(node.cluster, node.title)}`,
       attr: { type: "button", "aria-current": "true", title: node.path }
     });
     currentFocus.onclick = () => this.graphController.focusNode(node.id);
     this.renderGraphPopoutButton(current, node.id, node.title);
-    this.graphRelatedEl.createEl("strong", { text: `关联笔记 ${sidebarItems.length}` });
     if (!sidebarItems.length) {
       this.graphRelatedEl.createSpan({ cls: "echoink-home-empty", text: "当前节点没有已解析关联。" });
       return;
     }
-    const list = this.graphRelatedEl.createEl("ul");
+    const list = this.graphRelatedEl.createEl("ul", {
+      attr: { "aria-label": `关联笔记 ${sidebarItems.length}` }
+    });
     for (const itemData of sidebarItems) {
-      const item = list.createEl("li");
+      const item = list.createEl("li", { cls: "is-note" });
       const focus = item.createEl("button", {
         cls: "echoink-home-graph-related-focus",
         attr: { type: "button", title: itemData.detail },
         text: formatGraphRelationLabel(itemData.detail, itemData.title)
       });
       focus.onclick = () => this.graphController.focusNode(itemData.noteId);
+      item.createSpan({
+        cls: "echoink-home-graph-related-cluster",
+        text: itemData.detail,
+        attr: { "aria-hidden": "true" }
+      });
       this.renderGraphPopoutButton(item, itemData.noteId, itemData.title);
     }
   }

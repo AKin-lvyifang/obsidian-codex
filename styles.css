@@ -8470,6 +8470,10 @@ button.echoink-settings-navigation-row:focus-visible {
   font-size: 12px;
 }
 
+.echoink-home-graph-related.is-note {
+  margin-top: 19px;
+}
+
 .echoink-home-graph-related > strong {
   color: var(--echoink-home-ink);
   font-size: 12px;
@@ -8477,7 +8481,7 @@ button.echoink-settings-navigation-row:focus-visible {
 
 .echoink-home-graph-related ul {
   display: grid;
-  gap: 5px;
+  gap: 2px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -8486,13 +8490,40 @@ button.echoink-settings-navigation-row:focus-visible {
 .echoink-home-graph-related li,
 .echoink-home-graph-related-row {
   display: grid;
+  width: 100%;
+  min-width: 0;
   grid-template-columns: minmax(0, 1fr) 28px;
-  gap: 4px;
+  gap: 8px;
   align-items: center;
 }
 
 .echoink-home-graph-related li.is-cluster {
   grid-template-columns: minmax(0, 1fr);
+}
+
+.echoink-home-graph-related li.is-note {
+  min-height: 48px;
+  grid-template-columns: minmax(0, 1fr) clamp(56px, 24%, 72px) 28px;
+  margin-inline-start: 16px;
+  width: calc(100% - 16px);
+}
+
+.echoink-home-graph-related-row.is-note {
+  grid-template-columns: minmax(0, 1fr) 28px;
+}
+
+.echoink-home-graph-related li.is-note > .echoink-home-graph-related-focus,
+.echoink-home-graph-related-row.is-note > .echoink-home-graph-related-focus {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-start;
+  text-align: left;
+}
+
+.echoink-home-graph-related li.is-note > .echoink-home-graph-related-focus {
+  font-size: 14px;
+  line-height: 20px;
 }
 
 .echoink-home-graph-related button,
@@ -8521,9 +8552,21 @@ button.echoink-settings-navigation-row:focus-visible {
 }
 
 .echoink-home-graph-related-row.is-current .echoink-home-graph-related-focus {
-  color: var(--echoink-home-ink);
+  color: var(--echoink-home-muted);
   font-size: 13px;
   font-weight: 600;
+  line-height: 20px;
+}
+
+.echoink-home-graph-related-cluster {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--echoink-home-faint);
+  font-size: 13px;
+  line-height: 20px;
+  text-align: end;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .echoink-home-graph-related-focus span,
@@ -8545,6 +8588,7 @@ button.echoink-settings-navigation-row:focus-visible {
 .echoink-home-graph-related-row .echoink-home-graph-related-open {
   display: grid;
   width: 28px;
+  min-width: 28px;
   padding: 0;
   color: var(--echoink-home-faint);
   place-items: center;
@@ -9651,6 +9695,16 @@ button.echoink-settings-navigation-row:focus-visible {
 
   .echoink-home-graph-fallback {
     text-align: start;
+  }
+
+  .echoink-home-graph-related li.is-note {
+    grid-template-columns: minmax(0, 1fr) 28px;
+    width: 100%;
+    margin-inline-start: 0;
+  }
+
+  .echoink-home-graph-related li.is-note .echoink-home-graph-related-cluster {
+    display: none;
   }
 
   .echoink-home-graph-frame {
