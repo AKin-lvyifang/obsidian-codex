@@ -8036,18 +8036,17 @@ button.echoink-settings-navigation-row:focus-visible {
 }
 
 .echoink-home-amicro-title {
-  display: inline-flex;
+  display: block;
   width: 100%;
   min-width: 0;
   max-width: 100%;
-  flex-wrap: wrap;
-  align-items: center;
   color: var(--echoink-home-ink);
   font-size: clamp(21px, 2.35vw, 30px);
   font-weight: 640;
   line-height: 1.2;
   letter-spacing: -0.035em;
   overflow-wrap: anywhere;
+  text-wrap: balance;
 }
 
 .echoink-home-amicro-title > span {
@@ -8070,7 +8069,12 @@ button.echoink-settings-navigation-row:focus-visible {
   color: rgb(var(--glow-vm));
 }
 
+.echoink-home-conversation-action.is-revisit .echoink-home-amicro-title > span:first-child {
+  display: inline;
+}
+
 .echoink-home-amicro-cursor {
+  display: inline-block;
   width: 2px;
   height: 1em;
   margin-left: 6px;
@@ -8097,8 +8101,8 @@ button.echoink-settings-navigation-row:focus-visible {
   display: block;
   width: clamp(42px, 5vw, 58px);
   height: clamp(42px, 5vw, 58px);
-  background: var(--echoink-home-teal-deep);
-  box-shadow: 0 12px 30px color-mix(in srgb, var(--echoink-home-teal) 20%, transparent);
+  background: rgb(var(--glow-vd));
+  box-shadow: 0 12px 30px rgba(var(--glow-vd), 0.2);
 }
 
 .echoink-home-amicro-origami {

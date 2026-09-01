@@ -349,6 +349,10 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
   assert.match(styles, /\.echoink-home-conversation-action\.is-daily \.echoink-home-amicro-title\s*\{[^}]*color: rgb\(var\(--glow-vd\)\);/u);
   assert.match(styles, /\.echoink-home-conversation-action\.is-revisit \.echoink-home-amicro-title\s*\{[^}]*color: rgb\(var\(--glow-vm\)\);/u);
   assert.match(styles, /\.echoink-home-conversation-action\.is-daily \.echoink-home-amicro-title > span\s*\{[^}]*opacity: 1 !important;/u);
+  assert.match(styles, /\.echoink-home-amicro-title\s*\{[^}]*display: block;[^}]*text-wrap: balance;/u);
+  assert.match(styles, /\.echoink-home-conversation-action\.is-revisit \.echoink-home-amicro-title > span:first-child\s*\{[^}]*display: inline;/u);
+  assert.match(styles, /\.echoink-home-amicro-cursor\s*\{[^}]*display: inline-block;/u);
+  assert.match(styles, /\.echoink-home-amicro-morphing-shape\s*\{[^}]*background: rgb\(var\(--glow-vd\)\);[^}]*box-shadow: 0 12px 30px rgba\(var\(--glow-vd\), 0\.2\);/u);
   assert.match(textShimmerWave, /y: \[0, -2, 0\]/u);
   assert.match(styles, /@container echoink-home \(max-width: 800px\)[\s\S]*\.echoink-home-conversation-action\s*\{[^}]*gap: 14px;[^}]*padding: 18px;/u);
   assert.match(styles, /@container echoink-home \(max-width: 720px\)[\s\S]*\.echoink-home-conversation-actions\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\);/u);
