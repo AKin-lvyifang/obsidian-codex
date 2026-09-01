@@ -69,6 +69,7 @@ export class EchoInkHomeView extends ItemView {
   private graphRuntimeEl!: HTMLElement;
   private graphSelectionEl!: HTMLElement;
   private graphRelatedEl!: HTMLElement;
+  private graphSelectionStatusEl!: HTMLElement;
   private graphScopeButtons = new Map<"local" | "global", HTMLButtonElement>();
   private graphHopsButtons = new Map<"1" | "2" | "3", HTMLButtonElement>();
   private graphNodesStatEl!: HTMLElement;
@@ -320,6 +321,10 @@ export class EchoInkHomeView extends ItemView {
     legend.createSpan({ cls: "is-three-hop", text: "3 跳邻居" });
 
     const selectionSection = side.createDiv({ cls: "echoink-home-graph-side-section is-selection" });
+    this.graphSelectionStatusEl = selectionSection.createDiv({
+      cls: "echoink-home-graph-selection-status",
+      attr: { role: "status", "aria-live": "polite", "aria-atomic": "true" }
+    });
     this.graphSelectionEl = selectionSection.createDiv({ cls: "echoink-home-graph-selection" });
     this.graphRelatedEl = selectionSection.createDiv({ cls: "echoink-home-graph-related" });
   }
@@ -548,6 +553,7 @@ export class EchoInkHomeView extends ItemView {
     const sidebarItems = this.graphController.getSidebarItems();
     this.graphRelatedEl.toggleClass("is-note", !global && Boolean(node));
     if (global) {
+      this.graphSelectionStatusEl.setText(`全局主题簇，共 ${sidebarItems.length} 个主题簇。`);
       this.graphSelectionEl.createEl("strong", { text: "全局主题簇" });
       this.graphSelectionEl.createSpan({ text: "按顶层目录聚合当前筛选结果" });
       this.graphRelatedEl.createEl("strong", { text: `主题簇 ${sidebarItems.length}` });
@@ -565,18 +571,22 @@ export class EchoInkHomeView extends ItemView {
       return;
     }
     if (!node) {
+      const emptyMessage = result.totalCount
+        ? "当前筛选没有匹配笔记。可取消一项条件或清空筛选。"
+        : "当前 Vault 还没有 Markdown 笔记。";
+      this.graphSelectionStatusEl.setText(emptyMessage);
       this.graphSelectionEl.createSpan({
         cls: "echoink-home-empty",
-        text: result.totalCount
-          ? "当前筛选没有匹配笔记。可取消一项条件或清空筛选。"
-          : "当前 Vault 还没有 Markdown 笔记。"
+        text: emptyMessage
       });
       return;
     }
+    const currentLabel = formatGraphRelationLabel(node.cluster, node.title);
+    this.graphSelectionStatusEl.setText(`当前：${currentLabel}。关联笔记 ${sidebarItems.length} 篇。`);
     const current = this.graphSelectionEl.createDiv({ cls: "echoink-home-graph-related-row is-current is-note" });
     const currentFocus = current.createEl("button", {
       cls: "echoink-home-graph-related-focus",
-      text: `当前：${formatGraphRelationLabel(node.cluster, node.title)}`,
+      text: `当前： ${currentLabel}`,
       attr: { type: "button", "aria-current": "true", title: node.path }
     });
     currentFocus.onclick = () => this.graphController.focusNode(node.id);
@@ -590,12 +600,17 @@ export class EchoInkHomeView extends ItemView {
     });
     for (const itemData of sidebarItems) {
       const item = list.createEl("li", { cls: "is-note" });
+      const relationLabel = formatGraphRelationLabel(itemData.detail, itemData.title);
       const focus = item.createEl("button", {
         cls: "echoink-home-graph-related-focus",
-        attr: { type: "button", title: itemData.detail },
-        text: formatGraphRelationLabel(itemData.detail, itemData.title)
+        attr: { type: "button", title: relationLabel },
+        text: relationLabel
       });
-      focus.onclick = () => this.graphController.focusNode(itemData.noteId);
+      focus.onclick = () => {
+        const shouldRestoreFocus = document.activeElement === focus;
+        const selected = this.graphController.focusNode(itemData.noteId);
+        if (selected && shouldRestoreFocus) this.focusCurrentGraphNode();
+      };
       item.createSpan({
         cls: "echoink-home-graph-related-cluster",
         text: itemData.detail,
@@ -603,6 +618,10 @@ export class EchoInkHomeView extends ItemView {
       });
       this.renderGraphPopoutButton(item, itemData.noteId, itemData.title);
     }
+  }
+
+  private focusCurrentGraphNode(): void {
+    this.graphSelectionEl.querySelector<HTMLButtonElement>('button[aria-current="true"]')?.focus();
   }
 
   private renderGraphPopoutButton(container: HTMLElement, noteId: string, title: string): void {
