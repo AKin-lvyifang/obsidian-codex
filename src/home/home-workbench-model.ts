@@ -5,78 +5,9 @@ export interface HomeVaultFileRecord {
   path: string;
   title: string;
   folder: string;
-  ctime: number;
   mtime: number;
-  tags: string[];
-  properties: Record<string, string[]>;
   firstImagePath?: string;
   firstImageUrl?: string;
-}
-
-export interface HomeGraphNode extends HomeVaultFileRecord {
-  id: string;
-  cluster: string;
-  degree: number;
-}
-
-export interface HomeGraphLink {
-  source: string;
-  target: string;
-  count: number;
-  directions: HomeGraphLinkDirection[];
-}
-
-export interface HomeGraphLinkDirection {
-  source: string;
-  target: string;
-  count: number;
-}
-
-export interface HomePropertyFilter {
-  key: string;
-  value?: string;
-}
-
-export interface HomeGraphFilterOptions {
-  folders: string[];
-  properties: HomePropertyFilter[];
-  tags: string[];
-}
-
-export interface HomeGraphData {
-  nodes: HomeGraphNode[];
-  links: HomeGraphLink[];
-  nodeById: Map<string, HomeGraphNode>;
-  options: HomeGraphFilterOptions;
-}
-
-export interface HomeGraphFilters {
-  search: string;
-  folders: string[];
-  properties: HomePropertyFilter[];
-  tags: string[];
-}
-
-export interface HomeGraphFilterResult {
-  nodes: HomeGraphNode[];
-  links: HomeGraphLink[];
-  matchedIds: Set<string>;
-  totalCount: number;
-}
-
-export interface HomeGraphAggregateNode {
-  id: string;
-  title: string;
-  cluster: string;
-  count: number;
-  degree: number;
-  noteIds: string[];
-}
-
-export interface HomeGraphAggregateResult {
-  nodes: HomeGraphAggregateNode[];
-  links: HomeGraphLink[];
-  totalNotes: number;
 }
 
 export interface HomeActivityDay {
@@ -111,13 +42,6 @@ export interface HomeContributionGrid {
 
 export const HOME_CONTRIBUTION_WEEKS = 53;
 export const HOME_CONTRIBUTION_DAYS = 7;
-
-export const EMPTY_HOME_GRAPH_FILTERS: HomeGraphFilters = Object.freeze({
-  search: "",
-  folders: [],
-  properties: [],
-  tags: []
-});
 
 export interface HomeJournalDay {
   date: string;
@@ -227,198 +151,6 @@ export const BUILT_IN_JOURNAL_TEMPLATES: readonly JournalTemplateDefinition[] = 
     content: "# {{date}}\n"
   }
 ]);
-
-export function buildHomeGraph(
-  records: readonly HomeVaultFileRecord[],
-  resolvedLinks: Readonly<Record<string, Readonly<Record<string, number>>>>
-): HomeGraphData {
-  const nodes = records.map<HomeGraphNode>((record) => ({
-    ...record,
-    id: record.path,
-    cluster: topLevelFolder(record.path),
-    degree: 0,
-    tags: uniqueNormalized(record.tags),
-    properties: normalizeProperties(record.properties)
-  }));
-  const nodeById = new Map(nodes.map((node) => [node.id, node]));
-  const linkByPair = new Map<string, HomeGraphLink>();
-  const neighbors = new Map(nodes.map((node) => [node.id, new Set<string>()]));
-  for (const [source, targets] of Object.entries(resolvedLinks)) {
-    if (!nodeById.has(source)) continue;
-    for (const [target, count] of Object.entries(targets)) {
-      if (!nodeById.has(target) || source === target || count <= 0) continue;
-      const [left, right] = source < target ? [source, target] : [target, source];
-      const identity = `${left}\0${right}`;
-      const link = linkByPair.get(identity) ?? {
-        source: left,
-        target: right,
-        count: 0,
-        directions: []
-      };
-      link.count += count;
-      link.directions.push({ source, target, count });
-      linkByPair.set(identity, link);
-      neighbors.get(source)?.add(target);
-      neighbors.get(target)?.add(source);
-    }
-  }
-  for (const node of nodes) node.degree = neighbors.get(node.id)?.size ?? 0;
-  return {
-    nodes,
-    links: [...linkByPair.values()],
-    nodeById,
-    options: buildHomeGraphFilterOptions(nodes)
-  };
-}
-
-export function filterHomeGraph(data: HomeGraphData, filters: HomeGraphFilters): HomeGraphFilterResult {
-  const search = normalizeText(filters.search);
-  const folders = uniqueNormalized(filters.folders);
-  const tags = uniqueNormalized(filters.tags);
-  const properties = filters.properties
-    .map((filter) => ({ key: normalizeText(filter.key), value: normalizeText(filter.value ?? "") }))
-    .filter((filter) => filter.key);
-  const nodes = data.nodes.filter((node) => {
-    if (search && !normalizeText(`${node.title} ${node.path}`).includes(search)) return false;
-    if (folders.length && !folders.includes(normalizeText(node.folder))) return false;
-    if (tags.length && !tags.some((tag) => node.tags.includes(tag))) return false;
-    if (properties.length && !properties.some((filter) => {
-      const values = node.properties[filter.key];
-      return Boolean(values && (!filter.value || values.includes(filter.value)));
-    })) return false;
-    return true;
-  });
-  const matchedIds = new Set(nodes.map((node) => node.id));
-  const links = data.links.filter((link) => matchedIds.has(link.source) && matchedIds.has(link.target));
-  return { nodes, links, matchedIds, totalCount: data.nodes.length };
-}
-
-/** Select an undirected, bounded neighborhood for the local Canvas view. */
-export function selectHomeGraphNeighborhood(
-  nodes: readonly HomeGraphNode[],
-  links: readonly HomeGraphLink[],
-  centerId: string | null,
-  hops: 1 | 2 | 3,
-  maxNodes = 260
-): HomeGraphFilterResult {
-  const nodeById = new Map(nodes.map((node) => [node.id, node]));
-  const fallbackCenter = [...nodes].sort((left, right) => right.degree - left.degree || right.mtime - left.mtime)[0]?.id;
-  const startId = centerId && nodeById.has(centerId) ? centerId : fallbackCenter;
-  if (!startId) return { nodes: [], links: [], matchedIds: new Set(), totalCount: nodes.length };
-  const adjacency = new Map<string, string[]>();
-  for (const link of links) {
-    if (!nodeById.has(link.source) || !nodeById.has(link.target)) continue;
-    adjacency.set(link.source, [...(adjacency.get(link.source) ?? []), link.target]);
-    adjacency.set(link.target, [...(adjacency.get(link.target) ?? []), link.source]);
-  }
-  const distance = new Map<string, number>([[startId, 0]]);
-  const queue = [startId];
-  let head = 0;
-  while (head < queue.length) {
-    const current = queue[head++];
-    const depth = distance.get(current) ?? 0;
-    if (depth >= hops) continue;
-    for (const neighbor of adjacency.get(current) ?? []) {
-      if (distance.has(neighbor)) continue;
-      distance.set(neighbor, depth + 1);
-      queue.push(neighbor);
-    }
-  }
-  const limit = Math.max(1, Math.min(260, Math.floor(maxNodes)));
-  const orderedIds = queue.slice(0, limit);
-  const matchedIds = new Set(orderedIds);
-  return {
-    nodes: orderedIds.map((id) => nodeById.get(id)).filter((node): node is HomeGraphNode => Boolean(node)),
-    links: links.filter((link) => matchedIds.has(link.source) && matchedIds.has(link.target)),
-    matchedIds,
-    totalCount: nodes.length
-  };
-}
-
-/** Collapse the filtered graph into top-level-folder nodes for the global view. */
-export function aggregateHomeGraph(
-  nodes: readonly HomeGraphNode[],
-  links: readonly HomeGraphLink[]
-): HomeGraphAggregateResult {
-  const groups = new Map<string, HomeGraphAggregateNode>();
-  const clusterByNode = new Map<string, string>();
-  for (const node of nodes) {
-    const cluster = node.cluster || "根目录";
-    clusterByNode.set(node.id, cluster);
-    const group = groups.get(cluster) ?? {
-      id: `cluster:${cluster}`,
-      title: cluster,
-      cluster,
-      count: 0,
-      degree: 0,
-      noteIds: []
-    };
-    group.count += 1;
-    group.noteIds.push(node.id);
-    group.degree = group.noteIds.length;
-    groups.set(cluster, group);
-  }
-  const linkCounts = new Map<string, HomeGraphLink>();
-  for (const link of links) {
-    const sourceCluster = clusterByNode.get(link.source);
-    const targetCluster = clusterByNode.get(link.target);
-    if (!sourceCluster || !targetCluster || sourceCluster === targetCluster) continue;
-    const [left, right] = [sourceCluster, targetCluster].sort();
-    const identity = `${left}\0${right}`;
-    const current = linkCounts.get(identity) ?? {
-      source: `cluster:${left}`,
-      target: `cluster:${right}`,
-      count: 0,
-      directions: []
-    };
-    current.count += link.count;
-    current.directions.push(...link.directions);
-    linkCounts.set(identity, current);
-  }
-  return {
-    nodes: [...groups.values()].sort((left, right) => right.count - left.count || left.title.localeCompare(right.title)),
-    links: [...linkCounts.values()],
-    totalNotes: nodes.length
-  };
-}
-
-export function hasActiveHomeGraphFilters(filters: HomeGraphFilters): boolean {
-  return Boolean(
-    filters.search.trim()
-    || filters.folders.length
-    || filters.properties.length
-    || filters.tags.length
-  );
-}
-
-export function toggleHomeFilterValue(current: readonly string[], value: string, checked: boolean): string[] {
-  if (!value.trim()) return [...current];
-  if (checked) return [...new Set([...current, value])];
-  return current.filter((item) => item !== value);
-}
-
-export function toggleHomePropertyFilter(
-  current: readonly HomePropertyFilter[],
-  value: HomePropertyFilter,
-  checked: boolean
-): HomePropertyFilter[] {
-  const identity = homePropertyFilterIdentity(value);
-  if (checked && !current.some((item) => homePropertyFilterIdentity(item) === identity)) {
-    return [...current, value];
-  }
-  if (!checked) return current.filter((item) => homePropertyFilterIdentity(item) !== identity);
-  return [...current];
-}
-
-export function homePropertyFilterIdentity(filter: HomePropertyFilter): string {
-  return `${normalizeText(filter.key)}\0${normalizeText(filter.value ?? "")}`;
-}
-
-export function homeGraphNodeVisualValue(node: Pick<HomeGraphNode, "degree" | "mtime">, now = Date.now()): number {
-  const ageDays = Math.max(0, now - node.mtime) / 86_400_000;
-  const recencyBoost = ageDays < 7 ? 2.2 : ageDays < 30 ? 1.2 : ageDays < 90 ? 0.5 : 0;
-  return Math.max(2, 2 + Math.sqrt(node.degree + 1) + recencyBoost);
-}
 
 export function buildHomeActivityDays(
   records: readonly Pick<HomeVaultFileRecord, "mtime">[],
@@ -654,13 +386,6 @@ export function applyJournalTemplate(content: string, date: Date): string {
   return content.replace(/\{\{(date|time|datetime|title)\}\}/gu, (_, key: keyof typeof values) => values[key]);
 }
 
-export function sortRecentHomeRecords(records: readonly HomeVaultFileRecord[], limit = 8): HomeVaultFileRecord[] {
-  return records
-    .filter((record) => !isHomeSystemPath(record.path))
-    .sort((left, right) => right.mtime - left.mtime || left.path.localeCompare(right.path))
-    .slice(0, Math.max(0, limit));
-}
-
 export function mostRecentRecordInFolder(records: readonly HomeVaultFileRecord[], folder: string): HomeVaultFileRecord | null {
   const normalized = normalizeText(folder);
   return records
@@ -685,57 +410,6 @@ export function dateKey(date: Date): string {
 
 function normalizeText(value: string): string {
   return value.trim().replace(/^#/u, "").toLocaleLowerCase();
-}
-
-function normalizeProperties(properties: Record<string, string[]>): Record<string, string[]> {
-  return Object.fromEntries(
-    Object.entries(properties)
-      .map(([key, values]) => [normalizeText(key), uniqueNormalized(values)] as const)
-      .filter(([key, values]) => key && values.length)
-  );
-}
-
-function buildHomeGraphFilterOptions(nodes: readonly HomeGraphNode[]): HomeGraphFilterOptions {
-  const folders = new Set<string>();
-  const tags = new Set<string>();
-  const propertyKeys = new Set<string>();
-  const propertyValues = new Map<string, Set<string>>();
-  for (const node of nodes) {
-    folders.add(node.folder);
-    node.tags.forEach((tag) => tags.add(tag));
-    for (const [key, values] of Object.entries(node.properties)) {
-      propertyKeys.add(key);
-      const entries = propertyValues.get(key) ?? new Set<string>();
-      values.forEach((value) => entries.add(value));
-      propertyValues.set(key, entries);
-    }
-  }
-  const properties: HomePropertyFilter[] = [];
-  for (const key of [...propertyKeys].sort(localeCompareHome)) {
-    properties.push({ key });
-    for (const value of [...(propertyValues.get(key) ?? [])].sort(localeCompareHome)) {
-      properties.push({ key, value });
-    }
-  }
-  return {
-    folders: [...folders].sort(localeCompareHome),
-    properties,
-    tags: [...tags].sort(localeCompareHome)
-  };
-}
-
-function uniqueNormalized(values: readonly string[]): string[] {
-  return [...new Set(values.map(normalizeText).filter(Boolean))];
-}
-
-function topLevelFolder(path: string): string {
-  const normalized = path.replace(/\\/g, "/");
-  if (!normalized.includes("/")) return "根目录";
-  return normalized.split("/")[0] || "根目录";
-}
-
-function localeCompareHome(left: string, right: string): number {
-  return left.localeCompare(right, "zh-Hans");
 }
 
 function sanitizeTemplateName(value: string): string {
@@ -768,11 +442,4 @@ function activityLevel(count: number): HomeActivityDay["level"] {
 
 function timeKey(date: Date): string {
   return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
-}
-
-function isHomeSystemPath(path: string): boolean {
-  const normalized = path.replace(/\\/g, "/").toLocaleLowerCase();
-  return normalized.startsWith("templates/")
-    || normalized.includes("/.codex")
-    || /(?:^|\/)(?:index|00-索引)\.md$/u.test(normalized);
 }

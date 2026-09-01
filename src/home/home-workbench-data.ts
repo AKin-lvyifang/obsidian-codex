@@ -1,23 +1,21 @@
-import { App, TFile, TFolder, getAllTags, normalizePath } from "obsidian";
+import { App, TFile, TFolder, normalizePath } from "obsidian";
 import {
   BUILT_IN_JOURNAL_TEMPLATES,
   HOME_ENTRY_IDS,
   JOURNAL_TEMPLATE_DIRECTORY,
   applyJournalTemplate,
   buildHomeActivityDays,
-  buildHomeGraph,
   buildHomeJournalDays,
   countRecordsInFolder,
   importedTemplatePath,
   isKnowledgeBaseReviewPath,
+  journalDateFromPath,
   journalPathForDate,
   mostRecentRecordInFolder,
   nextAvailableImportedTemplatePath,
   parseImportedJournalTemplate,
-  sortRecentHomeRecords,
   type HomeActivityDay,
   type HomeEntryId,
-  type HomeGraphData,
   type HomeJournalDay,
   type HomeVaultFileRecord,
   type ImportedJournalTemplate,
@@ -42,10 +40,8 @@ export interface HomeCustomTemplateSummary {
 
 export interface HomeWorkbenchData {
   records: HomeVaultFileRecord[];
-  graph: HomeGraphData;
   activity: HomeActivityDay[];
   journalDays: HomeJournalDay[];
-  recentThoughts: HomeVaultFileRecord[];
   entries: HomeEntrySummary[];
   customTemplates: HomeCustomTemplateSummary[];
 }
@@ -71,17 +67,13 @@ export class HomeWorkbenchDataService {
 
   async build(visibleMonth = new Date()): Promise<HomeWorkbenchData> {
     const records = this.app.vault.getMarkdownFiles().map((file) => this.recordForFile(file));
-    const graph = buildHomeGraph(records, this.app.metadataCache.resolvedLinks);
     const activity = buildHomeActivityDays(records, { now: new Date(), days: 371 });
     const journalDays = buildHomeJournalDays(records, activity, visibleMonth);
-    const recentThoughts = sortRecentHomeRecords(records, 10);
     const customTemplates = this.listCustomTemplates();
     return {
       records,
-      graph,
       activity,
       journalDays,
-      recentThoughts,
       entries: buildEntrySummaries(records),
       customTemplates
     };
@@ -144,13 +136,9 @@ export class HomeWorkbenchDataService {
   }
 
   private recordForFile(file: TFile): HomeVaultFileRecord {
-    const cache = this.app.metadataCache.getFileCache(file);
-    const properties: Record<string, string[]> = {};
-    for (const [key, value] of Object.entries(cache?.frontmatter ?? {})) {
-      if (key === "position") continue;
-      const values = flattenPropertyValues(value);
-      if (values.length) properties[key] = values;
-    }
+    const cache = journalDateFromPath(file.path)
+      ? this.app.metadataCache.getFileCache(file)
+      : null;
     const imageFile = (cache?.embeds ?? [])
       .filter((embed) => IMAGE_EXTENSION.test(embed.link.split(/[?#]/u)[0] ?? ""))
       .map((embed) => this.app.metadataCache.getFirstLinkpathDest(embed.link, file.path))
@@ -159,10 +147,7 @@ export class HomeWorkbenchDataService {
       path: file.path,
       title: file.basename,
       folder: file.parent?.path || "根目录",
-      ctime: file.stat.ctime,
       mtime: file.stat.mtime,
-      tags: cache ? (getAllTags(cache) ?? []) : [],
-      properties,
       ...(imageFile instanceof TFile
         ? {
           firstImagePath: imageFile.path,
@@ -215,20 +200,4 @@ function buildEntrySummaries(records: readonly HomeVaultFileRecord[]): HomeEntry
       targetPath: wikiIndex?.path ?? recent?.path ?? review?.path
     };
   });
-}
-
-function flattenPropertyValues(value: unknown): string[] {
-  if (value === null || value === undefined) return [];
-  if (Array.isArray(value)) return value.flatMap(flattenPropertyValues);
-  if (typeof value === "object") {
-    try {
-      const serialized = JSON.stringify(value);
-      return serialized === undefined ? [] : [serialized];
-    } catch {
-      return [];
-    }
-  }
-  if (typeof value === "string") return [value];
-  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") return [String(value)];
-  return [];
 }

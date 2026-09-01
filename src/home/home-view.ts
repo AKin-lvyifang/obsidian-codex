@@ -7,32 +7,19 @@ import {
   type HomeWorkbenchData
 } from "./home-workbench-data";
 import {
-  EMPTY_HOME_GRAPH_FILTERS,
   HOME_CONTRIBUTION_DAYS,
   HOME_CONTRIBUTION_WEEKS,
   buildHomeContributionGrid,
   buildHomeJournalDays,
   dateKey,
-  hasActiveHomeGraphFilters,
-  homePropertyFilterIdentity,
   journalPathForDate,
-  mergeHomeActivityDays,
-  toggleHomeFilterValue,
-  toggleHomePropertyFilter,
-  type HomeGraphFilters,
-  type HomePropertyFilter,
+  mergeHomeActivityDays
 } from "./home-workbench-model";
-import {
-  HomeGraphController,
-  type HomeGraphFallback,
-  type HomeGraphRuntimeStats
-} from "./home-graph-controller";
 import {
   createHomeBentoIsland,
   type HomeBentoDetailNode,
   type HomeBentoIsland
 } from "./home-bento-island";
-import { createHomeRecentIsland, type HomeRecentIsland } from "./home-recent-island";
 import { JournalTemplateModal } from "./journal-template-modal";
 
 export const VIEW_TYPE_ECHOINK_HOME = "codex-echoink-home";
@@ -53,54 +40,18 @@ export class EchoInkHomeView extends ItemView {
   private loading = false;
   private error = "";
   private calendarMonthOffset = 0;
-  private graphFilters: HomeGraphFilters = cloneGraphFilters(EMPTY_HOME_GRAPH_FILTERS);
-  private selectedGraphNodeId: string | null = null;
-  private graphFallback: HomeGraphFallback = "none";
-  private graphFallbackReason = "";
-  private readonly graphController: HomeGraphController;
 
   private pageEl!: HTMLElement;
   private headerStatusEl!: HTMLElement;
-  private overviewEl!: HTMLElement;
-  private graphFiltersEl!: HTMLElement;
-  private graphCountEl!: HTMLElement;
-  private graphFallbackEl!: HTMLElement;
-  private graphRuntimeHudEl!: HTMLElement;
-  private graphRuntimeEl!: HTMLElement;
-  private graphSelectionEl!: HTMLElement;
-  private graphRelatedEl!: HTMLElement;
-  private graphSelectionStatusEl!: HTMLElement;
-  private graphScopeButtons = new Map<"local" | "global", HTMLButtonElement>();
-  private graphHopsButtons = new Map<"1" | "2" | "3", HTMLButtonElement>();
-  private graphNodesStatEl!: HTMLElement;
-  private graphLinksStatEl!: HTMLElement;
-  private graphTotalStatEl!: HTMLElement;
-  private graphFpsStatEl!: HTMLElement;
-  private recentEl!: HTMLElement;
-  private recentIsland: HomeRecentIsland | null = null;
   private entriesEl!: HTMLElement;
   private bentoIsland: HomeBentoIsland | null = null;
   private heatmapEl!: HTMLElement;
   private calendarEl!: HTMLElement;
-  private graphRefreshTimer: number | null = null;
+  private homeRefreshTimer: number | null = null;
 
   constructor(leaf: WorkspaceLeaf, private readonly plugin: CodexForObsidianPlugin) {
     super(leaf);
     this.dataService = new HomeWorkbenchDataService(plugin.app);
-    this.graphController = new HomeGraphController({
-      onSelect: (nodeId) => {
-        this.selectedGraphNodeId = nodeId;
-        this.renderGraphSelection();
-      },
-      onFallbackChange: (fallback, reason) => {
-        this.graphFallback = fallback;
-        this.graphFallbackReason = reason;
-        this.renderGraphState();
-      },
-      onStatsChange: (stats) => {
-        this.renderGraphRuntimeStats(stats);
-      }
-    });
   }
 
   getViewType(): string {
@@ -118,35 +69,16 @@ export class EchoInkHomeView extends ItemView {
   async onOpen(): Promise<void> {
     this.contentEl.addClass("codex-home-view", "echoink-home-view");
     this.renderShell();
-    this.registerDomEvent(document, "visibilitychange", () => {
-      this.pageEl.toggleClass("is-document-hidden", document.visibilityState === "hidden");
-    });
-    this.registerDomEvent(document, "pointerdown", (event) => {
-      if (!(event.target instanceof Node)) return;
-      const openMenu = this.graphFiltersEl.querySelector<HTMLDetailsElement>(".echoink-home-graph-filter[open]");
-      if (!openMenu || openMenu.contains(event.target)) return;
-      this.closeGraphFilterMenus();
-    });
-    this.registerDomEvent(document, "keydown", (event) => {
-      if (event.key !== "Escape" || !this.closeGraphFilterMenus(true)) return;
-      event.preventDefault();
-    });
-    this.registerEvent(this.app.metadataCache.on("resolved", () => this.scheduleGraphRefresh()));
-    this.registerEvent(this.app.vault.on("rename", () => this.scheduleGraphRefresh()));
-    this.registerEvent(this.app.vault.on("delete", () => this.scheduleGraphRefresh()));
-    this.registerEvent(this.app.workspace.on("css-change", () => this.graphController.refreshTheme()));
-    await this.graphController.mount(this.graphRuntimeEl);
+    this.registerEvent(this.app.vault.on("rename", () => this.scheduleHomeRefresh()));
+    this.registerEvent(this.app.vault.on("delete", () => this.scheduleHomeRefresh()));
     await this.refresh();
   }
 
   async onClose(): Promise<void> {
-    if (this.graphRefreshTimer !== null) window.clearTimeout(this.graphRefreshTimer);
-    this.graphRefreshTimer = null;
-    this.recentIsland?.unmount();
-    this.recentIsland = null;
+    if (this.homeRefreshTimer !== null) window.clearTimeout(this.homeRefreshTimer);
+    this.homeRefreshTimer = null;
     this.bentoIsland?.unmount();
     this.bentoIsland = null;
-    this.graphController.dispose();
     this.contentEl.removeClass("codex-home-view", "echoink-home-view");
     this.contentEl.empty();
   }
@@ -178,17 +110,15 @@ export class EchoInkHomeView extends ItemView {
     }
     this.loading = false;
     this.renderHeaderState();
-    this.renderOverview();
-    this.renderRecentThoughts();
     this.renderEntries();
     this.renderHeatmap();
     this.renderCalendar();
   }
 
-  private scheduleGraphRefresh(): void {
-    if (this.graphRefreshTimer !== null) window.clearTimeout(this.graphRefreshTimer);
-    this.graphRefreshTimer = window.setTimeout(() => {
-      this.graphRefreshTimer = null;
+  private scheduleHomeRefresh(): void {
+    if (this.homeRefreshTimer !== null) window.clearTimeout(this.homeRefreshTimer);
+    this.homeRefreshTimer = window.setTimeout(() => {
+      this.homeRefreshTimer = null;
       void this.refresh();
     }, 180);
   }
@@ -197,17 +127,6 @@ export class EchoInkHomeView extends ItemView {
     this.contentEl.empty();
     this.pageEl = this.contentEl.createDiv({ cls: "echoink-home-page" });
     this.renderHeader();
-
-    this.overviewEl = this.pageEl.createEl("section", {
-      cls: "echoink-home-overview",
-      attr: { "aria-labelledby": "echoink-home-overview-title" }
-    });
-    this.renderOverviewShell();
-
-    this.recentEl = this.pageEl.createEl("section", { cls: "echoink-home-recent" });
-    this.sectionTitle(this.recentEl, "继续最近的思路");
-    const recentHost = this.recentEl.createDiv({ cls: "echoink-home-magic-ui" });
-    this.recentIsland = createHomeRecentIsland(recentHost, (path) => this.openVaultFile(path));
     this.entriesEl = this.pageEl.createEl("section", { cls: "echoink-home-entries-section" });
     const entriesHead = this.sectionTitle(this.entriesEl, "知识工作入口");
     entriesHead.createSpan({ cls: "echoink-home-section-note", text: "从真实状态继续阅读、整理、写作与复盘" });
@@ -252,403 +171,6 @@ export class EchoInkHomeView extends ItemView {
     }
   }
 
-  private renderOverviewShell(): void {
-    const head = this.overviewEl.createDiv({ cls: "echoink-home-section-head" });
-    const copy = head.createDiv();
-    copy.createEl("h2", { text: "知识图谱", attr: { id: "echoink-home-overview-title" } });
-    copy.createDiv({
-      cls: "echoink-home-section-note",
-      text: "来自当前 Vault 的 Markdown 与已解析双链"
-    });
-    const actions = head.createDiv({ cls: "echoink-home-graph-head-actions" });
-    this.graphScopeButtons = this.graphButtonGroup(actions, [
-      ["local", "局部图谱"],
-      ["global", "全局聚合"]
-    ], "local", "图谱层级", (scope) => {
-      this.graphController.setScope(scope);
-      this.renderGraphSelection();
-    }, "is-scope");
-    const reset = actions.createEl("button", {
-      cls: "echoink-home-graph-secondary",
-      attr: { type: "button" }
-    });
-    setIcon(reset.createSpan(), "scan");
-    reset.createSpan({ text: "重置视角" });
-    reset.onclick = () => this.graphController.resetCamera();
-
-    this.graphFiltersEl = this.overviewEl.createDiv({ cls: "echoink-home-graph-filters" });
-    const status = this.overviewEl.createDiv({ cls: "echoink-home-graph-status" });
-    this.graphCountEl = status.createDiv({
-      cls: "echoink-home-graph-count",
-      attr: { role: "status", "aria-live": "polite" }
-    });
-    this.graphFallbackEl = status.createDiv({ cls: "echoink-home-graph-fallback", attr: { role: "status" } });
-
-    const frame = this.overviewEl.createDiv({ cls: "echoink-home-graph-frame" });
-    const stage = frame.createDiv({ cls: "echoink-home-graph-stage" });
-    this.graphRuntimeEl = stage.createDiv({ cls: "echoink-home-graph-host" });
-    this.graphRuntimeHudEl = stage.createDiv({ cls: "echoink-home-graph-runtime-hud", attr: { "aria-live": "polite" } });
-    const side = frame.createEl("aside", { cls: "echoink-home-graph-side", attr: { "aria-label": "图谱当前节点与关联笔记" } });
-    this.renderGraphControls(side);
-  }
-
-  private renderGraphControls(side: HTMLElement): void {
-    const depthSection = side.createDiv({ cls: "echoink-home-graph-side-section" });
-    depthSection.createEl("h3", { text: "邻居深度" });
-    this.graphHopsButtons = this.graphButtonGroup(depthSection, [
-      ["1", "1 跳"],
-      ["2", "2 跳"],
-      ["3", "3 跳"]
-    ], "2", "邻居深度", (value) => {
-      this.graphController.setHops(Number(value) as 1 | 2 | 3);
-      if (this.graphController.getScope() !== "local") this.graphController.setScope("local");
-      this.renderGraphSelection();
-    });
-
-    const stats = side.createDiv({ cls: "echoink-home-graph-side-section" });
-    stats.createEl("h3", { text: "当前视图" });
-    this.graphNodesStatEl = this.graphStat(stats, "渲染节点");
-    this.graphLinksStatEl = this.graphStat(stats, "渲染连线");
-    this.graphTotalStatEl = this.graphStat(stats, "全库笔记");
-    this.graphFpsStatEl = this.graphStat(stats, "帧率");
-
-    const legendSection = side.createDiv({ cls: "echoink-home-graph-side-section" });
-    legendSection.createEl("h3", { text: "图例" });
-    const legend = legendSection.createDiv({ cls: "echoink-home-graph-legend" });
-    legend.createSpan({ cls: "is-current", text: "当前笔记" });
-    legend.createSpan({ cls: "is-one-hop", text: "1 跳邻居" });
-    legend.createSpan({ cls: "is-two-hop", text: "2 跳邻居" });
-    legend.createSpan({ cls: "is-three-hop", text: "3 跳邻居" });
-
-    const selectionSection = side.createDiv({ cls: "echoink-home-graph-side-section is-selection" });
-    this.graphSelectionStatusEl = selectionSection.createDiv({
-      cls: "echoink-home-graph-selection-status",
-      attr: { role: "status", "aria-live": "polite", "aria-atomic": "true" }
-    });
-    this.graphSelectionEl = selectionSection.createDiv({ cls: "echoink-home-graph-selection" });
-    this.graphRelatedEl = selectionSection.createDiv({ cls: "echoink-home-graph-related" });
-  }
-
-  private graphStat(container: HTMLElement, label: string): HTMLElement {
-    const row = container.createDiv({ cls: "echoink-home-graph-stat" });
-    row.createSpan({ text: label });
-    return row.createEl("b", { text: "0" });
-  }
-
-  private graphButtonGroup<T extends string>(
-    container: HTMLElement,
-    options: readonly (readonly [T, string])[],
-    selected: T,
-    label: string,
-    onSelect: (value: T) => void,
-    extraClass = ""
-  ): Map<T, HTMLButtonElement> {
-    const group = container.createDiv({
-      cls: `echoink-home-graph-segment ${extraClass}`.trim(),
-      attr: { role: "group", "aria-label": label }
-    });
-    const buttons = new Map<T, HTMLButtonElement>();
-    for (const [value, text] of options) {
-      const button = group.createEl("button", {
-        cls: value === selected ? "is-on" : "",
-        text,
-        attr: { type: "button", "aria-pressed": String(value === selected) }
-      });
-      button.onclick = () => {
-        this.syncGraphButtons(buttons, value);
-        onSelect(value);
-      };
-      buttons.set(value, button);
-    }
-    return buttons;
-  }
-
-  private syncGraphButtons<T extends string>(buttons: Map<T, HTMLButtonElement>, selected: T): void {
-    for (const [value, button] of buttons) {
-      const active = value === selected;
-      button.toggleClass("is-on", active);
-      button.setAttribute("aria-pressed", String(active));
-    }
-  }
-
-  private renderGraphRuntimeStats(stats: HomeGraphRuntimeStats): void {
-    if (this.graphCountEl) {
-      this.graphCountEl.setText(`${stats.nodes} 节点 · ${stats.links} 连线 · ${stats.totalNotes} 全库笔记 · ${stats.fps} FPS`);
-    }
-    if (this.graphRuntimeHudEl) {
-      this.graphRuntimeHudEl.setText(stats.status);
-      this.graphRuntimeHudEl.toggleClass("is-sleeping", stats.state === "sleeping");
-    }
-    this.graphNodesStatEl?.setText(String(stats.nodes));
-    this.graphLinksStatEl?.setText(String(stats.links));
-    this.graphTotalStatEl?.setText(String(stats.totalNotes));
-    this.graphFpsStatEl?.setText(String(stats.fps));
-    this.syncGraphButtons(this.graphScopeButtons, stats.scope);
-    this.syncGraphButtons(this.graphHopsButtons, String(stats.hops) as "1" | "2" | "3");
-  }
-
-  private renderOverview(): void {
-    const graph = this.data?.graph;
-    if (graph) this.graphController.updateData(graph);
-    this.renderGraphFilters();
-    this.renderGraphState();
-  }
-
-  private renderGraphFilters(): void {
-    this.graphFiltersEl.empty();
-    const searchLabel = this.graphFiltersEl.createEl("label", { cls: "echoink-home-graph-search" });
-    searchLabel.createSpan({ text: "搜索" });
-    const search = searchLabel.createEl("input", {
-      attr: {
-        type: "search",
-        value: this.graphFilters.search,
-        placeholder: "文件名或路径",
-        autocomplete: "off"
-      }
-    });
-    search.addEventListener("input", () => {
-      this.graphFilters.search = search.value;
-      this.applyGraphFilters();
-    });
-
-    const options = this.data?.graph.options ?? { folders: [], properties: [], tags: [] };
-    this.renderGraphChecklist(
-      "文件夹",
-      options.folders.map((value) => ({ label: value, identity: value })),
-      new Set(this.graphFilters.folders),
-      (identity, checked) => {
-        this.graphFilters.folders = toggleHomeFilterValue(this.graphFilters.folders, identity, checked);
-        this.applyGraphFilters();
-      }
-    );
-    this.renderGraphPropertyChecklist(options.properties);
-    this.renderGraphChecklist(
-      "标签",
-      options.tags.map((value) => ({ label: `#${value}`, identity: value })),
-      new Set(this.graphFilters.tags),
-      (identity, checked) => {
-        this.graphFilters.tags = toggleHomeFilterValue(this.graphFilters.tags, identity, checked);
-        this.applyGraphFilters();
-      }
-    );
-    const clear = this.graphFiltersEl.createEl("button", {
-      cls: "echoink-home-graph-clear",
-      text: "清空筛选",
-      attr: { type: "button" }
-    });
-    clear.disabled = !hasActiveHomeGraphFilters(this.graphFilters);
-    clear.onclick = () => {
-      this.graphFilters = cloneGraphFilters(EMPTY_HOME_GRAPH_FILTERS);
-      this.renderGraphFilters();
-      this.applyGraphFilters();
-    };
-  }
-
-  private renderGraphChecklist(
-    label: string,
-    options: readonly { label: string; identity: string }[],
-    selected: ReadonlySet<string>,
-    onChange: (identity: string, checked: boolean) => void
-  ): void {
-    const details = this.graphFiltersEl.createEl("details", { cls: "echoink-home-graph-filter" });
-    const summary = details.createEl("summary", { text: selected.size ? `${label} ${selected.size}` : label });
-    this.bindGraphFilterMenu(details);
-    const panel = details.createDiv({ cls: "echoink-home-graph-filter-panel" });
-    if (!options.length) {
-      panel.createDiv({ cls: "echoink-home-empty", text: `当前没有可筛选的${label}` });
-      return;
-    }
-    for (const option of options) {
-      const row = panel.createEl("label");
-      const input = row.createEl("input", { attr: { type: "checkbox" } });
-      input.checked = selected.has(option.identity);
-      input.onchange = () => {
-        onChange(option.identity, input.checked);
-        const count = panel.querySelectorAll<HTMLInputElement>('input[type="checkbox"]:checked').length;
-        summary.setText(count ? `${label} ${count}` : label);
-        details.open = false;
-        summary.focus();
-      };
-      row.createSpan({ text: option.label });
-    }
-  }
-
-  private renderGraphPropertyChecklist(options: readonly HomePropertyFilter[]): void {
-    const selected = new Set(this.graphFilters.properties.map(homePropertyFilterIdentity));
-    const details = this.graphFiltersEl.createEl("details", { cls: "echoink-home-graph-filter" });
-    const summary = details.createEl("summary", { text: selected.size ? `属性 ${selected.size}` : "属性" });
-    this.bindGraphFilterMenu(details);
-    const panel = details.createDiv({ cls: "echoink-home-graph-filter-panel" });
-    if (!options.length) {
-      panel.createDiv({ cls: "echoink-home-empty", text: "当前没有可筛选的属性" });
-      return;
-    }
-    for (const option of options) {
-      const row = panel.createEl("label");
-      const input = row.createEl("input", { attr: { type: "checkbox" } });
-      input.checked = selected.has(homePropertyFilterIdentity(option));
-      input.onchange = () => {
-        this.graphFilters.properties = toggleHomePropertyFilter(this.graphFilters.properties, option, input.checked);
-        const count = this.graphFilters.properties.length;
-        summary.setText(count ? `属性 ${count}` : "属性");
-        this.applyGraphFilters();
-        details.open = false;
-        summary.focus();
-      };
-      row.createSpan({ text: option.value ? `${option.key}: ${option.value}` : option.key });
-    }
-  }
-
-  private bindGraphFilterMenu(details: HTMLDetailsElement): void {
-    details.addEventListener("toggle", () => {
-      if (!details.open) return;
-      for (const other of Array.from(
-        this.graphFiltersEl.querySelectorAll<HTMLDetailsElement>(".echoink-home-graph-filter[open]")
-      )) {
-        if (other !== details) other.open = false;
-      }
-    });
-  }
-
-  private closeGraphFilterMenus(restoreFocus = false): boolean {
-    const openMenus = Array.from(
-      this.graphFiltersEl.querySelectorAll<HTMLDetailsElement>(".echoink-home-graph-filter[open]")
-    );
-    if (!openMenus.length) return false;
-    const focusTarget = restoreFocus ? openMenus[openMenus.length - 1]?.querySelector("summary") : null;
-    for (const details of openMenus) details.open = false;
-    if (focusTarget instanceof HTMLElement) focusTarget.focus();
-    return true;
-  }
-
-  private applyGraphFilters(): void {
-    this.graphController.updateFilters(this.graphFilters);
-    const clear = this.graphFiltersEl.querySelector<HTMLButtonElement>(".echoink-home-graph-clear");
-    if (clear) clear.disabled = !hasActiveHomeGraphFilters(this.graphFilters);
-    this.renderGraphState();
-  }
-
-  private renderGraphState(): void {
-    if (!this.graphCountEl) return;
-    const result = this.graphController.getFilterResult();
-    if (!this.graphCountEl.textContent) this.graphCountEl.setText(`${result.nodes.length} / ${result.totalCount} 篇笔记`);
-    this.graphFallbackEl.setText(
-      this.graphFallback === "error"
-        ? `互动图谱暂不可用。${this.graphFallbackReason || "仍可从右栏选择和打开笔记。"}`
-        : ""
-    );
-    this.graphFallbackEl.toggleClass("is-error", this.graphFallback === "error");
-    this.renderGraphSelection();
-  }
-
-  private renderGraphSelection(): void {
-    if (!this.graphSelectionEl) return;
-    this.graphSelectionEl.empty();
-    this.graphRelatedEl?.empty();
-    const result = this.graphController.getFilterResult();
-    const global = this.graphController.getScope() === "global";
-    const node = this.selectedGraphNodeId
-      ? this.data?.graph.nodeById.get(this.selectedGraphNodeId)
-      : null;
-    const sidebarItems = this.graphController.getSidebarItems();
-    this.graphRelatedEl.toggleClass("is-note", !global && Boolean(node));
-    if (global) {
-      this.graphSelectionStatusEl.setText(`全局主题簇，共 ${sidebarItems.length} 个主题簇。`);
-      this.graphSelectionEl.createEl("strong", { text: "全局主题簇" });
-      this.graphSelectionEl.createSpan({ text: "按顶层目录聚合当前筛选结果" });
-      this.graphRelatedEl.createEl("strong", { text: `主题簇 ${sidebarItems.length}` });
-      const list = this.graphRelatedEl.createEl("ul");
-      for (const itemData of sidebarItems) {
-        const item = list.createEl("li", { cls: "is-cluster" });
-        const focus = item.createEl("button", {
-          cls: "echoink-home-graph-related-focus",
-          attr: { type: "button", title: `进入 ${itemData.title}` }
-        });
-        focus.createSpan({ text: itemData.title });
-        focus.createEl("em", { text: itemData.detail });
-        focus.onclick = () => this.graphController.focusNode(itemData.noteId);
-      }
-      return;
-    }
-    if (!node) {
-      const emptyMessage = result.totalCount
-        ? "当前筛选没有匹配笔记。可取消一项条件或清空筛选。"
-        : "当前 Vault 还没有 Markdown 笔记。";
-      this.graphSelectionStatusEl.setText(emptyMessage);
-      this.graphSelectionEl.createSpan({
-        cls: "echoink-home-empty",
-        text: emptyMessage
-      });
-      return;
-    }
-    const currentLabel = formatGraphRelationLabel(node.cluster, node.title);
-    this.graphSelectionStatusEl.setText(`当前：${currentLabel}。关联笔记 ${sidebarItems.length} 篇。`);
-    const current = this.graphSelectionEl.createDiv({ cls: "echoink-home-graph-related-row is-current is-note" });
-    const currentFocus = current.createEl("button", {
-      cls: "echoink-home-graph-related-focus",
-      text: `当前： ${currentLabel}`,
-      attr: { type: "button", "aria-current": "true", title: node.path }
-    });
-    currentFocus.onclick = () => this.graphController.focusNode(node.id);
-    this.renderGraphPopoutButton(current, node.id, node.title);
-    if (!sidebarItems.length) {
-      this.graphRelatedEl.createSpan({ cls: "echoink-home-empty", text: "当前节点没有已解析关联。" });
-      return;
-    }
-    const list = this.graphRelatedEl.createEl("ul", {
-      attr: { "aria-label": `关联笔记 ${sidebarItems.length}` }
-    });
-    for (const itemData of sidebarItems) {
-      const item = list.createEl("li", { cls: "is-note" });
-      const relationLabel = formatGraphRelationLabel(itemData.detail, itemData.title);
-      const focus = item.createEl("button", {
-        cls: "echoink-home-graph-related-focus",
-        attr: { type: "button", title: relationLabel },
-        text: relationLabel
-      });
-      focus.onclick = () => {
-        const shouldRestoreFocus = document.activeElement === focus;
-        const selected = this.graphController.focusNode(itemData.noteId);
-        if (selected && shouldRestoreFocus) this.focusCurrentGraphNode();
-      };
-      item.createSpan({
-        cls: "echoink-home-graph-related-cluster",
-        text: itemData.detail,
-        attr: { "aria-hidden": "true" }
-      });
-      this.renderGraphPopoutButton(item, itemData.noteId, itemData.title);
-    }
-  }
-
-  private focusCurrentGraphNode(): void {
-    this.graphSelectionEl.querySelector<HTMLButtonElement>('button[aria-current="true"]')?.focus();
-  }
-
-  private renderGraphPopoutButton(container: HTMLElement, noteId: string, title: string): void {
-    const button = container.createEl("button", {
-      cls: "echoink-home-graph-related-open",
-      attr: { type: "button", "aria-label": `在 Popout 打开：${title}`, title: `在 Popout 打开：${title}` }
-    });
-    setIcon(button, "arrow-up-right");
-    button.onclick = () => void this.openGraphPopout(noteId);
-  }
-
-  /**
-   * Official Magic UI Marquee React island.
-   * Upstream: https://github.com/magicuidesign/magicui/blob/2d671cc6c0e0f40e28682c9cbddd16694dcfe627/apps/www/registry/magicui/marquee.tsx
-   * Demo behavior: https://github.com/magicuidesign/magicui/blob/2d671cc6c0e0f40e28682c9cbddd16694dcfe627/apps/www/registry/example/marquee-demo.tsx
-   * Mapping: two horizontal tracks, reverse second row, repeat=4, 1rem gap,
-   * 20s linear loop and the upstream Demo's paired 25% edge fades.
-   */
-  private renderRecentThoughts(): void {
-    this.recentIsland?.render((this.data?.recentThoughts ?? []).map((record) => ({
-      path: record.path,
-      folder: record.folder,
-      title: record.title,
-      relativeTime: formatRelativeTime(record.mtime)
-    })));
-  }
-
   /**
    * Official Magic UI BentoGrid and AnimatedShinyText React island.
    * Upstream Bento: https://github.com/magicuidesign/magicui/blob/2d671cc6c0e0f40e28682c9cbddd16694dcfe627/apps/www/registry/magicui/bento-grid.tsx
@@ -673,7 +195,9 @@ export class EchoInkHomeView extends ItemView {
   }
 
   private entryDetailNodes(entry: HomeEntrySummary): readonly HomeBentoDetailNode[] {
-    const target = entry.targetPath ? this.data?.graph.nodeById.get(entry.targetPath) : null;
+    const target = entry.targetPath
+      ? this.data?.records.find((record) => record.path === entry.targetPath)
+      : null;
     const today = new Date();
     const journalExists = this.app.vault.getAbstractFileByPath(journalPathForDate(today)) instanceof TFile;
     if (entry.id === "wiki") {
@@ -888,20 +412,6 @@ export class EchoInkHomeView extends ItemView {
     }
   }
 
-  private async openGraphPopout(relativePath: string): Promise<void> {
-    const file = this.app.vault.getAbstractFileByPath(normalizePath(relativePath));
-    if (!(file instanceof TFile)) {
-      new Notice(`没有在当前 Vault 找到：${relativePath}`);
-      return;
-    }
-    try {
-      await this.app.workspace.getLeaf("window").openFile(file, { active: true });
-    } catch (error) {
-      console.warn("[EchoInk] Failed to open a Home graph Popout:", error);
-      new Notice(`暂时无法在 Popout 打开“${file.basename}”，请稍后重试。`);
-    }
-  }
-
   private shiftCalendar(offset: number): void {
     this.calendarMonthOffset += offset;
     if (this.data) {
@@ -920,13 +430,6 @@ export class EchoInkHomeView extends ItemView {
     const copy = head.createDiv();
     copy.createEl("h2", { text: title });
     return head;
-  }
-
-  private metric(container: HTMLElement, label: string, value: string | number, detail: string): void {
-    const metric = container.createDiv({ cls: "echoink-home-metric" });
-    metric.createSpan({ text: label });
-    metric.createEl("strong", { text: String(value) });
-    metric.createEl("small", { text: detail });
   }
 
   private iconButton(container: HTMLElement, icon: string, label: string, onClick: () => void): HTMLButtonElement {
@@ -959,21 +462,4 @@ function formatFullDate(date: Date): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function formatGraphRelationLabel(cluster: string, title: string): string {
-  const parent = cluster.trim();
-  const child = title.trim();
-  if (!parent || parent === "根目录" || parent === child) return child || parent;
-  if (!child) return parent;
-  return `${parent} · ${child}`;
-}
-
-function cloneGraphFilters(filters: HomeGraphFilters): HomeGraphFilters {
-  return {
-    search: filters.search,
-    folders: [...filters.folders],
-    properties: filters.properties.map((filter) => ({ ...filter })),
-    tags: [...filters.tags]
-  };
 }
