@@ -7821,6 +7821,10 @@ button.echoink-settings-navigation-row:focus-visible {
   --glow-vl: 143,184,177;
   --glow-a1: .10;
   --glow-a2: .06;
+  --echoink-home-title-teal-from: color-mix(in srgb, rgb(var(--glow-vd)) 72%, var(--echoink-home-ink));
+  --echoink-home-title-teal-to: color-mix(in srgb, rgb(var(--glow-vd)) 88%, var(--echoink-home-ink));
+  --echoink-home-title-vermilion-from: color-mix(in srgb, rgb(var(--glow-vm)) 72%, var(--echoink-home-ink));
+  --echoink-home-title-vermilion-to: color-mix(in srgb, rgb(var(--glow-vm)) 88%, var(--echoink-home-ink));
   container: echoink-home / inline-size;
   padding: 0;
   overflow: auto;
@@ -8341,6 +8345,8 @@ button.echoink-settings-navigation-row:focus-visible {
 .echoink-home-entry {
   --echoink-home-entry-tint: var(--echoink-home-surface-card);
   --echoink-home-entry-icon-color: var(--echoink-home-ink);
+  --echoink-home-entry-title-from: var(--echoink-home-title-teal-from);
+  --echoink-home-entry-title-to: var(--echoink-home-title-teal-to);
   position: relative;
   display: flex;
   appearance: none;
@@ -8374,6 +8380,8 @@ button.echoink-settings-navigation-row:focus-visible {
 .echoink-home-entry.is-outputs {
   --echoink-home-entry-tint: color-mix(in srgb, var(--echoink-home-surface-raised) 62%, var(--echoink-home-surface-card));
   --echoink-home-entry-icon-color: var(--echoink-home-teal);
+  --echoink-home-entry-title-from: var(--echoink-home-title-vermilion-from);
+  --echoink-home-entry-title-to: var(--echoink-home-title-vermilion-to);
   grid-column: 5 / 9;
   grid-row: 1;
   background:
@@ -8384,6 +8392,8 @@ button.echoink-settings-navigation-row:focus-visible {
 .echoink-home-entry.is-projects {
   --echoink-home-entry-tint: color-mix(in srgb, var(--echoink-home-teal-soft) 35%, var(--echoink-home-surface-card));
   --echoink-home-entry-icon-color: var(--echoink-home-teal-ink);
+  --echoink-home-entry-title-from: var(--echoink-home-title-vermilion-from);
+  --echoink-home-entry-title-to: var(--echoink-home-title-vermilion-to);
   grid-column: 9 / 13;
   grid-row: 1;
   background:
@@ -8531,6 +8541,33 @@ button.echoink-settings-navigation-row:focus-visible {
 .echoink-home-entry-copy strong {
   font-size: 15px;
   font-weight: 620;
+}
+
+.echoink-home-entry-copy > strong {
+  align-self: flex-start;
+  color: var(--echoink-home-entry-title-from);
+}
+
+@supports ((background-clip: text) or (-webkit-background-clip: text)) {
+  .echoink-home-entry-copy > strong {
+    background-image: linear-gradient(
+      105deg,
+      var(--echoink-home-entry-title-from),
+      var(--echoink-home-entry-title-to)
+    );
+    background-clip: text;
+    -webkit-background-clip: text;
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+  }
+}
+
+@media (forced-colors: active) {
+  .echoink-home-entry-copy > strong {
+    background-image: none;
+    color: ButtonText;
+    -webkit-text-fill-color: currentColor;
+  }
 }
 
 .echoink-home-entry-copy span,
