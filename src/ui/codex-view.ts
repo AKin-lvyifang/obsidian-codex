@@ -263,7 +263,7 @@ export class CodexView extends ItemView {
   }
 
   getIcon(): string {
-    return "bot";
+    return "feather";
   }
 
   refreshPersonalizationUi(): void {
@@ -421,6 +421,16 @@ export class CodexView extends ItemView {
 
   focusInput(): void {
     window.setTimeout(() => this.inputEl?.focus(), 50);
+  }
+
+  async createDraftSession(title: string, draft: string): Promise<StoredSession> {
+    const session = await this.createSession(title);
+    clearComposerDraftAction(this.composerHost());
+    this.inputEl.value = draft;
+    this.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+    this.inputEl.setSelectionRange(draft.length, draft.length);
+    this.focusInput();
+    return session;
   }
 
   private render(): void {

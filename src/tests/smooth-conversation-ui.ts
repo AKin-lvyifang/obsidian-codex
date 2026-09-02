@@ -4221,6 +4221,7 @@ export async function runSmoothConversationUiTests(): Promise<void> {
   const headerSource = readFileSync("src/ui/codex-view/header-controller.ts", "utf8");
   const messageControllerSource = readFileSync("src/ui/codex-view/message-controller.ts", "utf8");
   const viewShellSource = readFileSync("src/ui/codex-view/view-shell.ts", "utf8");
+  const codexViewSource = readFileSync("src/ui/codex-view.ts", "utf8");
   assert.match(composerSource, /placeholder:\s*""/u);
   assert.match(headerSource, /setAttr\("placeholder",\s*""\)/u);
   assert.match(messageControllerSource, /onSuggestionSelect:[\s\S]*?dispatchEvent\(new Event\("input"[\s\S]*?inputEl\.focus\(\)/u);
@@ -4229,6 +4230,16 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     /sendMessage|onSend/u,
     "suggestion selection must not enter the send chain"
   );
+  const draftSessionSource = codexViewSource.match(
+    /async createDraftSession\([\s\S]*?\n  \}/u
+  )?.[0] ?? "";
+  assert.match(draftSessionSource, /await this\.createSession\(title\)/u);
+  assert.match(draftSessionSource, /clearComposerDraftAction\(this\.composerHost\(\)\)/u);
+  assert.match(draftSessionSource, /this\.inputEl\.value = draft/u);
+  assert.match(draftSessionSource, /dispatchEvent\(new Event\("input", \{ bubbles: true \}\)\)/u);
+  assert.match(draftSessionSource, /setSelectionRange\(draft\.length, draft\.length\)/u);
+  assert.match(draftSessionSource, /this\.focusInput\(\)/u);
+  assert.doesNotMatch(draftSessionSource, /sendMessage|enqueue|Provider/u);
   assert.match(
     viewShellSource,
     /host\.messagesEl[\s\S]*?host\.taskPlanDockEl[\s\S]*?host\.interactionDockEl[\s\S]*?renderComposerShell/u,

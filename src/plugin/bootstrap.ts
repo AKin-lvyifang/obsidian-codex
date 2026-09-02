@@ -21,7 +21,7 @@ export function registerEchoInkPluginFeatures(plugin: CodexForObsidianPlugin): E
   plugin.registerView(VIEW_TYPE_ECHOINK_HOME, (leaf: WorkspaceLeaf) => new EchoInkHomeView(leaf, plugin));
   plugin.registerView(VIEW_TYPE_REVIEW_PREVIEW, (leaf: WorkspaceLeaf) => new ReviewPreviewView(leaf, plugin));
 
-  const ribbonAnchor = plugin.addRibbonIcon("bot", "打开 EchoInk 首页和 Agent 侧栏", () => {
+  const ribbonAnchor = plugin.addRibbonIcon("feather", "打开 EchoInk 首页和 Agent 侧栏", () => {
     void (async () => {
       await plugin.activateHomeAndSidebar();
       await plugin.handleEchoInkOnboardingTargetActivated("sidebar");

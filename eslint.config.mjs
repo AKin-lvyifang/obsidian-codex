@@ -17,6 +17,7 @@ export default defineConfig(
     "prototypes",
     "scripts",
     "src/tests",
+    "src/home/magic-ui/provenance/**",
     "esbuild.config.mjs",
     "package-lock.json",
     "tsconfig.json",

@@ -792,7 +792,7 @@ export class CodexSettingTab extends PluginSettingTab {
     // Logo + name + version
     const header = card.createDiv({ cls: "echoink-about-header" });
     const logoWrap = header.createDiv({ cls: "echoink-about-logo" });
-    logoWrap.innerHTML = `<svg width="36" height="36" viewBox="0 0 36 36" fill="none"><rect width="36" height="36" rx="10" fill="var(--interactive-accent)" fill-opacity="0.15"/><path d="M10 18c0-4.4 3.6-8 8-8s8 3.6 8 8-3.6 8-8 8" stroke="var(--interactive-accent)" stroke-width="2" stroke-linecap="round"/><circle cx="18" cy="18" r="2.5" fill="var(--interactive-accent)"/><path d="M18 10v3M18 23v3M10 18h3M23 18h3" stroke="var(--interactive-accent)" stroke-width="1.5" stroke-linecap="round" opacity="0.5"/></svg>`;
+    setIcon(logoWrap, "feather");
     const nameArea = header.createDiv({ cls: "echoink-about-name-area" });
     nameArea.createDiv({ cls: "echoink-about-name", text: "Codex EchoInk" });
     nameArea.createDiv({ cls: "echoink-about-version", text: `v${version}` });

@@ -3,6 +3,7 @@ import type CodexForObsidianPlugin from "../main";
 import type { ResourceManagementTab } from "../settings/settings";
 import type { SettingsTab } from "../settings/settings";
 import { EchoInkHomeView, VIEW_TYPE_ECHOINK_HOME } from "../home/home-view";
+import { openObsidianGraphLeaf } from "../home/open-native-graph";
 import { isReviewHtmlPath } from "../review/schedule";
 import { ReviewPreviewView, VIEW_TYPE_REVIEW_PREVIEW } from "../review/preview-view";
 import { CodexView, VIEW_TYPE_CODEX } from "../ui/codex-view";
@@ -43,6 +44,10 @@ export class EchoInkViewService {
     if (this.plugin.app.workspace.rightSplit.collapsed) this.plugin.app.workspace.rightSplit.expand();
     this.plugin.app.workspace.setActiveLeaf(leaf, { focus: true });
     this.getCodexView()?.focusInput();
+  }
+
+  async openObsidianGraph(): Promise<boolean> {
+    return openObsidianGraphLeaf(this.plugin.app);
   }
 
   applyComposerDefaultsToView(): void {
