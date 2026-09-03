@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import type { App } from "obsidian";
+import { TFile, type App } from "obsidian";
 import {
   BUILT_IN_JOURNAL_TEMPLATES,
   DEFAULT_JOURNAL_TEMPLATE_ID,
@@ -23,9 +23,17 @@ import {
   parseImportedJournalTemplate,
   type HomeVaultFileRecord
 } from "../home/home-workbench-model";
-import { openObsidianGraphLeaf } from "../home/open-native-graph";
+import {
+  HOME_ENTRY_INDEX_PATHS,
+  homeEntryIndexPath
+} from "../home/home-workbench-data";
+import {
+  openObsidianGraphLeaf,
+  openObsidianLocalGraphLeaf
+} from "../home/open-native-graph";
 import {
   buildDailyConversationDraft,
+  buildReviewConversationDraft,
   buildRevisitConversationDraft,
   HOME_DAILY_TITLES,
   HOME_REVISIT_TITLES,
@@ -49,6 +57,7 @@ function assertHomeConversationActions(): void {
   const now = new Date(2026, 8, 2, 9, 7);
   const dailyDraft = buildDailyConversationDraft(now);
   const revisitDraft = buildRevisitConversationDraft();
+  const reviewDraft = buildReviewConversationDraft(now);
 
   assert.equal(HOME_DAILY_TITLES.length, 6);
   assert.equal(HOME_REVISIT_TITLES.length, 6);
@@ -71,6 +80,11 @@ function assertHomeConversationActions(): void {
   assert.match(revisitDraft, /3–5 个仍未完成的 goal、task 或 open_loop/u);
   assert.match(revisitDraft, /在我选择前不要修改 Memory/u);
   assert.match(revisitDraft, /Memory 已关闭、不可用或没有结果/u);
+  assert.match(reviewDraft, /^\/review\n/u);
+  assert.match(reviewDraft, /从我最近积累和修改的知识中，推荐 3 个值得复盘的知识主题/u);
+  assert.match(reviewDraft, /选择主题并明确确认写入前/u);
+  assert.match(reviewDraft, /journal\/2026-09-02\.md 的“知识复盘”部分/u);
+  assert.match(reviewDraft, /是否另外整理到 outputs 由我决定/u);
 }
 
 function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
@@ -164,6 +178,16 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
     view.match(/private async openConversationAction\([\s\S]*?\n  \}/u)?.[0] ?? "",
     /sendMessage|Provider|\.create\(|\.modify\(/u
   );
+  assert.match(view, /const indexPath = homeEntryIndexPath\(entry\.id\);[\s\S]*openObsidianLocalGraphLeaf\(this\.app, indexPath\)/u);
+  assert.match(view, /entry\.id === "journal"\)[\s\S]*this\.openJournalTemplate\(new Date\(\)\)/u);
+  assert.match(view, /entry\.id === "review"\)[\s\S]*this\.openReviewConversation\(\)/u);
+  assert.doesNotMatch(view, /runReview\("knowledge-base"\)/u);
+  assert.match(view, /private async openReviewConversation\(\)[\s\S]*createDraftSession\([\s\S]*buildReviewConversationDraft\(now\)/u);
+  assert.doesNotMatch(
+    view.match(/private async openReviewConversation\([\s\S]*?\n  \}/u)?.[0] ?? "",
+    /sendMessage|Provider|runReview|\.create\(|\.modify\(/u
+  );
+  assert.match(view, /private async openJournal\(date: Date\)[\s\S]*existing instanceof TFile[\s\S]*openFile\(existing,[\s\S]*this\.openJournalTemplate\(date\)/u);
   assert.doesNotMatch(conversationActions, /app\.vault|adapter\.|\.create\(|\.modify\(|sendMessage|Provider/u);
 
   assert.match(bootstrap, /addRibbonIcon\("feather"/u);
@@ -178,7 +202,6 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
 
   assert.equal(packageJson.dependencies?.["3d-force-graph"], undefined);
   assert.doesNotMatch(packageLock, /3d-force-graph/u);
-  assert.match(view, /try \{[\s\S]*openFile\(file, \{ active: true \}\)[\s\S]*暂时无法打开/u);
   assert.doesNotMatch(view + data + model, /internalPlugins|dataEngine|GraphView|iframe/u);
 
   assert.match(view, new RegExp(fixedCommit, "u"));
@@ -217,8 +240,7 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
   assert.match(data, /projects: \{ label: "Projects", description: "正在推进的项目知识"/u);
   assert.match(data, /inbox: \{ label: "Inbox", description: "等待归类的输入"/u);
   assert.match(data, /review: \{ label: "Review", description: "知识库复盘与报告"/u);
-  assert.match(view, /可在 Projects 目录建立项目/u);
-  assert.match(view, /当前没有待整理输入/u);
+  assert.doesNotMatch(view, /private async openVaultFile/u);
 
   assert.equal(tsconfig.compilerOptions.jsx, "react-jsx");
   assert.deepEqual(tsconfig.compilerOptions.paths, {
@@ -353,6 +375,8 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
   assert.match(nativeGraph, /getLeavesOfType\("graph"\)\[0\]/u);
   assert.match(nativeGraph, /getLeaf\("tab"\)/u);
   assert.match(nativeGraph, /setViewState\(\{ type: "graph", active: true, state: \{\} \}\)/u);
+  assert.match(nativeGraph, /type: "localgraph",[\s\S]*state: \{ file: normalizedPath \}/u);
+  assert.match(nativeGraph, /viewState\.type !== "localgraph" \|\| viewState\.state\?\.file !== normalizedPath/u);
   assert.match(nativeGraph, /revealLeaf\(leaf\)/u);
   assert.doesNotMatch(nativeGraph, /internalPlugins|renderer|dataEngine|iframe/u);
   assert.match(viewService, /async openObsidianGraph\(\): Promise<boolean>/u);
@@ -450,6 +474,49 @@ async function assertNativeGraphBehavior(): Promise<void> {
     assert.equal(await openObsidianGraphLeaf(wrongType.app), false);
     assert.deepEqual(wrongType.revealed, [wrongTypeLeaf]);
     assert.match(openTestNoticeMessages.at(-1) ?? "", /暂时无法打开 Obsidian 原生图谱/u);
+
+    openTestNoticeMessages.length = 0;
+    const localLeaf = createGraphLeaf("empty");
+    const local = createLocalGraphApp(localLeaf);
+    assert.equal(await openObsidianLocalGraphLeaf(local.app, "wiki/index.md"), true);
+    assert.equal(local.getLeafCalls(), 1);
+    assert.deepEqual(localLeaf.setViewStates, ["localgraph"]);
+    assert.deepEqual(localLeaf.viewStates, [{
+      type: "localgraph",
+      active: true,
+      state: { file: "wiki/index.md" }
+    }]);
+    assert.deepEqual(local.revealed, [localLeaf]);
+    assert.deepEqual(openTestNoticeMessages, []);
+
+    openTestNoticeMessages.length = 0;
+    const missingLeaf = createGraphLeaf("empty");
+    const missing = createLocalGraphApp(missingLeaf, { indexExists: false });
+    assert.equal(await openObsidianLocalGraphLeaf(missing.app, "outputs/index.md"), false);
+    assert.equal(missing.getLeafCalls(), 0);
+    assert.deepEqual(missingLeaf.setViewStates, []);
+    assert.match(openTestNoticeMessages.at(-1) ?? "", /没有在当前 Vault 找到：outputs\/index\.md/u);
+
+    openTestNoticeMessages.length = 0;
+    const localRejectedLeaf = createGraphLeaf("empty", "reject");
+    const localRejected = createLocalGraphApp(localRejectedLeaf);
+    assert.equal(await openObsidianLocalGraphLeaf(localRejected.app, "projects/index.md"), false);
+    assert.deepEqual(localRejected.revealed, []);
+    assert.match(openTestNoticeMessages.at(-1) ?? "", /暂时无法打开 Obsidian 原生局部图谱/u);
+
+    openTestNoticeMessages.length = 0;
+    const wrongFileLeaf = createGraphLeaf("empty", "wrong-file");
+    const wrongFile = createLocalGraphApp(wrongFileLeaf);
+    assert.equal(await openObsidianLocalGraphLeaf(wrongFile.app, "inbox/index.md"), false);
+    assert.deepEqual(wrongFile.revealed, []);
+    assert.match(openTestNoticeMessages.at(-1) ?? "", /暂时无法打开 Obsidian 原生局部图谱/u);
+
+    openTestNoticeMessages.length = 0;
+    const localRevealLeaf = createGraphLeaf("empty");
+    const localRevealRejected = createLocalGraphApp(localRevealLeaf, { rejectReveal: true });
+    assert.equal(await openObsidianLocalGraphLeaf(localRevealRejected.app, "wiki/index.md"), false);
+    assert.deepEqual(localRevealRejected.revealed, []);
+    assert.match(openTestNoticeMessages.at(-1) ?? "", /暂时无法打开 Obsidian 原生局部图谱/u);
   } finally {
     console.warn = originalWarn;
     openTestNoticeMessages.length = 0;
@@ -458,24 +525,32 @@ async function assertNativeGraphBehavior(): Promise<void> {
 
 interface GraphLeafMock {
   setViewStates: string[];
-  setViewState(state: { type: string }): Promise<void>;
-  getViewState(): { type: string; state: Record<string, never> };
+  viewStates: Array<{ type: string; active?: boolean; state?: Record<string, unknown> }>;
+  setViewState(state: { type: string; active?: boolean; state?: Record<string, unknown> }): Promise<void>;
+  getViewState(): { type: string; state: Record<string, unknown> };
 }
 
 function createGraphLeaf(
   initialType: string,
-  behavior: "accept" | "reject" | "ignore" = "accept"
+  behavior: "accept" | "reject" | "ignore" | "wrong-file" = "accept"
 ): GraphLeafMock {
   let currentType = initialType;
+  let currentState: Record<string, unknown> = {};
   const setViewStates: string[] = [];
+  const viewStates: Array<{ type: string; active?: boolean; state?: Record<string, unknown> }> = [];
   return {
     setViewStates,
+    viewStates,
     async setViewState(state): Promise<void> {
       setViewStates.push(state.type);
+      viewStates.push(state);
       if (behavior === "reject") throw new Error("setViewState rejected");
-      if (behavior === "accept") currentType = state.type;
+      if (behavior === "accept" || behavior === "wrong-file") {
+        currentType = state.type;
+        currentState = behavior === "wrong-file" ? { file: "wrong/index.md" } : { ...(state.state ?? {}) };
+      }
     },
-    getViewState: () => ({ type: currentType, state: {} })
+    getViewState: () => ({ type: currentType, state: currentState })
   };
 }
 
@@ -509,9 +584,50 @@ function createGraphApp(existing: GraphLeafMock[], created: GraphLeafMock, rejec
   };
 }
 
+function createLocalGraphApp(
+  created: GraphLeafMock,
+  options: { indexExists?: boolean; rejectReveal?: boolean } = {}
+): {
+  app: App;
+  revealed: GraphLeafMock[];
+  getLeafCalls: () => number;
+} {
+  const revealed: GraphLeafMock[] = [];
+  let getLeafCallCount = 0;
+  return {
+    app: {
+      vault: {
+        getAbstractFileByPath: (path: string) => options.indexExists === false ? null : new TFile(path)
+      },
+      workspace: {
+        getLeaf: (mode: string) => {
+          assert.equal(mode, "tab");
+          getLeafCallCount += 1;
+          return created;
+        },
+        revealLeaf: async (leaf: GraphLeafMock) => {
+          if (options.rejectReveal) throw new Error("revealLeaf rejected");
+          revealed.push(leaf);
+        }
+      }
+    } as unknown as App,
+    revealed,
+    getLeafCalls: () => getLeafCallCount
+  };
+}
+
 function assertFixedEntryAndTemplateContracts(): void {
   assert.deepEqual(HOME_ENTRY_IDS, ["wiki", "outputs", "projects", "inbox", "journal", "review"]);
   assert.equal(HOME_ENTRY_IDS.includes("raw" as never), false);
+  assert.deepEqual(HOME_ENTRY_INDEX_PATHS, {
+    wiki: "wiki/index.md",
+    outputs: "outputs/index.md",
+    projects: "projects/index.md",
+    inbox: "inbox/index.md"
+  });
+  assert.equal(homeEntryIndexPath("wiki"), "wiki/index.md");
+  assert.equal(homeEntryIndexPath("journal"), null);
+  assert.equal(homeEntryIndexPath("review"), null);
   assert.equal(DEFAULT_JOURNAL_TEMPLATE_ID, "quick");
   assert.deepEqual(BUILT_IN_JOURNAL_TEMPLATES.map((template) => template.id), ["quick", "morning", "evening", "blank"]);
   assert.equal(BUILT_IN_JOURNAL_TEMPLATES[0]?.name, "此刻速记");

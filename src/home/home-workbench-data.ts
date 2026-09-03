@@ -32,6 +32,19 @@ export interface HomeEntrySummary {
   targetPath?: string;
 }
 
+export type HomeKnowledgeEntryId = Extract<HomeEntryId, "wiki" | "outputs" | "projects" | "inbox">;
+
+export const HOME_ENTRY_INDEX_PATHS: Readonly<Record<HomeKnowledgeEntryId, string>> = Object.freeze({
+  wiki: "wiki/index.md",
+  outputs: "outputs/index.md",
+  projects: "projects/index.md",
+  inbox: "inbox/index.md"
+});
+
+export function homeEntryIndexPath(id: HomeEntryId): string | null {
+  return HOME_ENTRY_INDEX_PATHS[id as HomeKnowledgeEntryId] ?? null;
+}
+
 export interface HomeCustomTemplateSummary {
   id: string;
   name: string;

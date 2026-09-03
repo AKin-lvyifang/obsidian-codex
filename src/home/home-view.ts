@@ -2,6 +2,7 @@ import { ItemView, Notice, TFile, WorkspaceLeaf, normalizePath, setIcon } from "
 import type CodexForObsidianPlugin from "../main";
 import type { KnowledgeBaseDashboardSnapshot } from "../knowledge-base/dashboard";
 import {
+  homeEntryIndexPath,
   HomeWorkbenchDataService,
   type HomeEntrySummary,
   type HomeWorkbenchData
@@ -22,6 +23,7 @@ import {
 } from "./home-bento-island";
 import {
   buildDailyConversationDraft,
+  buildReviewConversationDraft,
   buildRevisitConversationDraft,
   homeConversationTitle,
   type HomeConversationAction
@@ -31,6 +33,7 @@ import {
   type HomeConversationActionsIsland
 } from "./home-conversation-actions-island";
 import { JournalTemplateModal } from "./journal-template-modal";
+import { openObsidianLocalGraphLeaf } from "./open-native-graph";
 
 export const VIEW_TYPE_ECHOINK_HOME = "codex-echoink-home";
 
@@ -413,33 +416,32 @@ export class EchoInkHomeView extends ItemView {
   }
 
   private async openEntry(entry: HomeEntrySummary): Promise<void> {
-    if (entry.id === "journal") {
-      await this.openJournal(new Date());
+    const indexPath = homeEntryIndexPath(entry.id);
+    if (indexPath) {
+      await openObsidianLocalGraphLeaf(this.app, indexPath);
       return;
     }
-    if (entry.targetPath) {
-      await this.openVaultFile(entry.targetPath);
+    if (entry.id === "journal") {
+      this.openJournalTemplate(new Date());
       return;
     }
     if (entry.id === "review") {
-      const manager = this.plugin.getReviewManager();
-      if (!manager) {
-        new Notice("Review 还没有准备好，请稍后再试");
-        return;
-      }
-      const result = await manager.runReview("knowledge-base");
-      if (result.status === "success" && result.markdownPath) await this.openVaultFile(result.markdownPath);
+      await this.openReviewConversation();
       return;
     }
-    const message: Record<HomeEntrySummary["id"], string> = {
-      wiki: "Wiki 还没有索引，请先在知识库设置中完成初始化。",
-      outputs: "Outputs 还没有成果；运行一次知识维护后会在这里出现。",
-      projects: "Projects 还没有项目笔记，可在当前 Vault 的 projects 目录创建。",
-      inbox: "Inbox 目前为空，可通过现有记录流程收集新输入。",
-      journal: "",
-      review: ""
-    };
-    new Notice(message[entry.id]);
+  }
+
+  private async openReviewConversation(): Promise<void> {
+    try {
+      await this.plugin.activateView();
+      const view = this.plugin.getCodexView();
+      if (!view) throw new Error("右侧会话视图尚未准备好");
+      const now = new Date();
+      await view.createDraftSession(`知识复盘 · ${dateKey(now)}`, buildReviewConversationDraft(now));
+    } catch (error) {
+      console.warn("[EchoInk] Failed to prepare Home review draft:", error);
+      new Notice(`暂时无法新建复盘会话：${errorMessage(error)}`);
+    }
   }
 
   private async openJournal(date: Date): Promise<void> {
@@ -449,6 +451,10 @@ export class EchoInkHomeView extends ItemView {
       await this.app.workspace.getLeaf("tab").openFile(existing, { active: true });
       return;
     }
+    this.openJournalTemplate(date);
+  }
+
+  private openJournalTemplate(date: Date): void {
     const customTemplates = this.dataService.listCustomTemplates();
     if (this.data) this.data.customTemplates = customTemplates;
     new JournalTemplateModal(this.app, {
@@ -457,20 +463,6 @@ export class EchoInkHomeView extends ItemView {
       date,
       onCreated: () => void this.refresh()
     }).open();
-  }
-
-  private async openVaultFile(relativePath: string): Promise<void> {
-    const file = this.app.vault.getAbstractFileByPath(normalizePath(relativePath));
-    if (!(file instanceof TFile)) {
-      new Notice(`没有在当前 Vault 找到：${relativePath}`);
-      return;
-    }
-    try {
-      await this.app.workspace.getLeaf("tab").openFile(file, { active: true });
-    } catch (error) {
-      console.warn("[EchoInk] Failed to open a Home workbench note:", error);
-      new Notice(`暂时无法打开“${file.basename}”，请稍后重试。`);
-    }
   }
 
   private shiftCalendar(offset: number): void {
