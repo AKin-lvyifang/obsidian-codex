@@ -5726,6 +5726,10 @@ button.echoink-settings-navigation-row:focus-visible {
   stroke: currentColor;
 }
 
+body.theme-dark .codex-provider-brand-svg[data-provider-brand="qwen"] > path {
+  fill: #6f69f7;
+}
+
 .codex-provider-option-check,
 .codex-provider-option-check svg {
   flex: 0 0 16px;
