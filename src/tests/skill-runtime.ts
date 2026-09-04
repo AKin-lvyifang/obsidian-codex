@@ -30,6 +30,17 @@ export async function runSkillRuntimeScenarios(): Promise<void> {
       assert.match(loaded.instruction, /## 用途与触发/u);
       assert.match(loaded.instruction, /## 边界/u);
     }
+    const knowledgeReview = BUILTIN_SKILLS.find(
+      (definition) => definition.id === "knowledge-review"
+    );
+    assert.ok(knowledgeReview);
+    assert.match(knowledgeReview.body, /recent 模式、kinds=\[wiki\]、limit=8/u);
+    assert.match(knowledgeReview.body, /对返回的真实 Wiki 候选逐一调用 knowledge_read/u);
+    assert.match(knowledgeReview.body, /分页读完所选 Wiki 的全部正文/u);
+    assert.match(knowledgeReview.body, /每个 available Raw[\s\S]*changed 或 missing/u);
+    assert.match(knowledgeReview.body, /每次回复只处理一个知识节点/u);
+    assert.match(knowledgeReview.body, /不得调用 note_create 或 note_update/u);
+    assert.match(knowledgeReview.body, /Journal 的保存授权不能推导为 Outputs 授权/u);
 
     let now = 10_000;
     let candidate = {
@@ -53,7 +64,7 @@ export async function runSkillRuntimeScenarios(): Promise<void> {
       } })
     });
     const initial = await coordinator.initialize();
-    assert.equal(Object.keys(initial.records).length, 7);
+    assert.equal(Object.keys(initial.records).length, BUILTIN_SKILLS.length);
     assert.equal(Object.values(initial.records).every((record) =>
       record.origin === "builtin" && record.status === "active"
     ), true);
@@ -62,6 +73,11 @@ export async function runSkillRuntimeScenarios(): Promise<void> {
       text: "把 hello 翻译成中文",
       preferredSkillIds: ["evidence-freshness-audit"]
     }), null, "personality preference cannot trigger a Skill for a simple task");
+
+    const review = await coordinator.selectForTask({
+      text: "请做知识复盘，带我回看这些知识"
+    });
+    assert.equal(review?.id, "knowledge-review");
 
     const preferred = await coordinator.selectForTask({
       text: "请用小白能懂的方式，从第一性原理和多视角拆解这个复杂矛盾",

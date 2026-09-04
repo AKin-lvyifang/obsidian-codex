@@ -8,6 +8,7 @@ export interface EchoInkConversationSessionShell<
   title: string;
   piSessionId?: string;
   defaultMemoryMode?: "normal" | "no_memory";
+  defaultSkillId?: string;
   bodyAuthority?: "pi_session_only";
   cwd: string;
   messages: TMessage[];

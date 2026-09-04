@@ -57,7 +57,10 @@ export interface KnowledgeAgentSearchHit {
 }
 
 export interface KnowledgeAgentSearchRequest {
-  query: string;
+  /** Omitted only when mode=recent. */
+  query?: string;
+  /** Default keyword relevance search remains unchanged. */
+  mode?: "search" | "recent";
   kinds?: readonly KnowledgeAgentKind[];
   /** Internal dedupe for exact paths already disclosed outside the index page. */
   excludePaths?: readonly string[];
@@ -180,32 +183,54 @@ export class KnowledgeAgentIndex {
   ): Promise<KnowledgeAgentSearchResult> {
     await this.refresh();
     const index = this.requireCurrent();
-    const query = normalizeQuery(request.query);
+    const mode = request.mode ?? "search";
+    if (mode === "recent" && request.query !== undefined) {
+      throw new KnowledgeAgentIndexError(
+        "invalid_query",
+        "Recent Knowledge browsing must not include a query."
+      );
+    }
+    const query = mode === "recent"
+      ? ""
+      : normalizeQuery(request.query ?? "");
     const kinds = normalizeKinds(request.kinds);
     const excludedPaths = normalizeExcludedPaths(request.excludePaths);
     const limit = normalizePageSize(request.limit);
     const queryTokens = tokenCounts(query);
-    const queryHash = knowledgeQueryHash(queryTokens, kinds, excludedPaths);
+    const queryHash = knowledgeQueryHash(
+      queryTokens,
+      kinds,
+      excludedPaths,
+      mode
+    );
     const offset = request.cursor
       ? decodeCursor(request.cursor, index.generation, queryHash)
       : 0;
-    const matches = Object.values(index.entries)
+    const candidates = Object.values(index.entries)
       .filter((entry) => kinds.includes(entry.kind))
       .filter((entry) => !excludedPaths.includes(entry.vaultRelativePath))
       .map((entry) => ({
         entry,
         score: scoreEntry(entry, queryTokens)
-      }))
-      .filter((candidate) => candidate.score > 0)
-      .sort((left, right) =>
-        kindPriority(left.entry.kind) - kindPriority(right.entry.kind)
-        || verificationPriority(left.entry, index)
-          - verificationPriority(right.entry, index)
-        || right.score - left.score
-        || left.entry.vaultRelativePath.localeCompare(
-          right.entry.vaultRelativePath
+      }));
+    const matches = mode === "recent"
+      ? candidates.sort((left, right) =>
+          right.entry.mtimeMs - left.entry.mtimeMs
+          || left.entry.vaultRelativePath.localeCompare(
+            right.entry.vaultRelativePath
+          )
         )
-      );
+      : candidates
+        .filter((candidate) => candidate.score > 0)
+        .sort((left, right) =>
+          kindPriority(left.entry.kind) - kindPriority(right.entry.kind)
+          || verificationPriority(left.entry, index)
+            - verificationPriority(right.entry, index)
+          || right.score - left.score
+          || left.entry.vaultRelativePath.localeCompare(
+            right.entry.vaultRelativePath
+          )
+        );
     if (offset > matches.length) {
       throw new KnowledgeAgentIndexError(
         "cursor_invalid",
@@ -751,14 +776,21 @@ function tokenCounts(value: string): Record<string, number> {
 function knowledgeQueryHash(
   queryTokens: Record<string, number>,
   kinds: readonly KnowledgeAgentKind[],
-  excludedPaths: readonly string[]
+  excludedPaths: readonly string[],
+  mode: "search" | "recent" = "search"
 ): string {
   return createHash("sha256")
-    .update(JSON.stringify({
-      tokens: Object.keys(queryTokens),
-      kinds,
-      excludedPaths
-    }))
+    .update(JSON.stringify(mode === "search"
+      ? {
+          tokens: Object.keys(queryTokens),
+          kinds,
+          excludedPaths
+        }
+      : {
+          mode,
+          kinds,
+          excludedPaths
+        }))
     .digest("hex");
 }
 

@@ -183,6 +183,7 @@ export class PiLocalDataService {
       title: input.title,
       status: "active",
       defaultMemoryMode: input.defaultMemoryMode ?? "normal",
+      ...(input.defaultSkillId ? { defaultSkillId: input.defaultSkillId } : {}),
       createdAt,
       updatedAt: createdAt,
       sessionFile: durable.sessionFile

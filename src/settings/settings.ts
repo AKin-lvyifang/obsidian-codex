@@ -1642,6 +1642,7 @@ function normalizeStoredSessions(value: unknown): StoredSession[] {
         title: normalizeText(session.title, "新会话"),
         piSessionId,
         defaultMemoryMode: normalizeStoredSessionMemoryMode(session.defaultMemoryMode),
+        defaultSkillId: normalizeOptionalText(session.defaultSkillId) || undefined,
         bodyAuthority,
         cwd: normalizeOptionalText(session.cwd),
         messages,

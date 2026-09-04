@@ -39,7 +39,8 @@ const READ_RESULT_LIMIT_BYTES = 32_000;
 const MAX_READ_LINES = 80;
 
 export interface KnowledgeSearchToolArguments {
-  readonly query: string;
+  readonly query?: string;
+  readonly mode?: "recent";
   readonly kinds?: readonly KnowledgeAgentKind[];
   readonly limit?: number;
   readonly cursor?: string;
@@ -285,12 +286,14 @@ export function createPiKnowledgeReadToolDefinitions(input: Readonly<{
     label: "搜索知识库",
     description: [
       "搜索当前 Vault 的完整 Knowledge 索引，默认优先 Wiki、Projects，再到 Raw。",
+      "使用 mode=recent 时不传 query，可按 recordedAt 倒序浏览指定 kinds 的近期条目。",
       "结果包含 total、returned、hasMore、exhausted 和 continuationCursor；",
       "证据不足且 hasMore=true 时可携带同一查询与 cursor 继续，也可换关键词或限定 kinds。",
       "搜索命中只是候选，必须用 knowledge_read 读取真实正文后才能引用。"
     ].join(""),
     parameters: Type.Object({
-      query: Type.String({ minLength: 1, maxLength: 2_000 }),
+      query: Type.Optional(Type.String({ minLength: 1, maxLength: 2_000 })),
+      mode: Type.Optional(Type.Literal("recent")),
       kinds: Type.Optional(Type.Array(Type.Union([
         Type.Literal("wiki"),
         Type.Literal("projects"),
@@ -383,9 +386,21 @@ export function normalizePiKnowledgeReadToolArguments<
 ): Readonly<PiKnowledgeReadToolArgumentsById[T]> {
   const input = requireRecord(value);
   if (toolId === "knowledge_search") {
-    requireExactKeys(input, ["query"], ["kinds", "limit", "cursor"]);
+    requireExactKeys(input, [], ["query", "mode", "kinds", "limit", "cursor"]);
+    const mode = input.mode === undefined
+      ? undefined
+      : requireRecentMode(input.mode);
+    if (mode === "recent" && input.query !== undefined) {
+      throw new TypeError("knowledge_read_arguments_invalid");
+    }
+    if (!mode && input.query === undefined) {
+      throw new TypeError("knowledge_read_arguments_invalid");
+    }
     return Object.freeze({
-      query: requireString(input.query, 2_000),
+      ...(input.query === undefined
+        ? {}
+        : { query: requireString(input.query, 2_000) }),
+      ...(mode ? { mode } : {}),
       ...(input.kinds === undefined
         ? {}
         : { kinds: requireKinds(input.kinds) }),
@@ -415,7 +430,7 @@ export function normalizePiKnowledgeReadToolArguments<
     ...(input.lineCount === undefined
       ? {}
       : { lineCount: requireInteger(input.lineCount, 1, MAX_READ_LINES) })
-  }) as Readonly<PiKnowledgeReadToolArgumentsById[T]>;
+  });
 }
 
 function searchToolResult(
@@ -707,6 +722,13 @@ function requireKinds(value: unknown): readonly KnowledgeAgentKind[] {
     return item as KnowledgeAgentKind;
   })));
   return Object.freeze(result);
+}
+
+function requireRecentMode(value: unknown): "recent" {
+  if (value !== "recent") {
+    throw new TypeError("knowledge_read_arguments_invalid");
+  }
+  return value;
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {

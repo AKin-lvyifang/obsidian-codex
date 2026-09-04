@@ -787,7 +787,7 @@ function normalizeCatalogEntry(
       "createdAt",
       "updatedAt"
     ],
-    ["sessionFile"],
+    ["sessionFile", "defaultSkillId"],
     "Conversation Catalog Entry"
   );
   const vaultId = requireNonEmptyString(object.vaultId, "entry.vaultId");
@@ -820,6 +820,12 @@ function normalizeCatalogEntry(
     title: requireNonEmptyString(object.title, "entry.title"),
     status: requireCatalogStatus(object.status),
     defaultMemoryMode: requireMemoryMode(object.defaultMemoryMode),
+    ...(object.defaultSkillId === undefined
+      ? {}
+      : { defaultSkillId: requireNonEmptyString(
+          object.defaultSkillId,
+          "entry.defaultSkillId"
+        ) }),
     createdAt,
     updatedAt,
     ...(sessionFile ? { sessionFile } : {})
@@ -1202,6 +1208,9 @@ function cloneCatalogEntry(
     title: entry.title,
     status: entry.status,
     defaultMemoryMode: entry.defaultMemoryMode,
+    ...(entry.defaultSkillId
+      ? { defaultSkillId: entry.defaultSkillId }
+      : {}),
     createdAt: entry.createdAt,
     updatedAt: entry.updatedAt,
     ...(entry.sessionFile ? { sessionFile: entry.sessionFile } : {})

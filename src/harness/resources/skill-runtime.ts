@@ -953,6 +953,9 @@ function builtinTrigger(
   if (id === "minimum-real-world-experiment") {
     return trigger(hit(/验证假设|最小实验|现实实验|低成本验证|可逆.*试|mvp|a\/b|试点|小范围试/iu), 65);
   }
+  if (id === "knowledge-review") {
+    return trigger(hit(/知识复盘|复盘.*知识|回看.*知识|重新思考.*主题|review.*knowledge/iu), 68);
+  }
   const intent = hit(/探索.*(?:天赋|优势|人生|职业|方向)|人生设计|职业方向|长期行为模式|未来路径|我的优势|我的天赋/iu);
   const evidence = hit(/经历|过去|做过|具体例子|真实反馈|他人反馈|愿意.*分享/iu);
   return trigger(intent && (evidence || hit(/帮我探索|帮我设计/iu)), 66);

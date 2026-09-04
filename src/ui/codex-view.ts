@@ -1,7 +1,7 @@
 import { ItemView, MarkdownView, Notice, WorkspaceLeaf } from "obsidian";
 import type CodexForObsidianPlugin from "../main";
 import type { ChatMessage, StoredAttachment, StoredSession } from "../settings/settings";
-import { providerConnectionLabel } from "../settings/settings";
+import { newId, providerConnectionLabel } from "../settings/settings";
 import type { EchoInkResource } from "../resources/types";
 import type {
   PermissionMode,
@@ -19,7 +19,7 @@ import { canStartQueuedTurn, RuntimeTurnQueue, type QueuedTurnItem } from "./tur
 import { clearPromptEnhanceReview } from "./codex-view/composer";
 import { CodexMessageListRenderer, isProcessItemType } from "./codex-view/message-list";
 import { loadMcpPanelView } from "./codex-view/mcp-panel";
-import { mcpResourceEnablement } from "../resources/registry";
+import { enabledSkillResources, mcpResourceEnablement } from "../resources/registry";
 import { MessageScrollFollowController, type MessageRenderScheduleOptions } from "./codex-view/message-scroll-follow";
 import { enhanceChatInput as enhanceChatInputRunner } from "./codex-view/prompt-enhancer-runner";
 import {
@@ -34,7 +34,8 @@ import {
   startChatTurn as startChatTurnRunner,
   startNextQueuedTurn as startNextQueuedTurnRunner,
   startQueuedTurnItem as startQueuedTurnItemRunner,
-  startQueuedTurnItemSafely as startQueuedTurnItemSafelyRunner
+  startQueuedTurnItemSafely as startQueuedTurnItemSafelyRunner,
+  resourceMatchesSkillId
 } from "./codex-view/turn-runner";
 import type {
   CodexViewLifecycleSnapshot,
@@ -130,6 +131,7 @@ import {
   activeRunSession as activeRunSessionAction,
   archiveSession as archiveSessionAction,
   createSession as createSessionAction,
+  discardUnacceptedSession,
   deleteSession as deleteSessionAction,
   ensureInitialConversation as ensureInitialConversationAction,
   ensureSession as ensureSessionAction,
@@ -138,7 +140,8 @@ import {
   renderTabsView,
   renameSession as renameSessionAction,
   sessionById as sessionByIdAction,
-  type CodexSessionHost
+  type CodexSessionHost,
+  type CreateSessionOptions
 } from "./codex-view/session-controller";
 
 export const VIEW_TYPE_CODEX = "codex-for-obsidian-view";
@@ -202,6 +205,7 @@ export class CodexView extends ItemView {
   private viewLifecycleAbortController = new AbortController();
   private readonly turnQueue = new RuntimeTurnQueue();
   private queueStartInProgress = false;
+  private guidedSessionStartInProgress = false;
   private draggedQueueItemId = "";
   private readonly turnRunnerContext: CodexViewTurnContext;
   private readonly promptEnhancerRunnerContext: CodexViewPromptEnhanceContext;
@@ -431,6 +435,68 @@ export class CodexView extends ItemView {
     this.inputEl.setSelectionRange(draft.length, draft.length);
     this.focusInput();
     return session;
+  }
+
+  async createAndStartGuidedSession(input: Readonly<{
+    title: string;
+    prompt: string;
+    defaultSkillId: string;
+  }>): Promise<StoredSession> {
+    if (
+      this.guidedSessionStartInProgress
+      || this.running
+      || this.queueStartInProgress
+      || Boolean(this.plugin.getKnowledgeSurfaceService()?.isRunning)
+    ) {
+      throw new Error("当前 Agent 正在运行，请结束后再开始知识复盘");
+    }
+    this.guidedSessionStartInProgress = true;
+    let session: StoredSession | null = null;
+    try {
+      const skill = enabledSkillResources(
+        await this.plugin.buildRuntimeEchoInkResourceCatalog()
+      ).find((candidate) => resourceMatchesSkillId(
+        candidate,
+        input.defaultSkillId
+      ));
+      if (!skill?.contentPath?.trim() || !skill.name.trim()) {
+        throw new Error(
+          `知识复盘 Skill ${input.defaultSkillId} 已禁用、不存在或无法加载`
+        );
+      }
+      session = await this.createSession(input.title, {
+        defaultSkillId: input.defaultSkillId
+      });
+      clearComposerDraftAction(this.composerHost());
+      const item: QueuedTurnItem = {
+        id: newId("queued-turn"),
+        sessionId: session.id,
+        text: input.prompt,
+        attachments: [],
+        skill: null,
+        turnOptions: this.currentTurnOptions(session),
+        kind: "chat",
+        createdAt: Date.now()
+      };
+      const outcome = await this.startQueuedTurnItemSafely(item, "composer");
+      if (outcome !== "running") {
+        await this.afterTurnSettled(item.sessionId, outcome === "completed");
+      }
+      if (outcome === "failed" && item.piUserEntryAccepted !== true) {
+        await discardUnacceptedSession(this.sessionHost(), session.id);
+        session = null;
+        throw new Error("知识复盘提示语未被 Agent 接受，请检查 Provider 后重试");
+      }
+      return session;
+    } catch (error) {
+      if (session) {
+        await discardUnacceptedSession(this.sessionHost(), session.id)
+          .catch(() => undefined);
+      }
+      throw error;
+    } finally {
+      this.guidedSessionStartInProgress = false;
+    }
   }
 
   private render(): void {
@@ -693,8 +759,11 @@ export class CodexView extends ItemView {
   private isMessagesAtBottom(): boolean { return isMessagesAtBottomAction(typeof (this as unknown as { messageHost?: unknown }).messageHost === "function" ? this.messageHost() : this as unknown as CodexMessageHost); }
   private resetVirtualWindow(): void { resetVirtualWindowAction(this.messageHost()); }
   private ensureSession(): StoredSession { return ensureSessionAction(this.sessionHost()); }
-  private async createSession(title = "新会话"): Promise<StoredSession> {
-    return await createSessionAction(this.sessionHost(), title);
+  private async createSession(
+    title = "新会话",
+    options: CreateSessionOptions = {}
+  ): Promise<StoredSession> {
+    return await createSessionAction(this.sessionHost(), title, options);
   }
   private attachActiveFile(): void { attachActiveFileAction(this.attachmentHost()); }
   private pickFiles(imagesOnly: boolean): void { pickFilesAction(this.attachmentHost(), imagesOnly); }

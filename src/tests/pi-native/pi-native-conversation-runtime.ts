@@ -2608,8 +2608,10 @@ Promise<void> {
       conversationId: sourceConversationId,
       title: "源会话",
       cwd: fixture.root,
+      defaultSkillId: "knowledge-review",
       createdAt: 2
     });
+    assert.equal(sourceCatalog.defaultSkillId, "knowledge-review");
     await fixture.runtime.activateConversation(sourceConversationId);
 
     const first = await fixture.submit({
@@ -2642,6 +2644,7 @@ Promise<void> {
     });
     assert.equal(fromUser.anchorRole, "user");
     assert.equal(fromUser.editorText, "需要重新编辑的第二条提问");
+    assert.equal(fromUser.projection.catalog.defaultSkillId, "knowledge-review");
     assert.notEqual(fromUser.projection.catalog.piSessionId, sourceCatalog.piSessionId);
     assert.notEqual(fromUser.projection.catalog.sessionFile, sourceSessionFileBefore);
     assert.deepEqual(
@@ -2659,6 +2662,7 @@ Promise<void> {
     });
     assert.equal(fromAssistant.anchorRole, "assistant");
     assert.equal(fromAssistant.editorText, "");
+    assert.equal(fromAssistant.projection.catalog.defaultSkillId, "knowledge-review");
     assert.deepEqual(
       visibleConversationText(fromAssistant.projection),
       ["user:第一条提问", "assistant:第一条回复"],
@@ -2695,17 +2699,19 @@ Promise<void> {
     await reopened.initialize();
     try {
       assert.equal((await reopened.listConversations(["active"])).length, 3);
+      const reopenedFromUser = await reopened.activateConversation("derive-from-user");
+      assert.equal(reopenedFromUser.catalog.defaultSkillId, "knowledge-review");
       assert.deepEqual(
-        visibleConversationText(
-          await reopened.activateConversation("derive-from-user")
-        ),
+        visibleConversationText(reopenedFromUser),
         ["user:第一条提问", "assistant:第一条回复"],
         "the user-anchor Conversation must survive a full runtime restart"
       );
+      const reopenedFromAssistant = await reopened.activateConversation(
+        "derive-from-assistant"
+      );
+      assert.equal(reopenedFromAssistant.catalog.defaultSkillId, "knowledge-review");
       assert.deepEqual(
-        visibleConversationText(
-          await reopened.activateConversation("derive-from-assistant")
-        ),
+        visibleConversationText(reopenedFromAssistant),
         ["user:第一条提问", "assistant:第一条回复"],
         "a fresh runtime must restore the independently cataloged Pi Session prefix"
       );

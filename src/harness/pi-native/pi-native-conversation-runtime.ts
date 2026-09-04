@@ -452,6 +452,7 @@ export interface CreatePiNativeConversationInput {
   title: string;
   cwd: string;
   defaultMemoryMode?: PiConversationMemoryMode;
+  defaultSkillId?: string;
   createdAt?: number;
 }
 
@@ -783,6 +784,7 @@ export class PiNativeConversationRuntime {
       title: input.title,
       status: "active",
       defaultMemoryMode: input.defaultMemoryMode ?? "normal",
+      ...(input.defaultSkillId ? { defaultSkillId: input.defaultSkillId } : {}),
       createdAt,
       updatedAt: createdAt,
       sessionFile: durable.sessionFile
@@ -877,6 +879,9 @@ export class PiNativeConversationRuntime {
         title,
         status: "active",
         defaultMemoryMode: source.catalog.defaultMemoryMode,
+        ...(source.catalog.defaultSkillId
+          ? { defaultSkillId: source.catalog.defaultSkillId }
+          : {}),
         createdAt,
         updatedAt: createdAt,
         sessionFile: durable.sessionFile

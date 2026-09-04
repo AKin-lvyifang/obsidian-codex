@@ -23,8 +23,8 @@ import {
 } from "./home-bento-island";
 import {
   buildDailyConversationDraft,
-  buildReviewConversationDraft,
   buildRevisitConversationDraft,
+  HOME_REVIEW_PROMPT,
   homeConversationTitle,
   type HomeConversationAction
 } from "./home-conversation-actions";
@@ -437,7 +437,11 @@ export class EchoInkHomeView extends ItemView {
       const view = this.plugin.getCodexView();
       if (!view) throw new Error("右侧会话视图尚未准备好");
       const now = new Date();
-      await view.createDraftSession(`知识复盘 · ${dateKey(now)}`, buildReviewConversationDraft(now));
+      await view.createAndStartGuidedSession({
+        title: `知识复盘 · ${dateKey(now)}`,
+        prompt: HOME_REVIEW_PROMPT,
+        defaultSkillId: "knowledge-review"
+      });
     } catch (error) {
       console.warn("[EchoInk] Failed to prepare Home review draft:", error);
       new Notice(`暂时无法新建复盘会话：${errorMessage(error)}`);

@@ -2168,6 +2168,11 @@ export async function synchronizePiConversationShells(
     shell.title = catalogEntry.title;
     shell.piSessionId = catalogEntry.piSessionId;
     shell.defaultMemoryMode = catalogEntry.defaultMemoryMode;
+    if (catalogEntry.defaultSkillId) {
+      shell.defaultSkillId = catalogEntry.defaultSkillId;
+    } else {
+      delete shell.defaultSkillId;
+    }
     shell.bodyAuthority = "pi_session_only";
     shell.createdAt = catalogEntry.createdAt;
     shell.updatedAt = catalogEntry.updatedAt;

@@ -86,6 +86,23 @@ export async function runPiKnowledgeReadToolTests(): Promise<void> {
     const contentRevision = searchPayload.hits[0]?.contentRevision;
     assert.equal(contentRevision, revision(source));
 
+    const recentInput = { mode: "recent" as const, kinds: ["wiki" as const], limit: 8 };
+    const recentResult = await executeTool(
+      security,
+      tools[0]!,
+      "knowledge_search",
+      "knowledge-search-recent",
+      recentInput
+    );
+    assert.equal(recentResult.isError, false);
+    const recentPayload = JSON.parse(recentResult.content[0]!.text) as {
+      returned: number;
+      hits: Array<{ vaultRelativePath: string; recordedAt: number }>;
+    };
+    assert.equal(recentPayload.returned, 1);
+    assert.equal(recentPayload.hits[0]?.vaultRelativePath, "wiki/tool-source.md");
+    assert.equal(Number.isFinite(recentPayload.hits[0]?.recordedAt), true);
+
     const firstReadInput = {
       vaultRelativePath: "wiki/tool-source.md",
       expectedContentRevision: contentRevision,
@@ -170,6 +187,18 @@ export async function runPiKnowledgeReadToolTests(): Promise<void> {
     assert.throws(() => normalizePiKnowledgeReadToolArguments(
       "knowledge_search",
       { query: "x", unexpectedWrite: true }
+    ));
+    assert.deepEqual(
+      normalizePiKnowledgeReadToolArguments("knowledge_search", recentInput),
+      recentInput
+    );
+    assert.throws(() => normalizePiKnowledgeReadToolArguments(
+      "knowledge_search",
+      { mode: "recent", query: "must stay isolated" }
+    ));
+    assert.throws(() => normalizePiKnowledgeReadToolArguments(
+      "knowledge_search",
+      { kinds: ["wiki"], limit: 8 }
     ));
     assert.throws(() => normalizePiKnowledgeReadToolArguments(
       "knowledge_read",

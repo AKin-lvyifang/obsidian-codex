@@ -7,6 +7,9 @@ import {
 
 export type HomeConversationAction = "daily" | "revisit";
 
+export const HOME_REVIEW_PROMPT =
+  "请从我最近积累和修改的知识中，找出 3 个值得重新思考的主题。先说明它们为什么值得回看，等我选择后再带我逐步复盘；未经我确认，不要写入笔记。";
+
 export const HOME_DAILY_TITLES = Object.freeze([
   "今天，想留下些什么？",
   "把今天说给我听",
@@ -59,17 +62,6 @@ export function buildRevisitConversationDraft(): string {
     "请优先从长期 Memory 中推荐 3–5 个仍未完成的 goal、task 或 open_loop，并逐项提供足够上下文，让我先只选一个继续。",
     "在我选择前不要修改 Memory；选择后像朋友一样陪我继续聊，最后收束出一个具体、可执行的下一步。",
     "如果 Memory 已关闭、不可用或没有结果，请诚实说明，并邀请我直接说出最近一直放不下的事；不要伪造推荐。"
-  ].join("\n");
-}
-
-export function buildReviewConversationDraft(now = new Date()): string {
-  return [
-    "/review",
-    "",
-    "请先从我最近积累和修改的知识中，推荐 3 个值得复盘的知识主题，并让我只选择一个继续。",
-    "在我选择主题并明确确认写入前，不要创建、改写或追加任何文件。",
-    `确认后，默认把复盘结论写入 journal/${dateKey(now)}.md 的“知识复盘”部分；如果文件已存在，先读取并保留原内容。`,
-    "是否另外整理到 outputs 由我决定；没有获得我的选择时，不要擅自创建 outputs 文件。"
   ].join("\n");
 }
 

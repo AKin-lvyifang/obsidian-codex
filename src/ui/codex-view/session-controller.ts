@@ -38,7 +38,11 @@ export interface CodexSessionHost {
   renameSession(session: StoredSession): Promise<void>;
   archiveSession(sessionId: string): Promise<void>;
   deleteSession(sessionId: string): Promise<void>;
-  createSession(title?: string): Promise<StoredSession>;
+  createSession(title?: string, options?: CreateSessionOptions): Promise<StoredSession>;
+}
+
+export interface CreateSessionOptions {
+  defaultSkillId?: string;
 }
 
 const conversationTransitionLanes = new WeakMap<
@@ -444,6 +448,35 @@ export async function deleteSession(host: CodexSessionHost, sessionId: string): 
   await deleteSessions(host, [sessionId]);
 }
 
+export async function discardUnacceptedSession(
+  host: CodexSessionHost,
+  sessionId: string
+): Promise<boolean> {
+  const session = host.plugin.settings.sessions.find(
+    (candidate) => candidate.id === sessionId
+  );
+  if (
+    !session
+    || session.messages.length > 0
+    || (host.running && host.activeRunSessionId === sessionId)
+  ) return false;
+  const fallbackGeneration = host.plugin.settings.activeSessionId === sessionId
+    || isConversationSelectionTarget(host, sessionId)
+    ? beginConversationSelection(host)
+    : undefined;
+  await host.plugin.setPiConversationStatus(sessionId, "deleted");
+  host.turnQueue.clearSessionQueue(sessionId);
+  removeConversationShell(host, sessionId);
+  const fallbackError = await activateFallbackConversation(
+    host,
+    fallbackGeneration
+  );
+  await persistPiConversationShells(host);
+  renderConversationShellChange(host);
+  if (fallbackError) throw fallbackError;
+  return true;
+}
+
 export async function restoreArchivedConversation(
   host: CodexSessionHost,
   entry: Readonly<PiConversationCatalogEntry>
@@ -623,19 +656,22 @@ export async function ensureInitialConversation(
 
 export async function createSession(
   host: CodexSessionHost,
-  title = "新会话"
+  title = "新会话",
+  options: CreateSessionOptions = {}
 ): Promise<StoredSession> {
   return await createSessionForSelection(
     host,
     title,
-    beginConversationSelection(host)
+    beginConversationSelection(host),
+    options
   );
 }
 
 async function createSessionForSelection(
   host: CodexSessionHost,
   title: string,
-  generation: number
+  generation: number,
+  options: CreateSessionOptions = {}
 ): Promise<StoredSession> {
   const conversationId = newId("conversation");
   bindConversationSelectionTarget(host, generation, conversationId);
@@ -643,7 +679,10 @@ async function createSessionForSelection(
     conversationId,
     title,
     cwd: host.plugin.getVaultPath(),
-    defaultMemoryMode: "normal"
+    defaultMemoryMode: "normal",
+    ...(options.defaultSkillId
+      ? { defaultSkillId: options.defaultSkillId }
+      : {})
   });
   const session = createPiConversationShell(host, catalogEntry);
   host.plugin.settings.sessions.push(session);
@@ -721,6 +760,11 @@ function applyPiCatalogEntryToShell(
   shell.title = catalogEntry.title;
   shell.piSessionId = catalogEntry.piSessionId;
   shell.defaultMemoryMode = catalogEntry.defaultMemoryMode;
+  if (catalogEntry.defaultSkillId) {
+    shell.defaultSkillId = catalogEntry.defaultSkillId;
+  } else {
+    delete shell.defaultSkillId;
+  }
   shell.bodyAuthority = "pi_session_only";
   shell.createdAt = catalogEntry.createdAt;
   shell.updatedAt = catalogEntry.updatedAt;
@@ -807,6 +851,7 @@ function conversationShellFingerprint(host: CodexSessionHost): string {
       title: session.title,
       piSessionId: session.piSessionId,
       defaultMemoryMode: session.defaultMemoryMode,
+      defaultSkillId: session.defaultSkillId,
       bodyAuthority: session.bodyAuthority,
       createdAt: session.createdAt,
       updatedAt: session.updatedAt

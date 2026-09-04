@@ -1242,6 +1242,7 @@ Promise<void> {
             title: "Derived image conversation",
             status: "active" as const,
             defaultMemoryMode: "normal" as const,
+            defaultSkillId: "knowledge-review",
             createdAt: 3,
             updatedAt: 3,
             sessionFile: "/sessions/pi-image-derive-target.jsonl"
@@ -1302,6 +1303,7 @@ Promise<void> {
   const derived = plugin.settings.sessions.find(
     (session: StoredSession) => session.id === targetId
   );
+  assert.equal(derived?.defaultSkillId, "knowledge-review");
   assert.deepEqual(derived?.piImageAttachments, {
     [userEntryId]: [{
       name: "derive.png",
@@ -1376,20 +1378,22 @@ async function disabledOrStaleSkillCannotStartTurn(): Promise<void> {
     kind: "chat",
     piSessionId: "pi-session-disabled-skill",
     bodyAuthority: "pi_session_only",
+    defaultSkillId: "knowledge-review",
     cwd: "/vault",
     messages: [],
     createdAt: 1,
     updatedAt: 1
   };
   const selectedSkill = {
-    id: "echoink-local:skill:review",
+    id: "echoink-local:skill:knowledge-review",
     kind: "skill" as const,
     source: "echoink-local" as const,
-    name: "stale review",
+    name: "stale knowledge review",
     description: "Stale selected value",
     enabled: true,
     bridgeMode: "prompt-only" as const,
-    contentPath: "skills/stale/SKILL.md"
+    contentPath: "skills/stale/SKILL.md",
+    metadata: { resourceId: "knowledge-review" }
   };
   const item: QueuedTurnItem = {
     id: "queued-disabled-skill",
@@ -1412,7 +1416,7 @@ async function disabledOrStaleSkillCannotStartTurn(): Promise<void> {
   let submitted: PiChatSubmitRequest | null = null;
   const runtimeSkill = {
     ...selectedSkill,
-    name: "current review",
+    name: "current knowledge review",
     contentPath: "skills/current/SKILL.md"
   };
   const disabledCatalog = buildActiveEchoInkResourceCatalog({
@@ -1446,12 +1450,22 @@ async function disabledOrStaleSkillCannotStartTurn(): Promise<void> {
     clearComposerDraft: () => undefined
   };
 
+  openTestNoticeMessages.length = 0;
   assert.equal(await startChatTurn(view, session, item, "composer"), "failed");
   assert.equal(submitted, null, "disabled Skill must fail before Provider submit");
+  assert.equal(
+    openTestNoticeMessages.some((message) => message.includes("会话默认 Skill")),
+    true
+  );
 
+  openTestNoticeMessages.length = 0;
   view.plugin.buildRuntimeEchoInkResourceCatalog = async () => removedCatalog;
   assert.equal(await startChatTurn(view, session, item, "queue"), "failed");
   assert.equal(submitted, null, "removed Skill must fail before Provider submit");
+  assert.equal(
+    openTestNoticeMessages.some((message) => message.includes("会话默认 Skill")),
+    true
+  );
 
 }
 
@@ -1462,6 +1476,7 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
     kind: "chat",
     piSessionId: "pi-session-turn-runner",
     bodyAuthority: "pi_session_only",
+    defaultSkillId: "knowledge-review",
     cwd: "/vault",
     messages: [],
     createdAt: 1,
@@ -1514,6 +1529,17 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
     },
     kind: "chat",
     createdAt: 2
+  };
+  const defaultSkill = {
+    id: "echoink-local:skill:knowledge-review",
+    kind: "skill" as const,
+    source: "echoink-local" as const,
+    name: "knowledge-review",
+    description: "Persistent guided Knowledge review",
+    enabled: true,
+    bridgeMode: "prompt-only" as const,
+    contentPath: "skills/knowledge-review/SKILL.md",
+    metadata: { resourceId: "knowledge-review" }
   };
   item.preparedDocuments = (await preparePiChatDocuments(
     item.attachments.filter((attachment) => attachment.type === "file"),
@@ -1570,7 +1596,7 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
     readRawMessageText: async () => "",
     piAgentApprovalBinding: () => null,
     persistPiNativeSettings: async () => undefined,
-    buildRuntimeEchoInkResourceCatalog: async () => [item.skill!],
+    buildRuntimeEchoInkResourceCatalog: async () => [item.skill!, defaultSkill],
     submitPiChat: async (request: PiChatSubmitRequest) => {
       submittedRequest = request;
       return {
@@ -1690,8 +1716,8 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
     piSessionId: session.piSessionId,
     productRunId: "product-run-turn-runner"
   }, "turn runner subscribes to the exact active Approval run");
-  assert.equal(submittedRequest?.skillPath, "skills/review/SKILL.md");
-  assert.equal(submittedRequest?.skillName, "review");
+  assert.equal(submittedRequest?.skillPath, "skills/knowledge-review/SKILL.md");
+  assert.equal(submittedRequest?.skillName, "knowledge-review");
   assert.equal(submittedRequest?.memoryMode, "normal");
   assert.equal(submittedRequest?.images?.length, 1);
   assert.equal(submittedRequest?.documents?.length, 1);
@@ -1948,6 +1974,11 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
     "Approval refresh, Agent settlement, and formal ProductRun settlement each read once");
   assert.equal(session.messages.at(-1)?.status, "completed");
   assert.equal(session.messages.at(-1)?.askSourceAttribution, true);
+  assert.equal(
+    session.defaultSkillId,
+    "knowledge-review",
+    "durable projection readback preserves the Catalog-owned default Skill"
+  );
   assert.deepEqual(session.messages.at(-1)?.personalMemorySources, [
     { id: "memory-turn-runner", title: "Turn runner Memory" }
   ]);
@@ -2646,6 +2677,9 @@ function durableProjection(
       title: session.title,
       status: "active",
       defaultMemoryMode: "normal",
+      ...(session.defaultSkillId
+        ? { defaultSkillId: session.defaultSkillId }
+        : {}),
       createdAt: 1,
       updatedAt: assistantStatus === "completed" ? 8 : 7,
       sessionFile: "/sessions/pi-session-turn-runner.jsonl"

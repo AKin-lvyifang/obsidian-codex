@@ -5,6 +5,7 @@ export const BUILTIN_SKILL_IDS = Object.freeze([
   "evidence-freshness-audit",
   "multi-lens-problem-solving",
   "minimum-real-world-experiment",
+  "knowledge-review",
   "self-discovery-life-design"
 ] as const);
 
@@ -26,7 +27,7 @@ function skill(
   return Object.freeze({ id, title, description, body: body.trim() });
 }
 
-/** The seven product-owned procedures frozen by the 2026-08-28 PRD. */
+/** Product-owned procedures installed into every initialized EchoInk Vault. */
 export const BUILTIN_SKILLS: readonly BuiltinSkillDefinition[] = Object.freeze([
   skill(
     "clarify-real-question",
@@ -184,6 +185,43 @@ export const BUILTIN_SKILLS: readonly BuiltinSkillDefinition[] = Object.freeze([
 ## 边界
 
 不可用于高风险、不可逆或无法获得有效反馈的行动。Skill 只负责设计实验；需要对外发送、付费、发布、删除或其他真实副作用时，仍遵守原有授权规则。`
+  ),
+  skill(
+    "knowledge-review",
+    "知识复盘",
+    "从当前 Vault 的真实 Wiki 与 Raw 中推荐近期主题，并按用户确认逐节点复盘；保存必须另行获得明确授权。",
+    `## 用途与触发
+
+本 Skill 用于首页 Review 创建的持续复盘会话。它在每一轮都继续生效，包括用户只回复“好的”“继续”“下一个”或同义表达时。对话上下文可以记录已选择主题和当前知识节点，但不能把推测写成来源事实。
+
+## 首轮推荐
+
+1. 首先调用 knowledge_search，使用 recent 模式、kinds=[wiki]、limit=8。不得用普通关键词猜测代替近期浏览。
+2. 对返回的真实 Wiki 候选逐一调用 knowledge_read。若正文分页，沿 nextLineStart 继续，至少读到足以判断主题为何值得回看的内容。
+3. 资料足够时，从已读证据中推荐 3 个主题，并分别说明值得回看的理由；少于 3 个时只返回真实数量并说明不足。
+4. 等待用户选择一个主题。不得使用常识补造 Vault 主题，也不得声称具备长期未回看评分。
+
+## 选题后的证据读取
+
+1. 分页读完所选 Wiki 的全部正文。
+2. 检查 knowledge_read 返回的全部 rawSources。对每个 available Raw，使用其路径和 contentRevision 分页读完；对 changed 或 missing 明确标记证据降级，不得把未读、缺失或已变化内容冒充原文。
+3. 只根据已读 Wiki、available Raw 和用户在当前会话提供的信息拆分知识节点。保留来源路径与版本状态。
+
+## 逐节点教学
+
+每次回复只处理一个知识节点：讲解、追问，或针对用户质疑纠正当前节点。用户质疑、反对或要求澄清时停留在当前节点；只有“好的”“继续”“下一个”或明确同义的推进确认才进入下一节点。不得一次性倾倒全部复盘内容。
+
+“好的”“继续”“下一个”只授权教学推进，不授权创建、修改或追加笔记，也不得调用 note_create 或 note_update。
+
+## 保存
+
+最后一个节点完成后，单独询问用户是否保存。只有“写入今天日记”“确认保存”等明确保存表达，才可进入现有写 Tool 的审批、CAS 版本冲突保护与写后回读流程。
+
+默认候选目标是当天 Journal 的“知识复盘”部分。把成熟成果整理到 Outputs 必须另行询问并获得独立确认；Journal 的保存授权不能推导为 Outputs 授权。
+
+## 边界
+
+没有 recent 候选、真实正文不足或来源变化时，如实说明当前证据边界并等待用户决定。不得静默转成普通聊天，不得联网补造，不得自动生成复盘报告，也不得自动写文件。`
   ),
   skill(
     "self-discovery-life-design",

@@ -35,6 +35,8 @@ export interface PiConversationCatalogEntry {
   title: string;
   status: PiConversationCatalogStatus;
   defaultMemoryMode: PiConversationMemoryMode;
+  /** Optional product-owned Skill resolved again before every formal Turn. */
+  defaultSkillId?: string;
   createdAt: number;
   updatedAt: number;
   /** Pi-owned JSONL path. This is an index pointer, never a transcript copy. */

@@ -6,6 +6,7 @@ import {
   readFile,
   readdir,
   rm,
+  utimes,
   writeFile
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -55,6 +56,17 @@ export async function runKnowledgeAgentIndexTests(): Promise<void> {
     }
     await writeFixture(vaultPath, "journal/ignored.md", "COMMON_DEEP_TOKEN\n");
     await writeFixture(vaultPath, "notes/ignored.md", "COMMON_DEEP_TOKEN\n");
+    const recentBase = Date.now() + 60_000;
+    await utimes(
+      path.join(vaultPath, "wiki/deep-001.md"),
+      new Date(recentBase),
+      new Date(recentBase)
+    );
+    await utimes(
+      path.join(vaultPath, "wiki/deep-002.md"),
+      new Date(recentBase + 1_000),
+      new Date(recentBase + 1_000)
+    );
 
     const beforeVault = await snapshotTree(vaultPath);
     const index = new KnowledgeAgentIndex({ vaultPath, storageRootPath });
@@ -70,6 +82,40 @@ export async function runKnowledgeAgentIndexTests(): Promise<void> {
     assert.equal(secondRefresh.generation, firstRefresh.generation);
     assert.equal(secondRefresh.indexed, 0);
     assert.equal(secondRefresh.reused, 103);
+
+    const recent = await index.search({
+      mode: "recent",
+      kinds: ["wiki"],
+      limit: 2
+    });
+    assert.equal(recent.total, 101);
+    assert.deepEqual(recent.hits.map((hit) => hit.vaultRelativePath), [
+      "wiki/deep-002.md",
+      "wiki/deep-001.md"
+    ]);
+    assert.ok(recent.hits[0]!.recordedAt > recent.hits[1]!.recordedAt);
+    assert.equal(recent.hasMore, true);
+    assert.ok(recent.continuationCursor);
+    await assert.rejects(
+      index.search({
+        query: "COMMON_DEEP_TOKEN",
+        kinds: ["wiki"],
+        limit: 2,
+        cursor: recent.continuationCursor
+      }),
+      (error) => error instanceof KnowledgeAgentIndexError
+        && error.code === "cursor_invalid"
+    );
+    await assert.rejects(
+      index.search({ mode: "recent", query: "COMMON_DEEP_TOKEN", limit: 2 }),
+      (error) => error instanceof KnowledgeAgentIndexError
+        && error.code === "invalid_query"
+    );
+    await assert.rejects(
+      index.search({ limit: 2 }),
+      (error) => error instanceof KnowledgeAgentIndexError
+        && error.code === "invalid_query"
+    );
 
     const visited: string[] = [];
     let cursor: string | undefined;
@@ -211,6 +257,16 @@ export async function runKnowledgeAgentIndexTests(): Promise<void> {
 
     const firstPage = await index.search({ query: "COMMON_DEEP_TOKEN", limit: 8 });
     assert.ok(firstPage.continuationCursor);
+    await assert.rejects(
+      index.search({
+        mode: "recent",
+        kinds: ["wiki"],
+        limit: 8,
+        cursor: firstPage.continuationCursor
+      }),
+      (error) => error instanceof KnowledgeAgentIndexError
+        && error.code === "cursor_invalid"
+    );
     const changedRawText = `${rawText}changed\n`;
     await writeFixture(vaultPath, "raw/source.md", changedRawText);
     const changedRefresh = await index.refresh();
