@@ -133,6 +133,18 @@ export async function sendMessage(view: CodexViewTurnContext): Promise<void> {
     return;
   }
   if (action === "stop-turn") {
+    if (
+      view.running
+      && view.activeRunSessionId
+      && view.activeRunSessionId !== session.id
+    ) {
+      showNotice(
+        view,
+        "另一个会话正在运行；可继续浏览或填写草稿，当前运行不会被停止。",
+        "Another conversation is running. You can keep browsing or draft a message without stopping it."
+      );
+      return;
+    }
     await view.stopTurn();
     return;
   }
@@ -1085,6 +1097,13 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
     rememberPiConversationProjection(view.plugin, committedFinalProjection);
     applyPiConversationProjection(session, committedFinalProjection);
     view.renderMessagesIfActive(session);
+    await markUnreadCompletedAnswerIfBackground(
+      view,
+      session,
+      settledEvent,
+      settledRun,
+      committedFinalProjection
+    );
 
     if (settledEvent.terminalState === "failed") {
       const knownFailure = providerFailureText(settledRun.error);
@@ -1172,6 +1191,12 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
     if (handle) {
       view.setPendingInteraction(session.id, null, handle.productRunId);
       view.plugin.releasePiProductionRun(handle.productRunId);
+      await view.plugin.releasePiConversationIfInactive(
+        session.id,
+        () => view.plugin.settings.activeSessionId !== session.id
+      ).catch((error) => {
+        console.error("Inactive Pi Conversation release failed", error);
+      });
     }
     view.running = false;
     view.activeTurnId = "";
@@ -1262,6 +1287,66 @@ function assertPiChatSettlementIdentity(
   ) {
     throw new Error("Pi Chat ProductRun 终态与耐久回读不一致。");
   }
+}
+
+export async function markUnreadCompletedAnswerIfBackground(
+  view: CodexViewTurnContext,
+  session: StoredSession,
+  event: Readonly<Extract<PiChatRuntimeEvent, { type: "product_run_settled" }>>,
+  run: Readonly<PiProductRunRecord>,
+  projection: Readonly<PiConversationProjection>
+): Promise<void> {
+  const unreadAnswerAt = piConversationUnreadAnswerAt({
+    sessionId: session.id,
+    activeSessionId: view.plugin.settings.activeSessionId,
+    event,
+    run,
+    projection
+  });
+  if (unreadAnswerAt === undefined) return;
+
+  const previousUnreadAnswerAt = session.unreadAnswerAt;
+  session.unreadAnswerAt = unreadAnswerAt;
+  try {
+    await view.plugin.persistPiNativeSettings();
+  } catch (error) {
+    if (session.unreadAnswerAt === unreadAnswerAt) {
+      if (previousUnreadAnswerAt === undefined) {
+        delete session.unreadAnswerAt;
+      } else {
+        session.unreadAnswerAt = previousUnreadAnswerAt;
+      }
+    }
+    console.error("Unread Pi answer persistence failed", error);
+  }
+}
+
+export function piConversationUnreadAnswerAt(input: Readonly<{
+  sessionId: string;
+  activeSessionId: string;
+  event: Readonly<Extract<PiChatRuntimeEvent, { type: "product_run_settled" }>>;
+  run: Readonly<PiProductRunRecord>;
+  projection: Readonly<PiConversationProjection>;
+  now?: number;
+}>): number | undefined {
+  if (
+    input.event.terminalState !== "completed"
+    || input.activeSessionId === input.sessionId
+  ) return undefined;
+  const assistantEntryId = input.event.assistantEntryId
+    ?? input.run.assistantEntryId;
+  if (
+    !assistantEntryId
+    || !input.projection.messages.some((message) =>
+      message.role === "assistant"
+      && message.status === "completed"
+      && piEntryIdFromProjectedMessageId(message.id) === assistantEntryId
+    )
+  ) return undefined;
+  return [input.run.settledAt, input.event.occurredAt, input.now].find(
+    (value): value is number =>
+      typeof value === "number" && Number.isFinite(value) && value > 0
+  ) ?? Math.max(1, Date.now());
 }
 
 function applyPiConversationProjection(

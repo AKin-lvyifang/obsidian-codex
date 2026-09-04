@@ -220,7 +220,7 @@ export function renderToolbar(host: CodexComposerHost): void {
           }
         });
       },
-      onStopTurn: () => void host.stopTurn(),
+      onStopTurn: () => void stopTurnFromComposer(host, session),
       onSteerPiChat: () => void host.steerPiChatFromComposer(),
       onEnqueueDraft: () => void host.enqueueComposerDraft(),
       onResumeQueue: (sessionId) => void host.resumeQueuedTurns(sessionId),
@@ -1009,6 +1009,28 @@ export function renderKnowledgeCommandMatches(
     const currentQuery = knowledgeCommandQueryForInput(host.inputEl.value);
     if (currentQuery !== null) renderKnowledgeCommandMatches(host, currentQuery, skills);
   }).catch(() => undefined);
+}
+
+export async function stopTurnFromComposer(
+  host: Pick<
+    CodexComposerHost,
+    "activeRunSessionId" | "plugin" | "running" | "stopTurn"
+  >,
+  session: Pick<StoredSession, "id">
+): Promise<void> {
+  if (
+    host.running
+    && host.activeRunSessionId
+    && host.activeRunSessionId !== session.id
+  ) {
+    new Notice(conversationUiText(
+      host.plugin.settings.settingsLanguage,
+      "另一个会话正在运行；当前会话不能停止它。",
+      "Another conversation is running; this conversation cannot stop it."
+    ));
+    return;
+  }
+  await host.stopTurn();
 }
 
 export function removeTrailingSlashQuery(value: string): string {

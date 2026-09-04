@@ -778,6 +778,32 @@ export default class CodexForObsidianPlugin extends Plugin {
       }
     }
   }
+  async releasePiConversationIfInactive(
+    conversationId: string,
+    isStillInactive: () => boolean
+  ): Promise<boolean> {
+    const previousLane = this.piConversationActivationLane;
+    let released = false;
+    const release = previousLane.then(async () => {
+      if (
+        !isStillInactive()
+        || this.piActivatedConversationId === conversationId
+      ) return;
+      await this.settlePiRuntimeFlight();
+      if (
+        !isStillInactive()
+        || this.piActivatedConversationId === conversationId
+      ) return;
+      released = await this.piRuntimeBundle?.runtime
+        .releaseConversationIfIdle(conversationId) ?? false;
+    });
+    this.piConversationActivationLane = release.then(
+      () => undefined,
+      () => undefined
+    );
+    await release;
+    return released;
+  }
   async steerPiConversation(
     conversationId: string,
     text: string
@@ -1383,7 +1409,7 @@ export default class CodexForObsidianPlugin extends Plugin {
           const bundle = this.piRuntimeBundle;
           if (previousActiveConversationId && bundle) {
             try {
-              await bundle.runtime.releaseConversation(
+              await bundle.runtime.releaseConversationIfIdle(
                 previousActiveConversationId
               );
             } finally {
@@ -1422,7 +1448,7 @@ export default class CodexForObsidianPlugin extends Plugin {
 
         if (!this.isCurrentPiConversationActivation(task)) {
           try {
-            await bundle.runtime.releaseConversation(conversationId);
+            await bundle.runtime.releaseConversationIfIdle(conversationId);
           } finally {
             if (this.piActivatedConversationId === conversationId) {
               this.piActivatedConversationId = null;

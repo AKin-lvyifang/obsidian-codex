@@ -449,6 +449,7 @@ export function renderCodexTabs(
     const active = session.id === activeSessionId;
     const tabStop = session.id === state.trackRovingSessionId;
     const running = session.id === runningSessionId;
+    const unread = session.unreadAnswerAt !== undefined;
     const summary = sessionSummaryTooltip(session, Date.now(), language);
     const tab = track.createEl("button", {
       cls: [
@@ -461,7 +462,12 @@ export function renderCodexTabs(
         role: "tab",
         "data-session-id": session.id,
         "aria-selected": String(active),
-        "aria-label": session.title || conversationUiText(language, "未命名会话", "Untitled conversation"),
+        "aria-label": sessionStatusAriaLabel(
+          session.title,
+          running,
+          unread,
+          language
+        ),
         "aria-description": summary,
         tabindex: tabStop ? "0" : "-1"
       }
@@ -512,6 +518,18 @@ export function renderCodexTabs(
       }
     };
     tab.createSpan({ cls: "codex-session-tab-title", text: String(index + 1) });
+    if (running) {
+      const status = tab.createSpan({
+        cls: "codex-session-tab-status codex-session-tab-running",
+        attr: { "aria-hidden": "true" }
+      });
+      setIcon(status, "loader-circle");
+    } else if (unread) {
+      tab.createSpan({
+        cls: "codex-session-tab-status codex-session-tab-unread",
+        attr: { "aria-hidden": "true" }
+      });
+    }
     tab.onclick = (event) => {
       if (!shouldSuppressSessionTrackClick(state.suppressTrackClickUntil)) {
         const pointerActivation = pointerActivationPending || event.detail > 0;
@@ -937,6 +955,7 @@ function renderSessionPicker(
     });
     for (const [index, session] of visibleSessions.entries()) {
       const running = session.id === runningSessionId;
+      const unread = session.unreadAnswerAt !== undefined;
       const active = session.id === activeSessionId;
       const selected = state.selectedIds.has(session.id);
       const row = list.createDiv({
@@ -944,13 +963,20 @@ function renderSessionPicker(
           "codex-session-row",
           active ? "is-active" : "",
           index === state.focusedIndex ? "is-focused" : "",
-          running ? "is-running" : ""
+          running ? "is-running" : "",
+          unread && !running ? "is-unread" : ""
         ].filter(Boolean).join(" "),
         attr: {
           role: "option",
           tabindex: "-1",
           title: session.title,
           "data-session-id": session.id,
+          "aria-label": sessionStatusAriaLabel(
+            session.title,
+            running,
+            unread,
+            language
+          ),
           "aria-selected": state.managing ? (selected ? "true" : "false") : (active ? "true" : "false")
         }
       });
@@ -978,6 +1004,8 @@ function renderSessionPicker(
         if (running) {
           setIcon(leading, "loader-circle");
           leading.addClass("is-spinning");
+        } else if (unread) {
+          leading.createSpan({ cls: "codex-session-unread-dot" });
         } else {
           leading.createSpan({ cls: active ? "codex-session-active-dot" : "codex-session-dot" });
         }
@@ -989,6 +1017,8 @@ function renderSessionPicker(
       meta.createSpan({
         text: running
           ? conversationUiText(language, "Agent 正在运行", "Agent is running")
+          : unread
+            ? conversationUiText(language, "有未读答案", "Unread answer")
           : formatSessionUpdatedAt(session.updatedAt, Date.now(), language)
       });
       if (active) {
@@ -1216,6 +1246,31 @@ function renderSessionPicker(
   if (typeof window !== "undefined") {
     window.setTimeout(() => searchInput.focus(), 0);
   }
+}
+
+function sessionStatusAriaLabel(
+  title: string,
+  running: boolean,
+  unread: boolean,
+  language: SettingsLanguage
+): string {
+  const displayTitle = title
+    || conversationUiText(language, "未命名会话", "Untitled conversation");
+  if (running) {
+    return conversationUiText(
+      language,
+      `${displayTitle}，正在运行`,
+      `${displayTitle}, running`
+    );
+  }
+  if (unread) {
+    return conversationUiText(
+      language,
+      `${displayTitle}，有未读答案`,
+      `${displayTitle}, unread answer`
+    );
+  }
+  return displayTitle;
 }
 
 function navigatorStateFor(container: HTMLElement): CodexSessionNavigatorState {

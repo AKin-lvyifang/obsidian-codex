@@ -22,13 +22,20 @@ import {
 import {
   createQueuedTurnFromComposer,
   enqueueComposerDraft,
+  markUnreadCompletedAnswerIfBackground,
   piChatMemoryModeForGlobalSetting,
+  piConversationUnreadAnswerAt,
+  sendMessage,
   startChatTurn,
   startQueuedTurnItem,
   startNextQueuedTurn
 } from "../../ui/codex-view/turn-runner";
 import { classifyLocalAttachmentType } from "../../ui/codex-view/attachments";
-import { enabledSkillsForComposerMenu, removeTrailingSlashQuery } from "../../ui/codex-view/composer-controller";
+import {
+  enabledSkillsForComposerMenu,
+  removeTrailingSlashQuery,
+  stopTurnFromComposer
+} from "../../ui/codex-view/composer-controller";
 import { compactBrandedModelLabel } from "../../ui/codex-view/composer";
 import { buildActiveEchoInkResourceCatalog } from "../../resources/registry";
 import { splitMessageTableRow } from "../../ui/render-message";
@@ -92,7 +99,10 @@ export async function runPiNativeTurnRunnerTests(): Promise<void> {
   await queuedNativeDocumentCapabilityLossUsesFrozenTextOnly();
   await agentSettlementOnlyFinalizesPiChatTurn();
   await failedSettlementNoticeMatchesDurableFailureReason();
+  unreadAnswerRequiresBackgroundCompletedMatchingAssistant();
+  await unreadPersistenceFailureDoesNotRestoreAfterConcurrentRead();
   await pendingSubmitKeepsRunningConversationResidentAcrossSessionSwitch();
+  await busyActionInAnotherConversationDoesNotStopTheActiveRun();
   await disabledOrStaleSkillCannotStartTurn();
   await maintainScopeIsResolvedBeforeProviderSubmit();
   await queuedTurnsKeepExactProviderModelAndRetainUnavailableHead();
@@ -1099,7 +1109,8 @@ async function maintainScopeIsResolvedBeforeProviderSubmit(): Promise<void> {
       throw new Error("no durable run in request-capture fixture");
     },
     abortPiConversation: async () => undefined,
-    releasePiProductionRun: () => undefined
+    releasePiProductionRun: () => undefined,
+    releasePiConversationIfInactive: async () => false
   };
   const view: any = {
     plugin,
@@ -1638,7 +1649,8 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
     abortPiConversation: async () => undefined,
     releasePiProductionRun: (productRunId: string) => {
       releasedRunId = productRunId;
-    }
+    },
+    releasePiConversationIfInactive: async () => false
   };
   const dom = installTurnRunnerMessageDom();
   const messageContext = createTestContext();
@@ -2062,7 +2074,8 @@ Promise<void> {
     subscribePiAgentApproval: () => ({ unsubscribe: () => undefined }),
     readPiConversationProjection: async () => failedProjection(),
     abortPiConversation: async () => undefined,
-    releasePiProductionRun: () => undefined
+    releasePiProductionRun: () => undefined,
+    releasePiConversationIfInactive: async () => false
   };
   let running = false;
   let activeRunId = "";
@@ -2188,6 +2201,7 @@ Promise<void> {
   const pendingSubmit = deferred<typeof handle>();
   let listener: PiChatRuntimeEventListener | null = null;
   let projectionReads = 0;
+  let unreadPersistenceCalls = 0;
   const plugin = {
     settings: {
       memory: { useLongTermMemory: true },
@@ -2210,6 +2224,14 @@ Promise<void> {
     },
     abortPiConversation: async () => undefined,
     releasePiProductionRun: () => undefined,
+    releasePiConversationIfInactive: async (
+      conversationId: string,
+      isStillInactive: () => boolean
+    ) => {
+      assert.equal(conversationId, runningSession.id);
+      assert.equal(isStillInactive(), true);
+      return true;
+    },
     switchPiConversation: async (
       _previous: string | null,
       next: string
@@ -2230,7 +2252,8 @@ Promise<void> {
       diagnostics: [],
       drafts: []
     }),
-    saveSettings: async () => undefined
+    saveSettings: async () => undefined,
+    persistPiNativeSettings: async () => { unreadPersistenceCalls += 1; }
   };
   let running = false;
   let activeRunId = "";
@@ -2325,15 +2348,194 @@ Promise<void> {
     terminalState: "completed",
     activeLeafId: "entry-assistant",
     agentSettledAt: 7,
-    settledAt: 8,
+    settledAt: 9,
     createdAt: 2,
-    updatedAt: 8
+    updatedAt: 9
   });
 
   assert.equal(await turn, "completed");
+  assert.equal(runningSession.unreadAnswerAt, 9);
+  assert.equal(
+    runningSession.updatedAt,
+    8,
+    "marking the answer unread must not change conversation ordering time"
+  );
+  assert.equal(unreadPersistenceCalls, 1);
+  assert.deepEqual(
+    targetSession.messages.map((message) => message.id),
+    ["target-history"],
+    "background events must not enter the foreground conversation"
+  );
   assert.equal(view.running, false);
   assert.equal(view.activeRunKind, "");
   assert.equal(view.activeRunSessionId, "");
+}
+
+function unreadAnswerRequiresBackgroundCompletedMatchingAssistant(): void {
+  const session = piSessionShell("conversation-turn-runner");
+  const projection = durableProjection(session, "completed");
+  const completedEvent = runtimeEvent({
+    type: "product_run_settled",
+    terminalState: "completed",
+    assistantEntryId: "entry-assistant"
+  }) as Extract<PiChatRuntimeEvent, { type: "product_run_settled" }>;
+  const completedRun: PiProductRunRecord = {
+    productRunId: completedEvent.productRunId,
+    conversationId: completedEvent.conversationId,
+    piSessionId: completedEvent.piSessionId,
+    userEntryId: "entry-user",
+    assistantEntryId: "entry-assistant",
+    toolCallIds: [],
+    memoryMode: "normal",
+    state: "product_run_settled",
+    terminalState: "completed",
+    activeLeafId: "entry-assistant",
+    settledAt: 25,
+    createdAt: 2,
+    updatedAt: 25
+  };
+  const evaluate = (
+    event: typeof completedEvent,
+    run: PiProductRunRecord = completedRun,
+    finalProjection: PiConversationProjection = projection,
+    activeSessionId = "conversation-foreground"
+  ) => piConversationUnreadAnswerAt({
+    sessionId: session.id,
+    activeSessionId,
+    event,
+    run,
+    projection: finalProjection,
+    now: 30
+  });
+
+  assert.equal(evaluate(completedEvent), 25);
+  assert.equal(evaluate(completedEvent, completedRun, projection, session.id), undefined);
+  for (const terminalState of ["failed", "cancelled"] as const) {
+    assert.equal(evaluate({ ...completedEvent, terminalState }), undefined);
+  }
+  assert.equal(
+    evaluate({ ...completedEvent, assistantEntryId: "entry-other" }),
+    undefined
+  );
+  assert.equal(
+    evaluate(completedEvent, completedRun, {
+      ...projection,
+      messages: projection.messages.filter((message) => message.role !== "assistant")
+    }),
+    undefined
+  );
+  assert.equal(
+    evaluate(completedEvent, completedRun, {
+      ...projection,
+      messages: projection.messages.map((message) =>
+        message.role === "assistant"
+          ? { ...message, status: "running" }
+          : message
+      )
+    }),
+    undefined
+  );
+}
+
+async function unreadPersistenceFailureDoesNotRestoreAfterConcurrentRead():
+Promise<void> {
+  const session = piSessionShell("conversation-unread-cas");
+  session.unreadAnswerAt = 10;
+  const projection = durableProjection(session, "completed");
+  const event = runtimeEvent({
+    type: "product_run_settled",
+    terminalState: "completed",
+    assistantEntryId: "entry-assistant"
+  }) as Extract<PiChatRuntimeEvent, { type: "product_run_settled" }>;
+  const run: PiProductRunRecord = {
+    productRunId: event.productRunId,
+    conversationId: event.conversationId,
+    piSessionId: event.piSessionId,
+    userEntryId: "entry-user",
+    assistantEntryId: "entry-assistant",
+    toolCallIds: [],
+    memoryMode: "normal",
+    state: "product_run_settled",
+    terminalState: "completed",
+    activeLeafId: "entry-assistant",
+    settledAt: 25,
+    createdAt: 2,
+    updatedAt: 25
+  };
+  const persistence = deferred<void>();
+  const originalConsoleError = console.error;
+  console.error = () => undefined;
+  try {
+    const marking = markUnreadCompletedAnswerIfBackground({
+      plugin: {
+        settings: { activeSessionId: "conversation-foreground" },
+        persistPiNativeSettings: async () => await persistence.promise
+      }
+    } as never, session, event, run, projection);
+    await waitFor(() => session.unreadAnswerAt === 25);
+
+    delete session.unreadAnswerAt;
+    persistence.reject(new Error("older unread save failed"));
+    await marking;
+    assert.equal(
+      session.unreadAnswerAt,
+      undefined,
+      "an older failed save must not overwrite a newer successful read"
+    );
+  } finally {
+    console.error = originalConsoleError;
+  }
+}
+
+async function busyActionInAnotherConversationDoesNotStopTheActiveRun():
+Promise<void> {
+  const runningSession = piSessionShell("conversation-running-elsewhere");
+  const activeSession = piSessionShell("conversation-being-browsed");
+  let stopCalls = 0;
+  const view: any = {
+    plugin: { settings: structuredClone(DEFAULT_SETTINGS) },
+    running: true,
+    activeRunSessionId: runningSession.id,
+    turnQueue: { isSessionRecoveryRequired: () => false },
+    ensureSession: () => activeSession,
+    composerStateForSession: () => ({
+      viewRunning: true,
+      viewRunKind: "chat",
+      knowledgeTaskRunning: false,
+      hasDraft: false,
+      hasQueuedItems: false
+    }),
+    stopTurn: async () => { stopCalls += 1; }
+  };
+
+  openTestNoticeMessages.length = 0;
+  await sendMessage(view);
+  assert.equal(stopCalls, 0);
+  assert.match(
+    openTestNoticeMessages.at(-1) ?? "",
+    /另一个会话正在运行/u
+  );
+
+  await stopTurnFromComposer({
+    running: true,
+    activeRunSessionId: runningSession.id,
+    plugin: { settings: { settingsLanguage: "zh-CN" } },
+    stopTurn: async () => { stopCalls += 1; }
+  } as never, activeSession);
+  assert.equal(
+    stopCalls,
+    0,
+    "the Composer callback rechecks ownership before stopping"
+  );
+
+  view.ensureSession = () => runningSession;
+  view.activeRunSessionId = runningSession.id;
+  await sendMessage(view);
+  assert.equal(
+    stopCalls,
+    1,
+    "the explicit stop action still works from the conversation that owns the run"
+  );
 }
 
 function piSessionShell(id: string): StoredSession {
@@ -2414,7 +2616,8 @@ function imageFailureView(input: Readonly<{
         throw new Error("no ProductRun projection for rejected submit");
       },
       abortPiConversation: async () => undefined,
-      releasePiProductionRun: () => undefined
+      releasePiProductionRun: () => undefined,
+      releasePiConversationIfInactive: async () => false
     },
     get running() { return running; },
     set running(value: boolean) { running = value; },
@@ -2602,7 +2805,8 @@ function documentRequestCaptureView(input: Readonly<{
         throw new Error("no ProductRun projection for rejected submit");
       },
       abortPiConversation: async () => undefined,
-      releasePiProductionRun: () => undefined
+      releasePiProductionRun: () => undefined,
+      releasePiConversationIfInactive: async () => false
     },
     get running() { return running; },
     set running(value: boolean) { running = value; },

@@ -198,7 +198,14 @@ export function activateSession(
 
 type ConversationSelectionOutcome =
   | Readonly<{ status: "stale" }>
-  | Readonly<{ status: "selected"; error?: unknown }>;
+  | Readonly<{
+      status: "selected";
+      error?: unknown;
+      clearedUnread?: Readonly<{
+        session: StoredSession;
+        unreadAnswerAt: number;
+      }>;
+    }>;
 
 async function completeSessionActivation(
   host: CodexSessionHost,
@@ -206,7 +213,18 @@ async function completeSessionActivation(
 ): Promise<void> {
   const outcome = await selection;
   if (outcome.status === "stale") return;
-  await persistPiConversationShells(host);
+  try {
+    await persistPiConversationShells(host);
+  } catch (error) {
+    if (
+      outcome.clearedUnread
+      && outcome.clearedUnread.session.unreadAnswerAt === undefined
+    ) {
+      outcome.clearedUnread.session.unreadAnswerAt =
+        outcome.clearedUnread.unreadAnswerAt;
+    }
+    throw error;
+  }
   if ("error" in outcome) throw outcome.error;
 }
 
@@ -235,10 +253,17 @@ async function activateSessionInTransitionLane(
     }
     applyPiConversationProjectionToShell(host, session, projection);
     host.plugin.settings.activeSessionId = session.id;
+    const unreadAnswerAt = session.unreadAnswerAt;
+    if (unreadAnswerAt !== undefined) delete session.unreadAnswerAt;
     releaseInactiveConversationBodies(host);
     host.updateInputPlaceholder();
     renderConversationShellChange(host);
-    return { status: "selected" };
+    return {
+      status: "selected",
+      ...(unreadAnswerAt === undefined
+        ? {}
+        : { clearedUnread: { session, unreadAnswerAt } })
+    };
   } catch (error) {
     if (!isCurrentConversationSelection(host, generation)) {
       return { status: "stale" };

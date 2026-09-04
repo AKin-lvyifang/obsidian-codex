@@ -13632,6 +13632,7 @@ button.codex-message-note-mention-chip:focus-visible {
 }
 
 .codex-session-tab {
+  position: relative;
   min-width: 32px;
   width: 32px;
   flex: 0 0 auto;
@@ -13651,13 +13652,36 @@ button.codex-message-note-mention-chip:focus-visible {
 .codex-session-tab-running {
   display: inline-flex;
   flex: 0 0 auto;
-  color: var(--interactive-accent);
+  color: var(--echoink-conversation-status-running);
   animation: codex-session-spin 900ms linear infinite;
 }
 
+.codex-session-tab-status {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 7px;
+  height: 7px;
+  pointer-events: none;
+}
+
 .codex-session-tab-running svg {
-  width: 13px;
-  height: 13px;
+  width: 7px;
+  height: 7px;
+  stroke-width: 2.4;
+}
+
+.codex-session-tab-unread,
+.codex-session-unread-dot {
+  border-radius: 9999px;
+  background: var(--echoink-conversation-status-running);
+  box-shadow: 0 0 0 2px var(--background-primary);
+}
+
+.codex-session-unread-dot {
+  display: block;
+  width: 7px;
+  height: 7px;
 }
 
 .codex-session-track-controls {
@@ -14212,7 +14236,7 @@ body.theme-dark .codex-session-picker {
 }
 
 .codex-session-row.is-running .codex-session-row-leading {
-  color: var(--interactive-accent);
+  color: var(--echoink-conversation-status-running);
 }
 
 .codex-session-row-leading.is-spinning {
@@ -14254,7 +14278,11 @@ body.theme-dark .codex-session-picker {
 }
 
 .codex-session-row.is-running .codex-session-row-meta {
-  color: var(--interactive-accent);
+  color: var(--echoink-conversation-status-running);
+}
+
+.codex-session-row.is-unread .codex-session-row-meta {
+  color: var(--echoink-conversation-status-running);
 }
 
 .codex-session-current-badge {
@@ -14496,6 +14524,11 @@ body.theme-dark .codex-session-picker {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+
+  .codex-session-tab-running,
+  .codex-session-row-leading.is-spinning {
+    animation: none !important;
   }
 }
 

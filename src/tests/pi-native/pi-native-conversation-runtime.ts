@@ -129,6 +129,7 @@ export async function runPiNativeConversationRuntimeTests(): Promise<void> {
   await assertReasoningSelectionFailsClosedBeforePiPrompt();
   assertKnowledgeMaintenanceRequiresExplicitCommand();
   await assertProjectionAndCatalogManagementStayAgentSessionFree();
+  await assertSwitchPreservesRunningConversationUntilSettlement();
   await assertConversationCreateRollsBackAfterCatalogReadbackFailure();
   await assertFailedAssistantHistoryIsDurableButExcludedFromMemory();
   await assertKnowledgeAskUsesAgentAndReadOnlyTools();
@@ -1685,6 +1686,60 @@ Promise<void> {
     assert.equal(fixture.sessions.length, 1, "opening must activate its AgentSession");
     await fixture.runtime.switchConversation("history-a", "history-b");
     assert.equal(fixture.sessions.length, 2, "switching must activate the target AgentSession");
+  });
+}
+
+async function assertSwitchPreservesRunningConversationUntilSettlement():
+Promise<void> {
+  await withFixture(["run-background-switch"], async (fixture) => {
+    for (const conversationId of ["background-a", "background-b", "background-c"]) {
+      await fixture.runtime.createConversation({
+        conversationId,
+        title: conversationId,
+        cwd: fixture.root
+      });
+    }
+
+    await fixture.runtime.activateConversation("background-a");
+    const run = await fixture.submit({
+      conversationId: "background-a",
+      text: "continue after switching",
+      submittedAt: 10
+    });
+    const runningSession = fixture.latestSession();
+    runningSession.emitAssistantText("partial before switch");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    await fixture.runtime.switchConversation("background-a", "background-b");
+    await fixture.runtime.switchConversation("background-b", "background-c");
+    assert.equal(runningSession.isStreaming, true);
+    assert.equal(runningSession.disposed, false);
+    assert.equal(runningSession.lifecycleCalls.includes("abort"), false);
+    assert.equal(runningSession.lifecycleCalls.includes("dispose"), false);
+    assert.equal(
+      await fixture.runtime.releaseConversationIfIdle("background-a"),
+      false,
+      "a running conversation must not be released"
+    );
+
+    runningSession.finishSuccessful("completed after switch");
+    assert.equal((await run.result).terminalState, "completed");
+    const projection = await fixture.runtime.readProjection("background-a");
+    assert.equal(
+      projection.messages.some((message) =>
+        message.role === "assistant"
+        && message.text === "completed after switch"
+      ),
+      true,
+      "the background answer must remain durable and readable"
+    );
+    assert.equal(
+      await fixture.runtime.releaseConversationIfIdle("background-a"),
+      true,
+      "a settled inactive conversation may be released"
+    );
+    assert.equal(runningSession.disposed, true);
+    assert.equal(runningSession.lifecycleCalls.includes("abort"), false);
   });
 }
 

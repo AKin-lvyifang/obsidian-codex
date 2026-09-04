@@ -16,6 +16,8 @@ export interface EchoInkConversationSessionShell<
   tokenUsage?: TTokenUsage;
   /** Cache only; Pi Session remains authoritative. */
   contextLedger?: TContextLedger;
+  /** Positive timestamp for the latest completed answer not yet opened. */
+  unreadAnswerAt?: number;
   createdAt: number;
   updatedAt: number;
 }

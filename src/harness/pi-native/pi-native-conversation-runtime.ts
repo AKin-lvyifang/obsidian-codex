@@ -1162,13 +1162,17 @@ export class PiNativeConversationRuntime {
     nextConversationId: string,
     options: ActivatePiNativeConversationOptions = {}
   ): Promise<PiConversationProjection> {
+    const projection = await this.activateConversation(
+      nextConversationId,
+      options
+    );
     if (
       previousConversationId
       && previousConversationId !== nextConversationId
     ) {
-      await this.releaseConversation(previousConversationId);
+      await this.releaseConversationIfIdle(previousConversationId);
     }
-    return await this.activateConversation(nextConversationId, options);
+    return projection;
   }
 
   async recoverConversationFromVerifiedPrefix(
@@ -2370,6 +2374,20 @@ export class PiNativeConversationRuntime {
         `Conversation ${conversationId} release failed`
       );
     }
+  }
+
+  async releaseConversationIfIdle(conversationId: string): Promise<boolean> {
+    const active = this.active.get(conversationId);
+    if (
+      !active
+      || active.currentRun
+      || active.pendingSettlement
+      || active.session.isStreaming
+    ) {
+      return false;
+    }
+    await this.releaseConversation(conversationId);
+    return true;
   }
 
   async shutdown(): Promise<void> {

@@ -1651,6 +1651,9 @@ function normalizeStoredSessions(value: unknown): StoredSession[] {
       const piDocumentReplay = bodyAuthority === "pi_session_only"
         ? sanitizeStoredPiDocumentReplay(session.piDocumentReplay)
         : undefined;
+      const unreadAnswerAt = normalizeStoredSessionUnreadAnswerAt(
+        session.unreadAnswerAt
+      );
       return {
         id,
         title: normalizeText(session.title, "新会话"),
@@ -1663,6 +1666,7 @@ function normalizeStoredSessions(value: unknown): StoredSession[] {
         messages,
         tokenUsage: session.tokenUsage as TokenUsage,
         contextLedger,
+        ...(unreadAnswerAt === undefined ? {} : { unreadAnswerAt }),
         ...(piImageAttachments ? { piImageAttachments } : {}),
         ...(piDocumentReplay ? { piDocumentReplay } : {}),
         createdAt: normalizeNonNegativeNumber(session.createdAt),
@@ -1670,6 +1674,16 @@ function normalizeStoredSessions(value: unknown): StoredSession[] {
       };
     })
     .filter((session): session is StoredSession => Boolean(session));
+}
+
+function normalizeStoredSessionUnreadAnswerAt(
+  value: unknown
+): number | undefined {
+  return typeof value === "number"
+    && Number.isFinite(value)
+    && value > 0
+    ? value
+    : undefined;
 }
 
 function normalizeStoredSessionMemoryMode(

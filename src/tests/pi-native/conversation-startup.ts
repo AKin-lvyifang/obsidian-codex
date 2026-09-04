@@ -1,7 +1,11 @@
 import * as assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import type { PiConversationCatalogEntry, PiConversationProjection } from "../../harness/pi-native/contracts";
-import type { StoredSession } from "../../settings/settings";
+import {
+  DEFAULT_SETTINGS,
+  normalizeSettingsData,
+  type StoredSession
+} from "../../settings/settings";
 import {
   activateSession,
   archiveSession,
@@ -17,6 +21,8 @@ export async function runPiConversationStartupTests(): Promise<void> {
   await reusesTheCurrentConversationWhenOneExists();
   await releasesHistoricalBodiesAndReloadsThemOnSelection();
   await keepsAnInFlightConversationBodyWhileAnotherSessionIsActive();
+  await unreadAnswersClearOnlyAfterSuccessfulOpen();
+  unreadAnswerAtNormalizationAcceptsOnlyPositiveFiniteNumbers();
   await rendersLocalHistoryBeforeSettingsPersistenceCompletes();
   await rapidSelectionIsNotBlockedByEarlierSettingsPersistence();
   await lateEarlierProjectionCannotReplaceTheLatestSelection();
@@ -219,6 +225,132 @@ async function keepsAnInFlightConversationBodyWhileAnotherSessionIsActive(): Pro
   host.activeRunSessionId = "";
   await activateSession(host, running);
   assert.equal(active.messages.length, 0);
+}
+
+async function unreadAnswersClearOnlyAfterSuccessfulOpen(): Promise<void> {
+  const current = storedSession("conversation-unread-current");
+  const target = storedSession("conversation-unread-target");
+  target.unreadAnswerAt = 50;
+  target.updatedAt = 20;
+  const persisted: Array<Readonly<{
+    unreadAnswerAt: number | undefined;
+    updatedAt: number;
+  }>> = [];
+  const successHost = conversationHost({
+    sessions: [current, target],
+    activeSessionId: current.id,
+    switchPiConversation: async () => conversationProjection(target, "opened-unread"),
+    saveSettings: async () => {
+      persisted.push({
+        unreadAnswerAt: target.unreadAnswerAt,
+        updatedAt: target.updatedAt
+      });
+    },
+    rendered: []
+  });
+
+  await activateSession(successHost, target);
+  assert.equal(target.unreadAnswerAt, undefined);
+  assert.deepEqual(persisted, [{ unreadAnswerAt: undefined, updatedAt: 20 }]);
+
+  for (const failureStage of ["projection", "persistence"] as const) {
+    const failureCurrent = storedSession(`conversation-${failureStage}-current`);
+    const failureTarget = storedSession(`conversation-${failureStage}-target`);
+    failureTarget.unreadAnswerAt = 60;
+    failureTarget.updatedAt = 30;
+    const failureHost = conversationHost({
+      sessions: [failureCurrent, failureTarget],
+      activeSessionId: failureCurrent.id,
+      switchPiConversation: async () => {
+        if (failureStage === "projection") {
+          throw new Error("projection_open_failed");
+        }
+        return conversationProjection(failureTarget, "opened-before-save-failed");
+      },
+      saveSettings: async () => {
+        if (failureStage === "persistence") {
+          throw new Error("unread_clear_persistence_failed");
+        }
+      },
+      rendered: []
+    });
+
+    await assert.rejects(
+      activateSession(failureHost, failureTarget),
+      failureStage === "projection"
+        ? /projection_open_failed/u
+        : /unread_clear_persistence_failed/u
+    );
+    assert.equal(
+      failureTarget.unreadAnswerAt,
+      60,
+      `${failureStage} failure must retain the unread answer`
+    );
+    assert.equal(failureTarget.updatedAt, 30);
+  }
+
+  const concurrentCurrent = storedSession("conversation-concurrent-current");
+  const concurrentTarget = storedSession("conversation-concurrent-target");
+  concurrentTarget.unreadAnswerAt = 70;
+  let rejectSave!: (error: Error) => void;
+  const save = new Promise<void>((_resolve, reject) => {
+    rejectSave = reject;
+  });
+  const concurrentHost = conversationHost({
+    sessions: [concurrentCurrent, concurrentTarget],
+    activeSessionId: concurrentCurrent.id,
+    switchPiConversation: async () => conversationProjection(
+      concurrentTarget,
+      "opened-before-concurrent-answer"
+    ),
+    saveSettings: async () => await save,
+    rendered: []
+  });
+  const opening = activateSession(concurrentHost, concurrentTarget);
+  await flushMicrotasks();
+  assert.equal(concurrentTarget.unreadAnswerAt, undefined);
+  concurrentTarget.unreadAnswerAt = 80;
+  rejectSave(new Error("older unread clear failed"));
+  await assert.rejects(opening, /older unread clear failed/u);
+  assert.equal(
+    concurrentTarget.unreadAnswerAt,
+    80,
+    "an older failed clear must not overwrite a newer background answer"
+  );
+}
+
+function unreadAnswerAtNormalizationAcceptsOnlyPositiveFiniteNumbers(): void {
+  const session = (id: string, unreadAnswerAt: unknown) => ({
+    id,
+    title: id,
+    kind: "chat",
+    cwd: "/disposable-vault",
+    messages: [],
+    createdAt: 1,
+    updatedAt: 2,
+    unreadAnswerAt
+  });
+  const normalized = normalizeSettingsData({
+    ...structuredClone(DEFAULT_SETTINGS),
+    sessions: [
+      session("valid", 123.5),
+      session("zero", 0),
+      session("negative", -1),
+      session("infinite", Number.POSITIVE_INFINITY),
+      session("string", "123"),
+      session("nan", Number.NaN)
+    ],
+    activeSessionId: "valid"
+  }).settings.sessions;
+
+  assert.equal(normalized[0]?.unreadAnswerAt, 123.5);
+  for (const invalid of normalized.slice(1)) {
+    assert.equal(
+      invalid.unreadAnswerAt,
+      undefined,
+      `${invalid.id} must not retain an invalid unread timestamp`
+    );
+  }
 }
 
 async function rendersLocalHistoryBeforeSettingsPersistenceCompletes():

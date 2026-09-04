@@ -41,6 +41,7 @@ import type { EchoInkTaskPlanSnapshot } from "../types/task-plan";
 import type { EchoInkQuestionInteraction } from "../types/conversation-turn";
 import { InteractionDockController } from "../ui/codex-view/interaction-dock";
 import { renderCodexTabs } from "../ui/codex-view/tabs";
+import { CodexView } from "../ui/codex-view";
 
 type TestEventHandler = (event: {
   preventDefault(): void;
@@ -629,6 +630,8 @@ function assertSessionPickerArchiveActions(): void {
       testConversationSession("idle", "可归档会话", 1),
       testConversationSession("running", "运行会话", 2)
     ];
+    sessions[0]!.unreadAnswerAt = 10;
+    sessions[1]!.unreadAnswerAt = 20;
     const archivedSessionIds: string[] = [];
     renderCodexTabs(
       container as unknown as HTMLElement,
@@ -644,6 +647,25 @@ function assertSessionPickerArchiveActions(): void {
       },
       "running"
     );
+    const compactTabs = container.findAllByClass("codex-session-tab");
+    const unreadTab = compactTabs.find((tab) =>
+      tab.getAttribute("data-session-id") === "idle"
+    );
+    const runningTab = compactTabs.find((tab) =>
+      tab.getAttribute("data-session-id") === "running"
+    );
+    assert.ok(unreadTab && runningTab);
+    assert.equal(unreadTab.findByClass("codex-session-tab-title")?.textContent, "1");
+    assert.ok(unreadTab.findByClass("codex-session-tab-unread"));
+    assert.equal(unreadTab.getAttribute("aria-label"), "可归档会话，有未读答案");
+    assert.equal(runningTab.findByClass("codex-session-tab-title")?.textContent, "2");
+    assert.ok(runningTab.findByClass("codex-session-tab-running"));
+    assert.equal(runningTab.findByClass("codex-session-tab-unread"), null);
+    assert.equal(
+      runningTab.getAttribute("aria-label"),
+      "运行会话，正在运行",
+      "running status must take precedence over unread status"
+    );
     container.findByClass("codex-session-all")?.onclick?.({
       isTrusted: true,
       detail: 1,
@@ -655,6 +677,17 @@ function assertSessionPickerArchiveActions(): void {
     const idleRow = rows.find((row) => row.getAttribute("data-session-id") === "idle");
     const runningRow = rows.find((row) => row.getAttribute("data-session-id") === "running");
     assert.ok(idleRow && runningRow);
+    assert.equal(idleRow.hasClass("is-unread"), true);
+    assert.ok(idleRow.findByClass("codex-session-unread-dot"));
+    assert.equal(
+      idleRow.findByClass("codex-session-row-meta")?.children[0]?.textContent,
+      "有未读答案"
+    );
+    assert.equal(idleRow.getAttribute("aria-label"), "可归档会话，有未读答案");
+    assert.equal(runningRow.hasClass("is-unread"), false);
+    assert.ok(runningRow.findByClass("codex-session-row-leading")?.hasClass("is-spinning"));
+    assert.equal(runningRow.findByClass("codex-session-unread-dot"), null);
+    assert.equal(runningRow.getAttribute("aria-label"), "运行会话，正在运行");
     const idleActions = idleRow.findAllByClass("codex-session-row-action");
     const runningActions = runningRow.findAllByClass("codex-session-row-action");
     assert.deepEqual(
@@ -667,6 +700,12 @@ function assertSessionPickerArchiveActions(): void {
     clickElement(idleActions[1]!);
     clickElement(runningActions[1]!);
     assert.deepEqual(archivedSessionIds, ["idle"], "only the matching idle row archives");
+    const styles = readFileSync("styles.css", "utf8");
+    assert.match(
+      styles,
+      /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.codex-session-tab-running,[\s\S]*?\.codex-session-row-leading\.is-spinning\s*\{\s*animation:\s*none\s*!important;/u,
+      "reduced motion keeps the status icon visible without continuous rotation"
+    );
   } finally {
     if (originalDocument) Object.defineProperty(testGlobal, "document", originalDocument);
     else delete testGlobal.document;
@@ -911,6 +950,7 @@ function taskPlanMessage(
 export async function runSmoothConversationUiTests(): Promise<void> {
   assertSessionSummaryTooltipLifecycle();
   assertSessionPickerArchiveActions();
+  await assertViewCloseCancelsTheActiveConversationRun();
   assert.equal(
     settingsCopy("zh-CN").general.settingsLanguageDesc,
     "控制 EchoInk 界面语言；不会改写 Prompt、会话内容或用户自定义名称。"
@@ -4542,6 +4582,16 @@ export async function runSmoothConversationUiTests(): Promise<void> {
   const viewShellSource = readFileSync("src/ui/codex-view/view-shell.ts", "utf8");
   const codexViewSource = readFileSync("src/ui/codex-view.ts", "utf8");
   assert.match(composerSource, /placeholder:\s*""/u);
+  assert.match(
+    composerSource,
+    /anotherConversationOwnsStop[\s\S]*state\.activeRunSessionId\s*!==\s*state\.session\.id/u,
+    "the real Composer derives foreign-run ownership from the running conversation id"
+  );
+  assert.match(
+    composerSource,
+    /sendButton\.disabled\s*=\s*state\.promptEnhancerRunning\s*\|\|\s*anotherConversationOwnsStop/u,
+    "the real Composer disables the stop button while another conversation owns the run"
+  );
   assert.match(headerSource, /setAttr\("placeholder",\s*""\)/u);
   assert.match(messageControllerSource, /onSuggestionSelect:[\s\S]*?dispatchEvent\(new Event\("input"[\s\S]*?inputEl\.focus\(\)/u);
   assert.doesNotMatch(
@@ -4613,4 +4663,64 @@ export async function runSmoothConversationUiTests(): Promise<void> {
   assert.match(notices, /Copyright \(c\) 2025 Avijit Dey/u);
 
   console.log("PASS conversation-ui: one Assistant Turn, structured interaction Dock, durable Attachments, and truthful Provider Reasoning");
+}
+
+async function assertViewCloseCancelsTheActiveConversationRun(): Promise<void> {
+  const runningSession = testConversationSession("close-running", "运行会话", 1);
+  const foregroundSession = testConversationSession("close-foreground", "前台会话", 2);
+  const cancelledRuns: string[] = [];
+  const releasedRuns: string[] = [];
+  const releasedConversations: string[] = [];
+  const host: any = {
+    viewLifecycleGeneration: 1,
+    viewLifecycleAbortController: { abort: () => undefined },
+    composerHost: () => ({
+      contextPanelOpen: false,
+      contextPanelEl: null,
+      contextPanelCleanup: null,
+      contextPanelReposition: null,
+      contextEl: null
+    }),
+    contextPanelOpen: false,
+    clearTurnWatchdog: () => undefined,
+    clearKnowledgeBaseRunProgressTimer: () => undefined,
+    activeRunId: "run-close",
+    activeRunKind: "chat",
+    activeRunSessionId: runningSession.id,
+    activeRunSession: () => runningSession,
+    promptEnhancerRunId: "",
+    promptEnhancerRunning: false,
+    promptEnhancerTurnId: "",
+    running: true,
+    clearActiveRun: () => {
+      host.activeRunId = "";
+      host.activeRunKind = "";
+      host.activeRunSessionId = "";
+    },
+    flushSessionSave: async () => undefined,
+    plugin: {
+      settings: {
+        sessions: [runningSession, foregroundSession],
+        activeSessionId: foregroundSession.id
+      },
+      isPiProductionRun: (runId: string) => runId === "run-close",
+      cancelHarnessRun: async (runId: string) => { cancelledRuns.push(runId); },
+      releasePiProductionRun: (runId: string) => { releasedRuns.push(runId); },
+      releasePiConversation: async (conversationId: string) => {
+        releasedConversations.push(conversationId);
+      }
+    },
+    clearHomeAttentionFrame: () => undefined,
+    taskPlanDock: { dispose: () => undefined },
+    interactionDock: { dispose: () => undefined },
+    pendingInteractionsBySession: new Map(),
+    messageListRenderer: { dispose: () => undefined }
+  };
+
+  await CodexView.prototype.onClose.call(host);
+  assert.deepEqual(cancelledRuns, ["run-close"]);
+  assert.deepEqual(releasedRuns, ["run-close"]);
+  assert.deepEqual(releasedConversations, [foregroundSession.id]);
+  assert.equal(host.running, false);
+  assert.equal(host.activeRunId, "");
 }

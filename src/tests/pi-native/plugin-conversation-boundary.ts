@@ -40,6 +40,9 @@ export async function runPiPluginConversationBoundaryTests(): Promise<void> {
   await sendingWaitsForTheExistingActivationTask();
   await supersededSendDoesNotReactivateTheEarlierConversation();
   await latestRapidSwitchWinsAndReleasesTheStaleSession();
+  await inactiveReleaseIsSkippedWhenConversationBecomesActiveAgain();
+  await inactiveSettledConversationIsReleased();
+  await activeRunStillRejectsASecondProductActivity();
   await staleConcurrentSelectionDoesNotCreateAnObsoleteAgentSession();
   await archivingPendingSelectionDoesNotWaitForRuntimeInitialization();
   await switchingWithoutAKeyKeepsTargetHistoryReadable();
@@ -497,8 +500,9 @@ Promise<void> {
         events.push(`switch:${previous}->${next}`);
         return conversationProjection(next, "activated-latest");
       },
-      releaseConversation: async (conversationId: string) => {
-        events.push(`release:${conversationId}`);
+      releaseConversationIfIdle: async (conversationId: string) => {
+        events.push(`release-if-idle:${conversationId}`);
+        return true;
       },
       submit: async () => {
         events.push("submit");
@@ -563,8 +567,9 @@ async function latestRapidSwitchWinsAndReleasesTheStaleSession(): Promise<void> 
         }
         return conversationProjection(next, "activated-second");
       },
-      releaseConversation: async (conversationId: string) => {
-        events.push(`release:${conversationId}`);
+      releaseConversationIfIdle: async (conversationId: string) => {
+        events.push(`release-if-idle:${conversationId}`);
+        return true;
       }
     }
   });
@@ -596,7 +601,7 @@ async function latestRapidSwitchWinsAndReleasesTheStaleSession(): Promise<void> 
     "read:history-first",
     "switch:history-previous->history-first",
     "read:history-second",
-    "release:history-first",
+    "release-if-idle:history-first",
     "switch:history-first->history-second"
   ]);
   assert.equal(
@@ -604,6 +609,79 @@ async function latestRapidSwitchWinsAndReleasesTheStaleSession(): Promise<void> 
     secondLocal.catalog.conversationId,
     "only the final switch intent may remain active"
   );
+}
+
+async function inactiveReleaseIsSkippedWhenConversationBecomesActiveAgain():
+Promise<void> {
+  const activation = deferred<void>();
+  const released: string[] = [];
+  const host = pluginHost({
+    settings: { activeSessionId: "background-b", sessions: [] },
+    piActivatedConversationId: "background-b",
+    piRuntimeBundle: {
+      runtime: {
+        releaseConversationIfIdle: async (conversationId: string) => {
+          released.push(conversationId);
+          return true;
+        }
+      }
+    },
+    piConversationActivationLane: activation.promise,
+    settlePiRuntimeFlight: async () => undefined
+  });
+
+  const releasing = pluginPrototype.releasePiConversationIfInactive.call(
+    host,
+    "background-a",
+    () => host.settings.activeSessionId !== "background-a"
+  );
+  host.settings.activeSessionId = "background-a";
+  host.piActivatedConversationId = "background-a";
+  activation.resolve();
+
+  assert.equal(await releasing, false);
+  assert.deepEqual(released, []);
+}
+
+async function inactiveSettledConversationIsReleased(): Promise<void> {
+  const released: string[] = [];
+  const host = pluginHost({
+    settings: { activeSessionId: "background-b", sessions: [] },
+    piActivatedConversationId: "background-b",
+    piRuntimeBundle: {
+      runtime: {
+        releaseConversationIfIdle: async (conversationId: string) => {
+          released.push(conversationId);
+          return true;
+        }
+      }
+    },
+    settlePiRuntimeFlight: async () => undefined
+  });
+
+  assert.equal(
+    await pluginPrototype.releasePiConversationIfInactive.call(
+      host,
+      "background-a",
+      () => host.settings.activeSessionId !== "background-a"
+    ),
+    true
+  );
+  assert.deepEqual(released, ["background-a"]);
+}
+
+async function activeRunStillRejectsASecondProductActivity(): Promise<void> {
+  let actionCalls = 0;
+  await assert.rejects(
+    pluginPrototype.withProductActivity.call({
+      piRunConversations: new Map([["run-a", "conversation-a"]]),
+      productActivity: { hasActivity: false }
+    }, async () => {
+      actionCalls += 1;
+    }),
+    /正在处理其他请求/u
+  );
+  assert.equal(actionCalls, 0);
 }
 
 async function staleConcurrentSelectionDoesNotCreateAnObsoleteAgentSession():

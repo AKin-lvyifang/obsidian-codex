@@ -488,10 +488,16 @@ export function renderComposerToolbar(
   sendButton.toggleClass("is-send-action", action === "send");
   sendButton.toggleClass("is-queue-action", action === "enqueue" || action === "resume-queue");
   sendButton.toggleClass("is-stop-action", action === "stop-turn" || action === "cancel-knowledge-task");
-  sendButton.disabled = state.promptEnhancerRunning;
+  const anotherConversationOwnsStop = action === "stop-turn"
+    && Boolean(state.activeRunSessionId)
+    && state.activeRunSessionId !== state.session.id;
+  sendButton.disabled = state.promptEnhancerRunning || anotherConversationOwnsStop;
   if (state.promptEnhancerRunning) {
     sendButton.setAttribute("aria-label", conversationUiText(language, "提示词增强中", "Enhancing prompt"));
     sendButton.setAttribute("title", conversationUiText(language, "提示词增强完成后再发送", "Send after prompt enhancement finishes"));
+  } else if (anotherConversationOwnsStop) {
+    sendButton.setAttribute("aria-label", conversationUiText(language, "另一个会话正在运行", "Another conversation is running"));
+    sendButton.setAttribute("title", conversationUiText(language, "切回运行中的会话后可停止", "Switch to the running conversation to stop it"));
   }
   if (action === "send") {
     renderAnimateIcon(sendButton, "send-horizontal");

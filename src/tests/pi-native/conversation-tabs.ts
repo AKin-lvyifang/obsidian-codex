@@ -110,6 +110,15 @@ function stableNumberedTabsIgnoreUpdatedAtWhileThePickerRemainsRecentFirst(): vo
   assert.deepEqual(initial.tabSessions.map((entry) => entry.id), ["first", "second", "third"]);
   assert.deepEqual(initial.chatSessions.map((entry) => entry.id), ["third", "second", "first"]);
 
+  sessions[1]!.unreadAnswerAt = 40;
+  const afterUnread = buildCodexSessionNavigatorModel(sessions, "second");
+  assert.deepEqual(
+    afterUnread.chatSessions.map((entry) => entry.id),
+    ["third", "second", "first"],
+    "marking an answer unread must not change recent-use ordering"
+  );
+  assert.equal(sessions[1]!.updatedAt, 20);
+
   sessions[0]!.updatedAt = 99;
   const afterUpdate = buildCodexSessionNavigatorModel(sessions, "second");
   assert.deepEqual(
