@@ -1,5 +1,9 @@
 import { App, TFile, normalizePath } from "obsidian";
 import {
+  DEFAULT_JOURNAL_DIRECTORY,
+  normalizeJournalDirectory
+} from "./journal-directory";
+import {
   BUILT_IN_JOURNAL_TEMPLATES,
   HOME_ENTRY_IDS,
   JOURNAL_TEMPLATE_DIRECTORY,
@@ -76,18 +80,38 @@ export interface HomeTemplateSaveResult {
 }
 
 export class HomeWorkbenchDataService {
-  constructor(private readonly app: App) {}
+  constructor(
+    private readonly app: App,
+    private readonly journalDirectoryProvider: () => string = () => DEFAULT_JOURNAL_DIRECTORY
+  ) {}
+
+  getJournalDirectory(): string {
+    return normalizeJournalDirectory(this.journalDirectoryProvider());
+  }
+
+  journalPathForDate(date: Date): string {
+    return journalPathForDate(date, this.getJournalDirectory());
+  }
+
+  async ensureJournalDirectory(): Promise<string> {
+    const directory = this.getJournalDirectory();
+    await this.ensureFolder(directory);
+    return directory;
+  }
 
   async build(visibleMonth = new Date()): Promise<HomeWorkbenchData> {
-    const records = this.app.vault.getMarkdownFiles().map((file) => this.recordForFile(file));
+    const journalDirectory = this.getJournalDirectory();
+    const records = this.app.vault.getMarkdownFiles().map((file) =>
+      this.recordForFile(file, journalDirectory)
+    );
     const activity = buildHomeActivityDays(records, { now: new Date(), days: 371 });
-    const journalDays = buildHomeJournalDays(records, activity, visibleMonth);
+    const journalDays = buildHomeJournalDays(records, activity, visibleMonth, journalDirectory);
     const customTemplates = this.listCustomTemplates();
     return {
       records,
       activity,
       journalDays,
-      entries: buildEntrySummaries(records),
+      entries: buildEntrySummaries(records, journalDirectory),
       customTemplates
     };
   }
@@ -100,7 +124,7 @@ export class HomeWorkbenchDataService {
   }
 
   async createOrOpenJournal(choice: HomeJournalTemplateChoice, date = new Date()): Promise<HomeJournalCreateResult> {
-    const path = normalizePath(journalPathForDate(date));
+    const path = normalizePath(this.journalPathForDate(date));
     const existing = this.app.vault.getAbstractFileByPath(path);
     if (existing instanceof TFile) return { file: existing, created: false };
     if (existing) throw new Error(`日记路径已被文件夹占用：${path}`);
@@ -148,8 +172,8 @@ export class HomeWorkbenchDataService {
     return { status: "saved", path: targetPath, file };
   }
 
-  private recordForFile(file: TFile): HomeVaultFileRecord {
-    const cache = journalDateFromPath(file.path)
+  private recordForFile(file: TFile, journalDirectory: string): HomeVaultFileRecord {
+    const cache = journalDateFromPath(file.path, journalDirectory)
       ? this.app.metadataCache.getFileCache(file)
       : null;
     const imageFile = (cache?.embeds ?? [])
@@ -187,13 +211,16 @@ export function defaultJournalTemplateChoice(): HomeJournalTemplateChoice {
   return { kind: "built-in", template: BUILT_IN_JOURNAL_TEMPLATES[0] };
 }
 
-function buildEntrySummaries(records: readonly HomeVaultFileRecord[]): HomeEntrySummary[] {
+function buildEntrySummaries(
+  records: readonly HomeVaultFileRecord[],
+  journalDirectory = DEFAULT_JOURNAL_DIRECTORY
+): HomeEntrySummary[] {
   const definitions: Record<HomeEntryId, Pick<HomeEntrySummary, "label" | "description"> & { folder?: string }> = {
     wiki: { label: "Wiki", description: "结构化长期知识", folder: "wiki" },
     outputs: { label: "Outputs", description: "维护记录与生成成果", folder: "outputs" },
     projects: { label: "Projects", description: "正在推进的项目知识", folder: "projects" },
     inbox: { label: "Inbox", description: "等待归类的输入", folder: "inbox" },
-    journal: { label: "Journal", description: "日记、复盘与时间记录", folder: "journal" },
+    journal: { label: "Journal", description: "日记、复盘与时间记录", folder: journalDirectory },
     review: { label: "Review", description: "知识库复盘与报告" }
   };
   return HOME_ENTRY_IDS.map((id) => {

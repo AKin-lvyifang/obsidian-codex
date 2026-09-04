@@ -4086,6 +4086,48 @@ export async function runSmoothConversationUiTests(): Promise<void> {
   ]);
 
   const styles = readFileSync("styles.css", "utf8");
+  const attentionCodexViewSource = readFileSync("src/ui/codex-view.ts", "utf8");
+  const productionCompositionSource = readFileSync(
+    "src/plugin/pi-production-runtime-composition.ts",
+    "utf8"
+  );
+  const attentionFrameStyles = styles.match(
+    /\.codex-container\.is-home-attention-frame::after \{[\s\S]*?\n\}/u
+  )?.[0] ?? "";
+  assert.match(attentionFrameStyles, /position:\s*absolute;/u);
+  assert.match(attentionFrameStyles, /inset:\s*0;/u);
+  assert.match(attentionFrameStyles, /conic-gradient\(/u);
+  assert.match(attentionFrameStyles, /mask-composite:\s*exclude;/u);
+  assert.match(
+    attentionFrameStyles,
+    /animation:\s*echoink-home-attention-frame 1\.2s ease-in-out both;/u
+  );
+  assert.doesNotMatch(attentionFrameStyles, /background-position|translate|rotate/u,
+    "the Home attention treatment is a simultaneous closed frame, not a travelling scan line");
+  assert.match(
+    styles,
+    /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.codex-container\.is-home-attention-frame::after \{[\s\S]*?echoink-home-attention-frame-reduced 260ms ease-out both;/u
+  );
+  assert.match(
+    attentionCodexViewSource,
+    /async startHomeConversation\([\s\S]*?this\.playHomeAttentionFrame\(\);[\s\S]*?await this\.createSession/u
+  );
+  assert.match(
+    attentionCodexViewSource,
+    /private clearHomeAttentionFrame\(\)[\s\S]*?removeClass\("is-home-attention-frame"\)/u
+  );
+  assert.match(
+    productionCompositionSource,
+    /currentSkillTurn\?\(\): Readonly<PiNativeSkillTurnContext> \| null;/u
+  );
+  assert.match(
+    productionCompositionSource,
+    /customType: "echoink-skill-turn-context-v1",[\s\S]*?content: turn\.content,[\s\S]*?display: false as const/u
+  );
+  assert.match(
+    productionCompositionSource,
+    /currentSkillTurn: \(\) => input\.input\.currentSkillTurnContext\?\.\(\) \?\? null/u
+  );
   assert.match(styles, /filter:\s*blur\(6px\)/u);
   assert.match(styles, /opacity:\s*0;/u);
   assert.match(styles, /transform:\s*translateY\(10px\)/u);

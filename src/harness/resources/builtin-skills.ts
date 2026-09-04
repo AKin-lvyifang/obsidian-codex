@@ -5,7 +5,8 @@ export const BUILTIN_SKILL_IDS = Object.freeze([
   "evidence-freshness-audit",
   "multi-lens-problem-solving",
   "minimum-real-world-experiment",
-  "self-discovery-life-design"
+  "self-discovery-life-design",
+  "daily-journal"
 ] as const);
 
 export type BuiltinSkillId = (typeof BUILTIN_SKILL_IDS)[number];
@@ -26,7 +27,7 @@ function skill(
   return Object.freeze({ id, title, description, body: body.trim() });
 }
 
-/** The seven product-owned procedures frozen by the 2026-08-28 PRD. */
+/** Product-owned procedures installed as editable Vault Skills. */
 export const BUILTIN_SKILLS: readonly BuiltinSkillDefinition[] = Object.freeze([
   skill(
     "clarify-real-question",
@@ -215,6 +216,75 @@ export const BUILTIN_SKILLS: readonly BuiltinSkillDefinition[] = Object.freeze([
 ## 边界
 
 不得进行心理诊断，不用奉承代替证据，不把偶然成功认定为天赋。Skill 不能直接改写 USER.md、AGENT.md 或 Memory；是否长期保存仍由既有 Memory 与 Harness 规则判断，最终人生决定始终属于用户。`
+  ),
+  skill(
+    "daily-journal",
+    "此刻速记",
+    "在首页日记会话中自然交谈，并在用户准备好后安全创建或追加当天日记。",
+    `## 用途与触发
+
+只在 EchoInk 明确把当前会话绑定到 \`daily-journal\` 时使用。不要根据普通聊天内容自动启用，也不要把会话工作目录当成日记目录。
+
+EchoInk 会在当前轮提供这个会话创建时固定下来的日记目录、日期、时间和目标文件路径。后续每一轮都继续使用同一目录；不得自行改用设置页里的新值。
+
+## 交谈方式
+
+1. 先自然地陪用户回顾此刻发生了什么、真正想留下什么，不展示模板源码，也不要求用户先选择模板。
+2. 信息不足时只追问对日记内容真正必要的问题。用户还在表达时继续聊，不急着写文件。
+3. 用户准备好生成或补记时，再使用现有笔记 Tool。Tool 的审批、Vault 边界、版本冲突保护和写后回读仍然有效，Skill 不得绕过。
+
+## 新建当天日记
+
+当天目标文件不存在时，按下面的“此刻速记”模板组织 Markdown，并调用 \`note_create\` 写入当前会话给出的目标路径。允许根据本次谈话对标题下的正文做轻微措辞或空行调整，但保留 frontmatter 字段和三个固定标题。
+
+\`\`\`markdown
+---
+date: {{date}}
+template: 此刻速记
+tags:
+  - journal
+---
+
+# {{date}} 此刻速记
+
+## 现在发生了什么
+
+{{现在发生的事}}
+
+## 想记住的一点
+
+{{想留下的感受、判断或提醒}}
+\`\`\`
+
+## 追加当天日记
+
+当天目标文件已经存在时：
+
+1. 必须先用 \`note_read\` 读取完整原文。
+2. 如果读取失败、结果被截断，或没有取得本次读取对应的 \`expectedVersion\`，立即停止，不得覆盖文件。
+3. 保留完整原文，只在末尾追加：
+
+\`\`\`markdown
+## 补记 · {{HH:mm}}
+
+### 现在发生了什么
+
+{{本次补记内容}}
+
+### 想记住的一点
+
+{{本次想留下的一点}}
+\`\`\`
+
+4. 调用 \`note_update\` 时必须携带刚才读取到的 \`expectedVersion\`。版本冲突就停止并告诉用户重新读取，不能重试覆盖。
+
+## 完成判断
+
+只有 Tool 返回成功并完成既有写后回读，才能告诉用户日记已经保存。创建、读取、审批、更新或回读中的任何一步失败，都要如实说明当前文件没有被可靠写入。
+
+## 边界
+
+不得改写当天已有原文，不得在读取被截断时拼接，不得静默退回普通聊天或其他 Skill，不得新增日记专用 Tool，也不得把模板正文复制到聊天栏供用户切换。`
   )
 ]);
 

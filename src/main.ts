@@ -31,7 +31,10 @@ import {
   type SettingsSaveOptions
 } from "./plugin/settings-store";
 import { EchoInkViewService } from "./plugin/view-service";
-import { EchoInkResourceCatalogService } from "./plugin/resource-catalog-service";
+import {
+  EchoInkResourceCatalogService,
+  requireAvailableEchoInkSkillResource
+} from "./plugin/resource-catalog-service";
 import {
   EchoInkMcpSettingsService,
   type EchoInkMcpServerDraft
@@ -67,6 +70,7 @@ import type {
   PiNativeConversationRecoveryResult,
   RecoverPiNativeConversationInput
 } from "./harness/pi-native/pi-native-conversation-runtime";
+import { createPiLocalConversation } from "./harness/pi-native/pi-local-data-service";
 import {
   createPiProductionModelDefinition,
   createPiProductionRuntimeBundle,
@@ -113,6 +117,11 @@ import { resolveAgentAvatarUrl } from "./ui/agent-avatar-presets";
 import type { AgentIdentityView } from "./ui/codex-view/message-list";
 import type { DreamLlmPort } from "./harness/memory/dream-engine";
 import {
+  SkillRuntimeCoordinator,
+  type BuiltinSkillRuntimeSnapshot
+} from "./harness/resources/skill-runtime";
+import type { BuiltinSkillId } from "./harness/resources/builtin-skills";
+import {
   advanceEchoInkOnboardingTutorial,
   dismissEchoInkOnboardingTutorial,
   echoInkOnboardingTab,
@@ -151,6 +160,8 @@ export default class CodexForObsidianPlugin extends Plugin {
   private settingsStore: EchoInkSettingsStore | null = null;
   private viewService: EchoInkViewService | null = null;
   private resourceCatalogService: EchoInkResourceCatalogService | null = null;
+  private skillRuntimeCoordinator: SkillRuntimeCoordinator | null = null;
+  private pendingSettingsResourceDetailId = "";
   private mcpBrokerService: EchoInkMcpBrokerService | null = null;
   private mcpSettingsService: EchoInkMcpSettingsService | null = null;
   private piProviderConfigurationService:
@@ -645,7 +656,7 @@ export default class CodexForObsidianPlugin extends Plugin {
   async createPiConversation(
     input: CreatePiNativeConversationInput
   ): Promise<Readonly<PiConversationCatalogEntry>> {
-    return await (await this.ensurePiLocalData()).createConversation(input);
+    return await createPiLocalConversation(await this.ensurePiLocalData(), input);
   }
   async derivePiConversation(
     input: DerivePiNativeConversationInput
@@ -1039,6 +1050,51 @@ export default class CodexForObsidianPlugin extends Plugin {
     });
   }
   async buildRuntimeEchoInkResourceCatalog(): Promise<EchoInkResource[]> { return await this.getResourceCatalogService().buildRuntimeCatalog(); }
+  async requireAvailableEchoInkSkill(skillId: string): Promise<Readonly<EchoInkResource>> {
+    return requireAvailableEchoInkSkillResource(
+      await this.buildRuntimeEchoInkResourceCatalog(),
+      skillId
+    );
+  }
+  async openEchoInkSkillSettings(skillId: string): Promise<void> {
+    const resourceId = this.settings.resources.catalog.find((resource) =>
+      resource.kind === "skill"
+      && resource.metadata?.resourceId === skillId
+    )?.id ?? `echoink-local:skill:${skillId}`;
+    this.pendingSettingsResourceDetailId = resourceId;
+    await this.openWorkspaceResourceSettings("skills");
+  }
+  consumeEchoInkSettingsResourceDetail(): string {
+    const resourceId = this.pendingSettingsResourceDetailId;
+    this.pendingSettingsResourceDetailId = "";
+    return resourceId;
+  }
+  getSkillRuntimeCoordinator(): SkillRuntimeCoordinator {
+    if (!this.skillRuntimeCoordinator) {
+      this.skillRuntimeCoordinator = new SkillRuntimeCoordinator(
+        this.getVaultPath(),
+        { reviewLlm: () => this.createSkillReviewLlmPort() }
+      );
+    }
+    return this.skillRuntimeCoordinator;
+  }
+  async readEchoInkBuiltinSkill(
+    skillId: BuiltinSkillId
+  ): Promise<BuiltinSkillRuntimeSnapshot> {
+    return await this.getSkillRuntimeCoordinator().inspectBuiltinSkill(skillId);
+  }
+  async saveEchoInkBuiltinSkill(
+    skillId: BuiltinSkillId,
+    content: string
+  ): Promise<BuiltinSkillRuntimeSnapshot> {
+    return await this.getSkillRuntimeCoordinator()
+      .saveBuiltinSkillContent(skillId, content);
+  }
+  async restoreEchoInkBuiltinSkill(
+    skillId: BuiltinSkillId
+  ): Promise<BuiltinSkillRuntimeSnapshot> {
+    return await this.getSkillRuntimeCoordinator().restoreBuiltinSkill(skillId);
+  }
   async readPersistedEchoInkResourceSnapshot(): Promise<
   CodexForObsidianSettings["resources"]> {
     return await this.getSettingsStore().readPersistedEchoInkResourceSnapshot();

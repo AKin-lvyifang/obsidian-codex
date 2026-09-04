@@ -1,16 +1,25 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { BUILTIN_SKILLS } from "../harness/resources/builtin-skills";
+import {
+  BUILTIN_SKILLS,
+  getBuiltinSkillDefinition,
+  renderBuiltinSkill
+} from "../harness/resources/builtin-skills";
 import { initializeVaultResourceStore } from "../harness/resources/vault-store";
 import {
   AUTO_SKILL_LIFECYCLE_THRESHOLDS_MS,
   SkillRuntimeCoordinator
 } from "../harness/resources/skill-runtime";
 import { loadVaultSkill } from "../harness/resources/skill-loader";
+import { EchoInkResourceCatalogService } from "../plugin/resource-catalog-service";
+import { defaultResourceSettings } from "../resources/registry";
 
 export async function runSkillRuntimeScenarios(): Promise<void> {
+  await assertBuiltinSkillManagementScenarios();
+  await assertBuiltinSkillCatalogDegradesPerEntry();
   await withVault(async (vaultPath) => {
     const initialized = await initializeVaultResourceStore({ vaultPath });
     assert.equal(
@@ -53,7 +62,7 @@ export async function runSkillRuntimeScenarios(): Promise<void> {
       } })
     });
     const initial = await coordinator.initialize();
-    assert.equal(Object.keys(initial.records).length, 7);
+    assert.equal(Object.keys(initial.records).length, BUILTIN_SKILLS.length);
     assert.equal(Object.values(initial.records).every((record) =>
       record.origin === "builtin" && record.status === "active"
     ), true);
@@ -334,6 +343,174 @@ export async function runSkillRuntimeScenarios(): Promise<void> {
     );
   });
   console.log("PASS EchoInk Skill installation, routing, learning, and lifecycle contracts");
+}
+
+async function assertBuiltinSkillManagementScenarios(): Promise<void> {
+  await withVault(async (vaultPath) => {
+    await initializeVaultResourceStore({ vaultPath });
+    const definition = getBuiltinSkillDefinition("daily-journal");
+    assert.ok(definition);
+    const canonicalContent = renderBuiltinSkill(definition);
+    const entryPath = path.join(
+      vaultPath,
+      ".echoink/resources/skills/daily-journal/SKILL.md"
+    );
+    const coordinator = new SkillRuntimeCoordinator(vaultPath, {
+      now: () => 20_000
+    });
+    const initial = await coordinator.initialize();
+    assert.equal(initial.records["daily-journal"]?.origin, "builtin");
+    assert.equal(initial.records["daily-journal"]?.userModified, false);
+    const ordinaryJournalSelection = await coordinator.selectForTask({
+      text: "我想写一篇今天的日记"
+    });
+    assert.equal(
+      ordinaryJournalSelection?.applicableSkillIds.includes("daily-journal")
+        ?? false,
+      false,
+      "daily-journal is never selected from ordinary chat text"
+    );
+
+    const previousBuiltinContent = canonicalContent.replace(
+      "version: 1.0.0",
+      "version: 0.9.0"
+    );
+    await writeFile(entryPath, previousBuiltinContent, "utf8");
+    const stateDocument = JSON.parse(
+      await readFile(coordinator.statePath, "utf8")
+    ) as {
+      records: Record<string, {
+        contentHash: string;
+        userModified: boolean;
+      }>;
+    };
+    stateDocument.records["daily-journal"]!.contentHash = sha256Text(
+      previousBuiltinContent
+    );
+    stateDocument.records["daily-journal"]!.userModified = false;
+    await writeFile(
+      coordinator.statePath,
+      `${JSON.stringify(stateDocument, null, 2)}\n`,
+      "utf8"
+    );
+    const upgraded = new SkillRuntimeCoordinator(vaultPath, {
+      now: () => 21_000
+    });
+    const upgradedState = await upgraded.initialize();
+    assert.equal(await readFile(entryPath, "utf8"), canonicalContent,
+      "an untouched built-in Skill upgrades to the current bundled content");
+    assert.equal(upgradedState.records["daily-journal"]?.userModified, false);
+
+    const customizedContent = canonicalContent.replace(
+      "## 交谈方式",
+      "## 我的交谈方式"
+    );
+    const saved = await upgraded.saveBuiltinSkillContent(
+      "daily-journal",
+      customizedContent
+    );
+    assert.equal(saved.fileStatus, "ready");
+    assert.equal(saved.userModified, true);
+    assert.equal(await readFile(entryPath, "utf8"), customizedContent);
+    const customizedRestart = new SkillRuntimeCoordinator(vaultPath, {
+      now: () => 22_000
+    });
+    assert.equal(
+      (await customizedRestart.initialize()).records["daily-journal"]?.userModified,
+      true
+    );
+    assert.equal(await readFile(entryPath, "utf8"), customizedContent,
+      "a customized built-in Skill is not overwritten during startup");
+
+    await rm(entryPath);
+    const missingRestart = new SkillRuntimeCoordinator(vaultPath, {
+      now: () => 23_000
+    });
+    await missingRestart.initialize();
+    const missing = await missingRestart.inspectBuiltinSkill("daily-journal");
+    assert.equal(missing.fileStatus, "missing");
+    await assert.rejects(readFile(entryPath, "utf8"),
+      "a recorded but missing built-in Skill is not silently recreated");
+    await assert.rejects(
+      missingRestart.saveBuiltinSkillContent("daily-journal", canonicalContent),
+      /builtin_skill_file_missing/u
+    );
+
+    const restored = await missingRestart.restoreBuiltinSkill("daily-journal");
+    assert.equal(restored.fileStatus, "ready");
+    assert.equal(restored.userModified, false);
+    assert.equal(await readFile(entryPath, "utf8"), canonicalContent);
+
+    await writeFile(entryPath, "", "utf8");
+    const invalidRestart = new SkillRuntimeCoordinator(vaultPath, {
+      now: () => 24_000
+    });
+    await invalidRestart.initialize();
+    const invalid = await invalidRestart.inspectBuiltinSkill("daily-journal");
+    assert.equal(invalid.fileStatus, "invalid");
+    assert.equal(await readFile(entryPath, "utf8"), "",
+      "a recorded but invalid built-in Skill is preserved for explicit repair");
+    const repaired = await invalidRestart.saveBuiltinSkillContent(
+      "daily-journal",
+      customizedContent
+    );
+    assert.equal(repaired.fileStatus, "ready");
+    assert.equal(repaired.userModified, true);
+    const reset = await invalidRestart.restoreBuiltinSkill("daily-journal");
+    assert.equal(reset.userModified, false);
+    assert.equal(await readFile(entryPath, "utf8"), canonicalContent);
+  });
+}
+
+async function assertBuiltinSkillCatalogDegradesPerEntry(): Promise<void> {
+  await withVault(async (vaultPath) => {
+    await initializeVaultResourceStore({ vaultPath });
+    const coordinator = new SkillRuntimeCoordinator(vaultPath, {
+      now: () => 30_000
+    });
+    await coordinator.initialize();
+    await rm(path.join(
+      vaultPath,
+      ".echoink/resources/skills/daily-journal/SKILL.md"
+    ));
+    await writeFile(path.join(
+      vaultPath,
+      ".echoink/resources/skills/evidence-freshness-audit/SKILL.md"
+    ), "", "utf8");
+    const resources = defaultResourceSettings();
+    const plugin = {
+      settings: { resources },
+      getVaultPath: () => vaultPath,
+      getSkillRuntimeCoordinator: () => coordinator,
+      withEchoInkResourceMutation: async <T>(action: () => Promise<T>) =>
+        await action(),
+      saveEchoInkResourceMutation: async () => undefined
+    };
+    const catalog = await new EchoInkResourceCatalogService(plugin as never)
+      .buildRuntimeCatalog();
+    assert.equal(
+      catalog.filter((resource) => resource.kind === "skill").length,
+      BUILTIN_SKILLS.length,
+      "one damaged Skill does not hide the rest of the catalog"
+    );
+    assert.equal(
+      catalog.find((resource) => resource.metadata?.resourceId === "daily-journal")
+        ?.metadata?.fileStatus,
+      "missing"
+    );
+    assert.equal(
+      catalog.find((resource) =>
+        resource.metadata?.resourceId === "evidence-freshness-audit"
+      )?.metadata?.fileStatus,
+      "invalid"
+    );
+    assert.match(resources.lastError, /daily-journal/u);
+    assert.match(resources.lastError, /evidence-freshness-audit/u);
+  });
+}
+
+function sha256Text(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 async function withVault(run: (vaultPath: string) => Promise<void>): Promise<void> {

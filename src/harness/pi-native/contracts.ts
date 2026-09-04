@@ -35,6 +35,10 @@ export interface PiConversationCatalogEntry {
   title: string;
   status: PiConversationCatalogStatus;
   defaultMemoryMode: PiConversationMemoryMode;
+  /** Optional persistent Skill binding. The Skill file remains the content source. */
+  defaultSkillId?: string;
+  /** Journal directory frozen when a daily-journal Conversation is created. */
+  journalDirectory?: string;
   createdAt: number;
   updatedAt: number;
   /** Pi-owned JSONL path. This is an index pointer, never a transcript copy. */

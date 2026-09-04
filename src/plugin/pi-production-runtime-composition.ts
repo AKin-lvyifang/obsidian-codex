@@ -46,6 +46,7 @@ import {
   type PiNativeAgentSessionFactoryInput,
   type PiNativeAgentSessionFactoryResult,
   type PiNativeKnowledgeTurnContext,
+  type PiNativeSkillTurnContext,
   type PiNativeMemoryTurnContext,
   type PiNativeNoteMentionTurnContext,
   type PiNativeDocumentTurnContext,
@@ -236,6 +237,8 @@ export interface PiProductionPluginHost {
   readonly settings: CodexForObsidianSettings;
   resolveOpenAICodexAccessToken(): Promise<string>;
   createSkillReviewLlmPort(): SkillReviewLlmPort | null;
+  getSkillRuntimeCoordinator?(): SkillRuntimeCoordinator;
+  requireAvailableEchoInkSkill(skillId: string): Promise<Readonly<EchoInkResource>>;
   getVaultPath(): string;
   getPluginDataDirName(): string;
   persistPiNativeSettings(): Promise<void>;
@@ -291,6 +294,15 @@ export function hasPiProductionProviderConfiguration(
   } catch {
     return false;
   }
+}
+
+export async function resolvePiProductionSkillById(
+  plugin: Pick<PiProductionPluginHost, "requireAvailableEchoInkSkill">,
+  skillRuntime: Pick<SkillRuntimeCoordinator, "resolveById">,
+  skillId: string
+) {
+  await plugin.requireAvailableEchoInkSkill(skillId);
+  return await skillRuntime.resolveById(skillId);
 }
 
 /** Builds the same configured Pi model shape used by AgentSession before a
@@ -422,10 +434,11 @@ export async function createPiProductionRuntimeBundle(
   const interactionBroker = new PiTurnInteractionBroker();
   const dreamExperienceInbox = new DreamExperienceInboxStore(personalMemory.layout.root);
   const agentSelfMetadata = new AgentSelfMetadataStore(personalMemory.layout.root);
-  const skillRuntime = new SkillRuntimeCoordinator(vaultRootPath, {
-    reviewLlm: () => plugin.createSkillReviewLlmPort()
-  });
-  await skillRuntime.initialize();
+  const skillRuntime = plugin.getSkillRuntimeCoordinator?.()
+    ?? new SkillRuntimeCoordinator(vaultRootPath, {
+      reviewLlm: () => plugin.createSkillReviewLlmPort()
+    });
+  await skillRuntime.inspectBuiltinSkills();
   await skillRuntime.advanceLifecycle();
   let runtime: PiNativeConversationRuntime | null = null;
   try {
@@ -445,6 +458,9 @@ export async function createPiProductionRuntimeBundle(
             preferredSkillIds: getAgentTemplate(metadata?.templateId)
               ?.preferredSkillIds ?? []
           });
+        },
+        resolveById: async ({ id }) => {
+          return await resolvePiProductionSkillById(plugin, skillRuntime, id);
         },
         recordUse: async (skillId, usedAt) => {
           await skillRuntime.recordUse(skillId, usedAt);
@@ -867,6 +883,7 @@ function parsePiKnowledgeReference(value: unknown): PiKnowledgeReference | null 
 export function createPiKnowledgeInlineExtension(input: Readonly<{
   vaultSecurity: InlineExtension;
   currentTurn(): Readonly<PiNativeKnowledgeTurnContext> | null;
+  currentSkillTurn?(): Readonly<PiNativeSkillTurnContext> | null;
   currentMemoryTurn?(): Readonly<PiNativeMemoryTurnContext> | null;
   currentNoteMentionTurn?(): Readonly<PiNativeNoteMentionTurnContext> | null;
   currentDocumentTurn?(): Readonly<PiNativeDocumentTurnContext> | null;
@@ -958,6 +975,10 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
         const documentTurn = input.currentDocumentTurn?.() ?? null;
         const documentMessage = documentTurn
           ? buildPiDocumentContextMessage(documentTurn.documents)
+          : null;
+        const skillTurn = input.currentSkillTurn?.() ?? null;
+        const skillMessage = skillTurn
+          ? buildPiSkillTurnContextMessage(skillTurn)
           : null;
         const memoryTurn = input.currentMemoryTurn?.();
         if (memoryTurn && input.personalMemory) {
@@ -1129,7 +1150,7 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
             details: knowledgeReferenceEntryDetails(
               turn.references.map((reference) => ({ ...reference }))
             )
-          }, noteMentionMessage, documentMessage);
+          }, skillMessage, noteMentionMessage, documentMessage);
           transientResourceContextSignature = piResourceContextSignature(message);
           return {
             ...systemPromptResult,
@@ -1164,7 +1185,7 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
               preferenceState: command.preference.state,
               preferenceRevision: command.preference.revision
             })
-          }, noteMentionMessage, documentMessage);
+          }, skillMessage, noteMentionMessage, documentMessage);
           transientResourceContextSignature = piResourceContextSignature(message);
           return {
             ...systemPromptResult,
@@ -1173,6 +1194,7 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
         }
         const attachmentContextMessage = mergePiBeforeAgentStartContextMessages(
           null,
+          skillMessage,
           noteMentionMessage,
           documentMessage
         );
@@ -1249,6 +1271,7 @@ function mergePiBeforeAgentStartContextMessages(
     display: false;
     details: unknown;
   }> | null,
+  skillMessage: Extract<AgentMessage, { role: "custom" }> | null,
   noteMentionMessage: Extract<AgentMessage, { role: "custom" }> | null,
   documentMessage: Extract<AgentMessage, { role: "custom" }> | null
 ): Readonly<{
@@ -1257,14 +1280,14 @@ function mergePiBeforeAgentStartContextMessages(
   display: false;
   details: unknown;
 }> | null {
-  const primary = message ?? noteMentionMessage ?? documentMessage;
+  const primary = message ?? skillMessage ?? noteMentionMessage ?? documentMessage;
   if (!primary) return null;
   const details = primary.details
     && typeof primary.details === "object"
     && !Array.isArray(primary.details)
     ? primary.details as Readonly<Record<string, unknown>>
     : Object.freeze({});
-  const content = [message, noteMentionMessage, documentMessage]
+  const content = [message, skillMessage, noteMentionMessage, documentMessage]
     .filter((candidate): candidate is NonNullable<typeof candidate> => Boolean(candidate))
     .map((candidate) => candidate.content as string)
     .join("\n\n");
@@ -1274,6 +1297,9 @@ function mergePiBeforeAgentStartContextMessages(
     display: false as const,
     details: Object.freeze({
       ...details,
+      ...(skillMessage && skillMessage !== primary
+        ? { echoinkSkillTurnContext: skillMessage.details }
+        : {}),
       ...(noteMentionMessage && noteMentionMessage !== primary
         ? { [PI_NOTE_MENTIONS_CONTEXT_DETAILS_KEY]: noteMentionMessage.details }
         : {}),
@@ -1281,6 +1307,22 @@ function mergePiBeforeAgentStartContextMessages(
         ? { [PI_DOCUMENT_CONTEXT_DETAILS_KEY]: documentMessage.details }
         : {})
     })
+  });
+}
+
+function buildPiSkillTurnContextMessage(
+  turn: Readonly<PiNativeSkillTurnContext>
+): Extract<AgentMessage, { role: "custom" }> {
+  return Object.freeze({
+    role: "custom" as const,
+    customType: "echoink-skill-turn-context-v1",
+    content: turn.content,
+    display: false as const,
+    details: Object.freeze({
+      type: "echoink.skill-turn-context.v1",
+      skillId: turn.skillId
+    }),
+    timestamp: Date.now()
   });
 }
 
@@ -1840,6 +1882,7 @@ async function createProductionAgentSession(input: {
   const inlineExtension = createPiKnowledgeInlineExtension({
     vaultSecurity: security.inlineExtension,
     currentTurn: () => input.input.currentKnowledgeTurnContext(),
+    currentSkillTurn: () => input.input.currentSkillTurnContext?.() ?? null,
     currentMemoryTurn: () => input.input.currentMemoryTurnContext?.() ?? null,
     currentNoteMentionTurn: () =>
       input.input.currentNoteMentionTurnContext?.() ?? null,
@@ -2168,6 +2211,16 @@ export async function synchronizePiConversationShells(
     shell.title = catalogEntry.title;
     shell.piSessionId = catalogEntry.piSessionId;
     shell.defaultMemoryMode = catalogEntry.defaultMemoryMode;
+    if (catalogEntry.defaultSkillId) {
+      shell.defaultSkillId = catalogEntry.defaultSkillId;
+    } else {
+      delete shell.defaultSkillId;
+    }
+    if (catalogEntry.journalDirectory) {
+      shell.journalDirectory = catalogEntry.journalDirectory;
+    } else {
+      delete shell.journalDirectory;
+    }
     shell.bodyAuthority = "pi_session_only";
     shell.createdAt = catalogEntry.createdAt;
     shell.updatedAt = catalogEntry.updatedAt;

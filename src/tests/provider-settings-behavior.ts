@@ -188,6 +188,7 @@ import {
   settingsForDataSave,
   snapshotApiProviderSettings
 } from "../plugin/settings-store";
+import { EchoInkResourceCatalogService } from "../plugin/resource-catalog-service";
 import { AgentIdentityModal } from "../ui/agent-identity-modal";
 import { KnowledgeNotePickerModal } from "../settings/knowledge-note-picker-modal";
 import {
@@ -216,7 +217,15 @@ import {
 import { AgentSelfMetadataStore } from "../harness/memory/agent-self-metadata";
 import { CognitiveSystem } from "../harness/memory/cognitive-system";
 import { PersonalMemoryRepository } from "../harness/memory/personal-memory-repository";
-import { BUILTIN_SKILL_IDS, BUILTIN_SKILLS } from "../harness/resources/builtin-skills";
+import {
+  BUILTIN_SKILL_IDS,
+  BUILTIN_SKILLS,
+  getBuiltinSkillDefinition,
+  renderBuiltinSkill
+} from "../harness/resources/builtin-skills";
+import type {
+  BuiltinSkillRuntimeSnapshot
+} from "../harness/resources/skill-runtime";
 import {
   advanceEchoInkOnboardingTutorial,
   deriveEchoInkOnboardingTruth,
@@ -236,9 +245,11 @@ import {
   OpenAICodexOAuthService,
   OpenAICodexSettingsCredentialStore
 } from "../plugin/openai-codex-oauth-service";
+import { resolvePiProductionSkillById } from "../plugin/pi-production-runtime-composition";
 
 export async function runProviderSettingsBehaviorTests(): Promise<void> {
   assertSettingsV53MigrationContract();
+  await assertJournalDirectorySettingsUi();
   assertPiReasoningCapabilityContract();
   assertKnowledgeMaintenanceSubmitSnapshotContract();
   await assertPiReasoningPayloadContract();
@@ -286,6 +297,9 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   assertMemoryComposerVisualCssContract();
   await assertMcpPanelUsesTurnResourceTruth();
   await assertBuiltinSkillPresetLabels();
+  await assertBuiltinSkillEditorLifecycle();
+  await assertDefaultSkillProductionAvailabilityGate();
+  await assertRollbackSafeResourceCatalogKeepsBuiltinFileState();
   await assertSkillToggleNotCommittedRestoresAuthoritativeUi();
   await assertResourceScanErrorsClearAcrossTabs();
   assertProviderBadgeReflowCssContract();
@@ -322,6 +336,13 @@ export async function runProviderSettingsBehaviorTests(): Promise<void> {
   await assertIdentityModalNameValidation();
   await assertAvatarPresetCatalogBehavior();
   await assertAvatarProcessorContract();
+}
+
+export async function runBuiltinSkillSettingsBehaviorTests(): Promise<void> {
+  await assertBuiltinSkillPresetLabels();
+  await assertBuiltinSkillEditorLifecycle();
+  await assertRollbackSafeResourceCatalogKeepsBuiltinFileState();
+  console.log("PASS settings: built-in Skill labels, editing, restore, and rollback state");
 }
 
 function replaceProviderModels(
@@ -1096,7 +1117,16 @@ async function assertBuiltinSkillPresetLabels(): Promise<void> {
     enabled: true,
     bridgeMode: "prompt-only" as const,
     contentPath: `.echoink/resources/skills/${resourceId}/SKILL.md`,
-    metadata: { resourceId }
+    metadata: {
+      resourceId,
+      ...(resourceId === "daily-journal"
+        ? { userModified: true, fileStatus: "ready" }
+        : resourceId === "clarify-real-question"
+          ? { fileStatus: "missing" }
+          : resourceId === "two-layer-explanation"
+            ? { fileStatus: "invalid" }
+            : { fileStatus: "ready" })
+    }
   }));
   const customSkill = {
     id: "echoink-local:skill:user-created",
@@ -1126,13 +1156,20 @@ async function assertBuiltinSkillPresetLabels(): Promise<void> {
   (tab as unknown as { runtimeEchoInkResources: typeof settings.resources.catalog })
     .runtimeEchoInkResources = structuredClone(settings.resources.catalog);
 
-  const assertLanguage = (label: string): void => {
+  const assertLanguage = (
+    label: string,
+    defaultLabel: string,
+    customizedLabel: string,
+    missingLabel: string,
+    invalidLabel: string
+  ): void => {
     const badges = tab.containerEl.querySelectorAll<ProviderModalTestElement>(
       ".codex-resource-preset-badge"
     );
     assert.equal(badges.length, BUILTIN_SKILL_IDS.length);
     assert.deepEqual(badges.map((badge) => badge.textContent),
-      BUILTIN_SKILL_IDS.map(() => label));
+      BUILTIN_SKILL_IDS.map((skillId) =>
+        skillId === "daily-journal" ? defaultLabel : label));
     for (const badge of badges) {
       assert.equal(badge.getAttribute("data-resource-preset"), "true");
       const title = badge.parentElement;
@@ -1147,14 +1184,314 @@ async function assertBuiltinSkillPresetLabels(): Promise<void> {
     assert.equal(customRow.querySelector(".codex-resource-preset-badge"), null);
     assert.equal(typeof customRow.querySelector(".codex-resource-row-name")?.onclick, "function");
     assert.equal(typeof customRow.querySelector(".codex-resource-toggle")?.onchange, "function");
+    const stateBadges = tab.containerEl.querySelectorAll<ProviderModalTestElement>(
+      ".codex-resource-state-badge"
+    );
+    assert.deepEqual(
+      stateBadges.map((badge) => badge.textContent),
+      [missingLabel, invalidLabel, customizedLabel]
+    );
+    assert.match(tab.containerEl.textContent, new RegExp(missingLabel, "u"));
+    assert.match(tab.containerEl.textContent, new RegExp(invalidLabel, "u"));
   };
 
   tab.display();
-  assertLanguage("预设");
+  assertLanguage("预设", "EchoInk 默认", "已自定义", "SKILL.md 缺失", "SKILL.md 损坏");
   settings.settingsLanguage = "en";
   tab.display();
-  assertLanguage("Preset");
+  assertLanguage("Preset", "EchoInk default", "Customized", "SKILL.md missing", "SKILL.md invalid");
   tab.hide();
+}
+
+async function assertBuiltinSkillEditorLifecycle(): Promise<void> {
+  installProviderModalDomFixture();
+  const definition = getBuiltinSkillDefinition("daily-journal");
+  assert.ok(definition);
+  const canonicalContent = renderBuiltinSkill(definition);
+  let snapshot: BuiltinSkillRuntimeSnapshot = Object.freeze({
+    id: "daily-journal",
+    title: definition.title,
+    description: definition.description,
+    relativePath: ".echoink/resources/skills/daily-journal/SKILL.md",
+    fileStatus: "ready",
+    lifecycleStatus: "active",
+    userModified: false,
+    content: canonicalContent
+  });
+  const resource = {
+    id: "echoink-local:skill:daily-journal",
+    kind: "skill" as const,
+    source: "echoink-local" as const,
+    name: "daily-journal",
+    description: definition.description,
+    enabled: false,
+    bridgeMode: "prompt-only" as const,
+    contentPath: snapshot.relativePath,
+    metadata: {
+      resourceId: "daily-journal",
+      builtin: true,
+      userModified: false,
+      fileStatus: "ready",
+      lifecycleStatus: "active"
+    }
+  };
+  const settings = structuredClone(DEFAULT_SETTINGS);
+  settings.settingsLanguage = "zh-CN";
+  settings.settingsTab = "resources";
+  settings.resourceManagementTab = "skills";
+  settings.resources.catalog = [structuredClone(resource)];
+  let savedContent = "";
+  let restoreCalls = 0;
+  const runtimeResource = () => ({
+    ...structuredClone(resource),
+    enabled: settings.resources.catalog[0]?.enabled ?? false,
+    metadata: {
+      ...resource.metadata,
+      userModified: snapshot.userModified,
+      fileStatus: snapshot.fileStatus,
+      lifecycleStatus: snapshot.lifecycleStatus
+    }
+  });
+  const plugin = withSettingsTabDefaults({
+    app: new App(),
+    manifest: { id: "codex-echoink" },
+    settings,
+    getCognitiveSystem: async () => createCognitiveSystemStub(),
+    buildRuntimeEchoInkResourceCatalog: async () => [runtimeResource()],
+    readEchoInkBuiltinSkill: async () => snapshot,
+    saveEchoInkBuiltinSkill: async (
+      skillId: "daily-journal",
+      content: string
+    ) => {
+      assert.equal(skillId, "daily-journal");
+      savedContent = content;
+      snapshot = Object.freeze({
+        ...snapshot,
+        fileStatus: "ready",
+        userModified: true,
+        content
+      });
+      return snapshot;
+    },
+    restoreEchoInkBuiltinSkill: async (skillId: "daily-journal") => {
+      assert.equal(skillId, "daily-journal");
+      restoreCalls += 1;
+      snapshot = Object.freeze({
+        ...snapshot,
+        fileStatus: "ready",
+        userModified: false,
+        content: canonicalContent
+      });
+      return snapshot;
+    }
+  });
+  const tab = new CodexSettingTab(plugin as never);
+  (tab as unknown as { runtimeEchoInkResources: ReturnType<typeof runtimeResource>[] })
+    .runtimeEchoInkResources = [runtimeResource()];
+  tab.display();
+  const openDetail = tab.containerEl.querySelector<HTMLButtonElement>(
+    `[data-echoink-focus-key="resource:${resource.id}:detail"]`
+  );
+  assert.ok(openDetail);
+  openDetail.click();
+  await flushProviderModalTasks();
+  await flushProviderModalTasks();
+  tab.display();
+
+  let textarea = tab.containerEl.querySelector<HTMLTextAreaElement>(
+    ".echoink-builtin-skill-textarea"
+  );
+  let save = tab.containerEl.querySelector<HTMLButtonElement>(
+    `[data-echoink-focus-key="resource:${resource.id}:skill-save"]`
+  );
+  assert.ok(textarea);
+  assert.ok(save);
+  assert.equal(textarea.value, canonicalContent);
+  assert.match(tab.containerEl.textContent, /EchoInk 默认 · 已保存/u);
+  assert.equal(save.disabled, true);
+
+  textarea.value = canonicalContent.replace("## 交谈方式", "## 我的交谈方式");
+  textarea.oninput?.(new Event("input"));
+  assert.equal(save.disabled, false);
+  save.click();
+  await flushProviderModalTasks();
+  await flushProviderModalTasks();
+  assert.equal(savedContent, textarea.value);
+  assert.equal(snapshot.userModified, true);
+  assert.equal(settings.resources.catalog[0]?.enabled, false,
+    "saving built-in content does not enable the Skill");
+
+  tab.display();
+  assert.match(tab.containerEl.textContent, /已自定义 · 已保存/u);
+  const restore = tab.containerEl.querySelector<HTMLButtonElement>(
+    `[data-echoink-focus-key="resource:${resource.id}:skill-restore"]`
+  );
+  assert.ok(restore);
+  const modalCountBefore = openTestModals.length;
+  restore.click();
+  assert.equal(restoreCalls, 0,
+    "restoring a built-in Skill waits for explicit confirmation");
+  assert.equal(openTestModals.length, modalCountBefore + 1);
+  const modal = openTestModals.at(-1);
+  assert.ok(modal);
+  assert.match(modal.contentEl.textContent, /不会改变 Skill 的启用开关/u);
+  const modalButtons = modal.contentEl.querySelectorAll<HTMLButtonElement>("button");
+  modalButtons[modalButtons.length - 1]?.click();
+  await flushProviderModalTasks();
+  await flushProviderModalTasks();
+  assert.equal(restoreCalls, 1);
+  assert.equal(snapshot.userModified, false);
+  assert.equal(snapshot.content, canonicalContent);
+  assert.equal(settings.resources.catalog[0]?.enabled, false,
+    "restoring built-in content preserves the Skill enable switch");
+
+  tab.display();
+  textarea = tab.containerEl.querySelector<HTMLTextAreaElement>(
+    ".echoink-builtin-skill-textarea"
+  );
+  save = tab.containerEl.querySelector<HTMLButtonElement>(
+    `[data-echoink-focus-key="resource:${resource.id}:skill-save"]`
+  );
+  assert.ok(textarea);
+  assert.ok(save);
+  assert.equal(textarea.value, canonicalContent);
+  assert.match(tab.containerEl.textContent, /EchoInk 默认 · 已保存/u);
+  tab.hide();
+}
+
+async function assertDefaultSkillProductionAvailabilityGate(): Promise<void> {
+  const calls: string[] = [];
+  let enabled = false;
+  const requireAvailable = CodexForObsidianPlugin.prototype
+    .requireAvailableEchoInkSkill;
+  const host = {
+    buildRuntimeEchoInkResourceCatalog: async () => [{
+      id: "echoink-local:skill:daily-journal",
+      kind: "skill" as const,
+      source: "echoink-local" as const,
+      name: "daily-journal",
+      description: "Daily journal fixture",
+      enabled,
+      bridgeMode: "prompt-only" as const,
+      contentPath: ".echoink/resources/skills/daily-journal/SKILL.md",
+      metadata: {
+        resourceId: "daily-journal",
+        fileStatus: "ready",
+        lifecycleStatus: "active"
+      }
+    }]
+  };
+  const plugin = {
+    requireAvailableEchoInkSkill: async (skillId: string) => {
+      calls.push(`availability:${skillId}`);
+      return await requireAvailable.call(host as never, skillId);
+    }
+  };
+  const skillRuntime = {
+    resolveById: async (skillId: string) => {
+      calls.push(`runtime:${skillId}`);
+      return {
+        id: skillId,
+        skillPath: `/fixture/${skillId}/SKILL.md`,
+        skillName: skillId,
+        revision: "a".repeat(64),
+        skills: [],
+        applicableSkillIds: [skillId],
+        requiresFreshnessVerification: false
+      };
+    }
+  };
+
+  await assert.rejects(
+    resolvePiProductionSkillById(plugin, skillRuntime as never, "daily-journal"),
+    /Skill daily-journal 已停用/u
+  );
+  assert.deepEqual(calls, ["availability:daily-journal"],
+    "a disabled default Skill must stop before runtime resolution");
+
+  enabled = true;
+  await resolvePiProductionSkillById(
+    plugin,
+    skillRuntime as never,
+    "daily-journal"
+  );
+  assert.deepEqual(calls, [
+    "availability:daily-journal",
+    "availability:daily-journal",
+    "runtime:daily-journal"
+  ], "an enabled default Skill is validated before its live file is resolved");
+}
+
+async function assertRollbackSafeResourceCatalogKeepsBuiltinFileState(): Promise<void> {
+  const vaultPath = await mkdtemp(path.join(tmpdir(), "echoink-resource-rollback-"));
+  try {
+    const definition = getBuiltinSkillDefinition("daily-journal");
+    assert.ok(definition);
+    for (const fileStatus of ["missing", "invalid"] as const) {
+      const settings = structuredClone(DEFAULT_SETTINGS);
+      settings.resources.catalog = [{
+        id: "echoink-local:skill:daily-journal",
+        kind: "skill",
+        source: "echoink-local",
+        name: "daily-journal",
+        description: definition.description,
+        enabled: true,
+        bridgeMode: "prompt-only",
+        contentPath: ".echoink/resources/skills/daily-journal/SKILL.md",
+        metadata: {
+          resourceId: "daily-journal",
+          builtin: true,
+          userModified: false,
+          fileStatus: "ready",
+          lifecycleStatus: "active"
+        }
+      }];
+      const snapshot: BuiltinSkillRuntimeSnapshot = Object.freeze({
+        id: "daily-journal",
+        title: definition.title,
+        description: definition.description,
+        relativePath: ".echoink/resources/skills/daily-journal/SKILL.md",
+        fileStatus,
+        lifecycleStatus: "active",
+        userModified: false,
+        content: "",
+        error: `fixture-${fileStatus}`
+      });
+      const service = new EchoInkResourceCatalogService({
+        settings,
+        getVaultPath: () => vaultPath,
+        getSkillRuntimeCoordinator: () => ({
+          inspectBuiltinSkills: async () => [snapshot]
+        }) as never,
+        withEchoInkResourceMutation: async <R>(action: () => Promise<R>) =>
+          await action(),
+        saveEchoInkResourceMutation: async (previousResources) => {
+          settings.resources = structuredClone(previousResources);
+          throw new ResourceMutationError(
+            "fixture resource save rolled back",
+            true,
+            false,
+            true
+          );
+        }
+      });
+
+      const catalog = await service.buildRuntimeCatalog();
+      assert.equal(
+        settings.resources.catalog[0]?.metadata?.fileStatus,
+        "ready",
+        "safe rollback restores the authoritative persisted catalog"
+      );
+      assert.equal(
+        catalog.find((resource) => resource.metadata?.resourceId === "daily-journal")
+          ?.metadata?.fileStatus,
+        fileStatus,
+        "the runtime catalog must retain the latest built-in file probe after safe rollback"
+      );
+    }
+  } finally {
+    await rm(vaultPath, { recursive: true, force: true });
+  }
 }
 
 async function assertProviderApiKeyEditLifecycle(): Promise<void> {
@@ -2554,7 +2891,7 @@ async function assertSettingsAccessibleNamesAndOverflow(): Promise<void> {
   assert.ok(clearNoMatch);
   assert.equal(clearNoMatch.disabled, false);
   clearNoMatch.click();
-  tab.display();
+  resetSynchronousSettingsDisplayFrame(tab);
   await settleMicrotasks();
   assert.match(tab.containerEl.textContent, new RegExp(maintenanceReportPath, "u"));
   assert.match(tab.containerEl.textContent, new RegExp(previousMaintenanceReportPath, "u"));
@@ -2569,8 +2906,8 @@ async function assertSettingsAccessibleNamesAndOverflow(): Promise<void> {
   assert.equal(clearedDate.value, "");
   assert.equal(clearAfterReset.disabled, true);
   assert.equal(
-    providerModalTestDocument.activeElement,
-    clearedDate,
+    providerModalTestDocument.activeElement === clearedDate,
+    true,
     "clearing the date filter restores focus to the date control"
   );
 
@@ -2899,6 +3236,13 @@ function assertSettingsV53MigrationContract(): void {
     assert.equal(DEFAULT_SETTINGS.memory.useLongTermMemory, true);
     assert.equal(DEFAULT_SETTINGS.memory.dreamEnabled, true);
     assert.equal(normalizeSettingsData(undefined).settings.memory.dreamEnabled, true);
+    assert.equal(normalizeSettingsData(undefined).settings.journalDirectory, "journal");
+    assert.equal(normalizeSettingsData({ journalDirectory: "" }).settings.journalDirectory, "journal");
+    assert.equal(normalizeSettingsData({ journalDirectory: "../outside" }).settings.journalDirectory, "journal");
+    assert.equal(
+      normalizeSettingsData({ journalDirectory: " Notes\\Daily// " }).settings.journalDirectory,
+      "Notes/Daily"
+    );
     assert.equal(normalizeSettingsData({ memory: {} }).settings.memory.dreamEnabled, true);
     assert.equal(
       normalizeSettingsData({ memory: { dreamEnabled: false } }).settings.memory.dreamEnabled,
@@ -3936,6 +4280,43 @@ function assertSettingsV53MigrationContract(): void {
   if (failures.length > 0) {
     throw new AggregateError(failures, "Settings v53 migration contract failed");
   }
+}
+
+async function assertJournalDirectorySettingsUi(): Promise<void> {
+  installProviderModalDomFixture();
+  const fixtureState = createIdentityFixtureState();
+  const { plugin } = createIdentityTestPlugin(fixtureState);
+  const saved: Array<typeof DEFAULT_SETTINGS> = [];
+  plugin.saveSettings = async () => {
+    saved.push(structuredClone(plugin.settings));
+  };
+  const tab = new CodexSettingTab(withSettingsTabDefaults(plugin) as never);
+  (tab as unknown as { personalMemoryState: Record<string, any> | null })
+    .personalMemoryState = structuredClone(fixtureState);
+  tab.display();
+
+  const input = tab.containerEl.querySelector<ProviderModalTestElement>(
+    'input[aria-label="日记保存文件夹"]'
+  );
+  assert.ok(input, "general settings expose the journal folder input");
+  assert.equal(input.value, "journal");
+
+  input.value = " Notes\\Daily// ";
+  input.fireEvent("blur");
+  await settleMicrotasks();
+  assert.equal(plugin.settings.journalDirectory, "Notes/Daily");
+  assert.equal(input.value, "Notes/Daily");
+  assert.equal(saved.length, 1);
+  assert.equal(normalizeSettingsData(saved[0]).settings.journalDirectory, "Notes/Daily");
+
+  input.value = "../outside";
+  input.fireEvent("blur");
+  await settleMicrotasks();
+  assert.equal(plugin.settings.journalDirectory, "journal");
+  assert.equal(input.value, "journal");
+  assert.equal(saved.length, 2);
+  tab.hide();
+  console.log("PASS settings: journal folder normalizes, persists, and reloads");
 }
 
 function assertPiReasoningCapabilityContract(): void {
@@ -5354,6 +5735,10 @@ async function renderKnowledgeInitTab(plugin: Record<string, any>) {
 async function settleKnowledgeInitTab(tab: CodexSettingTab): Promise<void> {
   await flushProviderModalTasks();
   tab.display();
+}
+
+function resetSynchronousSettingsDisplayFrame(tab: CodexSettingTab): void {
+  (tab as unknown as { displayFrame: number | null }).displayFrame = null;
 }
 
 function knowledgeInitPanel(tab: CodexSettingTab) {
@@ -12107,4 +12492,8 @@ function withSettingsTabDefaults<T extends object>(plugin: T) {
   };
 }
 
-await runProviderSettingsBehaviorTests();
+if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "builtin-skill") {
+  await runBuiltinSkillSettingsBehaviorTests();
+} else {
+  await runProviderSettingsBehaviorTests();
+}

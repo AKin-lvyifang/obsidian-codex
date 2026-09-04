@@ -133,7 +133,7 @@ export class Setting {
   setDesc(value: string): this { this.descEl.setText(value); return this; }
   setHeading(): this { this.settingEl.addClass("setting-item-heading"); return this; }
   setClass(value: string): this { this.settingEl.addClass(value); return this; }
-  addText(callback: (component: { inputEl: HTMLInputElement; setPlaceholder: (value: string) => any; setValue: (value: string) => any; onChange: (handler: (value: string) => any) => any }) => any): this {
+  addText(callback: (component: { inputEl: HTMLInputElement; setPlaceholder: (value: string) => any; setValue: (value: string) => any; getValue: () => string; onChange: (handler: (value: string) => any) => any }) => any): this {
     const inputEl = this.controlEl.createEl("input", {
       attr: { type: "text" }
     }) as HTMLInputElement;
@@ -147,6 +147,7 @@ export class Setting {
         inputEl.value = value;
         return component;
       },
+      getValue: () => inputEl.value,
       onChange: (handler: (value: string) => any) => {
         inputEl.onchange = () => handler(inputEl.value);
         return component;

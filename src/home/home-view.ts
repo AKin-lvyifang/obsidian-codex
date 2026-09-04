@@ -13,7 +13,6 @@ import {
   buildHomeContributionGrid,
   buildHomeJournalDays,
   dateKey,
-  journalPathForDate,
   mergeHomeActivityDays
 } from "./home-workbench-model";
 import {
@@ -22,9 +21,9 @@ import {
   type HomeBentoIsland
 } from "./home-bento-island";
 import {
-  buildDailyConversationDraft,
   buildReviewConversationDraft,
-  buildRevisitConversationDraft,
+  HOME_DAILY_MESSAGE,
+  HOME_REVISIT_MESSAGE,
   homeConversationTitle,
   type HomeConversationAction
 } from "./home-conversation-actions";
@@ -65,7 +64,10 @@ export class EchoInkHomeView extends ItemView {
 
   constructor(leaf: WorkspaceLeaf, private readonly plugin: CodexForObsidianPlugin) {
     super(leaf);
-    this.dataService = new HomeWorkbenchDataService(plugin.app);
+    this.dataService = new HomeWorkbenchDataService(
+      plugin.app,
+      () => plugin.settings.journalDirectory
+    );
   }
 
   getViewType(): string {
@@ -122,7 +124,12 @@ export class EchoInkHomeView extends ItemView {
     }
     if (this.data && snapshotResult.status === "fulfilled") {
       this.data.activity = mergeHomeActivityDays(this.data.activity, snapshotResult.value.activity.days);
-      this.data.journalDays = buildHomeJournalDays(this.data.records, this.data.activity, visibleMonth);
+      this.data.journalDays = buildHomeJournalDays(
+        this.data.records,
+        this.data.activity,
+        visibleMonth,
+        this.dataService.getJournalDirectory()
+      );
     }
     this.loading = false;
     this.renderHeaderState();
@@ -203,7 +210,7 @@ export class EchoInkHomeView extends ItemView {
     this.conversationActionsIsland?.render([
       {
         id: "daily",
-        accessibleName: "写日记：新建会话并预填日记草稿",
+        accessibleName: "写日记：新建会话并自动发送开场消息",
         title: homeConversationTitle("daily", vaultName, now),
         description: "把今天说出来，确认后再整理成日记",
         onActivate: () => void this.openConversationAction("daily")
@@ -244,7 +251,9 @@ export class EchoInkHomeView extends ItemView {
       ? this.data?.records.find((record) => record.path === entry.targetPath)
       : null;
     const today = new Date();
-    const journalExists = this.app.vault.getAbstractFileByPath(journalPathForDate(today)) instanceof TFile;
+    const journalExists = this.app.vault.getAbstractFileByPath(
+      this.dataService.journalPathForDate(today)
+    ) instanceof TFile;
     if (entry.id === "wiki") {
       return [
         {
@@ -399,18 +408,45 @@ export class EchoInkHomeView extends ItemView {
   }
 
   private async openConversationAction(action: HomeConversationAction): Promise<void> {
+    const now = new Date();
+    let journalDirectory: string | undefined;
+    if (action === "daily") {
+      try {
+        await this.plugin.requireAvailableEchoInkSkill("daily-journal");
+      } catch (error) {
+        new Notice(`暂时无法开始日记：${errorMessage(error)}`);
+        await this.plugin.openEchoInkSkillSettings("daily-journal").catch(
+          (settingsError) => console.warn(
+            "[EchoInk] Failed to open daily-journal settings:",
+            settingsError
+          )
+        );
+        return;
+      }
+      try {
+        journalDirectory = await this.dataService.ensureJournalDirectory();
+      } catch (error) {
+        new Notice(`暂时无法准备日记目录：${errorMessage(error)}`);
+        return;
+      }
+    }
     try {
       await this.plugin.activateView();
       const view = this.plugin.getCodexView();
       if (!view) throw new Error("右侧会话视图尚未准备好");
-      const now = new Date();
       const title = action === "daily" ? `写日记 · ${dateKey(now)}` : `未完想法 · ${dateKey(now)}`;
-      const draft = action === "daily"
-        ? buildDailyConversationDraft(now)
-        : buildRevisitConversationDraft();
-      await view.createDraftSession(title, draft);
+      await view.startHomeConversation({
+        title,
+        message: action === "daily" ? HOME_DAILY_MESSAGE : HOME_REVISIT_MESSAGE,
+        ...(action === "daily"
+          ? {
+              defaultSkillId: "daily-journal",
+              journalDirectory: journalDirectory!
+            }
+          : {})
+      });
     } catch (error) {
-      console.warn("[EchoInk] Failed to prepare Home conversation draft:", error);
+      console.warn("[EchoInk] Failed to start Home conversation:", error);
       new Notice(`暂时无法新建会话：${errorMessage(error)}`);
     }
   }
@@ -445,7 +481,7 @@ export class EchoInkHomeView extends ItemView {
   }
 
   private async openJournal(date: Date): Promise<void> {
-    const path = normalizePath(journalPathForDate(date));
+    const path = normalizePath(this.dataService.journalPathForDate(date));
     const existing = this.app.vault.getAbstractFileByPath(path);
     if (existing instanceof TFile) {
       await this.app.workspace.getLeaf("tab").openFile(existing, { active: true });
@@ -468,7 +504,12 @@ export class EchoInkHomeView extends ItemView {
   private shiftCalendar(offset: number): void {
     this.calendarMonthOffset += offset;
     if (this.data) {
-      this.data.journalDays = buildHomeJournalDays(this.data.records, this.data.activity, this.visibleMonth());
+      this.data.journalDays = buildHomeJournalDays(
+        this.data.records,
+        this.data.activity,
+        this.visibleMonth(),
+        this.dataService.getJournalDirectory()
+      );
     }
     this.renderCalendar();
   }

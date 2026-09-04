@@ -202,6 +202,7 @@ export interface PiNativeAgentSessionFactoryInput {
     userEntryText: string;
   }>;
   currentKnowledgeTurnContext(): Readonly<PiNativeKnowledgeTurnContext> | null;
+  currentSkillTurnContext?(): Readonly<PiNativeSkillTurnContext> | null;
   currentMemoryTurnContext?(): Readonly<PiNativeMemoryTurnContext> | null;
   currentNoteMentionTurnContext?(): Readonly<PiNativeNoteMentionTurnContext> | null;
   currentDocumentTurnContext?(): Readonly<PiNativeDocumentTurnContext> | null;
@@ -245,6 +246,11 @@ export interface PiNativeNoteMentionTurnContext {
 
 export interface PiNativeDocumentTurnContext {
   readonly documents: readonly Readonly<PiChatPreparedDocument>[];
+}
+
+export interface PiNativeSkillTurnContext {
+  readonly skillId: string;
+  readonly content: string;
 }
 
 export function knowledgeWorkflowAllowsPersonalMemory(
@@ -372,18 +378,12 @@ export interface PiNativeAgentSessionFactoryResult {
 }
 
 export interface PiRuntimeSkillPort {
-  selectForTask(input: Readonly<{ text: string }>): Promise<Readonly<{
-    id: string;
-    skillPath: string;
-    skillName: string;
-    skills: readonly Readonly<{
-      id: string;
-      skillPath: string;
-      skillName: string;
-    }>[];
-    applicableSkillIds: readonly string[];
-    requiresFreshnessVerification: boolean;
-  }> | null>;
+  selectForTask(
+    input: Readonly<{ text: string }>
+  ): Promise<Readonly<PiRuntimeResolvedSkill> | null>;
+  resolveById?(
+    input: Readonly<{ id: string }>
+  ): Promise<Readonly<PiRuntimeResolvedSkill>>;
   recordUse(skillId: string, usedAt: number): Promise<void>;
   reviewCompletedTask(input: Readonly<{
     productRunId: string;
@@ -392,6 +392,20 @@ export interface PiRuntimeSkillPort {
     terminalState: "completed" | "failed" | "cancelled";
     existingCapabilityIds: readonly string[];
   }>): Promise<unknown>;
+}
+
+export interface PiRuntimeResolvedSkill {
+  readonly id: string;
+  readonly skillPath: string;
+  readonly skillName: string;
+  readonly revision: string;
+  readonly skills: readonly Readonly<{
+    id: string;
+    skillPath: string;
+    skillName: string;
+  }>[];
+  readonly applicableSkillIds: readonly string[];
+  readonly requiresFreshnessVerification: boolean;
 }
 
 export interface PiNativeConversationRuntimeOptions {
@@ -452,6 +466,8 @@ export interface CreatePiNativeConversationInput {
   title: string;
   cwd: string;
   defaultMemoryMode?: PiConversationMemoryMode;
+  defaultSkillId?: string;
+  journalDirectory?: string;
   createdAt?: number;
 }
 
@@ -468,6 +484,8 @@ export interface ActivatePiNativeConversationOptions {
   skillName?: string;
   skillPaths?: readonly string[];
   skillNames?: readonly string[];
+  /** Runtime-only file revision used to invalidate a cached AgentSession. */
+  skillRevision?: string;
 }
 
 export interface RecoverPiNativeConversationInput {
@@ -608,6 +626,7 @@ interface ActiveProductRun {
   memoryMode: PiConversationMemoryMode;
   noteMentions: readonly Readonly<PiChatNoteMention>[];
   documents: readonly Readonly<PiChatPreparedDocument>[];
+  skillTurnContext: Readonly<PiNativeSkillTurnContext> | null;
   memoryRecall?: PiMemoryRecallObservation;
   providerStartedAt?: number;
   firstAssistantTextSeen: boolean;
@@ -783,6 +802,8 @@ export class PiNativeConversationRuntime {
       title: input.title,
       status: "active",
       defaultMemoryMode: input.defaultMemoryMode ?? "normal",
+      ...(input.defaultSkillId ? { defaultSkillId: input.defaultSkillId } : {}),
+      ...(input.journalDirectory ? { journalDirectory: input.journalDirectory } : {}),
       createdAt,
       updatedAt: createdAt,
       sessionFile: durable.sessionFile
@@ -877,6 +898,12 @@ export class PiNativeConversationRuntime {
         title,
         status: "active",
         defaultMemoryMode: source.catalog.defaultMemoryMode,
+        ...(source.catalog.defaultSkillId
+          ? { defaultSkillId: source.catalog.defaultSkillId }
+          : {}),
+        ...(source.catalog.journalDirectory
+          ? { journalDirectory: source.catalog.journalDirectory }
+          : {}),
         createdAt,
         updatedAt: createdAt,
         sessionFile: durable.sessionFile
@@ -1274,8 +1301,11 @@ export class PiNativeConversationRuntime {
         : routeKnowledgeConversationCommand(request.text);
 
     const selectedRuntimeSkill = !request.skillPath
-      && mode !== "plan"
-      ? await this.options.skills?.selectForTask({ text: request.text }) ?? null
+      ? catalog.defaultSkillId
+        ? await this.resolveConversationDefaultSkill(catalog.defaultSkillId)
+        : mode !== "plan"
+          ? await this.options.skills?.selectForTask({ text: request.text }) ?? null
+          : null
       : null;
     const selectedRuntimeSkills = selectedRuntimeSkill
       ? selectedRuntimeSkill.skills?.length
@@ -1294,7 +1324,8 @@ export class PiNativeConversationRuntime {
         : selectedRuntimeSkill
           ? {
               skillPaths: selectedRuntimeSkills.map((skill) => skill.skillPath),
-              skillNames: selectedRuntimeSkills.map((skill) => skill.skillName)
+              skillNames: selectedRuntimeSkills.map((skill) => skill.skillName),
+              skillRevision: selectedRuntimeSkill.revision
             }
           : {}
     );
@@ -1374,6 +1405,12 @@ export class PiNativeConversationRuntime {
       memoryMode,
       noteMentions,
       documents,
+      skillTurnContext: dailyJournalSkillTurnContext({
+        catalog,
+        selectedRuntimeSkill,
+        explicitSkillSelected: Boolean(request.skillPath),
+        submittedAt: request.submittedAt
+      }),
       firstAssistantTextSeen: false,
       providerReasoningBlocks: new Map(),
       providerReasoningExposedMessageKeys: new Set(),
@@ -2378,6 +2415,8 @@ export class PiNativeConversationRuntime {
       },
       currentKnowledgeTurnContext: () =>
         holder.active?.knowledgeTurnContext ?? null,
+      currentSkillTurnContext: () =>
+        holder.active?.currentRun?.skillTurnContext ?? null,
       currentMemoryTurnContext: () => {
         const active = holder.active;
         const run = active?.currentRun;
@@ -2630,6 +2669,31 @@ export class PiNativeConversationRuntime {
     });
     this.active.set(conversationId, active);
     return active;
+  }
+
+  private async resolveConversationDefaultSkill(
+    skillId: string
+  ): Promise<Readonly<PiRuntimeResolvedSkill>> {
+    const skills = this.options.skills;
+    if (!skills?.resolveById) {
+      throw new PiNativeConversationRuntimeError(
+        "skill_binding_invalid",
+        `会话默认 Skill ${skillId} 当前无法解析，本轮没有发送。`
+      );
+    }
+    try {
+      const resolved = await skills.resolveById({ id: skillId });
+      if (resolved.id !== skillId) {
+        throw new Error("resolved_skill_identity_mismatch");
+      }
+      return resolved;
+    } catch (error) {
+      throw new PiNativeConversationRuntimeError(
+        "skill_binding_invalid",
+        `会话默认 Skill ${skillId} 已停用、缺失或损坏，本轮没有发送。`,
+        { cause: error }
+      );
+    }
   }
 
   private async completeProductRun(
@@ -6145,6 +6209,7 @@ function resourceKeyFor(
   return [
     options.skillPath ?? "",
     options.skillName ?? "",
+    options.skillRevision ?? "",
     ...(options.skillPaths ?? []),
     ...(options.skillNames ?? [])
   ].join("\0");
@@ -6162,15 +6227,60 @@ function assertValidSkillBinding(
   const singleValid = Boolean(options.skillPath) === Boolean(options.skillName);
   const paths = options.skillPaths ?? [];
   const names = options.skillNames ?? [];
+  const hasBinding = Boolean(options.skillPath) || paths.length > 0;
+  const revisionValid = options.skillRevision === undefined
+    || (hasBinding && /^[a-f0-9]{64}$/u.test(options.skillRevision));
   const setValid = paths.length === names.length
     && new Set(paths).size === paths.length
     && new Set(names).size === names.length;
-  if (singleValid && setValid
+  if (singleValid && setValid && revisionValid
     && !(options.skillPath && paths.length > 0)) return;
   throw new PiNativeConversationRuntimeError(
     "skill_binding_invalid",
     "Pi-native Skill requires one binding form with matching unique paths and names"
   );
+}
+
+function dailyJournalSkillTurnContext(input: Readonly<{
+  catalog: Readonly<PiConversationCatalogEntry>;
+  selectedRuntimeSkill: Readonly<PiRuntimeResolvedSkill> | null;
+  explicitSkillSelected: boolean;
+  submittedAt: number;
+}>): Readonly<PiNativeSkillTurnContext> | null {
+  if (
+    input.explicitSkillSelected
+    || input.catalog.defaultSkillId !== "daily-journal"
+    || input.selectedRuntimeSkill?.id !== "daily-journal"
+  ) return null;
+  const journalDirectory = input.catalog.journalDirectory;
+  const date = new Date(input.submittedAt);
+  if (!journalDirectory || !Number.isFinite(input.submittedAt)
+    || Number.isNaN(date.getTime())) {
+    throw new PiNativeConversationRuntimeError(
+      "skill_binding_invalid",
+      "daily-journal 会话缺少有效的固定目录或提交时间，本轮没有发送。"
+    );
+  }
+  const dateKey = [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0")
+  ].join("-");
+  const timeKey = [
+    String(date.getHours()).padStart(2, "0"),
+    String(date.getMinutes()).padStart(2, "0")
+  ].join(":");
+  return Object.freeze({
+    skillId: "daily-journal",
+    content: [
+      "当前轮已绑定 daily-journal Skill。",
+      `会话固定日记目录：${journalDirectory}`,
+      `当前日期：${dateKey}`,
+      `当前时间：${timeKey}`,
+      `目标文件：${journalDirectory}/${dateKey}.md`,
+      "这些值来自会话创建时冻结的目录和本轮提交时间；不要改用会话 cwd 或设置页的新值。"
+    ].join("\n")
+  });
 }
 
 function requireSkillCommandName(value: string): string {

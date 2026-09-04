@@ -1,4 +1,8 @@
 import type CodexForObsidianPlugin from "../main";
+import type {
+  BuiltinSkillRuntimeSnapshot,
+  SkillRuntimeCoordinator
+} from "../harness/resources/skill-runtime";
 import { buildActiveEchoInkResourceCatalog } from "../resources/registry";
 import type { EchoInkResource } from "../resources/types";
 import { loadVaultEchoInkResources } from "../resources/vault-resource-catalog";
@@ -10,7 +14,9 @@ type ResourceCatalogHost = Pick<
   | "settings"
   | "withEchoInkResourceMutation"
   | "saveEchoInkResourceMutation"
->;
+> & {
+  getSkillRuntimeCoordinator?: () => SkillRuntimeCoordinator;
+};
 
 /**
  * Lightweight runtime catalog boundary shared by Settings and the MCP protocol
@@ -26,6 +32,15 @@ export class EchoInkResourceCatalogService {
   }
 
   private async scanAndCommitRuntimeCatalog(): Promise<EchoInkResource[]> {
+    let builtinSnapshots: readonly BuiltinSkillRuntimeSnapshot[] = [];
+    let builtinSnapshotError = "";
+    try {
+      builtinSnapshots = await this.plugin.getSkillRuntimeCoordinator?.()
+        .inspectBuiltinSkills() ?? [];
+    } catch (error) {
+      builtinSnapshotError = errorMessage(error);
+    }
+    const builtinStatusWarnings = builtinSkillSnapshotWarnings(builtinSnapshots);
     let vaultResources: Awaited<ReturnType<typeof loadVaultEchoInkResources>>;
     try {
       vaultResources = await loadVaultEchoInkResources({
@@ -33,8 +48,12 @@ export class EchoInkResourceCatalogService {
         maxSkillBytes: 200_000
       });
     } catch (error) {
-      this.plugin.settings.resources.lastError = errorMessage(error);
-      return this.lastKnownRuntimeCatalog();
+      this.plugin.settings.resources.lastError = [
+        builtinSnapshotError,
+        ...builtinStatusWarnings,
+        errorMessage(error)
+      ].filter(Boolean).join("\n");
+      return this.lastKnownRuntimeCatalog(builtinSnapshots);
     }
 
     const liveResources = this.plugin.settings.resources;
@@ -42,9 +61,19 @@ export class EchoInkResourceCatalogService {
     const previousCatalog = structuredClone(liveResources.catalog);
     const previousLastError = liveResources.lastError;
     try {
+      const scannedResources = mergeBuiltinSkillSnapshots(
+        vaultResources.resources,
+        builtinSnapshots,
+        previousCatalog
+      );
+      const nextLastError = [...new Set([
+        builtinSnapshotError,
+        ...builtinStatusWarnings,
+        ...vaultResources.warnings
+      ].filter(Boolean))].join("\n");
       const catalog = buildActiveEchoInkResourceCatalog({
         settings: liveResources,
-        manual: vaultResources.resources
+        manual: scannedResources
       });
       const nextSavedCatalog = replaceScannedResources(
         previousCatalog,
@@ -52,40 +81,141 @@ export class EchoInkResourceCatalogService {
       );
       const consumedLegacyOverrides = consumeLegacyEnabledOverrides(
         liveResources,
-        vaultResources.resources
+        scannedResources
       );
       const snapshotChanged = JSON.stringify(nextSavedCatalog)
         !== JSON.stringify(previousCatalog);
-      const errorChanged = Boolean(previousLastError);
+      const errorChanged = previousLastError !== nextLastError;
       if (snapshotChanged) {
         liveResources.catalog = structuredClone(nextSavedCatalog);
         liveResources.lastScannedAt = Date.now();
       }
-      liveResources.lastError = "";
+      liveResources.lastError = nextLastError;
       if (snapshotChanged || errorChanged || consumedLegacyOverrides) {
         await this.plugin.saveEchoInkResourceMutation(previousResources);
       }
       const authoritativeResources = this.plugin.settings.resources;
       return buildActiveEchoInkResourceCatalog({
         settings: authoritativeResources,
-        manual: vaultResources.resources
+        manual: scannedResources
       });
     } catch (error) {
       if (isRollbackSafeResourceMutation(error)) {
-        return this.lastKnownRuntimeCatalog();
+        return this.lastKnownRuntimeCatalog(builtinSnapshots);
       }
       throw error;
     }
   }
 
-  private lastKnownRuntimeCatalog(): EchoInkResource[] {
+  private lastKnownRuntimeCatalog(
+    builtinSnapshots: readonly BuiltinSkillRuntimeSnapshot[] = []
+  ): EchoInkResource[] {
     const settings = this.plugin.settings.resources;
+    const manual = mergeBuiltinSkillSnapshots(
+      settings.catalog.filter((resource) => resource.source === "echoink-local"),
+      builtinSnapshots,
+      settings.catalog
+    );
     return buildActiveEchoInkResourceCatalog({
       settings,
-      manual: settings.catalog.filter((resource) =>
-        resource.source === "echoink-local")
+      manual
     });
   }
+}
+
+export function requireAvailableEchoInkSkillResource(
+  catalog: readonly Readonly<EchoInkResource>[],
+  skillId: string
+): Readonly<EchoInkResource> {
+  const id = skillId.trim();
+  const resource = catalog.find((candidate) =>
+    candidate.kind === "skill"
+    && (
+      candidate.id === id
+      || candidate.metadata?.resourceId === id
+    )
+  );
+  if (!resource) throw new Error(`Skill ${id} 不存在。`);
+  if (!resource.enabled) throw new Error(`Skill ${id} 已停用。`);
+  const fileStatus = resource.metadata?.fileStatus;
+  if (fileStatus === "missing") {
+    throw new Error(`Skill ${id} 的 SKILL.md 缺失。`);
+  }
+  if (fileStatus === "invalid") {
+    throw new Error(`Skill ${id} 的 SKILL.md 已损坏。`);
+  }
+  const lifecycleStatus = resource.metadata?.lifecycleStatus;
+  if (
+    typeof lifecycleStatus === "string"
+    && lifecycleStatus !== "active"
+    && lifecycleStatus !== "downranked"
+  ) {
+    throw new Error(`Skill ${id} 的生命周期状态不可用。`);
+  }
+  if (!resource.contentPath?.trim()) {
+    throw new Error(`Skill ${id} 没有可加载的 SKILL.md。`);
+  }
+  return resource;
+}
+
+function builtinSkillSnapshotWarnings(
+  snapshots: readonly BuiltinSkillRuntimeSnapshot[]
+): string[] {
+  return snapshots.flatMap((snapshot) => {
+    if (snapshot.fileStatus === "ready") return [];
+    const state = snapshot.fileStatus === "missing" ? "缺失" : "损坏";
+    return [
+      `内置 Skill ${snapshot.id} 的 SKILL.md ${state}${snapshot.error ? `：${snapshot.error}` : "。"}`
+    ];
+  });
+}
+
+function mergeBuiltinSkillSnapshots(
+  resources: EchoInkResource[],
+  snapshots: readonly BuiltinSkillRuntimeSnapshot[],
+  savedCatalog: EchoInkResource[]
+): EchoInkResource[] {
+  if (!snapshots.length) return resources;
+  const merged = [...resources];
+  const savedById = new Map(savedCatalog.map((resource) => [resource.id, resource]));
+  const indexById = new Map(merged.map((resource, index) => [resource.id, index]));
+  for (const snapshot of snapshots) {
+    const id = `echoink-local:skill:${snapshot.id}`;
+    const index = indexById.get(id);
+    const scanned = index === undefined ? undefined : merged[index];
+    const saved = savedById.get(id);
+    const source = scanned ?? saved;
+    const resource: EchoInkResource = {
+      id,
+      kind: "skill",
+      source: "echoink-local",
+      name: snapshot.fileStatus === "ready" && scanned
+        ? scanned.name
+        : snapshot.title,
+      description: snapshot.fileStatus === "ready" && scanned
+        ? scanned.description
+        : snapshot.description,
+      enabled: source?.enabled ?? true,
+      bridgeMode: "prompt-only",
+      contentPath: snapshot.relativePath,
+      metadata: {
+        ...(source?.metadata ?? {}),
+        resourceId: snapshot.id,
+        builtin: true,
+        userModified: snapshot.userModified,
+        fileStatus: snapshot.fileStatus,
+        lifecycleStatus: snapshot.lifecycleStatus,
+        ...(snapshot.error ? { fileError: snapshot.error } : {})
+      }
+    };
+    if (index === undefined) {
+      indexById.set(id, merged.length);
+      merged.push(resource);
+    } else {
+      merged[index] = resource;
+    }
+  }
+  return merged;
 }
 
 function consumeLegacyEnabledOverrides(

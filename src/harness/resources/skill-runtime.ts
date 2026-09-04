@@ -6,6 +6,7 @@ import {
   readdir,
   rename,
   rm,
+  stat,
   writeFile
 } from "node:fs/promises";
 import * as path from "node:path";
@@ -15,9 +16,14 @@ import {
   getBuiltinSkillDefinition,
   isBuiltinSkillId,
   renderBuiltinSkill,
+  type BuiltinSkillDefinition,
   type BuiltinSkillId
 } from "./builtin-skills";
-import { loadVaultSkill, type LoadedVaultSkill } from "./skill-loader";
+import {
+  loadVaultSkill,
+  parseVaultSkillDocument,
+  type LoadedVaultSkill
+} from "./skill-loader";
 
 export const SKILL_RUNTIME_STATE_SCHEMA = "echoink.skill-runtime.v1" as const;
 export const SKILL_RUNTIME_STATE_RELATIVE_PATH = path.posix.join(
@@ -53,6 +59,20 @@ export interface SkillRuntimeRecord {
   readonly triggerPhrases: readonly string[];
 }
 
+export type BuiltinSkillFileStatus = "ready" | "missing" | "invalid";
+
+export interface BuiltinSkillRuntimeSnapshot {
+  readonly id: BuiltinSkillId;
+  readonly title: string;
+  readonly description: string;
+  readonly relativePath: string;
+  readonly fileStatus: BuiltinSkillFileStatus;
+  readonly lifecycleStatus: SkillLifecycleStatus;
+  readonly userModified: boolean;
+  readonly content: string;
+  readonly error?: string;
+}
+
 export interface SkillRuntimeState {
   readonly schema: typeof SKILL_RUNTIME_STATE_SCHEMA;
   readonly records: Readonly<Record<string, SkillRuntimeRecord>>;
@@ -62,6 +82,7 @@ export interface SelectedRuntimeSkill {
   readonly id: string;
   readonly skillPath: string;
   readonly skillName: string;
+  readonly revision: string;
   readonly skills: readonly Readonly<{
     id: string;
     skillPath: string;
@@ -136,11 +157,33 @@ export async function installBuiltinSkillFiles(input: Readonly<{
 }>): Promise<void> {
   const root = skillRoot(input.vaultPath);
   await mkdir(root, { recursive: true });
+  const recorded = await readRecordedSkillRuntimeState(input.vaultPath);
   for (const definition of BUILTIN_SKILLS) {
     const target = path.join(root, definition.id);
     const entry = path.join(target, "SKILL.md");
-    if (await exists(target)) {
+    if (recorded?.records[definition.id]) {
+      if (await exists(entry)) input.existing?.push(entry);
+      continue;
+    }
+    if (await exists(entry)) {
       input.existing?.push(entry);
+      continue;
+    }
+    if (await exists(target)) {
+      try {
+        await writeFile(entry, renderBuiltinSkill(definition), {
+          encoding: "utf8",
+          mode: 0o600,
+          flag: "wx"
+        });
+        input.created?.push(entry);
+      } catch (error) {
+        if (nodeCode(error) === "EEXIST") {
+          input.existing?.push(entry);
+          continue;
+        }
+        throw error;
+      }
       continue;
     }
     const temporary = path.join(
@@ -185,85 +228,333 @@ export class SkillRuntimeCoordinator {
   }
 
   async initialize(): Promise<SkillRuntimeState> {
+    const now = this.now();
+    const state = await this.readState();
     await installBuiltinSkillFiles({ vaultPath: this.vaultPath });
     await mkdir(skillArchiveRoot(this.vaultPath), { recursive: true });
     await mkdir(skillCleanupRoot(this.vaultPath), { recursive: true });
-    const now = this.now();
-    const state = await this.readState();
-    await this.recoverLifecycleLayout(state, now);
-    const entries = await readdir(skillRoot(this.vaultPath), {
-      withFileTypes: true
-    });
-    const present = new Set<string>();
-    for (const entry of entries) {
-      if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
-      let loaded: LoadedVaultSkill;
-      try {
-        loaded = await loadVaultSkill({
-          vaultPath: this.vaultPath,
-          skillId: entry.name,
-          maxBytes: MAX_SKILL_BYTES
-        });
-      } catch {
-        continue;
-      }
-      const id = loaded.frontmatter.id || entry.name;
-      if (id !== entry.name || !SAFE_SKILL_ID.test(id)) continue;
-      present.add(id);
-      const previous = state.records[id];
-      if (previous) {
-        const autoContentChanged = previous.origin === "auto"
-          && previous.contentHash !== loaded.contentHash;
-        state.records[id] = Object.freeze({
-          ...previous,
-          userModified: previous.userModified
-            || previous.contentHash !== loaded.contentHash,
-          status: autoContentChanged ? "active" as const : previous.status,
-          statusChangedAt: autoContentChanged ? now : previous.statusChangedAt,
-          contentHash: autoContentChanged ? loaded.contentHash : previous.contentHash
-        });
-        continue;
-      }
-      const builtin = getBuiltinSkillDefinition(id);
-      const canonicalHash = builtin
-        ? sha256(renderBuiltinSkill(builtin))
-        : loaded.contentHash;
-      state.records[id] = Object.freeze({
-        id,
-        origin: builtin ? "builtin" : "user",
-        userModified: builtin
-          ? loaded.contentHash !== canonicalHash
-          : true,
-        createdAt: now,
-        lastUsedAt: null,
-        usageCount: 0,
-        status: "active",
-        statusChangedAt: now,
-        contentHash: canonicalHash,
-        semanticFingerprint: builtin
-          ? builtinSemanticFingerprint(builtin.id)
-          : sha256(`user\0${id}\0${loaded.contentHash}`),
-        triggerPhrases: Object.freeze([])
+    const upgradedEntries: Array<Readonly<{
+      entryPath: string;
+      previousContent: string;
+    }>> = [];
+    try {
+      await this.recoverLifecycleLayout(state, now);
+      const entries = await readdir(skillRoot(this.vaultPath), {
+        withFileTypes: true
       });
-    }
-    for (const [id, record] of Object.entries(state.records)) {
-      if (!present.has(id)
-        && record.status !== "archived"
-        && record.status !== "cleaned") {
+      const present = new Set<string>();
+      for (const entry of entries) {
+        if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+        let loaded: LoadedVaultSkill;
+        try {
+          loaded = await loadVaultSkill({
+            vaultPath: this.vaultPath,
+            skillId: entry.name,
+            maxBytes: MAX_SKILL_BYTES
+          });
+        } catch {
+          continue;
+        }
+        const id = loaded.frontmatter.id || entry.name;
+        if (id !== entry.name || !SAFE_SKILL_ID.test(id)) continue;
+        present.add(id);
+        const previous = state.records[id];
+        if (previous) {
+          const builtin = getBuiltinSkillDefinition(id);
+          if (builtin) {
+            const canonicalContent = renderBuiltinSkill(builtin);
+            const canonicalHash = sha256(canonicalContent);
+            const entryPath = path.join(loaded.rootPath, "SKILL.md");
+            let entryContent = await readFile(entryPath, "utf8");
+            let entryHash = sha256(entryContent);
+            if (
+              !previous.userModified
+              && previous.contentHash === entryHash
+              && entryHash !== canonicalHash
+            ) {
+              upgradedEntries.push({ entryPath, previousContent: entryContent });
+              await writeFileAtomic(entryPath, canonicalContent);
+              entryContent = canonicalContent;
+              entryHash = canonicalHash;
+            }
+            state.records[id] = Object.freeze({
+              ...previous,
+              userModified: previous.userModified || entryHash !== canonicalHash,
+              contentHash: entryHash,
+              semanticFingerprint: builtinSemanticFingerprint(builtin.id)
+            });
+            continue;
+          }
+          const autoContentChanged = previous.origin === "auto"
+            && previous.contentHash !== loaded.contentHash;
+          state.records[id] = Object.freeze({
+            ...previous,
+            userModified: previous.userModified
+              || previous.contentHash !== loaded.contentHash,
+            status: autoContentChanged ? "active" as const : previous.status,
+            statusChangedAt: autoContentChanged ? now : previous.statusChangedAt,
+            contentHash: autoContentChanged ? loaded.contentHash : previous.contentHash
+          });
+          continue;
+        }
+        const builtin = getBuiltinSkillDefinition(id);
+        const canonicalHash = builtin
+          ? sha256(renderBuiltinSkill(builtin))
+          : loaded.contentHash;
+        const currentHash = builtin
+          ? sha256(await readFile(path.join(loaded.rootPath, "SKILL.md"), "utf8"))
+          : loaded.contentHash;
         state.records[id] = Object.freeze({
-          ...record,
-          userModified: record.origin !== "auto" || record.userModified
+          id,
+          origin: builtin ? "builtin" : "user",
+          userModified: builtin
+            ? currentHash !== canonicalHash
+            : true,
+          createdAt: now,
+          lastUsedAt: null,
+          usageCount: 0,
+          status: "active",
+          statusChangedAt: now,
+          contentHash: builtin ? currentHash : canonicalHash,
+          semanticFingerprint: builtin
+            ? builtinSemanticFingerprint(builtin.id)
+            : sha256(`user\0${id}\0${loaded.contentHash}`),
+          triggerPhrases: Object.freeze([])
         });
       }
+      for (const [id, record] of Object.entries(state.records)) {
+        if (!present.has(id)
+          && record.status !== "archived"
+          && record.status !== "cleaned") {
+          state.records[id] = record;
+        }
+      }
+      await this.writeState(state);
+      this.initialized = true;
+      return freezeState(state);
+    } catch (error) {
+      for (const upgrade of upgradedEntries.reverse()) {
+        await writeFileAtomic(upgrade.entryPath, upgrade.previousContent)
+          .catch(() => undefined);
+      }
+      throw error;
     }
-    await this.writeState(state);
-    this.initialized = true;
-    return freezeState(state);
   }
 
   async read(): Promise<SkillRuntimeState> {
     if (!this.state) await this.initialize();
     return freezeState(this.state!);
+  }
+
+  async inspectBuiltinSkills(): Promise<readonly BuiltinSkillRuntimeSnapshot[]> {
+    return await this.withStateMutation(async (state) => {
+      const snapshots: BuiltinSkillRuntimeSnapshot[] = [];
+      let changed = false;
+      for (const definition of BUILTIN_SKILLS) {
+        const inspected = await this.inspectBuiltinSkillState(state, definition.id);
+        snapshots.push(inspected.snapshot);
+        changed = changed || inspected.changed;
+      }
+      if (changed) await this.writeState(state);
+      return Object.freeze(snapshots);
+    });
+  }
+
+  async inspectBuiltinSkill(
+    skillId: BuiltinSkillId
+  ): Promise<BuiltinSkillRuntimeSnapshot> {
+    return await this.withStateMutation(async (state) => {
+      const inspected = await this.inspectBuiltinSkillState(state, skillId);
+      if (inspected.changed) await this.writeState(state);
+      return inspected.snapshot;
+    });
+  }
+
+  async resolveById(skillId: string): Promise<SelectedRuntimeSkill> {
+    return await this.withStateMutation(async (state) => {
+      const id = skillId.trim();
+      if (!SAFE_SKILL_ID.test(id)) throw new Error("skill_runtime_id_invalid");
+      let changed = false;
+      const builtin = getBuiltinSkillDefinition(id);
+      if (builtin) {
+        const inspected = await this.inspectBuiltinSkillState(state, builtin.id);
+        changed = inspected.changed;
+        if (inspected.snapshot.fileStatus !== "ready") {
+          throw new Error(`skill_runtime_file_${inspected.snapshot.fileStatus}`);
+        }
+      }
+      const record = state.records[id];
+      if (!record) throw new Error("skill_runtime_not_found");
+      if (record.status !== "active" && record.status !== "downranked") {
+        throw new Error(`skill_runtime_lifecycle_${record.status}`);
+      }
+      const loaded = await loadVaultSkill({
+        vaultPath: this.vaultPath,
+        skillId: id,
+        maxBytes: MAX_SKILL_BYTES
+      });
+      if (
+        loaded.frontmatter.id !== id
+        || !loaded.frontmatter.name.trim()
+        || !loaded.instruction.trim()
+      ) {
+        throw new Error("skill_runtime_document_invalid");
+      }
+      if (record.contentHash !== loaded.contentHash) {
+        state.records[id] = Object.freeze({
+          ...record,
+          userModified: true,
+          contentHash: loaded.contentHash
+        });
+        changed = true;
+      }
+      if (changed) await this.writeState(state);
+      const skill = Object.freeze({
+        id,
+        skillPath: path.join(loaded.rootPath, "SKILL.md"),
+        skillName: loaded.frontmatter.name
+      });
+      return Object.freeze({
+        ...skill,
+        revision: loaded.contentHash,
+        skills: Object.freeze([skill]),
+        applicableSkillIds: Object.freeze([id]),
+        requiresFreshnessVerification: false
+      });
+    });
+  }
+
+  async saveBuiltinSkillContent(
+    skillId: BuiltinSkillId,
+    content: string
+  ): Promise<BuiltinSkillRuntimeSnapshot> {
+    assertUsableBuiltinSkillDocument(skillId, content);
+    return await this.withStateMutation(async (state) => {
+      const definition = requiredBuiltinSkillDefinition(skillId);
+      const entryPath = builtinSkillEntryPath(this.vaultPath, skillId);
+      const previousContent = await readTextFileOrNull(entryPath);
+      if (previousContent === null) throw new Error("builtin_skill_file_missing");
+      const previousRecord = state.records[skillId];
+      await writeFileAtomic(entryPath, content);
+      try {
+        const loaded = await loadVaultSkill({
+          vaultPath: this.vaultPath,
+          skillId,
+          maxBytes: MAX_SKILL_BYTES
+        });
+        assertLoadedBuiltinSkillUsable(skillId, loaded);
+        const now = this.now();
+        state.records[skillId] = Object.freeze({
+          ...(previousRecord ?? createBuiltinSkillRecord(
+            definition,
+            now,
+            sha256(content),
+            true
+          )),
+          userModified: true,
+          contentHash: sha256(content),
+          semanticFingerprint: builtinSemanticFingerprint(skillId)
+        });
+        await this.writeState(state);
+      } catch (error) {
+        await writeFileAtomic(entryPath, previousContent).catch(() => undefined);
+        throw error;
+      }
+      return builtinSkillSnapshot(
+        definition,
+        state.records[skillId],
+        { fileStatus: "ready", content }
+      );
+    });
+  }
+
+  async restoreBuiltinSkill(
+    skillId: BuiltinSkillId
+  ): Promise<BuiltinSkillRuntimeSnapshot> {
+    return await this.withStateMutation(async (state) => {
+      const definition = requiredBuiltinSkillDefinition(skillId);
+      const entryPath = builtinSkillEntryPath(this.vaultPath, skillId);
+      const previousContent = await readTextFileOrNull(entryPath);
+      const previousRecord = state.records[skillId];
+      const content = renderBuiltinSkill(definition);
+      await writeFileAtomic(entryPath, content);
+      const now = this.now();
+      state.records[skillId] = Object.freeze({
+        ...(previousRecord ?? createBuiltinSkillRecord(
+          definition,
+          now,
+          sha256(content),
+          false
+        )),
+        userModified: false,
+        contentHash: sha256(content),
+        semanticFingerprint: builtinSemanticFingerprint(skillId)
+      });
+      try {
+        await this.writeState(state);
+      } catch (error) {
+        if (previousContent === null) {
+          await rm(entryPath, { force: true }).catch(() => undefined);
+        } else {
+          await writeFileAtomic(entryPath, previousContent).catch(() => undefined);
+        }
+        throw error;
+      }
+      return builtinSkillSnapshot(
+        definition,
+        state.records[skillId],
+        { fileStatus: "ready", content }
+      );
+    });
+  }
+
+  private async inspectBuiltinSkillState(
+    state: SkillRuntimeStateDocument,
+    skillId: BuiltinSkillId
+  ): Promise<Readonly<{
+    snapshot: BuiltinSkillRuntimeSnapshot;
+    changed: boolean;
+  }>> {
+    const definition = requiredBuiltinSkillDefinition(skillId);
+    const probe = await probeBuiltinSkill(this.vaultPath, skillId);
+    let record = state.records[skillId];
+    let changed = false;
+    if (probe.fileStatus === "ready") {
+      const now = this.now();
+      const contentHash = sha256(probe.content);
+      const canonicalHash = sha256(renderBuiltinSkill(definition));
+      if (!record) {
+        record = createBuiltinSkillRecord(
+          definition,
+          now,
+          contentHash,
+          contentHash !== canonicalHash
+        );
+        state.records[skillId] = record;
+        changed = true;
+      } else {
+        const userModified = record.userModified || contentHash !== canonicalHash;
+        if (
+          record.contentHash !== contentHash
+          || record.userModified !== userModified
+          || record.origin !== "builtin"
+        ) {
+          record = Object.freeze({
+            ...record,
+            origin: "builtin" as const,
+            userModified,
+            contentHash,
+            semanticFingerprint: builtinSemanticFingerprint(skillId)
+          });
+          state.records[skillId] = record;
+          changed = true;
+        }
+      }
+    }
+    return Object.freeze({
+      snapshot: builtinSkillSnapshot(definition, record, probe),
+      changed
+    });
   }
 
   async selectForTask(input: Readonly<{
@@ -334,7 +625,8 @@ export class SkillRuntimeCoordinator {
       return Object.freeze({
         id: candidate.id,
         skillPath: path.join(loaded.rootPath, "SKILL.md"),
-        skillName: loaded.frontmatter.name
+        skillName: loaded.frontmatter.name,
+        contentHash: loaded.contentHash
       });
     }));
     if (stateChanged) await this.writeState(state);
@@ -343,7 +635,12 @@ export class SkillRuntimeCoordinator {
       id: selected.id,
       skillPath: selected.skillPath,
       skillName: selected.skillName,
-      skills: Object.freeze(loadedSkills),
+      revision: sha256(loadedSkills.map((skill) =>
+        `${skill.id}\0${skill.contentHash}`
+      ).join("\0")),
+      skills: Object.freeze(loadedSkills.map(({ contentHash: _contentHash, ...skill }) =>
+        Object.freeze(skill)
+      )),
       applicableSkillIds: Object.freeze(candidates.map((candidate) => candidate.id)),
       requiresFreshnessVerification: candidates.some(
         (candidate) => candidate.requiresFreshnessVerification
@@ -757,6 +1054,167 @@ export class SkillRuntimeCoordinator {
   }
 }
 
+interface BuiltinSkillProbe {
+  readonly fileStatus: BuiltinSkillFileStatus;
+  readonly content: string;
+  readonly error?: string;
+}
+
+async function readRecordedSkillRuntimeState(
+  vaultPath: string
+): Promise<SkillRuntimeStateDocument | null> {
+  const statePath = path.join(
+    path.resolve(vaultPath),
+    SKILL_RUNTIME_STATE_RELATIVE_PATH
+  );
+  const text = await readFile(statePath, "utf8").catch((error) => {
+    if (nodeCode(error) === "ENOENT") return "";
+    throw error;
+  });
+  if (!text) return null;
+  return parseState(JSON.parse(text) as unknown);
+}
+
+async function probeBuiltinSkill(
+  vaultPath: string,
+  skillId: BuiltinSkillId
+): Promise<BuiltinSkillProbe> {
+  const entryPath = builtinSkillEntryPath(vaultPath, skillId);
+  const info = await stat(entryPath).catch((error) => {
+    if (nodeCode(error) === "ENOENT") return null;
+    throw error;
+  });
+  if (!info) return Object.freeze({ fileStatus: "missing", content: "" });
+  if (!info.isFile()) {
+    return Object.freeze({
+      fileStatus: "invalid",
+      content: "",
+      error: "SKILL.md 不是普通文件。"
+    });
+  }
+  if (info.size > MAX_SKILL_BYTES) {
+    return Object.freeze({
+      fileStatus: "invalid",
+      content: "",
+      error: "SKILL.md 超过大小限制。"
+    });
+  }
+  const content = await readFile(entryPath, "utf8");
+  try {
+    assertUsableBuiltinSkillDocument(skillId, content);
+    const loaded = await loadVaultSkill({
+      vaultPath,
+      skillId,
+      maxBytes: MAX_SKILL_BYTES
+    });
+    assertLoadedBuiltinSkillUsable(skillId, loaded);
+    return Object.freeze({ fileStatus: "ready", content });
+  } catch (error) {
+    return Object.freeze({
+      fileStatus: "invalid",
+      content,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+
+function assertUsableBuiltinSkillDocument(
+  skillId: BuiltinSkillId,
+  content: string
+): void {
+  if (!content.trim() || Buffer.byteLength(content, "utf8") > MAX_SKILL_BYTES) {
+    throw new Error("builtin_skill_document_invalid");
+  }
+  const parsed = parseVaultSkillDocument(content, skillId);
+  if (
+    parsed.frontmatter.id !== skillId
+    || !parsed.frontmatter.name.trim()
+    || !parsed.instruction.trim()
+  ) {
+    throw new Error("builtin_skill_document_invalid");
+  }
+}
+
+function assertLoadedBuiltinSkillUsable(
+  skillId: BuiltinSkillId,
+  loaded: LoadedVaultSkill
+): void {
+  if (
+    loaded.frontmatter.id !== skillId
+    || !loaded.frontmatter.name.trim()
+    || !loaded.instruction.trim()
+  ) {
+    throw new Error("builtin_skill_document_invalid");
+  }
+}
+
+function requiredBuiltinSkillDefinition(
+  skillId: BuiltinSkillId
+): BuiltinSkillDefinition {
+  const definition = getBuiltinSkillDefinition(skillId);
+  if (!definition) throw new Error("builtin_skill_not_found");
+  return definition;
+}
+
+function createBuiltinSkillRecord(
+  definition: BuiltinSkillDefinition,
+  now: number,
+  contentHash: string,
+  userModified: boolean
+): SkillRuntimeRecord {
+  return Object.freeze({
+    id: definition.id,
+    origin: "builtin" as const,
+    userModified,
+    createdAt: now,
+    lastUsedAt: null,
+    usageCount: 0,
+    status: "active" as const,
+    statusChangedAt: now,
+    contentHash,
+    semanticFingerprint: builtinSemanticFingerprint(definition.id),
+    triggerPhrases: Object.freeze([])
+  });
+}
+
+function builtinSkillSnapshot(
+  definition: BuiltinSkillDefinition,
+  record: SkillRuntimeRecord | undefined,
+  probe: BuiltinSkillProbe
+): BuiltinSkillRuntimeSnapshot {
+  return Object.freeze({
+    id: definition.id,
+    title: definition.title,
+    description: definition.description,
+    relativePath: path.posix.join(
+      ".echoink",
+      "resources",
+      "skills",
+      definition.id,
+      "SKILL.md"
+    ),
+    fileStatus: probe.fileStatus,
+    lifecycleStatus: record?.status ?? "active",
+    userModified: record?.userModified ?? false,
+    content: probe.content,
+    ...(probe.error ? { error: probe.error } : {})
+  });
+}
+
+function builtinSkillEntryPath(
+  vaultPath: string,
+  skillId: BuiltinSkillId
+): string {
+  return path.join(skillRoot(vaultPath), skillId, "SKILL.md");
+}
+
+async function readTextFileOrNull(filePath: string): Promise<string | null> {
+  return await readFile(filePath, "utf8").catch((error) => {
+    if (nodeCode(error) === "ENOENT") return null;
+    throw error;
+  });
+}
+
 function parseState(value: unknown): SkillRuntimeStateDocument {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("skill_runtime_state_invalid");
@@ -933,6 +1391,9 @@ function builtinTrigger(
   requiresFreshnessVerification: boolean;
 }> {
   const hit = (pattern: RegExp) => pattern.test(text);
+  if (id === "daily-journal") {
+    return trigger(false, 0);
+  }
   if (id === "clarify-real-question") {
     return trigger(hit(/说不清|有点乱|互相矛盾|目标.*(?:但是|却)|到底要解决|不知道.*问题|信息矛盾/iu), 62);
   }

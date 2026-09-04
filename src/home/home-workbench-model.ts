@@ -1,3 +1,8 @@
+import {
+  DEFAULT_JOURNAL_DIRECTORY,
+  normalizeJournalDirectory
+} from "./journal-directory";
+
 export const HOME_ENTRY_IDS = ["wiki", "outputs", "projects", "inbox", "journal", "review"] as const;
 export type HomeEntryId = (typeof HOME_ENTRY_IDS)[number];
 
@@ -68,7 +73,7 @@ export interface ImportedJournalTemplate {
 }
 
 export const DEFAULT_JOURNAL_TEMPLATE_ID = "quick" as const;
-export const JOURNAL_DIRECTORY = "journal";
+export const JOURNAL_DIRECTORY = DEFAULT_JOURNAL_DIRECTORY;
 export const JOURNAL_TEMPLATE_DIRECTORY = "templates/journal";
 
 export const BUILT_IN_JOURNAL_TEMPLATES: readonly JournalTemplateDefinition[] = Object.freeze([
@@ -291,12 +296,13 @@ export function homeContributionLevel(count: number): HomeContributionLevel {
 export function buildHomeJournalDays(
   records: readonly HomeVaultFileRecord[],
   activity: readonly HomeActivityDay[],
-  visibleMonth: Date
+  visibleMonth: Date,
+  journalDirectory = DEFAULT_JOURNAL_DIRECTORY
 ): HomeJournalDay[] {
   const activityByDate = new Map(activity.map((day) => [day.date, day.count]));
   const journalByDate = new Map<string, HomeVaultFileRecord>();
   for (const record of records) {
-    const date = journalDateFromPath(record.path);
+    const date = journalDateFromPath(record.path, journalDirectory);
     if (date) journalByDate.set(date, record);
   }
   const year = visibleMonth.getFullYear();
@@ -317,13 +323,23 @@ export function buildHomeJournalDays(
   });
 }
 
-export function journalDateFromPath(path: string): string | null {
-  const match = path.replace(/\\/g, "/").match(/(?:^|\/)journal\/(\d{4}-\d{2}-\d{2})\.md$/iu);
+export function journalDateFromPath(
+  path: string,
+  journalDirectory = DEFAULT_JOURNAL_DIRECTORY
+): string | null {
+  const normalizedPath = path.replace(/\\/gu, "/").replace(/^\/+|\/+$/gu, "");
+  const directory = normalizeJournalDirectory(journalDirectory);
+  const prefix = `${directory}/`;
+  if (!normalizedPath.toLocaleLowerCase().startsWith(prefix.toLocaleLowerCase())) return null;
+  const match = normalizedPath.slice(prefix.length).match(/^(\d{4}-\d{2}-\d{2})\.md$/iu);
   return match?.[1] ?? null;
 }
 
-export function journalPathForDate(date: Date): string {
-  return `${JOURNAL_DIRECTORY}/${dateKey(date)}.md`;
+export function journalPathForDate(
+  date: Date,
+  journalDirectory = DEFAULT_JOURNAL_DIRECTORY
+): string {
+  return `${normalizeJournalDirectory(journalDirectory)}/${dateKey(date)}.md`;
 }
 
 export function extractFirstLocalImageTarget(markdown: string): string | null {

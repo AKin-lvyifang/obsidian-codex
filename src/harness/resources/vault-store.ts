@@ -115,8 +115,9 @@ export async function initializeVaultResourceStore(input: { vaultPath: string })
 export async function loadVaultResourceStore(input: LoadVaultResourceStoreInput): Promise<VaultResourceStore> {
   const layout = vaultResourceLayout(input.vaultPath);
   const manifest = await readJsonFile<VaultResourceManifest>(layout.manifest, { version: 1, resourceStoreVersion: 1 });
+  const skills = await loadVaultSkillCatalog(input.vaultPath, input.maxSkillBytes);
   const catalog = [
-    ...await loadVaultSkillCatalog(input.vaultPath, input.maxSkillBytes),
+    ...skills.catalog,
     ...await loadVaultMcpCatalog(layout.mcpServers)
   ];
   const connections = await loadVaultMcpConnections(layout.mcpServers);
@@ -128,17 +129,24 @@ export async function loadVaultResourceStore(input: LoadVaultResourceStoreInput)
     connections,
     bindings,
     policies,
-    warnings: []
+    warnings: skills.warnings
   };
 }
 
-async function loadVaultSkillCatalog(vaultPath: string, maxSkillBytes: number): Promise<VaultResourceCatalogItem[]> {
+async function loadVaultSkillCatalog(
+  vaultPath: string,
+  maxSkillBytes: number
+): Promise<Readonly<{
+  catalog: VaultResourceCatalogItem[];
+  warnings: string[];
+}>> {
   const skillsRoot = vaultResourceLayout(vaultPath).skills;
   const entries = await readdir(skillsRoot, { withFileTypes: true }).catch((error) => {
     if (isMissingFileSystemError(error)) return [];
     throw error;
   });
   const catalog: VaultResourceCatalogItem[] = [];
+  const warnings: string[] = [];
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const skill = await loadVaultSkill({
@@ -147,7 +155,10 @@ async function loadVaultSkillCatalog(vaultPath: string, maxSkillBytes: number): 
       maxBytes: maxSkillBytes
     }).catch((error) => {
       if (isMissingFileSystemError(error)) return null;
-      throw error;
+      warnings.push(
+        `Skill ${entry.name} 无法读取：${error instanceof Error ? error.message : String(error)}`
+      );
+      return null;
     });
     if (!skill) continue;
     const uri = resourceRefToUri(skill.ref);
@@ -161,7 +172,10 @@ async function loadVaultSkillCatalog(vaultPath: string, maxSkillBytes: number): 
       contentHash: skill.contentHash
     });
   }
-  return catalog.sort((left, right) => left.uri.localeCompare(right.uri));
+  return {
+    catalog: catalog.sort((left, right) => left.uri.localeCompare(right.uri)),
+    warnings
+  };
 }
 
 async function loadVaultMcpCatalog(filePath: string): Promise<VaultResourceCatalogItem[]> {

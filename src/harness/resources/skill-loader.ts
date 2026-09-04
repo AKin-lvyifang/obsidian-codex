@@ -32,12 +32,17 @@ export interface LoadedVaultSkill {
   contentHash: string;
 }
 
+export interface ParsedVaultSkillDocument {
+  frontmatter: VaultSkillFrontmatter;
+  instruction: string;
+}
+
 export async function loadVaultSkill(input: LoadVaultSkillInput): Promise<LoadedVaultSkill> {
   const skillId = normalizeSkillId(input.skillId);
   const skillRoot = safeJoin(input.vaultPath, ".echoink", "resources", "skills", skillId);
   const entryPath = safeJoin(skillRoot, "SKILL.md");
   const entry = await readLimitedFile(entryPath, input.maxBytes);
-  const parsed = parseSkillDocument(entry);
+  const parsed = parseVaultSkillDocument(entry, skillId);
   const files = await readSupportFiles(skillRoot, input.maxBytes - Buffer.byteLength(entry, "utf8"));
   const hash = createHash("sha256");
   hash.update(entry);
@@ -48,6 +53,20 @@ export async function loadVaultSkill(input: LoadVaultSkillInput): Promise<Loaded
   return {
     ref: { plane: "echoink-vault", resourceId: skillId },
     rootPath: skillRoot,
+    frontmatter: parsed.frontmatter,
+    instruction: parsed.instruction,
+    files,
+    contentHash: hash.digest("hex")
+  };
+}
+
+export function parseVaultSkillDocument(
+  text: string,
+  fallbackSkillId: string
+): ParsedVaultSkillDocument {
+  const skillId = normalizeSkillId(fallbackSkillId);
+  const parsed = parseSkillDocument(text);
+  return {
     frontmatter: {
       id: parsed.frontmatter.id || skillId,
       name: parsed.frontmatter.name || skillId,
@@ -56,9 +75,7 @@ export async function loadVaultSkill(input: LoadVaultSkillInput): Promise<Loaded
       permissions: parsed.frontmatter.permissions,
       entry: parsed.frontmatter.entry || "instruction"
     },
-    instruction: parsed.body,
-    files,
-    contentHash: hash.digest("hex")
+    instruction: parsed.body
   };
 }
 

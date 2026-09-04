@@ -21,6 +21,7 @@ import {
   stablePathToken,
   type PiNativeVaultFileLayout
 } from "./file-store-utils";
+import { normalizedJournalDirectoryOrNull } from "../../home/journal-directory";
 
 const CATALOG_STATUSES = new Set<PiConversationCatalogStatus>([
   "active",
@@ -787,7 +788,7 @@ function normalizeCatalogEntry(
       "createdAt",
       "updatedAt"
     ],
-    ["sessionFile"],
+    ["sessionFile", "defaultSkillId", "journalDirectory"],
     "Conversation Catalog Entry"
   );
   const vaultId = requireNonEmptyString(object.vaultId, "entry.vaultId");
@@ -807,6 +808,21 @@ function normalizeCatalogEntry(
   const sessionFile = object.sessionFile === undefined
     ? undefined
     : normalizeSessionFilePath(object.sessionFile, layout);
+  const defaultSkillId = object.defaultSkillId === undefined
+    ? undefined
+    : requireSkillId(object.defaultSkillId, "entry.defaultSkillId");
+  const journalDirectory = object.journalDirectory === undefined
+    ? undefined
+    : requireJournalDirectory(
+        object.journalDirectory,
+        "entry.journalDirectory"
+      );
+  if (defaultSkillId === "daily-journal" && !journalDirectory) {
+    throw new PiNativeFileStoreError(
+      "invalid-input",
+      "daily-journal Conversation 必须冻结 journalDirectory"
+    );
+  }
   return {
     conversationId: requireNonEmptyString(
       object.conversationId,
@@ -820,6 +836,8 @@ function normalizeCatalogEntry(
     title: requireNonEmptyString(object.title, "entry.title"),
     status: requireCatalogStatus(object.status),
     defaultMemoryMode: requireMemoryMode(object.defaultMemoryMode),
+    ...(defaultSkillId ? { defaultSkillId } : {}),
+    ...(journalDirectory ? { journalDirectory } : {}),
     createdAt,
     updatedAt,
     ...(sessionFile ? { sessionFile } : {})
@@ -1108,6 +1126,14 @@ function assertStableCatalogIdentity(
       `Conversation ${existing.conversationId} 的 Pi Session 文件不可改绑`
     );
   }
+  if (
+    existing.defaultSkillId !== candidate.defaultSkillId
+    || existing.journalDirectory !== candidate.journalDirectory
+  ) {
+    throw mappingConflict(
+      `Conversation ${existing.conversationId} 的默认 Skill / 日记目录不可改写`
+    );
+  }
 }
 
 function requireCatalogStatus(value: unknown): PiConversationCatalogStatus {
@@ -1134,6 +1160,29 @@ function requireMemoryMode(value: unknown): PiConversationMemoryMode {
     );
   }
   return value as PiConversationMemoryMode;
+}
+
+function requireSkillId(value: unknown, label: string): string {
+  const id = requireNonEmptyString(value, label);
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(id)) {
+    throw new PiNativeFileStoreError(
+      "invalid-input",
+      `${label} 不是合法的 Skill ID`
+    );
+  }
+  return id;
+}
+
+function requireJournalDirectory(value: unknown, label: string): string {
+  const raw = requireNonEmptyString(value, label);
+  const normalized = normalizedJournalDirectoryOrNull(raw);
+  if (!normalized || normalized !== raw) {
+    throw new PiNativeFileStoreError(
+      "invalid-input",
+      `${label} 不是规范化的 Vault 相对目录`
+    );
+  }
+  return normalized;
 }
 
 function assertUniqueRecordIds<T extends object>(
@@ -1202,6 +1251,8 @@ function cloneCatalogEntry(
     title: entry.title,
     status: entry.status,
     defaultMemoryMode: entry.defaultMemoryMode,
+    ...(entry.defaultSkillId ? { defaultSkillId: entry.defaultSkillId } : {}),
+    ...(entry.journalDirectory ? { journalDirectory: entry.journalDirectory } : {}),
     createdAt: entry.createdAt,
     updatedAt: entry.updatedAt,
     ...(entry.sessionFile ? { sessionFile: entry.sessionFile } : {})

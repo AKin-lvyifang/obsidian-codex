@@ -138,11 +138,19 @@ import {
   renderTabsView,
   renameSession as renameSessionAction,
   sessionById as sessionByIdAction,
-  type CodexSessionHost
+  type CodexSessionHost,
+  type CreateConversationSessionOptions
 } from "./codex-view/session-controller";
 
 export const VIEW_TYPE_CODEX = "codex-for-obsidian-view";
 export { isKnowledgeDashboardHealthTooltipHoverPoint } from "./codex-view/knowledge-dashboard";
+
+export interface HomeConversationStartInput {
+  readonly title: string;
+  readonly message: string;
+  readonly defaultSkillId?: string;
+  readonly journalDirectory?: string;
+}
 
 export class CodexView extends ItemView {
   private rootEl!: HTMLElement;
@@ -203,6 +211,8 @@ export class CodexView extends ItemView {
   private readonly turnQueue = new RuntimeTurnQueue();
   private queueStartInProgress = false;
   private draggedQueueItemId = "";
+  private homeAttentionFrameTimer: number | null = null;
+  private homeAttentionFrameGeneration = 0;
   private readonly turnRunnerContext: CodexViewTurnContext;
   private readonly promptEnhancerRunnerContext: CodexViewPromptEnhanceContext;
 
@@ -364,6 +374,7 @@ export class CodexView extends ItemView {
         });
       }
     } finally {
+      this.clearHomeAttentionFrame();
       this.taskPlanDock.dispose();
       this.interactionDock.dispose();
       this.pendingInteractionsBySession.clear();
@@ -431,6 +442,55 @@ export class CodexView extends ItemView {
     this.inputEl.setSelectionRange(draft.length, draft.length);
     this.focusInput();
     return session;
+  }
+
+  async startHomeConversation(
+    input: Readonly<HomeConversationStartInput>
+  ): Promise<StoredSession> {
+    const message = input.message.trim();
+    if (!message) throw new Error("首页会话开场消息不能为空");
+    this.playHomeAttentionFrame();
+    const session = await this.createSession(input.title, {
+      ...(input.defaultSkillId ? { defaultSkillId: input.defaultSkillId } : {}),
+      ...(input.journalDirectory
+        ? { journalDirectory: input.journalDirectory }
+        : {})
+    });
+    clearComposerDraftAction(this.composerHost());
+    this.inputEl.value = message;
+    this.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+    this.inputEl.setSelectionRange(message.length, message.length);
+    await this.sendMessage();
+    return session;
+  }
+
+  private playHomeAttentionFrame(): void {
+    if (!this.rootEl) return;
+    const root = this.rootEl;
+    const generation = ++this.homeAttentionFrameGeneration;
+    if (this.homeAttentionFrameTimer !== null) {
+      window.clearTimeout(this.homeAttentionFrameTimer);
+      this.homeAttentionFrameTimer = null;
+    }
+    root.removeClass("is-home-attention-frame");
+    window.requestAnimationFrame(() => {
+      if (generation !== this.homeAttentionFrameGeneration || root !== this.rootEl) return;
+      root.addClass("is-home-attention-frame");
+      this.homeAttentionFrameTimer = window.setTimeout(() => {
+        if (generation !== this.homeAttentionFrameGeneration) return;
+        root.removeClass("is-home-attention-frame");
+        this.homeAttentionFrameTimer = null;
+      }, 1_250);
+    });
+  }
+
+  private clearHomeAttentionFrame(): void {
+    this.homeAttentionFrameGeneration += 1;
+    if (this.homeAttentionFrameTimer !== null) {
+      window.clearTimeout(this.homeAttentionFrameTimer);
+      this.homeAttentionFrameTimer = null;
+    }
+    this.rootEl?.removeClass("is-home-attention-frame");
   }
 
   private render(): void {
@@ -693,8 +753,11 @@ export class CodexView extends ItemView {
   private isMessagesAtBottom(): boolean { return isMessagesAtBottomAction(typeof (this as unknown as { messageHost?: unknown }).messageHost === "function" ? this.messageHost() : this as unknown as CodexMessageHost); }
   private resetVirtualWindow(): void { resetVirtualWindowAction(this.messageHost()); }
   private ensureSession(): StoredSession { return ensureSessionAction(this.sessionHost()); }
-  private async createSession(title = "新会话"): Promise<StoredSession> {
-    return await createSessionAction(this.sessionHost(), title);
+  private async createSession(
+    title = "新会话",
+    options: CreateConversationSessionOptions = {}
+  ): Promise<StoredSession> {
+    return await createSessionAction(this.sessionHost(), title, options);
   }
   private attachActiveFile(): void { attachActiveFileAction(this.attachmentHost()); }
   private pickFiles(imagesOnly: boolean): void { pickFilesAction(this.attachmentHost(), imagesOnly); }

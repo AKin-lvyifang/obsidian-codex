@@ -28,6 +28,7 @@ import type {
   UserMessage
 } from "@earendil-works/pi-ai";
 import { FileConversationCatalog } from "../../harness/pi-native/file-conversation-catalog";
+import { createPiLocalConversation } from "../../harness/pi-native/pi-local-data-service";
 import { FileProductRunStore } from "../../harness/pi-native/file-product-run-store";
 import { PiNativeFileStoreError } from "../../harness/pi-native/file-store-utils";
 import {
@@ -38,6 +39,7 @@ import {
   type PiNativeKnowledgeTurnContext,
   type PiNativeDocumentTurnContext,
   type PiNativeMemoryTurnContext,
+  type PiNativeSkillTurnContext,
   type PiNativeTaskPlanTurnContext
 } from "../../harness/pi-native/pi-native-conversation-runtime";
 import type {
@@ -103,6 +105,7 @@ const QUERY_MAINTENANCE_SCOPE = Object.freeze({
 });
 
 export async function runPiNativeConversationRuntimeTests(): Promise<void> {
+  await assertConversationDefaultSkillPriorityAndTurnContext();
   await assertRuntimeAutoSkillSelectionAndReviewLifecycle();
   await assertFreshnessRoutesExternalReadToolsAcrossWorkflows();
   await assertRelatedNormalChatPreflightsAndReadsKnowledge();
@@ -147,6 +150,143 @@ export async function runPiNativeConversationRuntimeTests(): Promise<void> {
   await assertDerivationExcludesIdentityBoundOperationalState();
   await assertDerivedActivationFailureRemainsAVisibleDurableConversation();
   await runPiNativeTaskPlanRuntimeTests();
+}
+
+async function assertConversationDefaultSkillPriorityAndTurnContext(): Promise<void> {
+  const resolvedIds: string[] = [];
+  const automaticSelections: string[] = [];
+  let revision = "a".repeat(64);
+  let defaultSkillUnavailable = false;
+  await withFixture([
+    "run-default-skill-first",
+    "run-default-skill-revised",
+    "run-explicit-skill"
+  ], async (fixture) => {
+    const conversationId = "conversation-default-daily-journal";
+    await createPiLocalConversation({
+      catalog: fixture.catalog,
+      sessionApi: API
+    }, {
+      conversationId,
+      title: "Default daily journal",
+      cwd: fixture.root,
+      defaultSkillId: "daily-journal",
+      journalDirectory: "notes/daily",
+      createdAt: 1
+    });
+    const submittedAt = new Date(2026, 8, 4, 9, 7).getTime();
+    const first = await fixture.submit({
+      conversationId,
+      text: "想把今天发生的事记下来。",
+      submittedAt
+    });
+    assert.deepEqual(resolvedIds, ["daily-journal"]);
+    assert.deepEqual(automaticSelections, []);
+    assert.equal(fixture.sessions.length, 1);
+    assert.deepEqual(fixture.currentSkillTurn(), {
+      skillId: "daily-journal",
+      content: [
+        "当前轮已绑定 daily-journal Skill。",
+        "会话固定日记目录：notes/daily",
+        "当前日期：2026-09-04",
+        "当前时间：09:07",
+        "目标文件：notes/daily/2026-09-04.md",
+        "这些值来自会话创建时冻结的目录和本轮提交时间；不要改用会话 cwd 或设置页的新值。"
+      ].join("\n")
+    });
+    assert.match(
+      fixture.latestSession().promptTexts[0] ?? "",
+      /^<skill name="daily-journal">fixture procedure<\/skill>\n\n想把今天发生的事记下来。$/u
+    );
+    fixture.latestSession().finishSuccessful("先聊聊今天发生的事");
+    assert.equal((await first.result).terminalState, "completed");
+
+    revision = "b".repeat(64);
+    const second = await fixture.submit({
+      conversationId,
+      text: "我准备好补记了。",
+      submittedAt: submittedAt + 60_000
+    });
+    assert.deepEqual(resolvedIds, ["daily-journal", "daily-journal"]);
+    assert.equal(
+      fixture.sessions.length,
+      2,
+      "editing the default Skill invalidates the cached AgentSession on the next turn"
+    );
+    fixture.latestSession().finishSuccessful("已经准备补记");
+    assert.equal((await second.result).terminalState, "completed");
+
+    const explicit = await fixture.submit({
+      conversationId,
+      text: "这一轮使用我明确选择的 Skill。",
+      submittedAt: submittedAt + 120_000,
+      skillPath: "/fixture/skills/explicit/SKILL.md",
+      skillName: "explicit-skill"
+    });
+    assert.deepEqual(
+      resolvedIds,
+      ["daily-journal", "daily-journal"],
+      "an explicit per-turn Skill takes priority over the Conversation default"
+    );
+    assert.equal(fixture.currentSkillTurn(), null);
+    assert.equal(
+      fixture.latestSession().promptTexts[0],
+      "/skill:explicit-skill 这一轮使用我明确选择的 Skill。"
+    );
+    fixture.latestSession().finishSuccessful("显式 Skill 已执行");
+    assert.equal((await explicit.result).terminalState, "completed");
+
+    const unavailableConversationId = "conversation-default-skill-unavailable";
+    await fixture.runtime.createConversation({
+      conversationId: unavailableConversationId,
+      title: "Unavailable default Skill",
+      cwd: fixture.root,
+      defaultSkillId: "daily-journal",
+      journalDirectory: "notes/daily",
+      createdAt: 2
+    });
+    defaultSkillUnavailable = true;
+    const sessionCountBeforeFailure = fixture.sessions.length;
+    await assert.rejects(
+      fixture.submit({
+        conversationId: unavailableConversationId,
+        text: "这轮不应触发 Provider。",
+        submittedAt: submittedAt + 180_000
+      }),
+      (error: unknown) => error instanceof PiNativeConversationRuntimeError
+        && error.code === "skill_binding_invalid"
+    );
+    assert.equal(
+      fixture.sessions.length,
+      sessionCountBeforeFailure,
+      "default Skill failure happens before createAgentSession and Provider preparation"
+    );
+  }, {
+    skills: {
+      selectForTask: async ({ text }) => {
+        automaticSelections.push(text);
+        return null;
+      },
+      resolveById: async ({ id }) => {
+        resolvedIds.push(id);
+        if (defaultSkillUnavailable) throw new Error("fixture_skill_disabled");
+        const selected = Object.freeze({
+          id,
+          skillPath: `/fixture/skills/${id}/SKILL.md`,
+          skillName: id
+        });
+        return Object.freeze({
+          ...selected,
+          revision,
+          skills: Object.freeze([selected]),
+          applicableSkillIds: Object.freeze([id]),
+          requiresFreshnessVerification: false
+        });
+      },
+      recordUse: async () => undefined,
+      reviewCompletedTask: async () => undefined
+    }
+  });
 }
 
 async function assertFreshnessRoutesExternalReadToolsAcrossWorkflows(): Promise<void> {
@@ -256,6 +396,7 @@ async function assertFreshnessRoutesExternalReadToolsAcrossWorkflows(): Promise<
       });
       return Object.freeze({
         ...selected,
+        revision: "f".repeat(64),
         skills: Object.freeze([selected]),
         applicableSkillIds: Object.freeze([selected.id]),
         requiresFreshnessVerification: true
@@ -688,6 +829,7 @@ async function assertRuntimeAutoSkillSelectionAndReviewLifecycle(): Promise<void
           id: "multi-lens-problem-solving",
           skillPath: "/fixture/skills/multi-lens-problem-solving/SKILL.md",
           skillName: "multi-lens-problem-solving",
+          revision: "e".repeat(64),
           skills: Object.freeze([Object.freeze({
             id: "multi-lens-problem-solving",
             skillPath: "/fixture/skills/multi-lens-problem-solving/SKILL.md",
@@ -4534,6 +4676,7 @@ interface RuntimeFixture {
   }>): void;
   currentMemoryTurn(): Readonly<PiNativeMemoryTurnContext> | null;
   currentKnowledgeTurn(): Readonly<PiNativeKnowledgeTurnContext> | null;
+  currentSkillTurn(): Readonly<PiNativeSkillTurnContext> | null;
   currentDocumentTurn(): Readonly<PiNativeDocumentTurnContext> | null;
   currentSuccessfulExternalReadTools(): readonly string[];
   reportMemoryRecall(input: Parameters<NonNullable<
@@ -4569,6 +4712,8 @@ async function withFixture(
     (() => Readonly<PiNativeMemoryTurnContext> | null) | null = null;
   let currentKnowledgeTurnReader:
     (() => Readonly<PiNativeKnowledgeTurnContext> | null) | null = null;
+  let currentSkillTurnReader:
+    (() => Readonly<PiNativeSkillTurnContext> | null) | null = null;
   let currentDocumentTurnReader:
     (() => Readonly<PiNativeDocumentTurnContext> | null) | null = null;
   let currentSuccessfulExternalReadToolsReader:
@@ -4606,6 +4751,7 @@ async function withFixture(
     createAgentSession: async (input) => {
       currentMemoryTurnReader = input.currentMemoryTurnContext ?? null;
       currentKnowledgeTurnReader = input.currentKnowledgeTurnContext ?? null;
+      currentSkillTurnReader = input.currentSkillTurnContext ?? null;
       currentDocumentTurnReader = input.currentDocumentTurnContext ?? null;
       currentSuccessfulExternalReadToolsReader =
         input.currentSuccessfulExternalReadToolNames;
@@ -4685,6 +4831,7 @@ async function withFixture(
       },
       currentMemoryTurn: () => currentMemoryTurnReader?.() ?? null,
       currentKnowledgeTurn: () => currentKnowledgeTurnReader?.() ?? null,
+      currentSkillTurn: () => currentSkillTurnReader?.() ?? null,
       currentDocumentTurn: () => currentDocumentTurnReader?.() ?? null,
       currentSuccessfulExternalReadTools: () =>
         currentSuccessfulExternalReadToolsReader?.() ?? [],

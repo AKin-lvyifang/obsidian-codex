@@ -47,6 +47,11 @@ import type {
   EchoInkAssistantTurnSnapshot,
   EchoInkTurnInteractionRecord
 } from "../types/conversation-turn";
+import {
+  DEFAULT_JOURNAL_DIRECTORY,
+  normalizeJournalDirectory,
+  normalizedJournalDirectoryOrNull
+} from "../home/journal-directory";
 
 export interface StoredAttachment {
   type: "file" | "image";
@@ -462,6 +467,7 @@ export interface CodexForObsidianSettings {
   defaultMode: UiMode;
   autoOpen: boolean;
   autoOpenHome: boolean;
+  journalDirectory: string;
   customWelcomeEnabled: boolean;
   customWelcomeTitle: string;
   customWelcomeSubtitle: string;
@@ -497,6 +503,7 @@ export const DEFAULT_SETTINGS: CodexForObsidianSettings = {
   defaultMode: "agent",
   autoOpen: false,
   autoOpenHome: false,
+  journalDirectory: DEFAULT_JOURNAL_DIRECTORY,
   customWelcomeEnabled: false,
   customWelcomeTitle: DEFAULT_ECHOINK_WELCOME_TITLE,
   customWelcomeSubtitle: DEFAULT_ECHOINK_WELCOME_SUBTITLE,
@@ -584,6 +591,7 @@ export function normalizeSettingsData(input: unknown): { settings: CodexForObsid
     settingsTab: normalizeSettingsTab(data?.settingsTab),
     providerMode: normalizeProviderMode(data?.providerMode),
     autoOpenHome: data?.autoOpenHome === true,
+    journalDirectory: normalizeJournalDirectory(data?.journalDirectory),
     activeApiProviderId: typeof data?.activeApiProviderId === "string" ? data.activeApiProviderId.trim() : "",
     apiProviders: normalizeApiProviders(
       data?.apiProviders,
@@ -1622,6 +1630,12 @@ function normalizeStoredSessions(value: unknown): StoredSession[] {
       if (!id) return null;
       const messages = normalizeChatMessages(session.messages);
       const piSessionId = normalizeOptionalText(session.piSessionId) || undefined;
+      const defaultSkillId = normalizeStoredSessionSkillId(
+        session.defaultSkillId
+      );
+      const journalDirectory = normalizedJournalDirectoryOrNull(
+        session.journalDirectory
+      ) ?? undefined;
       const parsedContextLedger = parsePiContextLedger(session.contextLedger);
       const contextLedger = parsedContextLedger
         && parsedContextLedger.conversationId === id
@@ -1642,6 +1656,8 @@ function normalizeStoredSessions(value: unknown): StoredSession[] {
         title: normalizeText(session.title, "新会话"),
         piSessionId,
         defaultMemoryMode: normalizeStoredSessionMemoryMode(session.defaultMemoryMode),
+        ...(defaultSkillId ? { defaultSkillId } : {}),
+        ...(journalDirectory ? { journalDirectory } : {}),
         bodyAuthority,
         cwd: normalizeOptionalText(session.cwd),
         messages,
@@ -1660,6 +1676,11 @@ function normalizeStoredSessionMemoryMode(
   value: unknown
 ): StoredSession["defaultMemoryMode"] {
   return value === "normal" || value === "no_memory" ? value : undefined;
+}
+
+function normalizeStoredSessionSkillId(value: unknown): string | undefined {
+  const id = normalizeOptionalText(value);
+  return /^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(id) ? id : undefined;
 }
 
 function normalizeStoredSessionBodyAuthority(

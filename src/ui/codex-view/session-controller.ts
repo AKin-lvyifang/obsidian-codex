@@ -38,7 +38,15 @@ export interface CodexSessionHost {
   renameSession(session: StoredSession): Promise<void>;
   archiveSession(sessionId: string): Promise<void>;
   deleteSession(sessionId: string): Promise<void>;
-  createSession(title?: string): Promise<StoredSession>;
+  createSession(
+    title?: string,
+    options?: CreateConversationSessionOptions
+  ): Promise<StoredSession>;
+}
+
+export interface CreateConversationSessionOptions {
+  readonly defaultSkillId?: string;
+  readonly journalDirectory?: string;
 }
 
 const conversationTransitionLanes = new WeakMap<
@@ -623,19 +631,22 @@ export async function ensureInitialConversation(
 
 export async function createSession(
   host: CodexSessionHost,
-  title = "新会话"
+  title = "新会话",
+  options: CreateConversationSessionOptions = {}
 ): Promise<StoredSession> {
   return await createSessionForSelection(
     host,
     title,
-    beginConversationSelection(host)
+    beginConversationSelection(host),
+    options
   );
 }
 
 async function createSessionForSelection(
   host: CodexSessionHost,
   title: string,
-  generation: number
+  generation: number,
+  options: CreateConversationSessionOptions = {}
 ): Promise<StoredSession> {
   const conversationId = newId("conversation");
   bindConversationSelectionTarget(host, generation, conversationId);
@@ -643,7 +654,13 @@ async function createSessionForSelection(
     conversationId,
     title,
     cwd: host.plugin.getVaultPath(),
-    defaultMemoryMode: "normal"
+    defaultMemoryMode: "normal",
+    ...(options.defaultSkillId
+      ? { defaultSkillId: options.defaultSkillId }
+      : {}),
+    ...(options.journalDirectory
+      ? { journalDirectory: options.journalDirectory }
+      : {})
   });
   const session = createPiConversationShell(host, catalogEntry);
   host.plugin.settings.sessions.push(session);
@@ -721,6 +738,16 @@ function applyPiCatalogEntryToShell(
   shell.title = catalogEntry.title;
   shell.piSessionId = catalogEntry.piSessionId;
   shell.defaultMemoryMode = catalogEntry.defaultMemoryMode;
+  if (catalogEntry.defaultSkillId) {
+    shell.defaultSkillId = catalogEntry.defaultSkillId;
+  } else {
+    delete shell.defaultSkillId;
+  }
+  if (catalogEntry.journalDirectory) {
+    shell.journalDirectory = catalogEntry.journalDirectory;
+  } else {
+    delete shell.journalDirectory;
+  }
   shell.bodyAuthority = "pi_session_only";
   shell.createdAt = catalogEntry.createdAt;
   shell.updatedAt = catalogEntry.updatedAt;
@@ -807,6 +834,8 @@ function conversationShellFingerprint(host: CodexSessionHost): string {
       title: session.title,
       piSessionId: session.piSessionId,
       defaultMemoryMode: session.defaultMemoryMode,
+      defaultSkillId: session.defaultSkillId,
+      journalDirectory: session.journalDirectory,
       bodyAuthority: session.bodyAuthority,
       createdAt: session.createdAt,
       updatedAt: session.updatedAt

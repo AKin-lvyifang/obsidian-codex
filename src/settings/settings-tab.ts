@@ -9,8 +9,15 @@ import { initialTemplateSelectionStatus } from "../harness/memory/cognitive-syst
 import {
   AGENT_TEMPLATES
 } from "../harness/memory/agent-templates";
-import { isBuiltinSkillId } from "../harness/resources/builtin-skills";
+import {
+  isBuiltinSkillId,
+  type BuiltinSkillId
+} from "../harness/resources/builtin-skills";
+import type {
+  BuiltinSkillRuntimeSnapshot
+} from "../harness/resources/skill-runtime";
 import { AGENT_AVATAR_PRESETS, resolveAgentAvatarUrl } from "../ui/agent-avatar-presets";
+import { normalizeJournalDirectory } from "../home/journal-directory";
 import { AgentIdentityModal } from "../ui/agent-identity-modal";
 import { renderAnimateIcon } from "../ui/animate-icon";
 import {
@@ -146,6 +153,16 @@ interface AgentProfileCardRefs {
   readonly expandedTemplateLabel: string;
 }
 
+interface BuiltinSkillEditorState {
+  resourceId: string;
+  skillId: BuiltinSkillId;
+  snapshot: BuiltinSkillRuntimeSnapshot | null;
+  draftContent: string;
+  loading: boolean;
+  saving: boolean;
+  error: string;
+}
+
 const settingsContainerFocusIntents = new WeakMap<HTMLElement, string>();
 const PERSONALITY_TEMPLATE_FOCUS_INTENT = "explicit:general:personality-template";
 
@@ -157,6 +174,8 @@ export class CodexSettingTab extends PluginSettingTab {
   private resourceLoadErrors: Partial<Record<ResourceManagementTab, string>> = {};
   private resourceSearchQuery: Record<ResourceManagementTab, string> = { plugins: "", mcp: "", skills: "" };
   private resourceSearchDebounceTimer: number | null = null;
+  private builtinSkillEditor: BuiltinSkillEditorState | null = null;
+  private builtinSkillEditorRequestId = 0;
   private settingsVisible = false;
   private memoryActionRunning = false;
   private personalMemoryState: PersonalMemoryControlState | null = null;
@@ -229,6 +248,13 @@ export class CodexSettingTab extends PluginSettingTab {
       this.displayFrame = null;
     }
     this.renderSettingsShell();
+    const pendingResourceId = this.plugin.consumeEchoInkSettingsResourceDetail?.() ?? "";
+    if (pendingResourceId) {
+      this.openSettingsDetail({
+        kind: "resource",
+        resourceId: pendingResourceId
+      });
+    }
     this.renderSettingsContent();
   }
 
@@ -639,6 +665,42 @@ export class CodexSettingTab extends PluginSettingTab {
         toggle.setValue(this.plugin.settings.autoOpenHome).onChange(async (value) => {
           this.plugin.settings.autoOpenHome = value;
           await this.plugin.saveSettings();
+        });
+      }));
+
+    const journalSection = createSettingsSection(page, {
+      title: zh ? "日记" : "Journal",
+      surface: "group"
+    });
+    const journalGroup = createSettingsGroup(journalSection);
+    applySettingsRow(new Setting(journalGroup)
+      .setName(zh ? "日记保存文件夹" : "Journal folder")
+      .setDesc(zh
+        ? "填写当前 Vault 内的相对路径。首页日历、模板创建和日记会话都会使用这个文件夹。"
+        : "Enter a relative path inside this vault. The Home calendar, template creation, and journal conversations use this folder.")
+      .addText((text) => {
+        const label = zh ? "日记保存文件夹" : "Journal folder";
+        text.setPlaceholder("journal").setValue(this.plugin.settings.journalDirectory);
+        text.inputEl.setAttr("aria-label", label);
+        const saveDirectory = async (): Promise<void> => {
+          const previous = this.plugin.settings.journalDirectory;
+          const normalized = normalizeJournalDirectory(text.getValue());
+          text.setValue(normalized);
+          if (normalized === previous) return;
+          this.plugin.settings.journalDirectory = normalized;
+          try {
+            await this.plugin.saveSettings(true);
+          } catch {
+            this.plugin.settings.journalDirectory = previous;
+            text.setValue(previous);
+            new Notice(zh ? "日记保存文件夹未保存，请重试" : "Journal folder was not saved. Try again.");
+          }
+        };
+        text.inputEl.addEventListener("blur", () => void saveDirectory());
+        text.inputEl.addEventListener("keydown", (event) => {
+          if (event.key !== "Enter") return;
+          event.preventDefault();
+          text.inputEl.blur();
         });
       }));
 
@@ -2694,6 +2756,16 @@ export class CodexSettingTab extends PluginSettingTab {
   private openSettingsDetail(detail: Exclude<SettingsDetail, null>): void {
     this.settingsDetail = detail;
     this.settingsFocusIntent = "explicit:settings-detail:back";
+    if (typeof detail === "object" && detail.kind === "resource") {
+      const resource = this.currentEchoInkResourceCatalog().find(
+        (candidate) => candidate.id === detail.resourceId
+      );
+      const skillId = resource ? builtinSkillIdForResource(resource) : null;
+      if (skillId) this.loadBuiltinSkillEditor(detail.resourceId, skillId);
+      else this.clearBuiltinSkillEditor();
+    } else {
+      this.clearBuiltinSkillEditor();
+    }
     if (detail === "knowledge-maintenance-history") {
       this.knowledgeMaintenanceHistoryDate = "";
     }
@@ -2727,6 +2799,7 @@ export class CodexSettingTab extends PluginSettingTab {
       this.resetKnowledgePreferenceDraft();
     }
     this.settingsDetail = null;
+    this.clearBuiltinSkillEditor();
     if (typeof detail === "object" && detail?.kind === "resource") {
       this.settingsFocusIntent = `explicit:resource:${detail.resourceId}:detail`;
     } else if (
@@ -2744,6 +2817,52 @@ export class CodexSettingTab extends PluginSettingTab {
       this.settingsFocusIntent = "explicit:review:memory";
     }
     this.scheduleDisplay();
+  }
+
+  private clearBuiltinSkillEditor(): void {
+    this.builtinSkillEditorRequestId += 1;
+    this.builtinSkillEditor = null;
+  }
+
+  private loadBuiltinSkillEditor(
+    resourceId: string,
+    skillId: BuiltinSkillId
+  ): void {
+    const requestId = ++this.builtinSkillEditorRequestId;
+    this.builtinSkillEditor = {
+      resourceId,
+      skillId,
+      snapshot: null,
+      draftContent: "",
+      loading: true,
+      saving: false,
+      error: ""
+    };
+    void this.plugin.readEchoInkBuiltinSkill(skillId).then((snapshot) => {
+      if (requestId !== this.builtinSkillEditorRequestId) return;
+      this.builtinSkillEditor = {
+        resourceId,
+        skillId,
+        snapshot,
+        draftContent: snapshot.content,
+        loading: false,
+        saving: false,
+        error: ""
+      };
+      this.scheduleDisplay();
+    }).catch((error) => {
+      if (requestId !== this.builtinSkillEditorRequestId) return;
+      this.builtinSkillEditor = {
+        resourceId,
+        skillId,
+        snapshot: null,
+        draftContent: "",
+        loading: false,
+        saving: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+      this.scheduleDisplay();
+    });
   }
 
   private renderProviderModelManager(container: HTMLElement): void {
@@ -3503,6 +3622,10 @@ export class CodexSettingTab extends PluginSettingTab {
       });
       pathButton.onclick = () => void this.copySettingsValue(path, pathButton);
     }
+    const builtinSkillId = builtinSkillIdForResource(resource);
+    if (builtinSkillId) {
+      this.renderBuiltinSkillEditor(page, resource, builtinSkillId);
+    }
     if (resource.kind === "mcp-server") {
       const connection = resolveMcpConnectionRecord(resource, this.plugin.settings.resources);
       const diagnostic = connection?.diagnostic;
@@ -3609,6 +3732,241 @@ export class CodexSettingTab extends PluginSettingTab {
             action: async (trusted) => await this.plugin.setEchoInkMcpToolPolicy(resource.id, tool.name, { trusted })
           });
         }
+      }
+    }
+  }
+
+  private renderBuiltinSkillEditor(
+    page: HTMLElement,
+    resource: EchoInkResource,
+    skillId: BuiltinSkillId
+  ): void {
+    const english = this.plugin.settings.settingsLanguage === "en";
+    const section = createSettingsSection(page, {
+      title: english ? "Skill instructions" : "Skill 指令",
+      description: english
+        ? "Edit the complete SKILL.md used by EchoInk. Saving marks this built-in Skill as customized."
+        : "编辑 EchoInk 实际使用的完整 SKILL.md；保存后会标记为“已自定义”。",
+      surface: "group"
+    });
+    const group = createSettingsGroup(section);
+    const editor = this.builtinSkillEditor;
+    if (
+      !editor
+      || editor.resourceId !== resource.id
+      || editor.skillId !== skillId
+    ) {
+      createSettingsState(
+        group,
+        english ? "Loading SKILL.md…" : "正在读取 SKILL.md…"
+      );
+      if (!editor || editor.resourceId !== resource.id) {
+        this.loadBuiltinSkillEditor(resource.id, skillId);
+      }
+      return;
+    }
+    if (editor.loading) {
+      createSettingsState(
+        group,
+        english ? "Loading SKILL.md…" : "正在读取 SKILL.md…"
+      );
+      return;
+    }
+    if (!editor.snapshot) {
+      createSettingsState(
+        group,
+        english
+          ? "SKILL.md could not be read. Reload it before editing so existing content is not overwritten."
+          : "SKILL.md 暂时无法读取。为避免覆盖现有内容，请先重新加载。",
+        "error",
+        {
+          label: english ? "Reload" : "重新加载",
+          onActivate: () => this.loadBuiltinSkillEditor(resource.id, skillId)
+        }
+      );
+      if (editor.error) {
+        group.createDiv({
+          cls: "codex-settings-inline-error is-visible",
+          text: editor.error,
+          attr: { role: "alert" }
+        });
+      }
+      return;
+    }
+
+    const snapshot = editor.snapshot;
+    if (snapshot.fileStatus !== "ready") {
+      createSettingsState(
+        group,
+        builtinSkillFileStateText(snapshot.fileStatus, english),
+        "error"
+      );
+    }
+    const row = applySettingsRow(new Setting(group)
+      .setName("SKILL.md")
+      .setDesc(english
+        ? "This Vault file is the single source used for installation, editing, validation, and model runs."
+        : "这份 Vault 文件是安装、编辑、有效性检查和模型运行共同使用的唯一真源。")
+      .setClass("echoink-personalization-instruction-row")
+      .setClass("echoink-builtin-skill-editor-row"));
+    row.controlEl.empty();
+    const textarea = row.controlEl.createEl("textarea", {
+      cls: "echoink-personalization-textarea echoink-builtin-skill-textarea",
+      attr: {
+        rows: "20",
+        maxlength: "200000",
+        spellcheck: "false",
+        "aria-label": english
+          ? `${skillId} complete SKILL.md`
+          : `${skillId} 完整 SKILL.md`,
+        "data-echoink-focus-key": `resource:${resource.id}:skill-editor`
+      }
+    });
+    textarea.value = editor.draftContent;
+    const status = row.controlEl.createDiv({
+      cls: "echoink-knowledge-preference-status echoink-builtin-skill-status",
+      attr: { role: "status", "aria-live": "polite" }
+    });
+    const error = row.controlEl.createDiv({
+      cls: "codex-settings-inline-error echoink-builtin-skill-error",
+      attr: { role: "alert" }
+    });
+    const actions = row.controlEl.createDiv({
+      cls: "echoink-personalization-actions"
+    });
+    const restore = actions.createEl("button", {
+      text: english ? "Restore EchoInk default" : "恢复 EchoInk 默认",
+      attr: {
+        type: "button",
+        "data-echoink-focus-key": `resource:${resource.id}:skill-restore`
+      }
+    });
+    const save = actions.createEl("button", {
+      text: english ? "Save" : "保存",
+      attr: {
+        type: "button",
+        "data-echoink-focus-key": `resource:${resource.id}:skill-save`
+      }
+    });
+
+    const syncControls = (): void => {
+      const current = this.builtinSkillEditor;
+      if (!current || current.resourceId !== resource.id || !current.snapshot) return;
+      const dirty = current.draftContent !== current.snapshot.content;
+      const stateText = current.snapshot.fileStatus === "ready"
+        ? current.snapshot.userModified
+          ? (english ? "Customized" : "已自定义")
+          : (english ? "EchoInk default" : "EchoInk 默认")
+        : builtinSkillFileStateText(current.snapshot.fileStatus, english);
+      status.setText([
+        stateText,
+        dirty ? (english ? "Unsaved changes" : "有未保存修改") : (english ? "Saved" : "已保存"),
+        current.saving ? (english ? "Saving…" : "正在保存…") : ""
+      ].filter(Boolean).join(" · "));
+      error.setText(current.error);
+      error.toggleClass("is-visible", Boolean(current.error));
+      textarea.setAttr("aria-invalid", String(Boolean(current.error)));
+      textarea.disabled = current.saving;
+      save.disabled = current.saving
+        || !dirty
+        || current.snapshot.fileStatus === "missing";
+      restore.disabled = current.saving
+        || (
+          current.snapshot.fileStatus === "ready"
+          && !current.snapshot.userModified
+          && !dirty
+        );
+      save.toggleClass("mod-cta", !save.disabled);
+    };
+
+    textarea.oninput = () => {
+      const current = this.builtinSkillEditor;
+      if (!current || current.resourceId !== resource.id || current.saving) return;
+      current.draftContent = textarea.value;
+      current.error = "";
+      syncControls();
+    };
+    save.onclick = () => void this.saveBuiltinSkillEditor(resource.id);
+    restore.onclick = () => void this.restoreBuiltinSkillEditor(resource.id);
+    syncControls();
+  }
+
+  private async saveBuiltinSkillEditor(resourceId: string): Promise<void> {
+    const editor = this.builtinSkillEditor;
+    if (!editor || editor.resourceId !== resourceId || !editor.snapshot || editor.saving) return;
+    editor.saving = true;
+    editor.error = "";
+    this.scheduleDisplay();
+    try {
+      const snapshot = await this.plugin.saveEchoInkBuiltinSkill(
+        editor.skillId,
+        editor.draftContent
+      );
+      if (this.builtinSkillEditor !== editor) return;
+      editor.snapshot = snapshot;
+      editor.draftContent = snapshot.content;
+      const message = this.plugin.settings.settingsLanguage === "en"
+        ? "Skill instructions saved."
+        : "Skill 指令已保存。";
+      new Notice(message);
+      this.announceSettingsStatus(message);
+      await this.loadWorkspaceResources(true, "skills");
+    } catch (error) {
+      if (this.builtinSkillEditor !== editor) return;
+      editor.error = error instanceof Error ? error.message : String(error);
+      const message = this.plugin.settings.settingsLanguage === "en"
+        ? "Skill instructions were not saved. Check the document and try again."
+        : "Skill 指令未保存。请检查文档后重试。";
+      new Notice(message);
+      this.announceSettingsStatus(message);
+    } finally {
+      if (this.builtinSkillEditor === editor) {
+        editor.saving = false;
+        this.scheduleDisplay();
+      }
+    }
+  }
+
+  private async restoreBuiltinSkillEditor(resourceId: string): Promise<void> {
+    const editor = this.builtinSkillEditor;
+    if (!editor || editor.resourceId !== resourceId || !editor.snapshot || editor.saving) return;
+    const english = this.plugin.settings.settingsLanguage === "en";
+    const accepted = await confirmModal(
+      this.app,
+      english ? "Restore EchoInk default?" : "恢复 EchoInk 默认？",
+      english
+        ? "This replaces the current SKILL.md content with the default included in this EchoInk version. The Skill enable switch is not changed."
+        : "这会把当前 SKILL.md 内容替换为本版本 EchoInk 自带的默认内容，不会改变 Skill 的启用开关。",
+      english ? "Restore default" : "恢复默认",
+      english ? "Cancel" : "取消"
+    );
+    if (!accepted || this.builtinSkillEditor !== editor) return;
+    editor.saving = true;
+    editor.error = "";
+    this.scheduleDisplay();
+    try {
+      const snapshot = await this.plugin.restoreEchoInkBuiltinSkill(editor.skillId);
+      if (this.builtinSkillEditor !== editor) return;
+      editor.snapshot = snapshot;
+      editor.draftContent = snapshot.content;
+      const message = english
+        ? "EchoInk default restored."
+        : "已恢复 EchoInk 默认。";
+      new Notice(message);
+      this.announceSettingsStatus(message);
+      await this.loadWorkspaceResources(true, "skills");
+    } catch (error) {
+      if (this.builtinSkillEditor !== editor) return;
+      editor.error = error instanceof Error ? error.message : String(error);
+      const message = english
+        ? "The default Skill could not be restored."
+        : "默认 Skill 恢复失败，请重试。";
+      new Notice(message);
+      this.announceSettingsStatus(message);
+    } finally {
+      if (this.builtinSkillEditor === editor) {
+        editor.saving = false;
+        this.scheduleDisplay();
       }
     }
   }
@@ -3900,12 +4258,33 @@ export class CodexSettingTab extends PluginSettingTab {
       }
     });
     nameButton.onclick = () => this.openSettingsDetail({ kind: "resource", resourceId: resource.id });
-    if (resource.kind === "skill" && isBuiltinSkillId(resource.metadata?.resourceId)) {
+    const builtinSkillId = builtinSkillIdForResource(resource);
+    if (builtinSkillId) {
       title.createSpan({
         cls: "codex-resource-preset-badge",
-        text: copy.resources.preset,
+        text: builtinSkillId === "daily-journal"
+          ? (this.plugin.settings.settingsLanguage === "en" ? "EchoInk default" : "EchoInk 默认")
+          : copy.resources.preset,
         attr: { "data-resource-preset": "true" }
       });
+      if (resource.metadata?.userModified === true) {
+        title.createSpan({
+          cls: "codex-resource-state-badge is-customized",
+          text: this.plugin.settings.settingsLanguage === "en" ? "Customized" : "已自定义",
+          attr: { "data-resource-skill-state": "customized" }
+        });
+      }
+      const fileStatus = builtinSkillFileStatus(resource);
+      if (fileStatus && fileStatus !== "ready") {
+        title.createSpan({
+          cls: "codex-resource-state-badge is-error",
+          text: builtinSkillFileStateText(
+            fileStatus,
+            this.plugin.settings.settingsLanguage === "en"
+          ),
+          attr: { "data-resource-skill-state": fileStatus }
+        });
+      }
     }
     const desc = resource.description || resource.contentPath || resource.configPath || copy.resources.noDesc;
     const description = [desc, meta].filter(Boolean).join(" · ");
@@ -4368,8 +4747,45 @@ function resourceDisplayMeta(
     : "not-mcp";
   return [
     resourceSourceLabel(resource.source, language),
-    resource.kind === "mcp-server" ? mcpConnectionStatusLabel(connectionStatus, language) : ""
+    resource.kind === "mcp-server" ? mcpConnectionStatusLabel(connectionStatus, language) : "",
+    resource.kind === "skill" ? builtinSkillResourceStatusText(resource, language === "en") : ""
   ].filter(Boolean).join(" · ");
+}
+
+function builtinSkillIdForResource(
+  resource: EchoInkResource
+): BuiltinSkillId | null {
+  const skillId = resource.kind === "skill"
+    ? resource.metadata?.resourceId
+    : null;
+  return isBuiltinSkillId(skillId) ? skillId : null;
+}
+
+function builtinSkillFileStatus(
+  resource: EchoInkResource
+): BuiltinSkillRuntimeSnapshot["fileStatus"] | null {
+  const status = resource.metadata?.fileStatus;
+  return status === "ready" || status === "missing" || status === "invalid"
+    ? status
+    : null;
+}
+
+function builtinSkillFileStateText(
+  status: BuiltinSkillRuntimeSnapshot["fileStatus"],
+  english: boolean
+): string {
+  if (status === "missing") return english ? "SKILL.md missing" : "SKILL.md 缺失";
+  if (status === "invalid") return english ? "SKILL.md invalid" : "SKILL.md 损坏";
+  return english ? "SKILL.md ready" : "SKILL.md 可用";
+}
+
+function builtinSkillResourceStatusText(
+  resource: EchoInkResource,
+  english: boolean
+): string {
+  const status = builtinSkillFileStatus(resource);
+  if (!status || status === "ready") return "";
+  return builtinSkillFileStateText(status, english);
 }
 
 function mcpConnectionSummary(connection: EchoInkMcpConnectionRecord, english: boolean): string {

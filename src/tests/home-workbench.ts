@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { TFile, type App } from "obsidian";
+import { TFile, WorkspaceLeaf, type App } from "obsidian";
 import {
   BUILT_IN_JOURNAL_TEMPLATES,
   DEFAULT_JOURNAL_TEMPLATE_ID,
@@ -17,6 +17,7 @@ import {
   homeContributionLevel,
   importedTemplatePath,
   isKnowledgeBaseReviewPath,
+  journalDateFromPath,
   journalPathForDate,
   mergeHomeActivityDays,
   nextAvailableImportedTemplatePath,
@@ -25,21 +26,28 @@ import {
 } from "../home/home-workbench-model";
 import {
   HOME_ENTRY_INDEX_PATHS,
+  HomeWorkbenchDataService,
+  defaultJournalTemplateChoice,
   homeEntryIndexPath
 } from "../home/home-workbench-data";
+import {
+  DEFAULT_JOURNAL_DIRECTORY,
+  normalizeJournalDirectory
+} from "../home/journal-directory";
 import {
   openObsidianGraphLeaf,
   openObsidianLocalGraphLeaf
 } from "../home/open-native-graph";
 import {
-  buildDailyConversationDraft,
   buildReviewConversationDraft,
-  buildRevisitConversationDraft,
+  HOME_DAILY_MESSAGE,
   HOME_DAILY_TITLES,
+  HOME_REVISIT_MESSAGE,
   HOME_REVISIT_TITLES,
   homeConversationTitle
 } from "../home/home-conversation-actions";
 import { openTestNoticeMessages } from "./obsidian-shim";
+import { EchoInkHomeView } from "../home/home-view";
 
 export async function runHomeWorkbenchTests(): Promise<void> {
   assertFixedEntryAndTemplateContracts();
@@ -50,13 +58,92 @@ export async function runHomeWorkbenchTests(): Promise<void> {
   assertReviewRecognitionAndUtf8Import();
   assertHomeConversationActions();
   assertHomeWorkbenchRemovalAndMagicUiContracts();
+  await assertHomeConversationLaunchFlow();
+  await assertCustomJournalDirectoryBehavior();
   await assertNativeGraphBehavior();
+}
+
+async function assertHomeConversationLaunchFlow(): Promise<void> {
+  const calls: string[] = [];
+  const starts: unknown[] = [];
+  const view = {
+    startHomeConversation: async (input: unknown) => {
+      calls.push("start");
+      starts.push(input);
+    }
+  };
+  const plugin = {
+    app: {},
+    settings: { journalDirectory: "notes/daily" },
+    requireAvailableEchoInkSkill: async (skillId: string) => {
+      calls.push(`skill:${skillId}`);
+    },
+    openEchoInkSkillSettings: async (skillId: string) => {
+      calls.push(`settings:${skillId}`);
+    },
+    activateView: async () => {
+      calls.push("open-sidebar");
+    },
+    getCodexView: () => {
+      calls.push("get-view");
+      return view;
+    }
+  };
+  const home = new EchoInkHomeView(
+    new WorkspaceLeaf(),
+    plugin as never
+  );
+  (home as unknown as { dataService: { ensureJournalDirectory(): Promise<string> } })
+    .dataService = {
+      ensureJournalDirectory: async () => {
+        calls.push("ensure-directory");
+        return "notes/daily";
+      }
+    };
+  await (home as unknown as {
+    openConversationAction(action: "daily" | "revisit"): Promise<void>;
+  }).openConversationAction("daily");
+  assert.deepEqual(calls, [
+    "skill:daily-journal",
+    "ensure-directory",
+    "open-sidebar",
+    "get-view",
+    "start"
+  ]);
+  const dailyStart = starts[0] as Readonly<Record<string, unknown>>;
+  assert.match(String(dailyStart.title), /^写日记 · \d{4}-\d{2}-\d{2}$/u);
+  assert.equal(dailyStart.message, HOME_DAILY_MESSAGE);
+  assert.equal(dailyStart.defaultSkillId, "daily-journal");
+  assert.equal(dailyStart.journalDirectory, "notes/daily");
+
+  calls.length = 0;
+  starts.length = 0;
+  await (home as unknown as {
+    openConversationAction(action: "daily" | "revisit"): Promise<void>;
+  }).openConversationAction("revisit");
+  assert.deepEqual(calls, ["open-sidebar", "get-view", "start"]);
+  const revisitStart = starts[0] as Readonly<Record<string, unknown>>;
+  assert.match(String(revisitStart.title), /^未完想法 · \d{4}-\d{2}-\d{2}$/u);
+  assert.deepEqual(revisitStart, {
+    title: revisitStart.title,
+    message: HOME_REVISIT_MESSAGE
+  });
+
+  calls.length = 0;
+  openTestNoticeMessages.length = 0;
+  plugin.requireAvailableEchoInkSkill = async (skillId: string) => {
+    calls.push(`skill:${skillId}`);
+    throw new Error("Skill daily-journal 已停用。");
+  };
+  await (home as unknown as {
+    openConversationAction(action: "daily" | "revisit"): Promise<void>;
+  }).openConversationAction("daily");
+  assert.deepEqual(calls, ["skill:daily-journal", "settings:daily-journal"]);
+  assert.match(openTestNoticeMessages.at(-1) ?? "", /暂时无法开始日记：Skill daily-journal 已停用/u);
 }
 
 function assertHomeConversationActions(): void {
   const now = new Date(2026, 8, 2, 9, 7);
-  const dailyDraft = buildDailyConversationDraft(now);
-  const revisitDraft = buildRevisitConversationDraft();
   const reviewDraft = buildReviewConversationDraft(now);
 
   assert.equal(HOME_DAILY_TITLES.length, 6);
@@ -72,14 +159,11 @@ function assertHomeConversationActions(): void {
     homeConversationTitle("revisit", "EchoInk 测试库", now) as (typeof HOME_REVISIT_TITLES)[number]
   ));
 
-  assert.match(dailyDraft, /^\/daily\n/u);
-  assert.match(dailyDraft, /2026-09-02 此刻速记/u);
-  assert.match(dailyDraft, /在我明确确认生成前，不要创建或改写任何文件/u);
-  assert.match(dailyDraft, /目标文件已经存在，先读取并保留原内容/u);
-  assert.match(revisitDraft, /^\/revisit\n/u);
-  assert.match(revisitDraft, /3–5 个仍未完成的 goal、task 或 open_loop/u);
-  assert.match(revisitDraft, /在我选择前不要修改 Memory/u);
-  assert.match(revisitDraft, /Memory 已关闭、不可用或没有结果/u);
+  assert.equal(HOME_DAILY_MESSAGE, "想把今天发生的事记下来。");
+  assert.equal(
+    HOME_REVISIT_MESSAGE,
+    "从我的长期记忆里，找一件没说完的事，我们接着聊。"
+  );
   assert.match(reviewDraft, /^\/review\n/u);
   assert.match(reviewDraft, /从我最近积累和修改的知识中，推荐 3 个值得复盘的知识主题/u);
   assert.match(reviewDraft, /选择主题并明确确认写入前/u);
@@ -156,7 +240,7 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
   assert.doesNotMatch(data, /resolvedLinks|getAllTags|frontmatter|flattenPropertyValues/u);
   assert.doesNotMatch(model, /EMPTY_HOME_GRAPH_FILTERS|buildHomeGraph|filterHomeGraph|selectHomeGraphNeighborhood|aggregateHomeGraph|homeGraphNodeVisualValue|isHomeSystemPath/u);
   assert.doesNotMatch(model, /\bctime:\s*number|\btags:\s*string\[\]|\bproperties:\s*Record/u);
-  assert.match(data, /const cache = journalDateFromPath\(file\.path\)[\s\S]*?metadataCache\.getFileCache\(file\)[\s\S]*?: null/u);
+  assert.match(data, /const cache = journalDateFromPath\(file\.path, journalDirectory\)[\s\S]*?metadataCache\.getFileCache\(file\)[\s\S]*?: null/u);
   assert.match(data, /path: file\.path,[\s\S]*title: file\.basename,[\s\S]*folder: file\.parent\?\.path \|\| "根目录",[\s\S]*mtime: file\.stat\.mtime/u);
 
   assert.match(view, /this\.registerEvent\(this\.app\.vault\.on\("rename", \(\) => this\.scheduleHomeRefresh\(\)\)\)/u);
@@ -173,10 +257,40 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
   );
   assert.doesNotMatch(shellSource, /getBoundingClientRect|offsetHeight|clientHeight|ResizeObserver/u);
   assert.doesNotMatch(shellSource, /overview|graph|recent|marquee|thought/u);
-  assert.match(view, /await this\.plugin\.activateView\(\)[\s\S]*this\.plugin\.getCodexView\(\)[\s\S]*view\.createDraftSession\(title, draft\)/u);
+  const conversationActionSource = view.match(
+    /private async openConversationAction\([\s\S]*?\n  \}/u
+  )?.[0] ?? "";
+  assert.ok(
+    conversationActionSource.indexOf('requireAvailableEchoInkSkill("daily-journal")')
+      < conversationActionSource.indexOf("ensureJournalDirectory()")
+  );
+  assert.ok(
+    conversationActionSource.indexOf("ensureJournalDirectory()")
+      < conversationActionSource.indexOf("await this.plugin.activateView()")
+  );
+  assert.ok(
+    conversationActionSource.indexOf("await this.plugin.activateView()")
+      < conversationActionSource.indexOf("view.startHomeConversation({")
+  );
+  assert.match(
+    conversationActionSource,
+    /openEchoInkSkillSettings\("daily-journal"\)[\s\S]*return;/u
+  );
+  assert.match(
+    conversationActionSource,
+    /defaultSkillId: "daily-journal",[\s\S]*journalDirectory: journalDirectory!/u
+  );
   assert.doesNotMatch(
-    view.match(/private async openConversationAction\([\s\S]*?\n  \}/u)?.[0] ?? "",
-    /sendMessage|Provider|\.create\(|\.modify\(/u
+    conversationActions,
+    /\/daily|\/revisit|默认模板预览|3–5 个仍未完成/u
+  );
+  assert.match(
+    codexView,
+    /async startHomeConversation\([\s\S]*?await this\.createSession\(input\.title,[\s\S]*?this\.inputEl\.value = message;[\s\S]*?await this\.sendMessage\(\);/u
+  );
+  assert.match(
+    codexView,
+    /async createDraftSession\([\s\S]*?this\.inputEl\.value = draft;[\s\S]*?return session;/u
   );
   assert.match(view, /const indexPath = homeEntryIndexPath\(entry\.id\);[\s\S]*openObsidianLocalGraphLeaf\(this\.app, indexPath\)/u);
   assert.match(view, /entry\.id === "journal"\)[\s\S]*this\.openJournalTemplate\(new Date\(\)\)/u);
@@ -682,6 +796,79 @@ function assertActivityAndJournalCalendar(): void {
     { date: "2026-08-31", count: 4, fileCount: 2, checkCount: 2, level: "mid" }
   );
   assert.equal(journalPathForDate(now), "journal/2026-08-31.md");
+  assert.equal(journalPathForDate(now, "Notes/Daily"), "Notes/Daily/2026-08-31.md");
+  assert.equal(journalDateFromPath("Notes/Daily/2026-08-31.md", "Notes/Daily"), "2026-08-31");
+  assert.equal(journalDateFromPath("Notes/Daily/archive/2026-08-31.md", "Notes/Daily"), null);
+
+  const customDays = buildHomeJournalDays([{
+    ...journalRecords[0]!,
+    path: "Notes/Daily/2026-08-31.md",
+    folder: "Notes/Daily"
+  }], activity, now, "Notes/Daily");
+  assert.equal(customDays.find((day) => day.date === "2026-08-31")?.path, "Notes/Daily/2026-08-31.md");
+}
+
+async function assertCustomJournalDirectoryBehavior(): Promise<void> {
+  assert.equal(DEFAULT_JOURNAL_DIRECTORY, "journal");
+  for (const invalid of [undefined, null, "", "   ", ".", "..", "../outside", "daily/../outside", "/journal", "C:/journal", "C:journal", "\\\\server\\journal"]) {
+    assert.equal(normalizeJournalDirectory(invalid), "journal", String(invalid));
+  }
+  assert.equal(normalizeJournalDirectory(" Notes\\Daily// "), "Notes/Daily");
+
+  const folders = new Set<string>();
+  const files = new Map<string, TFile>();
+  const contents = new Map<string, string>();
+  const createdFolders: string[] = [];
+  const makeFile = (path: string): TFile => Object.assign(new TFile(path), {
+    basename: path.split("/").at(-1)?.replace(/\.md$/u, "") ?? path,
+    parent: { path: path.slice(0, path.lastIndexOf("/")) },
+    stat: { mtime: new Date(2026, 8, 4, 10, 0).getTime() }
+  });
+  const app = {
+    vault: {
+      getMarkdownFiles: () => Array.from(files.values()),
+      getAbstractFileByPath: (path: string) => files.get(path) ?? (folders.has(path) ? { path } : null),
+      createFolder: async (path: string) => {
+        createdFolders.push(path);
+        folders.add(path);
+      },
+      create: async (path: string, content: string) => {
+        const file = makeFile(path);
+        files.set(path, file);
+        contents.set(path, content);
+        return file;
+      },
+      read: async (file: TFile) => contents.get(file.path) ?? "",
+      getResourcePath: (file: TFile) => `app://local/${file.path}`
+    },
+    metadataCache: {
+      getFileCache: () => null,
+      getFirstLinkpathDest: () => null
+    }
+  } as unknown as App;
+  const service = new HomeWorkbenchDataService(app, () => " Notes\\Daily// ");
+
+  assert.equal(service.getJournalDirectory(), "Notes/Daily");
+  assert.equal(await service.ensureJournalDirectory(), "Notes/Daily");
+  assert.deepEqual(createdFolders, ["Notes", "Notes/Daily"]);
+
+  const date = new Date(2026, 8, 4, 10, 0);
+  const created = await service.createOrOpenJournal(defaultJournalTemplateChoice(), date);
+  assert.equal(created.created, true);
+  assert.equal(created.file.path, "Notes/Daily/2026-09-04.md");
+  assert.match(contents.get(created.file.path) ?? "", /2026-09-04/u);
+  const reopened = await service.createOrOpenJournal(defaultJournalTemplateChoice(), date);
+  assert.equal(reopened.created, false);
+  assert.equal(reopened.file, created.file);
+
+  const data = await service.build(date);
+  assert.equal(data.entries.find((entry) => entry.id === "journal")?.count, 1);
+  assert.equal(data.entries.find((entry) => entry.id === "journal")?.targetPath, created.file.path);
+  assert.equal(data.journalDays.find((day) => day.date === "2026-09-04")?.exists, true);
+
+  const fallback = new HomeWorkbenchDataService(app, () => "../outside");
+  assert.equal(fallback.getJournalDirectory(), "journal");
+  assert.equal(fallback.journalPathForDate(date), "journal/2026-09-04.md");
 }
 
 function assertImageExtraction(): void {
