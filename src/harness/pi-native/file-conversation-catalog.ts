@@ -1,3 +1,4 @@
+import { unlink } from "node:fs/promises";
 import * as path from "node:path";
 import type {
   PiConversationCatalogEntry,
@@ -79,6 +80,11 @@ export interface AdoptVerifiedRecoverySessionFileInput {
   expectedSessionFile: string;
   recoverySessionFile: string;
   updatedAt?: number;
+}
+
+export interface DiscardUnacceptedConversationCreateInput {
+  conversationId: string;
+  piSessionId: string;
 }
 
 /**
@@ -218,6 +224,56 @@ export class FileConversationCatalog {
         ));
       }
     );
+  }
+
+  async discardUnacceptedCreate(
+    input: Readonly<DiscardUnacceptedConversationCreateInput>
+  ): Promise<void> {
+    const conversationId = requireNonEmptyString(
+      input.conversationId,
+      "conversationId"
+    );
+    const piSessionId = requireNonEmptyString(input.piSessionId, "piSessionId");
+    const claim: ConversationSessionBindingV1 = {
+      schemaVersion: PI_NATIVE_FILE_SCHEMA_VERSION,
+      vaultId: this.vaultId,
+      conversationId,
+      piSessionId
+    };
+    await serializePiNativeFileWrite(this.storageRootPath, async () => {
+      await ensurePiNativeVaultFileLayout(this.layout);
+      const document = await this.readDocument();
+      const matchingIndex = document.entries.findIndex((entry) =>
+        entry.conversationId === conversationId
+        && entry.piSessionId === piSessionId);
+      if (matchingIndex >= 0) {
+        const nextDocument = cloneCatalogDocument(document);
+        nextDocument.entries.splice(matchingIndex, 1);
+        nextDocument.drafts = nextDocument.drafts.filter((draft) =>
+          draft.conversationId !== conversationId
+          || draft.piSessionId !== piSessionId);
+        nextDocument.diagnostics = nextDocument.diagnostics.filter((diagnostic) =>
+          diagnostic.conversationId !== conversationId
+          || diagnostic.piSessionId !== piSessionId);
+        await this.writeDocument(nextDocument);
+      }
+      await removeExactBindingClaim(
+        path.join(
+          this.layout.conversationBindingsRootPath,
+          `${stablePathToken(conversationId)}.json`
+        ),
+        claim,
+        "Conversation identity claim"
+      );
+      await removeExactBindingClaim(
+        path.join(
+          this.layout.piSessionBindingsRootPath,
+          `${stablePathToken(piSessionId)}.json`
+        ),
+        claim,
+        "Pi Session identity claim"
+      );
+    });
   }
 
   async rename(
@@ -1010,6 +1066,32 @@ async function assertBindingClaimAvailable(
       `${label} 已绑定到 Vault ${current.vaultId} / Conversation ${current.conversationId} / Pi Session ${current.piSessionId}`
     );
   }
+}
+
+async function removeExactBindingClaim(
+  filePath: string,
+  expected: ConversationSessionBindingV1,
+  label: string
+): Promise<void> {
+  const currentValue = await readJsonFileIfPresent(filePath, label);
+  if (currentValue === null) return;
+  const current = parseBindingClaim(currentValue, label);
+  if (!sameBindingClaim(current, expected)) {
+    throw mappingConflict(
+      `${label} 不属于本次未接受的 Conversation，拒绝清理`
+    );
+  }
+  try {
+    await unlink(filePath);
+  } catch (error) {
+    if (!isMissingFileError(error)) throw error;
+  }
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return error instanceof Error
+    && "code" in error
+    && (error as NodeJS.ErrnoException).code === "ENOENT";
 }
 
 function parseBindingClaim(

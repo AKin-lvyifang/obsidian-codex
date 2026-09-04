@@ -58,6 +58,7 @@ import type {
   PiChatNoteMention,
   PiChatPreparedDocument,
   PiChatSubmitRequest,
+  PiKnowledgeReviewWriteScope,
   PiChatPreparedImage,
   PiConversationCatalogEntry,
   PiConversationDerivationResult,
@@ -200,6 +201,7 @@ export interface PiNativeAgentSessionFactoryInput {
     vaultId: string;
     userEntryId: string;
     userEntryText: string;
+    knowledgeReviewWriteScope: PiKnowledgeReviewWriteScope | null;
   }>;
   currentKnowledgeTurnContext(): Readonly<PiNativeKnowledgeTurnContext> | null;
   currentSkillTurnContext?(): Readonly<PiNativeSkillTurnContext> | null;
@@ -471,6 +473,72 @@ export interface CreatePiNativeConversationInput {
   createdAt?: number;
 }
 
+export interface CreatePiConversationTransactionInput {
+  catalog: FileConversationCatalog;
+  sessionApi: PiSessionManagerApi;
+  conversation: CreatePiNativeConversationInput;
+  now?: () => number;
+}
+
+export async function createPiConversation(
+  input: Readonly<CreatePiConversationTransactionInput>
+): Promise<Readonly<PiConversationCatalogEntry>> {
+  const { catalog, sessionApi, conversation } = input;
+  const existing = await catalog.get(conversation.conversationId);
+  if (existing) return existing;
+  const createdAt = conversation.createdAt ?? (input.now ?? Date.now)();
+  const durable = createDurablePiSession({
+    api: sessionApi,
+    sessionRoot: catalog.sessionRootPath,
+    cwd: conversation.cwd
+  });
+  try {
+    return await catalog.upsert({
+      conversationId: conversation.conversationId,
+      piSessionId: durable.piSessionId,
+      vaultId: catalog.vaultId,
+      title: conversation.title,
+      status: "active",
+      defaultMemoryMode: conversation.defaultMemoryMode ?? "normal",
+      ...(conversation.defaultSkillId
+        ? { defaultSkillId: conversation.defaultSkillId }
+        : {}),
+      ...(conversation.journalDirectory
+        ? { journalDirectory: conversation.journalDirectory }
+        : {}),
+      createdAt,
+      updatedAt: createdAt,
+      sessionFile: durable.sessionFile
+    });
+  } catch (error) {
+    const cleanupErrors: unknown[] = [];
+    try {
+      await catalog.discardUnacceptedCreate({
+        conversationId: conversation.conversationId,
+        piSessionId: durable.piSessionId
+      });
+    } catch (cleanupError) {
+      cleanupErrors.push(cleanupError);
+    }
+    try {
+      discardCreatedDurablePiSession({
+        sessionRoot: catalog.sessionRootPath,
+        sessionFile: durable.sessionFile,
+        piSessionId: durable.piSessionId
+      });
+    } catch (cleanupError) {
+      cleanupErrors.push(cleanupError);
+    }
+    if (cleanupErrors.length) {
+      throw new AggregateError(
+        [error, ...cleanupErrors],
+        "会话登记失败，且新建 Conversation 的回滚未完成"
+      );
+    }
+    throw error;
+  }
+}
+
 export interface DerivePiNativeConversationInput {
   sourceConversationId: string;
   targetConversationId: string;
@@ -619,6 +687,7 @@ interface ActiveProductRun {
   requestText: string;
   commandKind: "chat" | "ask" | "maintain";
   selectedSkillIds: readonly string[];
+  knowledgeReviewWriteScope: PiKnowledgeReviewWriteScope | null;
   requiresFreshnessVerification: boolean;
   successfulCapabilityIds: Set<string>;
   projectId?: string;
@@ -787,26 +856,11 @@ export class PiNativeConversationRuntime {
     input: CreatePiNativeConversationInput
   ): Promise<Readonly<PiConversationCatalogEntry>> {
     this.assertReady();
-    const existing = await this.catalog.get(input.conversationId);
-    if (existing) return existing;
-    const createdAt = input.createdAt ?? this.now();
-    const durable = createDurablePiSession({
-      api: this.options.sessionApi,
-      sessionRoot: this.catalog.sessionRootPath,
-      cwd: input.cwd
-    });
-    return await this.catalog.upsert({
-      conversationId: input.conversationId,
-      piSessionId: durable.piSessionId,
-      vaultId: this.catalog.vaultId,
-      title: input.title,
-      status: "active",
-      defaultMemoryMode: input.defaultMemoryMode ?? "normal",
-      ...(input.defaultSkillId ? { defaultSkillId: input.defaultSkillId } : {}),
-      ...(input.journalDirectory ? { journalDirectory: input.journalDirectory } : {}),
-      createdAt,
-      updatedAt: createdAt,
-      sessionFile: durable.sessionFile
+    return await createPiConversation({
+      catalog: this.catalog,
+      sessionApi: this.options.sessionApi,
+      conversation: input,
+      now: this.now
     });
   }
 
@@ -1378,6 +1432,14 @@ export class PiNativeConversationRuntime {
     const projectId = resolveExplicitMemoryProjectId(request.text);
     const channel = new PiRuntimeEventChannel();
     this.runChannels.set(productRunId, channel);
+    const selectedSkillIds = Object.freeze(selectedRuntimeSkill
+      ? selectedRuntimeSkills.map((skill) => skill.id)
+      : request.skillId?.trim()
+        ? [request.skillId.trim()]
+        : request.skillName ? [request.skillName] : []);
+    const knowledgeReviewPolicySelected = selectedRuntimeSkill
+      ? selectedRuntimeSkills.some((skill) => skill.id === "knowledge-review")
+      : request.skillId?.trim() === "knowledge-review";
     const execution: ActiveProductRun = {
       productRunId,
       submittedAt: request.submittedAt,
@@ -1394,9 +1456,10 @@ export class PiNativeConversationRuntime {
       settlementBarrier: createSettlementBarrier(),
       requestText: request.text,
       commandKind: knowledgeCommand.kind,
-      selectedSkillIds: Object.freeze(selectedRuntimeSkill
-        ? selectedRuntimeSkills.map((skill) => skill.id)
-        : request.skillName ? [request.skillName] : []),
+      selectedSkillIds,
+      knowledgeReviewWriteScope: knowledgeReviewPolicySelected
+        ? resolveKnowledgeReviewWriteScope(request.text)
+        : null,
       requiresFreshnessVerification:
         selectedRuntimeSkill?.requiresFreshnessVerification === true,
       successfulCapabilityIds: new Set<string>(),
@@ -2410,7 +2473,8 @@ export class PiNativeConversationRuntime {
           productRunId: run.productRunId,
           vaultId: catalog.vaultId,
           userEntryId: userEntry.id,
-          userEntryText: publicMessageText(userEntry.message)
+          userEntryText: publicMessageText(userEntry.message),
+          knowledgeReviewWriteScope: run.knowledgeReviewWriteScope
         };
       },
       currentKnowledgeTurnContext: () =>
@@ -2610,10 +2674,10 @@ export class PiNativeConversationRuntime {
       now: this.now()
     });
     settleFailedKnowledgeMaintenanceToolCalls(projected, runs, branchEntries);
-    const projection = this.projector.decorate(
+    const projection = hideInternalSkillPromptPrefixes(this.projector.decorate(
       projected,
       await this.loadKnowledgeDecorations(catalog, branchEntries)
-    );
+    ));
     const active: ActiveConversation = {
       catalog,
       cwd,
@@ -4169,6 +4233,7 @@ export class PiNativeConversationRuntime {
         current: active.projection,
         event: published
       });
+      hideInternalSkillPromptPrefixes(active.projection);
       if (published.type.startsWith("tool_execution_")) {
         active.projection = this.projector.decorateToolProductState(
           active.projection,
@@ -4245,7 +4310,7 @@ export class PiNativeConversationRuntime {
       await this.loadKnowledgeDecorations(active.catalog, branchEntries)
     );
     preserveLiveAssistantTurnProjection(decorated, active.projection);
-    return decorated;
+    return hideInternalSkillPromptPrefixes(decorated);
   }
 
   private async projectionFromActive(
@@ -4600,14 +4665,14 @@ export async function readDurablePiConversationProjection(
     now: now()
   });
   settleFailedKnowledgeMaintenanceToolCalls(projected, runs, branchEntries);
-  const view = projector.decorate(
+  const view = hideInternalSkillPromptPrefixes(projector.decorate(
     projected,
     await options.loadKnowledgeDecorations?.({
       conversationId: catalog.conversationId,
       piSessionId: catalog.piSessionId,
       entries: branchEntries
     }) ?? Object.freeze([])
-  );
+  ));
   const contextLedger = latestPiContextLedger(branchEntries);
   return {
     catalog,
@@ -5046,17 +5111,45 @@ function localAssistantMessage(
 
 function publicMessageText(message: AgentMessage): string {
   const content = (message as { content?: unknown }).content;
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .filter((part): part is { type: "text"; text: string } =>
-      typeof part === "object"
-      && part !== null
-      && (part as { type?: unknown }).type === "text"
-      && typeof (part as { text?: unknown }).text === "string"
-    )
-    .map((part) => part.text)
-    .join("");
+  const text = typeof content === "string"
+    ? content
+    : Array.isArray(content)
+      ? content
+        .filter((part): part is { type: "text"; text: string } =>
+          typeof part === "object"
+          && part !== null
+          && (part as { type?: unknown }).type === "text"
+          && typeof (part as { text?: unknown }).text === "string"
+        )
+        .map((part) => part.text)
+        .join("")
+      : "";
+  return message.role === "user" ? stripInternalSkillPromptPrefix(text) : text;
+}
+
+function hideInternalSkillPromptPrefixes(
+  projection: PiChatUiViewModel
+): PiChatUiViewModel {
+  projection.messages = projection.messages.map((message) => {
+    if (message.role !== "user") return message;
+    const text = stripInternalSkillPromptPrefix(message.text);
+    return text === message.text ? message : { ...message, text };
+  });
+  return projection;
+}
+
+function stripInternalSkillPromptPrefix(text: string): string {
+  let remaining = text;
+  let stripped = false;
+  while (remaining.startsWith("<skill name=\"")) {
+    const block = remaining.match(
+      /^<skill name="[^"\r\n]+"(?: location="[^"\r\n]+")?>[\s\S]*?<\/skill>\r?\n\r?\n/u
+    );
+    if (!block) break;
+    remaining = remaining.slice(block[0].length);
+    stripped = true;
+  }
+  return stripped ? remaining : text;
 }
 
 function isValidRecentConversationMessage(message: AgentMessage): boolean {
@@ -5112,13 +5205,15 @@ function isAssistantMessage(message: AgentMessage): message is AssistantMessage 
 
 function editorTextFromUserMessage(message: AgentMessage): string {
   if (message.role !== "user") return "";
-  if (typeof message.content === "string") return message.content;
-  return message.content
-    .filter((part): part is Extract<typeof part, { type: "text" }> =>
-      part.type === "text" && typeof part.text === "string"
-    )
-    .map((part) => part.text)
-    .join("\n");
+  const text = typeof message.content === "string"
+    ? message.content
+    : message.content
+      .filter((part): part is Extract<typeof part, { type: "text" }> =>
+        part.type === "text" && typeof part.text === "string"
+      )
+      .map((part) => part.text)
+      .join("\n");
+  return stripInternalSkillPromptPrefix(text);
 }
 
 function lastAssistantEntryId(entries: readonly SessionEntry[]): string | undefined {
@@ -6219,6 +6314,40 @@ function normalizePiChatMode(value: unknown): PiChatMode {
   if (value === undefined || value === "agent") return "agent";
   if (value === "plan") return "plan";
   throw new TypeError("Pi Chat mode must be agent or plan");
+}
+
+function resolveKnowledgeReviewWriteScope(
+  text: string
+): PiKnowledgeReviewWriteScope {
+  const positiveText = positiveKnowledgeReviewSaveText(text);
+  if (!knowledgeReviewSaveIntentPattern().test(positiveText)) {
+    return "read_only";
+  }
+  const namesJournal = /\bjournal\b|日记|日志/iu.test(positiveText);
+  const namesOutputs = /\boutputs?\b|输出目录|输出文件夹/iu.test(positiveText);
+  if (namesJournal && namesOutputs) return "read_only";
+  return namesOutputs ? "outputs" : "journal";
+}
+
+function positiveKnowledgeReviewSaveText(text: string): string {
+  const normalized = text.normalize("NFKC").trim();
+  if (!normalized) return "";
+  const reviewTopic = /(?:保存|写入|写到|写进|存入|存到|记录到|记录进|归档到|落盘)|\b(?:save|write|persist|store|record|append|journal|outputs?)\b|日记|日志|输出目录|输出文件夹/iu;
+  const blocker = /(?:不要|不必|无需|不用|别|先不|暂不|暂时不|不可|禁止|不能|无法|没法|不可以|不想|不愿|拒绝|取消|放弃|还没|尚未|未确认|没有确认|待确认|犹豫|不确定|再想想|考虑一下|稍后|晚点|以后|回头|等会儿?|待会儿?|下次|改天|延后|推迟|暂缓|之后再|再说)|\b(?:do\s+not|don't|dont|never|without|no\s+need\s+to|cannot|can't|cant|unable|not\s+yet|unconfirmed|decline|refuse|cancel|hesitate|unsure|maybe|later|eventually|postpone|delay|another\s+time)\b/iu;
+  if (reviewTopic.test(normalized) && blocker.test(normalized)) return "";
+  const question = /[吗？?]/u;
+  const questionLead = /(?:是否|能否|可否|要不要|能不能|该不该).{0,20}(?:保存|写入|写到|写进|存入|存到|记录到|记录进|归档到|落盘)|\b(?:can|could|would|should|may)\b.{0,30}\b(?:save|write|persist|store|record|append)\b/iu;
+  return normalized
+    .split(/[,，。；;！!\n]+/u)
+    .map((clause) => clause.trim())
+    .filter(Boolean)
+    .filter((clause) => !(knowledgeReviewSaveIntentPattern().test(clause)
+      && (question.test(clause) || questionLead.test(clause))))
+    .join(" ");
+}
+
+function knowledgeReviewSaveIntentPattern(): RegExp {
+  return /(?:保存|写入|写到|写进|存入|存到|记录到|记录进|归档到|落盘)|\b(?:save|write|persist|store|record|append)\b/iu;
 }
 
 function assertValidSkillBinding(

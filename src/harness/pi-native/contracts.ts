@@ -23,6 +23,10 @@ import type {
 
 export type PiConversationMemoryMode = "normal" | "no_memory";
 export type PiChatMode = "agent" | "plan";
+export type PiKnowledgeReviewWriteScope =
+  | "read_only"
+  | "journal"
+  | "outputs";
 export type PiConversationCatalogStatus = "active" | "archived" | "deleted";
 
 export const PI_IMAGE_INPUT_UNSUPPORTED_MESSAGE =
@@ -35,7 +39,7 @@ export interface PiConversationCatalogEntry {
   title: string;
   status: PiConversationCatalogStatus;
   defaultMemoryMode: PiConversationMemoryMode;
-  /** Optional persistent Skill binding. The Skill file remains the content source. */
+  /** Optional product-owned Skill resolved again before every formal Turn. */
   defaultSkillId?: string;
   /** Journal directory frozen when a daily-journal Conversation is created. */
   journalDirectory?: string;
@@ -362,6 +366,8 @@ export interface PiChatSubmitRequest {
   /** Exact per-turn selection to map to Pi's Provider thinking level. */
   reasoning: ReasoningEffort;
   memoryMode?: PiConversationMemoryMode;
+  /** Stable Resource identity for runtime policy; never inferred from display name. */
+  skillId?: string;
   skillPath?: string;
   skillName?: string;
   /** A durable queued draft explicitly selected by the user for resubmission. */

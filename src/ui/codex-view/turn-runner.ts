@@ -689,22 +689,36 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
     }
   }
   let currentSkill: EchoInkResource | null = null;
-  if (item.skill) {
+  const defaultSkillId = session.defaultSkillId?.trim() ?? "";
+  if (defaultSkillId || item.skill) {
     try {
-      currentSkill = enabledSkillResources(
+      const enabledSkills = enabledSkillResources(
         await view.plugin.buildRuntimeEchoInkResourceCatalog()
-      ).find((skill) => skill.id === item.skill?.id) ?? null;
+      );
+      currentSkill = defaultSkillId
+        ? enabledSkills.find((skill) => resourceMatchesSkillId(
+            skill,
+            defaultSkillId
+          )) ?? null
+        : enabledSkills.find((skill) => skill.id === item.skill?.id) ?? null;
     } catch {
-      new Notice("无法确认所选 Vault Skill 的当前启用状态，本轮没有发送。");
+      new Notice(defaultSkillId
+        ? "无法确认会话默认 Skill 的当前启用状态，本轮没有发送。"
+        : "无法确认所选 Vault Skill 的当前启用状态，本轮没有发送。");
       return "failed";
     }
     if (!currentSkill) {
-      new Notice("所选 Vault Skill 已禁用或不存在，本轮没有发送。");
+      new Notice(defaultSkillId
+        ? `会话默认 Skill ${defaultSkillId} 已禁用或不存在，本轮没有发送。`
+        : "所选 Vault Skill 已禁用或不存在，本轮没有发送。");
       return "failed";
     }
   }
   const skillPath = currentSkill?.contentPath?.trim();
   const skillName = currentSkill?.name.trim();
+  const skillId = currentSkill
+    ? stableSkillIdForResource(currentSkill)
+    : "";
   if (currentSkill && (!skillPath || !skillName)) {
     new Notice("所选 Vault Skill 缺少可加载的 contentPath 或名称，本轮没有发送。");
     return "failed";
@@ -752,7 +766,7 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
       memoryMode: piChatMemoryModeForGlobalSetting(
         view.plugin.settings?.memory?.useLongTermMemory !== false
       ),
-      ...(skillPath && skillName ? { skillPath, skillName } : {}),
+      ...(skillPath && skillName ? { skillId, skillPath, skillName } : {}),
       ...(item.piDraftId ? { draftId: item.piDraftId } : {}),
       ...(maintenanceScope ? { maintenanceScope } : {}),
       ...(preparedImages.length ? { images: preparedImages } : {}),
@@ -1011,6 +1025,25 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
   }
 }
 
+export function resourceMatchesSkillId(
+  skill: Readonly<EchoInkResource>,
+  skillId: string
+): boolean {
+  const normalizedId = skillId.trim();
+  if (!normalizedId || skill.kind !== "skill") return false;
+  const resourceId = typeof skill.metadata?.resourceId === "string"
+    ? skill.metadata.resourceId.trim()
+    : "";
+  return skill.id === normalizedId || resourceId === normalizedId;
+}
+
+function stableSkillIdForResource(skill: Readonly<EchoInkResource>): string {
+  const resourceId = typeof skill.metadata?.resourceId === "string"
+    ? skill.metadata.resourceId.trim()
+    : "";
+  return resourceId || skill.id.trim();
+}
+
 function frozenTurnReasoningSelectionIsValid(
   settings: CodexViewTurnContext["plugin"]["settings"],
   selection: Pick<
@@ -1077,6 +1110,11 @@ function applyPiConversationProjection(
   target.title = projection.catalog.title;
   target.piSessionId = projection.catalog.piSessionId;
   target.defaultMemoryMode = projection.catalog.defaultMemoryMode;
+  if (projection.catalog.defaultSkillId) {
+    target.defaultSkillId = projection.catalog.defaultSkillId;
+  } else {
+    delete target.defaultSkillId;
+  }
   target.messages = projectPiImageAttachments(
     target,
     clonePiChatMessages(projection.messages)

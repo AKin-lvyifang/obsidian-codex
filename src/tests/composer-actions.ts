@@ -410,6 +410,7 @@ export async function runComposerActionTests(): Promise<void> {
     assert.match(turnRunnerSource, /preparedImages\.length/u);
     await assertExactComposerProviderModelSelection();
     assertAdaptiveComposerReasoning();
+    assertDefaultSkillSettingsNormalization();
     console.log("PASS conversation-ui: composer actions, compact attachments, and exact Provider/model selection preserve send semantics");
   } finally {
     (globalThis as unknown as { document?: Document }).document = originalDocument;
@@ -425,6 +426,25 @@ export async function runComposerActionTests(): Promise<void> {
         originalMutationObserver;
     }
   }
+}
+
+function assertDefaultSkillSettingsNormalization(): void {
+  const normalized = normalizeSettingsData({
+    ...structuredClone(DEFAULT_SETTINGS),
+    productGeneration: "pi-agent-product-v1",
+    sessions: [{
+      id: "review-session",
+      title: "Knowledge review",
+      kind: "chat",
+      defaultSkillId: "  knowledge-review  ",
+      cwd: "/disposable-vault",
+      messages: [],
+      createdAt: 1,
+      updatedAt: 1
+    }],
+    activeSessionId: "review-session"
+  }).settings;
+  assert.equal(normalized.sessions[0]?.defaultSkillId, "knowledge-review");
 }
 
 function assertAdaptiveComposerReasoning(): void {

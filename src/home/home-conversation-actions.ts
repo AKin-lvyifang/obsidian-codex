@@ -2,6 +2,9 @@ import { dateKey } from "./home-workbench-model";
 
 export type HomeConversationAction = "daily" | "revisit";
 
+export const HOME_REVIEW_PROMPT =
+  "请从我最近积累和修改的知识中，找出 3 个值得重新思考的主题。先说明它们为什么值得回看，等我选择后再带我逐步复盘；未经我确认，不要写入笔记。";
+
 export const HOME_DAILY_TITLES = Object.freeze([
   "今天，想留下些什么？",
   "把今天说给我听",
@@ -32,17 +35,6 @@ export function homeConversationTitle(
   const titles = action === "daily" ? HOME_DAILY_TITLES : HOME_REVISIT_TITLES;
   const seed = `${dateKey(now)}\u0000${vaultName.trim()}\u0000${action}`;
   return titles[stableTextHash(seed) % titles.length];
-}
-
-export function buildReviewConversationDraft(now = new Date()): string {
-  return [
-    "/review",
-    "",
-    "请先从我最近积累和修改的知识中，推荐 3 个值得复盘的知识主题，并让我只选择一个继续。",
-    "在我选择主题并明确确认写入前，不要创建、改写或追加任何文件。",
-    `确认后，默认把复盘结论写入 journal/${dateKey(now)}.md 的“知识复盘”部分；如果文件已存在，先读取并保留原内容。`,
-    "是否另外整理到 outputs 由我决定；没有获得我的选择时，不要擅自创建 outputs 文件。"
-  ].join("\n");
 }
 
 function stableTextHash(value: string): number {

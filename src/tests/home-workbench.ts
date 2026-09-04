@@ -39,10 +39,10 @@ import {
   openObsidianLocalGraphLeaf
 } from "../home/open-native-graph";
 import {
-  buildReviewConversationDraft,
   HOME_DAILY_MESSAGE,
   HOME_DAILY_TITLES,
   HOME_REVISIT_MESSAGE,
+  HOME_REVIEW_PROMPT,
   HOME_REVISIT_TITLES,
   homeConversationTitle
 } from "../home/home-conversation-actions";
@@ -144,7 +144,6 @@ async function assertHomeConversationLaunchFlow(): Promise<void> {
 
 function assertHomeConversationActions(): void {
   const now = new Date(2026, 8, 2, 9, 7);
-  const reviewDraft = buildReviewConversationDraft(now);
 
   assert.equal(HOME_DAILY_TITLES.length, 6);
   assert.equal(HOME_REVISIT_TITLES.length, 6);
@@ -164,11 +163,11 @@ function assertHomeConversationActions(): void {
     HOME_REVISIT_MESSAGE,
     "从我的长期记忆里，找一件没说完的事，我们接着聊。"
   );
-  assert.match(reviewDraft, /^\/review\n/u);
-  assert.match(reviewDraft, /从我最近积累和修改的知识中，推荐 3 个值得复盘的知识主题/u);
-  assert.match(reviewDraft, /选择主题并明确确认写入前/u);
-  assert.match(reviewDraft, /journal\/2026-09-02\.md 的“知识复盘”部分/u);
-  assert.match(reviewDraft, /是否另外整理到 outputs 由我决定/u);
+  assert.equal(
+    HOME_REVIEW_PROMPT,
+    "请从我最近积累和修改的知识中，找出 3 个值得重新思考的主题。先说明它们为什么值得回看，等我选择后再带我逐步复盘；未经我确认，不要写入笔记。"
+  );
+  assert.doesNotMatch(HOME_REVIEW_PROMPT, /\/review/u);
 }
 
 function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
@@ -296,11 +295,14 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
   assert.match(view, /entry\.id === "journal"\)[\s\S]*this\.openJournalTemplate\(new Date\(\)\)/u);
   assert.match(view, /entry\.id === "review"\)[\s\S]*this\.openReviewConversation\(\)/u);
   assert.doesNotMatch(view, /runReview\("knowledge-base"\)/u);
-  assert.match(view, /private async openReviewConversation\(\)[\s\S]*createDraftSession\([\s\S]*buildReviewConversationDraft\(now\)/u);
-  assert.doesNotMatch(
-    view.match(/private async openReviewConversation\([\s\S]*?\n  \}/u)?.[0] ?? "",
-    /sendMessage|Provider|runReview|\.create\(|\.modify\(/u
+  const reviewSource = view.match(
+    /private async openReviewConversation\([\s\S]*?\n  \}/u
+  )?.[0] ?? "";
+  assert.match(
+    reviewSource,
+    /createAndStartGuidedSession\(\{[\s\S]*title: `知识复盘 · \$\{dateKey\(now\)\}`,[\s\S]*prompt: HOME_REVIEW_PROMPT,[\s\S]*defaultSkillId: "knowledge-review"/u
   );
+  assert.doesNotMatch(reviewSource, /createDraftSession|buildReviewConversationDraft|runReview/u);
   assert.match(view, /private async openJournal\(date: Date\)[\s\S]*existing instanceof TFile[\s\S]*openFile\(existing,[\s\S]*this\.openJournalTemplate\(date\)/u);
   assert.doesNotMatch(conversationActions, /app\.vault|adapter\.|\.create\(|\.modify\(|sendMessage|Provider/u);
 

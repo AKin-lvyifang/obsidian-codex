@@ -6,6 +6,7 @@ import {
   copyFile,
   mkdtemp,
   readFile,
+  readdir,
   realpath,
   rm
 } from "node:fs/promises";
@@ -30,7 +31,10 @@ import type {
 import { FileConversationCatalog } from "../../harness/pi-native/file-conversation-catalog";
 import { createPiLocalConversation } from "../../harness/pi-native/pi-local-data-service";
 import { FileProductRunStore } from "../../harness/pi-native/file-product-run-store";
-import { PiNativeFileStoreError } from "../../harness/pi-native/file-store-utils";
+import {
+  PiNativeFileStoreError,
+  piNativeVaultFileLayout
+} from "../../harness/pi-native/file-store-utils";
 import {
   PiNativeConversationRuntime,
   PiNativeConversationRuntimeError,
@@ -46,6 +50,7 @@ import type {
   PiChatPreparedImage,
   PiChatSubmitRequest,
   PiChatRuntimeEvent,
+  PiKnowledgeReviewWriteScope,
   PiKnowledgeRuntimePort,
   PiKnowledgeReference
 } from "../../harness/pi-native/contracts";
@@ -64,7 +69,8 @@ import {
   PiUserQuestionToolSecurity
 } from "../../harness/pi-native/pi-user-question-tool";
 import {
-  createPiVaultToolSecurityAdapter
+  createPiVaultToolSecurityAdapter,
+  PiVaultToolAuthorizationError
 } from "../../harness/pi-native/pi-vault-tool-security-extension";
 import {
   closeReasoningSummary,
@@ -111,6 +117,7 @@ export async function runPiNativeConversationRuntimeTests(): Promise<void> {
   await assertRelatedNormalChatPreflightsAndReadsKnowledge();
   await assertZeroReferenceNormalChatSkipsUsageAndSettles();
   await assertKnowledgeUsageFailureRemainsTerminal();
+  await assertKnowledgeReviewWritePolicyPrecedesApproval();
   await assertUserQuestionUsesCentralFailClosedSecurity();
   assertReasoningSummaryLifecycleSemantics();
   await assertReasoningSummaryRuntimeLifecycle();
@@ -118,6 +125,7 @@ export async function runPiNativeConversationRuntimeTests(): Promise<void> {
   await assertReasoningSelectionFailsClosedBeforePiPrompt();
   assertKnowledgeMaintenanceRequiresExplicitCommand();
   await assertProjectionAndCatalogManagementStayAgentSessionFree();
+  await assertConversationCreateRollsBackAfterCatalogReadbackFailure();
   await assertFailedAssistantHistoryIsDurableButExcludedFromMemory();
   await assertKnowledgeAskUsesAgentAndReadOnlyTools();
   await assertAskSourceAttributionCapturesOnlyInjectedPrimaryMemory();
@@ -128,6 +136,7 @@ export async function runPiNativeConversationRuntimeTests(): Promise<void> {
   await runPiNativeDurableSettlementProjectionRegressionTest();
   await assertAgentSessionWarningsUseConversationSupport();
   await assertSkillPromptAndBindingValidation();
+  await assertKnowledgeReviewWriteScopeIsTurnBound();
   await assertDurableDraftRequiresExplicitSuccessfulResubmission();
   await assertImagePromptsRequireCapabilityAndPreserveOrder();
   await assertDocumentSnapshotsAreTurnBoundAndValidatedBeforePrompt();
@@ -200,6 +209,14 @@ async function assertConversationDefaultSkillPriorityAndTurnContext(): Promise<v
     );
     fixture.latestSession().finishSuccessful("先聊聊今天发生的事");
     assert.equal((await first.result).terminalState, "completed");
+    const firstProjection = await fixture.runtime.readProjection(conversationId);
+    assert.deepEqual(
+      firstProjection.messages
+        .filter((message) => message.role === "user")
+        .map((message) => message.text),
+      ["想把今天发生的事记下来。"],
+      "the internal daily-journal procedure must not appear in Conversation UI"
+    );
 
     revision = "b".repeat(64);
     const second = await fixture.submit({
@@ -1100,6 +1117,131 @@ async function assertReasoningSelectionFailsClosedBeforePiPrompt(): Promise<void
   });
 }
 
+async function assertKnowledgeReviewWritePolicyPrecedesApproval(): Promise<void> {
+  let scope: PiKnowledgeReviewWriteScope | null = "read_only";
+  const authorizationCalls: string[] = [];
+  const adapter = createPiVaultToolSecurityAdapter({
+    authorization: {
+      async authorize(input) {
+        authorizationCalls.push(input.toolCallId);
+        throw new PiVaultToolAuthorizationError("approval_denied");
+      }
+    },
+    currentKnowledgeReviewWriteScope: () => scope,
+    resultCorrection: {
+      async correct() {
+        throw new Error("unexpected_vault_result_correction");
+      }
+    }
+  });
+  const handlers = new Map<string, (...args: unknown[]) => unknown>();
+  await adapter.inlineExtension.factory({
+    on(name: string, handler: unknown) {
+      handlers.set(name, handler as (...args: unknown[]) => unknown);
+    }
+  } as never);
+  const handleToolCall = handlers.get("tool_call");
+  assert.ok(handleToolCall);
+  const call = async (
+    toolName: string,
+    toolCallId: string,
+    input: Readonly<Record<string, unknown>>
+  ) => await handleToolCall({ toolName, toolCallId, input }, {
+    signal: undefined
+  });
+  const blocked = {
+    block: true,
+    reason: "tool_policy_blocked"
+  } as const;
+  const reachedApproval = {
+    block: true,
+    reason: "approval_denied"
+  } as const;
+
+  assert.deepEqual(await call("note_create", "review-readonly-create", {
+    relativePath: "journal/2026-09-04.md",
+    content: "must not reach approval"
+  }), blocked);
+  assert.deepEqual(await call("note_update", "review-readonly-update", {
+    relativePath: "journal/2026-09-04.md",
+    expectedVersion: `sha256:${"a".repeat(64)}`,
+    content: "must not reach approval"
+  }), blocked);
+  assert.deepEqual(authorizationCalls, [],
+    "read-only Review turns block model-initiated writes before approval");
+
+  scope = "journal";
+  assert.deepEqual(await call("note_create", "review-journal-wrong-root", {
+    relativePath: "outputs/review.md",
+    content: "wrong root"
+  }), blocked);
+  assert.deepEqual(await call("note_create", "review-journal-absolute", {
+    relativePath: "/journal/review.md",
+    content: "absolute"
+  }), blocked);
+  assert.deepEqual(await call("note_create", "review-journal-traversal", {
+    relativePath: "journal/../outputs/review.md",
+    content: "traversal"
+  }), blocked);
+  assert.deepEqual(await call("metadata_update", "review-journal-metadata", {
+    relativePath: "journal/2026-09-04.md",
+    expectedVersion: `sha256:${"b".repeat(64)}`,
+    patch: { set: { reviewed: true } }
+  }), blocked);
+  assert.deepEqual(await call("note_move", "review-journal-move", {
+    sourcePath: "journal/a.md",
+    targetPath: "journal/b.md",
+    expectedVersion: `sha256:${"c".repeat(64)}`
+  }), blocked);
+  assert.deepEqual(await call("note_delete", "review-journal-delete", {
+    relativePath: "journal/a.md",
+    expectedVersion: `sha256:${"d".repeat(64)}`
+  }), blocked);
+  assert.deepEqual(await call("note_create", "review-journal-allowed", {
+    relativePath: "journal/2026-09-04.md",
+    content: "approved candidate"
+  }), reachedApproval);
+  assert.deepEqual(await call("note_update", "review-journal-update-allowed", {
+    relativePath: "journal/2026-09-04.md",
+    expectedVersion: `sha256:${"e".repeat(64)}`,
+    content: "approved candidate"
+  }), reachedApproval);
+
+  scope = "outputs";
+  assert.deepEqual(await call("note_create", "review-outputs-wrong-root", {
+    relativePath: "journal/2026-09-04.md",
+    content: "wrong root"
+  }), blocked);
+  assert.deepEqual(await call("note_create", "review-outputs-allowed", {
+    relativePath: "outputs/reviews/knowledge-review.md",
+    content: "approved candidate"
+  }), reachedApproval);
+  assert.deepEqual(await call("note_update", "review-outputs-update-allowed", {
+    relativePath: "outputs/reviews/knowledge-review.md",
+    expectedVersion: `sha256:${"f".repeat(64)}`,
+    content: "approved candidate"
+  }), reachedApproval);
+
+  scope = null;
+  assert.deepEqual(await call("note_create", "ordinary-create", {
+    relativePath: "projects/ordinary.md",
+    content: "ordinary behavior"
+  }), reachedApproval);
+  assert.deepEqual(await call("metadata_update", "ordinary-metadata", {
+    relativePath: "projects/ordinary.md",
+    expectedVersion: `sha256:${"0".repeat(64)}`,
+    patch: { set: { status: "active" } }
+  }), reachedApproval);
+  assert.deepEqual(authorizationCalls, [
+    "review-journal-allowed",
+    "review-journal-update-allowed",
+    "review-outputs-allowed",
+    "review-outputs-update-allowed",
+    "ordinary-create",
+    "ordinary-metadata"
+  ], "only allowed Review targets and ordinary Tools enter existing approval");
+}
+
 async function assertUserQuestionUsesCentralFailClosedSecurity(): Promise<void> {
   const questionSecurity = new PiUserQuestionToolSecurity();
   const adapter = createPiVaultToolSecurityAdapter({
@@ -1108,6 +1250,7 @@ async function assertUserQuestionUsesCentralFailClosedSecurity(): Promise<void> 
         throw new Error("unexpected_vault_authorization");
       }
     },
+    currentKnowledgeReviewWriteScope: () => null,
     additionalToolSecurities: [questionSecurity],
     resultCorrection: {
       async correct() {
@@ -1557,6 +1700,100 @@ Promise<void> {
     assert.equal(fixture.sessions.length, 1, "opening must activate its AgentSession");
     await fixture.runtime.switchConversation("history-a", "history-b");
     assert.equal(fixture.sessions.length, 2, "switching must activate the target AgentSession");
+  });
+}
+
+async function assertConversationCreateRollsBackAfterCatalogReadbackFailure():
+Promise<void> {
+  await withFixture([], async (fixture) => {
+    const existing = await fixture.runtime.createConversation({
+      conversationId: "existing-before-create-rejection",
+      title: "Existing conversation",
+      cwd: fixture.root,
+      createdAt: 1
+    });
+    const existingSessionBytes = await readFile(existing.sessionFile, "utf8");
+    const layout = piNativeVaultFileLayout(
+      fixture.catalog.storageRootPath,
+      fixture.catalog.vaultId
+    );
+    const beforeSessions = (await readdir(layout.sessionRootPath)).sort();
+    const beforeConversationClaims = (
+      await readdir(layout.conversationBindingsRootPath)
+    ).sort();
+    const beforePiSessionClaims = (
+      await readdir(layout.piSessionBindingsRootPath)
+    ).sort();
+    const originalUpsert = fixture.catalog.upsert.bind(fixture.catalog);
+    let rejectedPiSessionId = "";
+    let rejectedSessionFile = "";
+    fixture.catalog.upsert = async (input) => {
+      const persisted = await originalUpsert(input);
+      if (input.conversationId === "catalog-readback-rejected-create") {
+        rejectedPiSessionId = persisted.piSessionId;
+        rejectedSessionFile = persisted.sessionFile;
+        throw new PiNativeFileStoreError(
+          "readback-diverged",
+          "simulated Catalog readback rejection"
+        );
+      }
+      return persisted;
+    };
+
+    try {
+      await assert.rejects(
+        fixture.runtime.createConversation({
+          conversationId: "catalog-readback-rejected-create",
+          title: "Rejected conversation",
+          cwd: fixture.root,
+          createdAt: 2
+        }),
+        (error: unknown) => error instanceof PiNativeFileStoreError
+          && error.code === "readback-diverged"
+      );
+    } finally {
+      fixture.catalog.upsert = originalUpsert;
+    }
+
+    assert.ok(rejectedPiSessionId, "the rejected create must reach Catalog persistence");
+    assert.ok(rejectedSessionFile, "the rejected create must create a durable Session");
+    const reopenedCatalog = new FileConversationCatalog({
+      storageRootPath: fixture.catalog.storageRootPath,
+      vaultId: fixture.catalog.vaultId
+    });
+    await reopenedCatalog.initialize();
+    assert.deepEqual(await reopenedCatalog.list(), [existing]);
+    await assert.rejects(
+      readFile(rejectedSessionFile, "utf8"),
+      (error: unknown) => error instanceof Error
+        && "code" in error
+        && (error as NodeJS.ErrnoException).code === "ENOENT"
+    );
+    assert.deepEqual(
+      (await readdir(layout.sessionRootPath)).sort(),
+      beforeSessions,
+      "a rejected Catalog readback must remove only its new Session JSONL"
+    );
+    assert.deepEqual(
+      (await readdir(layout.conversationBindingsRootPath)).sort(),
+      beforeConversationClaims,
+      "a rejected create must remove its Conversation binding claim"
+    );
+    assert.deepEqual(
+      (await readdir(layout.piSessionBindingsRootPath)).sort(),
+      beforePiSessionClaims,
+      "a rejected create must remove its Pi Session binding claim"
+    );
+    assert.equal(
+      await readFile(existing.sessionFile, "utf8"),
+      existingSessionBytes,
+      "rollback must not rewrite an existing Conversation Session"
+    );
+    assert.deepEqual(await reopenedCatalog.get(existing.conversationId), existing);
+    assert.equal(
+      await reopenedCatalog.get("catalog-readback-rejected-create"),
+      null
+    );
   });
 }
 
@@ -2750,8 +2987,10 @@ Promise<void> {
       conversationId: sourceConversationId,
       title: "源会话",
       cwd: fixture.root,
+      defaultSkillId: "knowledge-review",
       createdAt: 2
     });
+    assert.equal(sourceCatalog.defaultSkillId, "knowledge-review");
     await fixture.runtime.activateConversation(sourceConversationId);
 
     const first = await fixture.submit({
@@ -2784,6 +3023,7 @@ Promise<void> {
     });
     assert.equal(fromUser.anchorRole, "user");
     assert.equal(fromUser.editorText, "需要重新编辑的第二条提问");
+    assert.equal(fromUser.projection.catalog.defaultSkillId, "knowledge-review");
     assert.notEqual(fromUser.projection.catalog.piSessionId, sourceCatalog.piSessionId);
     assert.notEqual(fromUser.projection.catalog.sessionFile, sourceSessionFileBefore);
     assert.deepEqual(
@@ -2801,6 +3041,7 @@ Promise<void> {
     });
     assert.equal(fromAssistant.anchorRole, "assistant");
     assert.equal(fromAssistant.editorText, "");
+    assert.equal(fromAssistant.projection.catalog.defaultSkillId, "knowledge-review");
     assert.deepEqual(
       visibleConversationText(fromAssistant.projection),
       ["user:第一条提问", "assistant:第一条回复"],
@@ -2837,22 +3078,45 @@ Promise<void> {
     await reopened.initialize();
     try {
       assert.equal((await reopened.listConversations(["active"])).length, 3);
+      const reopenedFromUser = await reopened.activateConversation("derive-from-user");
+      assert.equal(reopenedFromUser.catalog.defaultSkillId, "knowledge-review");
       assert.deepEqual(
-        visibleConversationText(
-          await reopened.activateConversation("derive-from-user")
-        ),
+        visibleConversationText(reopenedFromUser),
         ["user:第一条提问", "assistant:第一条回复"],
         "the user-anchor Conversation must survive a full runtime restart"
       );
+      const reopenedFromAssistant = await reopened.activateConversation(
+        "derive-from-assistant"
+      );
+      assert.equal(reopenedFromAssistant.catalog.defaultSkillId, "knowledge-review");
       assert.deepEqual(
-        visibleConversationText(
-          await reopened.activateConversation("derive-from-assistant")
-        ),
+        visibleConversationText(reopenedFromAssistant),
         ["user:第一条提问", "assistant:第一条回复"],
         "a fresh runtime must restore the independently cataloged Pi Session prefix"
       );
     } finally {
       await reopened.shutdown();
+    }
+  }, {
+    skills: {
+      selectForTask: async () => null,
+      resolveById: async ({ id }) => {
+        assert.equal(id, "knowledge-review");
+        const selected = Object.freeze({
+          id,
+          skillPath: "/fixture/skills/knowledge-review/SKILL.md",
+          skillName: id
+        });
+        return Object.freeze({
+          ...selected,
+          revision: "a".repeat(64),
+          skills: Object.freeze([selected]),
+          applicableSkillIds: Object.freeze([id]),
+          requiresFreshnessVerification: false
+        });
+      },
+      recordUse: async () => undefined,
+      reviewCompletedTask: async () => undefined
     }
   });
 }
@@ -4052,6 +4316,74 @@ async function assertSkillPromptAndBindingValidation(): Promise<void> {
   );
 }
 
+async function assertKnowledgeReviewWriteScopeIsTurnBound(): Promise<void> {
+  const cases: readonly Readonly<{
+    text: string;
+    expected: PiKnowledgeReviewWriteScope;
+  }>[] = [
+    { text: "好的", expected: "read_only" },
+    { text: "继续", expected: "read_only" },
+    { text: "下一个", expected: "read_only" },
+    { text: "Journal", expected: "read_only" },
+    { text: "Outputs", expected: "read_only" },
+    { text: "不要保存到 Outputs", expected: "read_only" },
+    { text: "继续，我还没确认保存", expected: "read_only" },
+    { text: "好的，但现在不能保存", expected: "read_only" },
+    { text: "下一个，我不想保存", expected: "read_only" },
+    { text: "继续，我拒绝保存", expected: "read_only" },
+    { text: "好的，稍后再保存", expected: "read_only" },
+    { text: "下一个，我还在犹豫是否保存", expected: "read_only" },
+    { text: "能否保存到 Journal？", expected: "read_only" },
+    { text: "确认保存", expected: "journal" },
+    { text: "确认保存，但不要写入 Outputs", expected: "read_only" },
+    { text: "我还没想好，保存到 Journal", expected: "read_only" },
+    { text: "写入今天日记", expected: "journal" },
+    { text: "请保存到 Outputs", expected: "outputs" },
+    { text: "不要写 Journal，只保存到 Outputs", expected: "read_only" },
+    { text: "请同时保存到 Journal 和 Outputs", expected: "read_only" }
+  ];
+  await withFixture(
+    cases.map((_, index) => `review-scope-${index}`).concat("ordinary-scope"),
+    async (fixture) => {
+      const binding = {
+        skillId: "knowledge-review",
+        skillPath: path.join(fixture.root, "knowledge-review", "SKILL.md"),
+        skillName: "knowledge-review"
+      } as const;
+      for (const testCase of cases) {
+        const handle = await fixture.submit({
+          conversationId: "review-write-scope",
+          text: testCase.text,
+          submittedAt: 10,
+          ...binding
+        });
+        assert.equal(
+          fixture.currentToolExecution().knowledgeReviewWriteScope,
+          testCase.expected,
+          testCase.text
+        );
+        fixture.latestSession().finishSuccessful("review turn complete");
+        await handle.result;
+      }
+
+      const ordinary = await fixture.submit({
+        conversationId: "ordinary-write-scope",
+        text: "请保存到 Outputs",
+        submittedAt: 11,
+        skillPath: path.join(fixture.root, "ordinary", "SKILL.md"),
+        skillName: "knowledge-review"
+      });
+      assert.equal(
+        fixture.currentToolExecution().knowledgeReviewWriteScope,
+        null,
+        "a display-name collision without the stable Skill ID keeps ordinary behavior"
+      );
+      fixture.latestSession().finishSuccessful("ordinary turn complete");
+      await ordinary.result;
+    }
+  );
+}
+
 async function assertProductRunCreateFailureCleansRuntime(): Promise<void> {
   await assertProductRunPersistenceFailure("create");
 }
@@ -4678,6 +5010,9 @@ interface RuntimeFixture {
   currentKnowledgeTurn(): Readonly<PiNativeKnowledgeTurnContext> | null;
   currentSkillTurn(): Readonly<PiNativeSkillTurnContext> | null;
   currentDocumentTurn(): Readonly<PiNativeDocumentTurnContext> | null;
+  currentToolExecution(): ReturnType<
+    PiNativeAgentSessionFactoryInput["currentToolExecutionContext"]
+  >;
   currentSuccessfulExternalReadTools(): readonly string[];
   reportMemoryRecall(input: Parameters<NonNullable<
     PiNativeAgentSessionFactoryInput["reportMemoryRecallProgress"]
@@ -4716,6 +5051,8 @@ async function withFixture(
     (() => Readonly<PiNativeSkillTurnContext> | null) | null = null;
   let currentDocumentTurnReader:
     (() => Readonly<PiNativeDocumentTurnContext> | null) | null = null;
+  let currentToolExecutionReader:
+    PiNativeAgentSessionFactoryInput["currentToolExecutionContext"] | null = null;
   let currentSuccessfulExternalReadToolsReader:
     (() => readonly string[]) | null = null;
   let memoryRecallReporter: PiNativeAgentSessionFactoryInput["reportMemoryRecallProgress"] = undefined;
@@ -4753,6 +5090,7 @@ async function withFixture(
       currentKnowledgeTurnReader = input.currentKnowledgeTurnContext ?? null;
       currentSkillTurnReader = input.currentSkillTurnContext ?? null;
       currentDocumentTurnReader = input.currentDocumentTurnContext ?? null;
+      currentToolExecutionReader = input.currentToolExecutionContext;
       currentSuccessfulExternalReadToolsReader =
         input.currentSuccessfulExternalReadToolNames;
       memoryRecallReporter = input.reportMemoryRecallProgress;
@@ -4833,6 +5171,10 @@ async function withFixture(
       currentKnowledgeTurn: () => currentKnowledgeTurnReader?.() ?? null,
       currentSkillTurn: () => currentSkillTurnReader?.() ?? null,
       currentDocumentTurn: () => currentDocumentTurnReader?.() ?? null,
+      currentToolExecution: () => {
+        assert.ok(currentToolExecutionReader);
+        return currentToolExecutionReader();
+      },
       currentSuccessfulExternalReadTools: () =>
         currentSuccessfulExternalReadToolsReader?.() ?? [],
       reportMemoryRecall: async (input) => {

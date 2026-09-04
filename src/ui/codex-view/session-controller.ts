@@ -38,13 +38,10 @@ export interface CodexSessionHost {
   renameSession(session: StoredSession): Promise<void>;
   archiveSession(sessionId: string): Promise<void>;
   deleteSession(sessionId: string): Promise<void>;
-  createSession(
-    title?: string,
-    options?: CreateConversationSessionOptions
-  ): Promise<StoredSession>;
+  createSession(title?: string, options?: CreateSessionOptions): Promise<StoredSession>;
 }
 
-export interface CreateConversationSessionOptions {
+export interface CreateSessionOptions {
   readonly defaultSkillId?: string;
   readonly journalDirectory?: string;
 }
@@ -452,6 +449,35 @@ export async function deleteSession(host: CodexSessionHost, sessionId: string): 
   await deleteSessions(host, [sessionId]);
 }
 
+export async function discardUnacceptedSession(
+  host: CodexSessionHost,
+  sessionId: string
+): Promise<boolean> {
+  const session = host.plugin.settings.sessions.find(
+    (candidate) => candidate.id === sessionId
+  );
+  if (
+    !session
+    || session.messages.length > 0
+    || (host.running && host.activeRunSessionId === sessionId)
+  ) return false;
+  const fallbackGeneration = host.plugin.settings.activeSessionId === sessionId
+    || isConversationSelectionTarget(host, sessionId)
+    ? beginConversationSelection(host)
+    : undefined;
+  await host.plugin.setPiConversationStatus(sessionId, "deleted");
+  host.turnQueue.clearSessionQueue(sessionId);
+  removeConversationShell(host, sessionId);
+  const fallbackError = await activateFallbackConversation(
+    host,
+    fallbackGeneration
+  );
+  await persistPiConversationShells(host);
+  renderConversationShellChange(host);
+  if (fallbackError) throw fallbackError;
+  return true;
+}
+
 export async function restoreArchivedConversation(
   host: CodexSessionHost,
   entry: Readonly<PiConversationCatalogEntry>
@@ -632,7 +658,7 @@ export async function ensureInitialConversation(
 export async function createSession(
   host: CodexSessionHost,
   title = "新会话",
-  options: CreateConversationSessionOptions = {}
+  options: CreateSessionOptions = {}
 ): Promise<StoredSession> {
   return await createSessionForSelection(
     host,
@@ -646,37 +672,102 @@ async function createSessionForSelection(
   host: CodexSessionHost,
   title: string,
   generation: number,
-  options: CreateConversationSessionOptions = {}
+  options: CreateSessionOptions = {}
 ): Promise<StoredSession> {
   const conversationId = newId("conversation");
+  let createdConversationId = conversationId;
+  const previousActiveSessionId = host.plugin.settings.activeSessionId;
+  let catalogCreated = false;
   bindConversationSelectionTarget(host, generation, conversationId);
-  const catalogEntry = await host.plugin.createPiConversation({
-    conversationId,
-    title,
-    cwd: host.plugin.getVaultPath(),
-    defaultMemoryMode: "normal",
-    ...(options.defaultSkillId
-      ? { defaultSkillId: options.defaultSkillId }
-      : {}),
-    ...(options.journalDirectory
-      ? { journalDirectory: options.journalDirectory }
-      : {})
-  });
-  const session = createPiConversationShell(host, catalogEntry);
-  host.plugin.settings.sessions.push(session);
-  const outcome = await enqueueConversationTransition(
-    host,
-    async () => await activateSessionInTransitionLane(
+  try {
+    const catalogEntry = await host.plugin.createPiConversation({
+      conversationId,
+      title,
+      cwd: host.plugin.getVaultPath(),
+      defaultMemoryMode: "normal",
+      ...(options.defaultSkillId
+        ? { defaultSkillId: options.defaultSkillId }
+        : {}),
+      ...(options.journalDirectory
+        ? { journalDirectory: options.journalDirectory }
+        : {})
+    });
+    createdConversationId = catalogEntry.conversationId;
+    catalogCreated = true;
+    const session = createPiConversationShell(host, catalogEntry);
+    host.plugin.settings.sessions.push(session);
+    const outcome = await enqueueConversationTransition(
       host,
-      session,
-      generation
-    )
-  );
-  await persistPiConversationShells(host);
-  if (outcome.status === "selected" && "error" in outcome) {
-    throw outcome.error;
+      async () => await activateSessionInTransitionLane(
+        host,
+        session,
+        generation
+      )
+    );
+    if (outcome.status === "selected" && "error" in outcome) {
+      throw outcome.error;
+    }
+    await persistPiConversationShells(host);
+    return session;
+  } catch (error) {
+    if (catalogCreated) {
+      await rollbackFailedSessionCreation(
+        host,
+        createdConversationId,
+        previousActiveSessionId,
+        generation,
+        error
+      );
+    }
+    throw error;
   }
-  return session;
+}
+
+async function rollbackFailedSessionCreation(
+  host: CodexSessionHost,
+  conversationId: string,
+  previousActiveSessionId: string,
+  generation: number,
+  originalError: unknown
+): Promise<void> {
+  const session = host.plugin.settings.sessions.find(
+    (candidate) => candidate.id === conversationId
+  );
+  if (session?.messages.length) return;
+
+  const cleanupErrors: unknown[] = [];
+  try {
+    await host.plugin.setPiConversationStatus(conversationId, "deleted");
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+  host.turnQueue.clearSessionQueue(conversationId);
+  removeConversationShell(host, conversationId);
+  if (host.plugin.settings.activeSessionId === conversationId) {
+    host.plugin.settings.activeSessionId = host.plugin.settings.sessions.some(
+      (candidate) => candidate.id === previousActiveSessionId
+    )
+      ? previousActiveSessionId
+      : "";
+  }
+  if (isCurrentConversationSelection(host, generation)) {
+    beginConversationSelection(
+      host,
+      host.plugin.settings.activeSessionId || undefined
+    );
+  }
+  try {
+    await persistPiConversationShells(host);
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+  renderConversationShellChange(host);
+  if (cleanupErrors.length) {
+    throw new AggregateError(
+      [originalError, ...cleanupErrors],
+      "新会话创建失败，且未能完整回滚"
+    );
+  }
 }
 
 function derivedConversationTitle(

@@ -4282,6 +4282,38 @@ export async function runSmoothConversationUiTests(): Promise<void> {
   assert.match(draftSessionSource, /setSelectionRange\(draft\.length, draft\.length\)/u);
   assert.match(draftSessionSource, /this\.focusInput\(\)/u);
   assert.doesNotMatch(draftSessionSource, /sendMessage|enqueue|Provider/u);
+  const guidedSessionSource = codexViewSource.match(
+    /async createAndStartGuidedSession\([\s\S]*?\): Promise<StoredSession> \{[\s\S]*?\n  \}/u
+  )?.[0] ?? "";
+  assert.match(
+    guidedSessionSource,
+    /this\.guidedSessionStartInProgress[\s\S]*this\.running[\s\S]*this\.queueStartInProgress/u,
+    "guided Review rejects a duplicate click or any existing run before creating a session"
+  );
+  assert.ok(
+    guidedSessionSource.indexOf("enabledSkillResources(")
+      < guidedSessionSource.indexOf("session = await this.createSession"),
+    "the required default Skill is validated before the empty session can be created"
+  );
+  assert.match(
+    guidedSessionSource,
+    /session = await this\.createSession\(input\.title, \{[\s\S]*defaultSkillId: input\.defaultSkillId/u
+  );
+  assert.match(guidedSessionSource, /text: input\.prompt,[\s\S]*skill: null,/u);
+  assert.match(
+    guidedSessionSource,
+    /startQueuedTurnItemSafely\(item, "composer"\)/u,
+    "guided Review enters the same formal composer send chain"
+  );
+  assert.match(
+    guidedSessionSource,
+    /outcome === "failed" && item\.piUserEntryAccepted !== true[\s\S]*discardUnacceptedSession/u
+  );
+  assert.doesNotMatch(
+    guidedSessionSource,
+    /inputEl\.value\s*=|turnQueue\.enqueue|\/review/u,
+    "the guided prompt is neither left in Composer nor parked in a cross-session queue"
+  );
   assert.match(
     viewShellSource,
     /host\.messagesEl[\s\S]*?host\.taskPlanDockEl[\s\S]*?host\.interactionDockEl[\s\S]*?renderComposerShell/u,

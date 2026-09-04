@@ -57,7 +57,10 @@ export interface KnowledgeAgentSearchHit {
 }
 
 export interface KnowledgeAgentSearchRequest {
-  query: string;
+  /** Omitted only when mode=recent. */
+  query?: string;
+  /** Default keyword relevance search remains unchanged. */
+  mode?: "search" | "recent";
   kinds?: readonly KnowledgeAgentKind[];
   /** Internal dedupe for exact paths already disclosed outside the index page. */
   excludePaths?: readonly string[];
@@ -124,6 +127,8 @@ interface StoredKnowledgeEntry {
 interface StoredKnowledgeAgentIndex {
   schemaVersion: typeof KNOWLEDGE_AGENT_INDEX_SCHEMA_VERSION;
   generation: number;
+  /** Cursor generation for result sets ordered by recordedAt metadata. */
+  recentGeneration: number;
   updatedAt: number;
   entries: Record<string, StoredKnowledgeEntry>;
 }
@@ -137,6 +142,7 @@ interface CandidateEntry extends Omit<StoredKnowledgeEntry, "rawSources"> {
 
 interface CursorPayload {
   v: 1;
+  mode?: "recent";
   generation: number;
   queryHash: string;
   offset: number;
@@ -180,32 +186,57 @@ export class KnowledgeAgentIndex {
   ): Promise<KnowledgeAgentSearchResult> {
     await this.refresh();
     const index = this.requireCurrent();
-    const query = normalizeQuery(request.query);
+    const mode = request.mode ?? "search";
+    if (mode === "recent" && request.query !== undefined) {
+      throw new KnowledgeAgentIndexError(
+        "invalid_query",
+        "Recent Knowledge browsing must not include a query."
+      );
+    }
+    const query = mode === "recent"
+      ? ""
+      : normalizeQuery(request.query ?? "");
     const kinds = normalizeKinds(request.kinds);
     const excludedPaths = normalizeExcludedPaths(request.excludePaths);
     const limit = normalizePageSize(request.limit);
     const queryTokens = tokenCounts(query);
-    const queryHash = knowledgeQueryHash(queryTokens, kinds, excludedPaths);
+    const queryHash = knowledgeQueryHash(
+      queryTokens,
+      kinds,
+      excludedPaths,
+      mode
+    );
+    const cursorGeneration = mode === "recent"
+      ? index.recentGeneration
+      : index.generation;
     const offset = request.cursor
-      ? decodeCursor(request.cursor, index.generation, queryHash)
+      ? decodeCursor(request.cursor, cursorGeneration, queryHash, mode)
       : 0;
-    const matches = Object.values(index.entries)
+    const candidates = Object.values(index.entries)
       .filter((entry) => kinds.includes(entry.kind))
       .filter((entry) => !excludedPaths.includes(entry.vaultRelativePath))
       .map((entry) => ({
         entry,
         score: scoreEntry(entry, queryTokens)
-      }))
-      .filter((candidate) => candidate.score > 0)
-      .sort((left, right) =>
-        kindPriority(left.entry.kind) - kindPriority(right.entry.kind)
-        || verificationPriority(left.entry, index)
-          - verificationPriority(right.entry, index)
-        || right.score - left.score
-        || left.entry.vaultRelativePath.localeCompare(
-          right.entry.vaultRelativePath
+      }));
+    const matches = mode === "recent"
+      ? candidates.sort((left, right) =>
+          right.entry.mtimeMs - left.entry.mtimeMs
+          || left.entry.vaultRelativePath.localeCompare(
+            right.entry.vaultRelativePath
+          )
         )
-      );
+      : candidates
+        .filter((candidate) => candidate.score > 0)
+        .sort((left, right) =>
+          kindPriority(left.entry.kind) - kindPriority(right.entry.kind)
+          || verificationPriority(left.entry, index)
+            - verificationPriority(right.entry, index)
+          || right.score - left.score
+          || left.entry.vaultRelativePath.localeCompare(
+            right.entry.vaultRelativePath
+          )
+        );
     if (offset > matches.length) {
       throw new KnowledgeAgentIndexError(
         "cursor_invalid",
@@ -217,16 +248,17 @@ export class KnowledgeAgentIndex {
     const nextOffset = offset + hits.length;
     const hasMore = nextOffset < matches.length;
     return Object.freeze({
-      generation: index.generation,
+      generation: cursorGeneration,
       total: matches.length,
       returned: hits.length,
       remaining: Math.max(0, matches.length - nextOffset),
       hasMore,
       exhausted: !hasMore,
       ...(hasMore
-        ? { continuationCursor: encodeCursor({
+          ? { continuationCursor: encodeCursor({
             v: 1,
-            generation: index.generation,
+            ...(mode === "recent" ? { mode } : {}),
+            generation: cursorGeneration,
             queryHash,
             offset: nextOffset
           }) }
@@ -395,13 +427,22 @@ export class KnowledgeAgentIndex {
       ))
       .sort((left, right) => left.localeCompare(right));
     const semanticChanged = changedPaths.length > 0 || deletedPaths.length > 0;
+    const recentMetadataChanged = nextPaths.some((relativePath) => {
+      const oldEntry = previous.entries[relativePath];
+      return oldEntry !== undefined
+        && Math.abs(oldEntry.mtimeMs - combined[relativePath].mtimeMs) >= 1;
+    });
+    const recentSnapshotChanged = semanticChanged || recentMetadataChanged;
     const metadataChanged = indexedCount > 0;
     const next: StoredKnowledgeAgentIndex = {
       schemaVersion: KNOWLEDGE_AGENT_INDEX_SCHEMA_VERSION,
       generation: semanticChanged
         ? Math.max(0, previous.generation) + 1
         : previous.generation,
-      updatedAt: semanticChanged ? Date.now() : previous.updatedAt,
+      recentGeneration: recentSnapshotChanged
+        ? Math.max(0, previous.recentGeneration) + 1
+        : previous.recentGeneration,
+      updatedAt: recentSnapshotChanged ? Date.now() : previous.updatedAt,
       entries: Object.fromEntries(nextPaths.map((relativePath) => [
         relativePath,
         combined[relativePath]
@@ -751,14 +792,21 @@ function tokenCounts(value: string): Record<string, number> {
 function knowledgeQueryHash(
   queryTokens: Record<string, number>,
   kinds: readonly KnowledgeAgentKind[],
-  excludedPaths: readonly string[]
+  excludedPaths: readonly string[],
+  mode: "search" | "recent" = "search"
 ): string {
   return createHash("sha256")
-    .update(JSON.stringify({
-      tokens: Object.keys(queryTokens),
-      kinds,
-      excludedPaths
-    }))
+    .update(JSON.stringify(mode === "search"
+      ? {
+          tokens: Object.keys(queryTokens),
+          kinds,
+          excludedPaths
+        }
+      : {
+          mode,
+          kinds,
+          excludedPaths
+        }))
     .digest("hex");
 }
 
@@ -769,19 +817,28 @@ function encodeCursor(payload: CursorPayload): string {
 function decodeCursor(
   value: string,
   generation: number,
-  queryHash: string
+  queryHash: string,
+  mode: "search" | "recent"
 ): number {
   try {
     const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as
       Partial<CursorPayload>;
     if (
       parsed.v !== 1
+      || (parsed.mode !== undefined && parsed.mode !== "recent")
       || !Number.isInteger(parsed.generation)
       || !Number.isInteger(parsed.offset)
       || (parsed.offset ?? -1) < 0
       || typeof parsed.queryHash !== "string"
     ) {
       throw new Error("invalid");
+    }
+    const cursorMode = parsed.mode ?? "search";
+    if (cursorMode !== mode) {
+      throw new KnowledgeAgentIndexError(
+        "cursor_invalid",
+        "Knowledge continuation cursor does not match this query mode."
+      );
     }
     if (parsed.generation !== generation) {
       throw new KnowledgeAgentIndexError(
@@ -850,6 +907,12 @@ function normalizeStoredIndex(value: unknown): StoredKnowledgeAgentIndex {
     generation: Number.isInteger(record.generation) && (record.generation ?? -1) >= 0
       ? record.generation as number
       : 0,
+    recentGeneration: Number.isInteger(record.recentGeneration)
+      && (record.recentGeneration ?? -1) >= 0
+      ? record.recentGeneration as number
+      : Number.isInteger(record.generation) && (record.generation ?? -1) >= 0
+        ? record.generation as number
+        : 0,
     updatedAt: typeof record.updatedAt === "number" ? record.updatedAt : 0,
     entries: Object.fromEntries(Object.keys(entries).sort().map((key) => [key, entries[key]]))
   };
@@ -918,6 +981,7 @@ function emptyIndex(): StoredKnowledgeAgentIndex {
   return {
     schemaVersion: KNOWLEDGE_AGENT_INDEX_SCHEMA_VERSION,
     generation: 0,
+    recentGeneration: 0,
     updatedAt: 0,
     entries: {}
   };
