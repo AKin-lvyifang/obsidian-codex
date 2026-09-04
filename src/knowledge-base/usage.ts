@@ -116,6 +116,13 @@ const REFERENCE_KEYS = [
   "lineEnd"
 ] as const;
 
+const OPTIONAL_REFERENCE_KEYS = [
+  "sourceType",
+  "recordedAt",
+  "publishedAt",
+  "verificationStatus"
+] as const;
+
 const PERSONAL_MEMORY_SOURCE_KEYS = ["id", "title"] as const;
 
 const WORKFLOWS = new Set<KnowledgeUsageWorkflow>([
@@ -580,7 +587,13 @@ function normalizeKnowledgeReference(
     throw new PiNativeFileStoreError(errorCode, "KnowledgeReference 必须是对象");
   }
   const object = value as Record<string, unknown>;
-  assertExactKeys(object, REFERENCE_KEYS, "KnowledgeReference", errorCode);
+  assertExactKeys(
+    object,
+    REFERENCE_KEYS,
+    "KnowledgeReference",
+    errorCode,
+    OPTIONAL_REFERENCE_KEYS
+  );
   const lineStart = object.lineStart;
   const lineEnd = object.lineEnd;
   if (
@@ -593,6 +606,48 @@ function normalizeKnowledgeReference(
   if (!/^sha256:[a-f0-9]{64}$/u.test(contentRevision)) {
     throw new PiNativeFileStoreError(errorCode, "KnowledgeReference contentRevision 无效");
   }
+  const hasSourceType = Object.hasOwn(object, "sourceType");
+  if (
+    hasSourceType
+    && object.sourceType !== "wiki"
+    && object.sourceType !== "projects"
+    && object.sourceType !== "raw"
+  ) {
+    throw new PiNativeFileStoreError(errorCode, "KnowledgeReference sourceType 无效");
+  }
+  const hasRecordedAt = Object.hasOwn(object, "recordedAt");
+  if (
+    hasRecordedAt
+    && (
+      typeof object.recordedAt !== "number"
+      || !Number.isFinite(object.recordedAt)
+      || object.recordedAt < 0
+    )
+  ) {
+    throw new PiNativeFileStoreError(errorCode, "KnowledgeReference recordedAt 无效");
+  }
+  const hasPublishedAt = Object.hasOwn(object, "publishedAt");
+  if (
+    hasPublishedAt
+    && (
+      typeof object.publishedAt !== "string"
+      || object.publishedAt.length > 100
+      || /[\r\n]/u.test(object.publishedAt)
+    )
+  ) {
+    throw new PiNativeFileStoreError(errorCode, "KnowledgeReference publishedAt 无效");
+  }
+  const hasVerificationStatus = Object.hasOwn(object, "verificationStatus");
+  if (
+    hasVerificationStatus
+    && object.verificationStatus !== "local_revision_verified"
+    && object.verificationStatus !== "source_link_changed"
+  ) {
+    throw new PiNativeFileStoreError(
+      errorCode,
+      "KnowledgeReference verificationStatus 无效"
+    );
+  }
   return {
     referenceId: requireUsageString(object.referenceId, "referenceId", errorCode),
     vaultRelativePath: normalizeVaultRelativePath(object.vaultRelativePath, "vaultRelativePath"),
@@ -602,7 +657,22 @@ function normalizeKnowledgeReference(
       : (() => { throw new PiNativeFileStoreError(errorCode, "KnowledgeReference excerpt 无效"); })(),
     contentRevision,
     lineStart: lineStart as number,
-    lineEnd: lineEnd as number
+    lineEnd: lineEnd as number,
+    ...(hasSourceType
+      ? { sourceType: object.sourceType as KnowledgeReference["sourceType"] }
+      : {}),
+    ...(hasRecordedAt
+      ? { recordedAt: object.recordedAt as number }
+      : {}),
+    ...(hasPublishedAt
+      ? { publishedAt: object.publishedAt as string }
+      : {}),
+    ...(hasVerificationStatus
+      ? {
+          verificationStatus:
+            object.verificationStatus as KnowledgeReference["verificationStatus"]
+        }
+      : {})
   };
 }
 
@@ -679,12 +749,12 @@ function assertExactKeys(
   value: Record<string, unknown>,
   keys: readonly string[],
   label: string,
-  errorCode: "invalid-input" | "store-corrupt"
+  errorCode: "invalid-input" | "store-corrupt",
+  optionalKeys: readonly string[] = []
 ): void {
-  const expected = new Set(keys);
+  const expected = new Set([...keys, ...optionalKeys]);
   if (
-    Object.keys(value).length !== keys.length
-    || keys.some((key) => !Object.prototype.hasOwnProperty.call(value, key))
+    keys.some((key) => !Object.prototype.hasOwnProperty.call(value, key))
     || Object.keys(value).some((key) => !expected.has(key))
   ) throw new PiNativeFileStoreError(errorCode, `${label} 字段集合无效`);
 }
