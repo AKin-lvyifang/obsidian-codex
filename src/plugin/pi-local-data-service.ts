@@ -30,12 +30,12 @@ import type {
 } from "../harness/pi-native/contracts";
 import {
   PiNativeConversationRuntimeError,
+  createPiConversation,
   readDurablePiConversationProjection,
   type CreatePiNativeConversationInput
 } from "../harness/pi-native/pi-native-conversation-runtime";
 import {
   ECHOINK_PI_CODING_AGENT_VERSION,
-  createDurablePiSession,
   type PiSessionManagerApi
 } from "../harness/pi-native/pi-session-durability";
 import {
@@ -168,25 +168,10 @@ export class PiLocalDataService {
   async createConversation(
     input: CreatePiNativeConversationInput
   ): Promise<Readonly<PiConversationCatalogEntry>> {
-    const existing = await this.catalog.get(input.conversationId);
-    if (existing) return existing;
-    const createdAt = input.createdAt ?? Date.now();
-    const durable = createDurablePiSession({
-      api: this.sessionApi,
-      sessionRoot: this.catalog.sessionRootPath,
-      cwd: input.cwd
-    });
-    return await this.catalog.upsert({
-      conversationId: input.conversationId,
-      piSessionId: durable.piSessionId,
-      vaultId: this.catalog.vaultId,
-      title: input.title,
-      status: "active",
-      defaultMemoryMode: input.defaultMemoryMode ?? "normal",
-      ...(input.defaultSkillId ? { defaultSkillId: input.defaultSkillId } : {}),
-      createdAt,
-      updatedAt: createdAt,
-      sessionFile: durable.sessionFile
+    return await createPiConversation({
+      catalog: this.catalog,
+      sessionApi: this.sessionApi,
+      conversation: input
     });
   }
 

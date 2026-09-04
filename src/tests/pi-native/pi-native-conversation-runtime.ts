@@ -6,6 +6,7 @@ import {
   copyFile,
   mkdtemp,
   readFile,
+  readdir,
   realpath,
   rm
 } from "node:fs/promises";
@@ -29,7 +30,10 @@ import type {
 } from "@earendil-works/pi-ai";
 import { FileConversationCatalog } from "../../harness/pi-native/file-conversation-catalog";
 import { FileProductRunStore } from "../../harness/pi-native/file-product-run-store";
-import { PiNativeFileStoreError } from "../../harness/pi-native/file-store-utils";
+import {
+  PiNativeFileStoreError,
+  piNativeVaultFileLayout
+} from "../../harness/pi-native/file-store-utils";
 import {
   PiNativeConversationRuntime,
   PiNativeConversationRuntimeError,
@@ -118,6 +122,7 @@ export async function runPiNativeConversationRuntimeTests(): Promise<void> {
   await assertReasoningSelectionFailsClosedBeforePiPrompt();
   assertKnowledgeMaintenanceRequiresExplicitCommand();
   await assertProjectionAndCatalogManagementStayAgentSessionFree();
+  await assertConversationCreateRollsBackAfterCatalogReadbackFailure();
   await assertFailedAssistantHistoryIsDurableButExcludedFromMemory();
   await assertKnowledgeAskUsesAgentAndReadOnlyTools();
   await assertAskSourceAttributionCapturesOnlyInjectedPrimaryMemory();
@@ -1545,6 +1550,100 @@ Promise<void> {
     assert.equal(fixture.sessions.length, 1, "opening must activate its AgentSession");
     await fixture.runtime.switchConversation("history-a", "history-b");
     assert.equal(fixture.sessions.length, 2, "switching must activate the target AgentSession");
+  });
+}
+
+async function assertConversationCreateRollsBackAfterCatalogReadbackFailure():
+Promise<void> {
+  await withFixture([], async (fixture) => {
+    const existing = await fixture.runtime.createConversation({
+      conversationId: "existing-before-create-rejection",
+      title: "Existing conversation",
+      cwd: fixture.root,
+      createdAt: 1
+    });
+    const existingSessionBytes = await readFile(existing.sessionFile, "utf8");
+    const layout = piNativeVaultFileLayout(
+      fixture.catalog.storageRootPath,
+      fixture.catalog.vaultId
+    );
+    const beforeSessions = (await readdir(layout.sessionRootPath)).sort();
+    const beforeConversationClaims = (
+      await readdir(layout.conversationBindingsRootPath)
+    ).sort();
+    const beforePiSessionClaims = (
+      await readdir(layout.piSessionBindingsRootPath)
+    ).sort();
+    const originalUpsert = fixture.catalog.upsert.bind(fixture.catalog);
+    let rejectedPiSessionId = "";
+    let rejectedSessionFile = "";
+    fixture.catalog.upsert = async (input) => {
+      const persisted = await originalUpsert(input);
+      if (input.conversationId === "catalog-readback-rejected-create") {
+        rejectedPiSessionId = persisted.piSessionId;
+        rejectedSessionFile = persisted.sessionFile;
+        throw new PiNativeFileStoreError(
+          "readback-diverged",
+          "simulated Catalog readback rejection"
+        );
+      }
+      return persisted;
+    };
+
+    try {
+      await assert.rejects(
+        fixture.runtime.createConversation({
+          conversationId: "catalog-readback-rejected-create",
+          title: "Rejected conversation",
+          cwd: fixture.root,
+          createdAt: 2
+        }),
+        (error: unknown) => error instanceof PiNativeFileStoreError
+          && error.code === "readback-diverged"
+      );
+    } finally {
+      fixture.catalog.upsert = originalUpsert;
+    }
+
+    assert.ok(rejectedPiSessionId, "the rejected create must reach Catalog persistence");
+    assert.ok(rejectedSessionFile, "the rejected create must create a durable Session");
+    const reopenedCatalog = new FileConversationCatalog({
+      storageRootPath: fixture.catalog.storageRootPath,
+      vaultId: fixture.catalog.vaultId
+    });
+    await reopenedCatalog.initialize();
+    assert.deepEqual(await reopenedCatalog.list(), [existing]);
+    await assert.rejects(
+      readFile(rejectedSessionFile, "utf8"),
+      (error: unknown) => error instanceof Error
+        && "code" in error
+        && (error as NodeJS.ErrnoException).code === "ENOENT"
+    );
+    assert.deepEqual(
+      (await readdir(layout.sessionRootPath)).sort(),
+      beforeSessions,
+      "a rejected Catalog readback must remove only its new Session JSONL"
+    );
+    assert.deepEqual(
+      (await readdir(layout.conversationBindingsRootPath)).sort(),
+      beforeConversationClaims,
+      "a rejected create must remove its Conversation binding claim"
+    );
+    assert.deepEqual(
+      (await readdir(layout.piSessionBindingsRootPath)).sort(),
+      beforePiSessionClaims,
+      "a rejected create must remove its Pi Session binding claim"
+    );
+    assert.equal(
+      await readFile(existing.sessionFile, "utf8"),
+      existingSessionBytes,
+      "rollback must not rewrite an existing Conversation Session"
+    );
+    assert.deepEqual(await reopenedCatalog.get(existing.conversationId), existing);
+    assert.equal(
+      await reopenedCatalog.get("catalog-readback-rejected-create"),
+      null
+    );
   });
 }
 
@@ -4057,12 +4156,19 @@ async function assertKnowledgeReviewWriteScopeIsTurnBound(): Promise<void> {
     { text: "Journal", expected: "read_only" },
     { text: "Outputs", expected: "read_only" },
     { text: "不要保存到 Outputs", expected: "read_only" },
+    { text: "继续，我还没确认保存", expected: "read_only" },
+    { text: "好的，但现在不能保存", expected: "read_only" },
+    { text: "下一个，我不想保存", expected: "read_only" },
+    { text: "继续，我拒绝保存", expected: "read_only" },
+    { text: "好的，稍后再保存", expected: "read_only" },
+    { text: "下一个，我还在犹豫是否保存", expected: "read_only" },
     { text: "能否保存到 Journal？", expected: "read_only" },
     { text: "确认保存", expected: "journal" },
-    { text: "确认保存，但不要写入 Outputs", expected: "journal" },
+    { text: "确认保存，但不要写入 Outputs", expected: "read_only" },
+    { text: "我还没想好，保存到 Journal", expected: "read_only" },
     { text: "写入今天日记", expected: "journal" },
     { text: "请保存到 Outputs", expected: "outputs" },
-    { text: "不要写 Journal，只保存到 Outputs", expected: "outputs" },
+    { text: "不要写 Journal，只保存到 Outputs", expected: "read_only" },
     { text: "请同时保存到 Journal 和 Outputs", expected: "read_only" }
   ];
   await withFixture(

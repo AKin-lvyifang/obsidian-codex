@@ -458,6 +458,69 @@ export interface CreatePiNativeConversationInput {
   createdAt?: number;
 }
 
+export interface CreatePiConversationTransactionInput {
+  catalog: FileConversationCatalog;
+  sessionApi: PiSessionManagerApi;
+  conversation: CreatePiNativeConversationInput;
+  now?: () => number;
+}
+
+export async function createPiConversation(
+  input: Readonly<CreatePiConversationTransactionInput>
+): Promise<Readonly<PiConversationCatalogEntry>> {
+  const { catalog, sessionApi, conversation } = input;
+  const existing = await catalog.get(conversation.conversationId);
+  if (existing) return existing;
+  const createdAt = conversation.createdAt ?? (input.now ?? Date.now)();
+  const durable = createDurablePiSession({
+    api: sessionApi,
+    sessionRoot: catalog.sessionRootPath,
+    cwd: conversation.cwd
+  });
+  try {
+    return await catalog.upsert({
+      conversationId: conversation.conversationId,
+      piSessionId: durable.piSessionId,
+      vaultId: catalog.vaultId,
+      title: conversation.title,
+      status: "active",
+      defaultMemoryMode: conversation.defaultMemoryMode ?? "normal",
+      ...(conversation.defaultSkillId
+        ? { defaultSkillId: conversation.defaultSkillId }
+        : {}),
+      createdAt,
+      updatedAt: createdAt,
+      sessionFile: durable.sessionFile
+    });
+  } catch (error) {
+    const cleanupErrors: unknown[] = [];
+    try {
+      await catalog.discardUnacceptedCreate({
+        conversationId: conversation.conversationId,
+        piSessionId: durable.piSessionId
+      });
+    } catch (cleanupError) {
+      cleanupErrors.push(cleanupError);
+    }
+    try {
+      discardCreatedDurablePiSession({
+        sessionRoot: catalog.sessionRootPath,
+        sessionFile: durable.sessionFile,
+        piSessionId: durable.piSessionId
+      });
+    } catch (cleanupError) {
+      cleanupErrors.push(cleanupError);
+    }
+    if (cleanupErrors.length) {
+      throw new AggregateError(
+        [error, ...cleanupErrors],
+        "会话登记失败，且新建 Conversation 的回滚未完成"
+      );
+    }
+    throw error;
+  }
+}
+
 export interface DerivePiNativeConversationInput {
   sourceConversationId: string;
   targetConversationId: string;
@@ -772,25 +835,11 @@ export class PiNativeConversationRuntime {
     input: CreatePiNativeConversationInput
   ): Promise<Readonly<PiConversationCatalogEntry>> {
     this.assertReady();
-    const existing = await this.catalog.get(input.conversationId);
-    if (existing) return existing;
-    const createdAt = input.createdAt ?? this.now();
-    const durable = createDurablePiSession({
-      api: this.options.sessionApi,
-      sessionRoot: this.catalog.sessionRootPath,
-      cwd: input.cwd
-    });
-    return await this.catalog.upsert({
-      conversationId: input.conversationId,
-      piSessionId: durable.piSessionId,
-      vaultId: this.catalog.vaultId,
-      title: input.title,
-      status: "active",
-      defaultMemoryMode: input.defaultMemoryMode ?? "normal",
-      ...(input.defaultSkillId ? { defaultSkillId: input.defaultSkillId } : {}),
-      createdAt,
-      updatedAt: createdAt,
-      sessionFile: durable.sessionFile
+    return await createPiConversation({
+      catalog: this.catalog,
+      sessionApi: this.options.sessionApi,
+      conversation: input,
+      now: this.now
     });
   }
 
@@ -6191,14 +6240,14 @@ function positiveKnowledgeReviewSaveText(text: string): string {
   const normalized = text.normalize("NFKC").trim();
   if (!normalized) return "";
   const reviewTopic = /(?:保存|写入|写到|写进|存入|存到|记录到|记录进|归档到|落盘)|\b(?:save|write|persist|store|record|append|journal|outputs?)\b|日记|日志|输出目录|输出文件夹/iu;
-  const negation = /(?:不要|不必|无需|不用|别|先不|暂不|暂时不|不可|禁止)|\b(?:do\s+not|don't|dont|never|without|no\s+need\s+to)\b/iu;
+  const blocker = /(?:不要|不必|无需|不用|别|先不|暂不|暂时不|不可|禁止|不能|无法|没法|不可以|不想|不愿|拒绝|取消|放弃|还没|尚未|未确认|没有确认|待确认|犹豫|不确定|再想想|考虑一下|稍后|晚点|以后|回头|等会儿?|待会儿?|下次|改天|延后|推迟|暂缓|之后再|再说)|\b(?:do\s+not|don't|dont|never|without|no\s+need\s+to|cannot|can't|cant|unable|not\s+yet|unconfirmed|decline|refuse|cancel|hesitate|unsure|maybe|later|eventually|postpone|delay|another\s+time)\b/iu;
+  if (reviewTopic.test(normalized) && blocker.test(normalized)) return "";
   const question = /[吗？?]/u;
   const questionLead = /(?:是否|能否|可否|要不要|能不能|该不该).{0,20}(?:保存|写入|写到|写进|存入|存到|记录到|记录进|归档到|落盘)|\b(?:can|could|would|should|may)\b.{0,30}\b(?:save|write|persist|store|record|append)\b/iu;
   return normalized
     .split(/[,，。；;！!\n]+/u)
     .map((clause) => clause.trim())
     .filter(Boolean)
-    .filter((clause) => !(reviewTopic.test(clause) && negation.test(clause)))
     .filter((clause) => !(knowledgeReviewSaveIntentPattern().test(clause)
       && (question.test(clause) || questionLead.test(clause))))
     .join(" ");
