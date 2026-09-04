@@ -4,6 +4,8 @@ import {
   dateKey,
   DEFAULT_JOURNAL_TEMPLATE_ID
 } from "./home-workbench-model";
+import type { SettingsLanguage } from "../settings/settings";
+import { homeCopy } from "./home-i18n";
 
 export type HomeConversationAction = "daily" | "revisit";
 
@@ -25,22 +27,54 @@ export const HOME_REVISIT_TITLES = Object.freeze([
   "我们接着想哪一件？"
 ] as const);
 
+export const HOME_DAILY_TITLES_EN = Object.freeze([
+  "What would you like to keep from today?",
+  "Tell me about your day",
+  "What deserves a place in today's journal?",
+  "Write today from this moment",
+  "What happened today?",
+  "Leave a note for today"
+] as const);
+
+export const HOME_REVISIT_TITLES_EN = Object.freeze([
+  "What is still on your mind?",
+  "Which thought was left unfinished?",
+  "What have you not thought through yet?",
+  "Want to pick up an earlier idea?",
+  "What have you been carrying lately?",
+  "What should we keep thinking about?"
+] as const);
+
 export function homeConversationTitle(
   action: HomeConversationAction,
   vaultName: string,
-  now = new Date()
+  now = new Date(),
+  language: SettingsLanguage = "zh-CN"
 ): string {
-  const titles = action === "daily" ? HOME_DAILY_TITLES : HOME_REVISIT_TITLES;
+  const titles = language === "en"
+    ? action === "daily" ? HOME_DAILY_TITLES_EN : HOME_REVISIT_TITLES_EN
+    : action === "daily" ? HOME_DAILY_TITLES : HOME_REVISIT_TITLES;
   const seed = `${dateKey(now)}\u0000${vaultName.trim()}\u0000${action}`;
   return titles[stableTextHash(seed) % titles.length];
 }
 
-export function buildDailyConversationDraft(now = new Date()): string {
+export function buildDailyConversationDraft(now = new Date(), language: SettingsLanguage = "zh-CN"): string {
   const template = BUILT_IN_JOURNAL_TEMPLATES.find(
     (candidate) => candidate.id === DEFAULT_JOURNAL_TEMPLATE_ID
   );
-  if (!template) throw new Error("默认日记模板不可用");
+  if (!template) throw new Error(homeCopy(language).template.defaultTemplateUnavailable);
   const renderedTemplate = applyJournalTemplate(template.content, now);
+  if (language === "en") {
+    return [
+      "/daily",
+      "",
+      `Please help me make a journal entry for ${dateKey(now)}. Listen to what I want to share about today first, and ask follow-up questions only when useful; do not invent experiences or feelings I did not describe.`,
+      "Do not create or edit any files until I explicitly confirm that the journal should be generated. After I confirm, organize it with the original template shown below in journal/YYYY-MM-DD.md; if the target file already exists, read it first, keep its original content, then append or organize only what I confirm this time.",
+      "",
+      "--- Default template preview ---",
+      renderedTemplate
+    ].join("\n");
+  }
   return [
     "/daily",
     "",
@@ -52,7 +86,16 @@ export function buildDailyConversationDraft(now = new Date()): string {
   ].join("\n");
 }
 
-export function buildRevisitConversationDraft(): string {
+export function buildRevisitConversationDraft(language: SettingsLanguage = "zh-CN"): string {
+  if (language === "en") {
+    return [
+      "/revisit",
+      "",
+      "First, recommend 3–5 unfinished goals, tasks, or open loops from my long-term Memory. Give enough context for each one, then let me choose just one to continue.",
+      "Do not change Memory before I choose. Once I choose, stay with me like a friend and finish by helping me define one concrete next step.",
+      "If Memory is off, unavailable, or has no results, say so honestly and invite me to share what has been on my mind lately; do not fabricate recommendations."
+    ].join("\n");
+  }
   return [
     "/revisit",
     "",

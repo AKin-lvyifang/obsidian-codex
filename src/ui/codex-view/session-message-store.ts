@@ -1,9 +1,10 @@
-import type { ChatMessage, DiffSummary, StoredSession } from "../../settings/settings";
+import type { ChatMessage, DiffSummary, SettingsLanguage, StoredSession } from "../../settings/settings";
 import type { ProcessFileRef } from "../../types/app-server";
 import { buildDiffSummary, diffSummaryLabel, serializeFileChanges } from "../../core/diff-summary";
 import { basename, reasoningTextFromPayload, summarizeProcessEvent } from "../../core/mapping";
 import { newId } from "../../settings/settings";
 import { insertAgentProcessMessage, isAgentProcessItemType as isProcessItemType, isAgentTurnTerminalMessage } from "./agent-turn-process";
+import { conversationUiText } from "./ui-i18n";
 
 const TERMINAL_CARRIER_STATUSES = new Set(["completed", "failed", "error", "interrupted", "cancelled", "canceled"]);
 
@@ -13,6 +14,7 @@ export interface SessionMessageStoreContext {
   getActiveRunId(): string;
   getActiveTurnId(): string;
   getVaultPath(): string;
+  getSettingsLanguage(): SettingsLanguage;
   externalizeMessageText(message: ChatMessage, text: string): Promise<void>;
   renderMessagesIfActive(session: StoredSession, updatedMessage?: ChatMessage): void;
   scheduleSessionSave(): void;
@@ -79,7 +81,7 @@ export class SessionMessageStore {
       session.messages.push(message);
       this.activeItemMessages.set(itemId, message.id);
     }
-    if (itemType === "reasoning" || !message.title || message.title === "命令输出") message.title = summary.title;
+    if (itemType === "reasoning" || !message.title || message.title === "命令输出" || message.title === "Command output") message.title = summary.title;
     if (itemType === "reasoning") {
       if (summary.detail) message.details = summary.detail;
     } else if (!message.details && summary.detail) {
@@ -134,7 +136,11 @@ export class SessionMessageStore {
   markThinkingAsStreaming(session: StoredSession): void {
     const message = session.messages.find((item) => item.id === this.activeThinkingMessageId);
     if (!message || message.status !== "running") return;
-    message.text = "正在生成回复...";
+    message.text = conversationUiText(
+      this.context.getSettingsLanguage(),
+      "正在生成回复...",
+      "Generating reply..."
+    );
     this.context.renderMessagesIfActive(session);
   }
 
@@ -155,8 +161,8 @@ export class SessionMessageStore {
       && TERMINAL_CARRIER_STATUSES.has(item.status ?? ""));
     session.messages.splice(messageIndex, 1);
     if (!hasNativeProcess && !hasTerminalCarrier) {
-      const settled = settledThinkingMessage(status);
-      message.title = "处理过程";
+      const settled = settledThinkingMessage(status, this.context.getSettingsLanguage());
+      message.title = conversationUiText(this.context.getSettingsLanguage(), "处理过程", "Processing");
       message.text = settled.text;
       message.status = settled.status;
       message.completedAt = Date.now();
@@ -185,6 +191,7 @@ export class SessionMessageStore {
   }
 
   renderPlanUpdate(session: StoredSession, params: unknown): void {
+    const language = this.context.getSettingsLanguage();
     const payload = processPayloadRecord(params);
     const lines: string[] = [];
     if (typeof payload.explanation === "string" && payload.explanation) lines.push(payload.explanation, "");
@@ -195,7 +202,9 @@ export class SessionMessageStore {
       const step = typeof item.step === "string" ? item.step : "";
       if (!step) continue;
       const mark = status === "completed" ? "x" : " ";
-      const suffix = status === "inProgress" ? " (进行中)" : "";
+      const suffix = status === "inProgress"
+        ? conversationUiText(language, " (进行中)", " (in progress)")
+        : "";
       lines.push(`- [${mark}] ${step}${suffix}`);
     }
     if (!lines.length) return;
@@ -205,7 +214,7 @@ export class SessionMessageStore {
         id: newId("plan"),
         role: "assistant",
         itemType: "plan",
-        title: "更新计划",
+        title: conversationUiText(language, "更新计划", "Plan update"),
         text: "",
         processKind: "plan",
         runId: this.context.getActiveRunId() || undefined,
@@ -264,14 +273,21 @@ export class SessionMessageStore {
       if (!itemPath) return;
       this.addMessageToSession(session, {
         role: "assistant",
-        title: "图片",
+        title: conversationUiText(this.context.getSettingsLanguage(), "图片", "Image"),
         itemType: "image",
         text: itemPath,
         images: [{ type: "image", name: basename(itemPath), path: itemPath }],
         createdAt: Date.now()
       });
     } else if (type === "contextCompaction") {
-      this.addMessageToSession(session, { role: "system", title: "上下文压缩", itemType: "contextCompaction", text: "Codex 已自动压缩上下文。", createdAt: Date.now() });
+      const language = this.context.getSettingsLanguage();
+      this.addMessageToSession(session, {
+        role: "system",
+        title: conversationUiText(language, "上下文压缩", "Context compacted"),
+        itemType: "contextCompaction",
+        text: conversationUiText(language, "Codex 已自动压缩上下文。", "Codex automatically compacted the context."),
+        createdAt: Date.now()
+      });
     }
   }
 
@@ -382,16 +398,29 @@ function sameAgentRun(left: ChatMessage, right: ChatMessage): boolean {
   return Boolean(left.turnId && right.turnId && left.turnId === right.turnId);
 }
 
-function settledThinkingMessage(status: string): { status: string; text: string } {
+function settledThinkingMessage(
+  status: string,
+  language: SettingsLanguage = "zh-CN"
+): { status: string; text: string } {
   if (status === "recovery-pending" || /安全恢复中|恢复中|等待恢复|正在恢复/.test(status)) {
-    return { status: "recovery-pending", text: "安全恢复中" };
+    return {
+      status: "recovery-pending",
+      text: conversationUiText(language, "安全恢复中", "Recovering safely")
+    };
   }
   if (status === "recovery-blocked" || /恢复受阻|恢复被阻断/.test(status)) {
-    return { status: "recovery-blocked", text: "安全恢复受阻" };
+    return {
+      status: "recovery-blocked",
+      text: conversationUiText(language, "安全恢复受阻", "Safe recovery is blocked")
+    };
   }
-  if (/完成|成功/.test(status)) return { status: "completed", text: "处理完成" };
-  if (/中断|取消/.test(status)) return { status: "interrupted", text: "处理已中断" };
-  return { status: "failed", text: "处理失败" };
+  if (/完成|成功|completed|success/iu.test(status)) {
+    return { status: "completed", text: conversationUiText(language, "处理完成", "Processing complete") };
+  }
+  if (/中断|取消|interrupted|cancel/iu.test(status)) {
+    return { status: "interrupted", text: conversationUiText(language, "处理已中断", "Processing interrupted") };
+  }
+  return { status: "failed", text: conversationUiText(language, "处理失败", "Processing failed") };
 }
 
 function roleForProcessItem(itemType: string): ChatMessage["role"] {

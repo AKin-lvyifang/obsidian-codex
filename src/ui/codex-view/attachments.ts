@@ -17,6 +17,7 @@ import {
   PI_DOCUMENT_ACCEPT,
   piDocumentKindForAttachment
 } from "./pi-document-input";
+import { conversationUiText } from "./ui-i18n";
 
 export interface CodexAttachmentHost {
   readonly app: App;
@@ -33,12 +34,14 @@ export interface CodexAttachmentHost {
 export function renderAttachmentsView(host: CodexAttachmentHost): void {
   if (!host.attachmentsEl) return;
   renderComposerAttachments(host.attachmentsEl, {
+    language: host.plugin.settings.settingsLanguage,
     selectedSkill: host.selectedSkill,
     noteMentions: composerNoteMentionSelections(host.inputEl),
     attachments: host.attachments,
     attachmentResolver: createAttachmentResourceResolver(
       host.app,
-      host.plugin.getVaultPath()
+      host.plugin.getVaultPath(),
+      host.plugin.settings.settingsLanguage
     )
   }, {
     onRemoveSkill: () => {
@@ -67,7 +70,7 @@ export async function openComposerAttachment(
 ): Promise<void> {
   const ref = normalizeProcessFileRef(attachment.path, host.plugin.getVaultPath());
   if (!ref.openable) {
-    new Notice("这个文件路径无法打开");
+    new Notice(conversationUiText(host.plugin.settings.settingsLanguage, "这个文件路径无法打开", "This file path cannot be opened"));
     return;
   }
   const absolutePath = ref.absolutePath
@@ -75,13 +78,17 @@ export async function openComposerAttachment(
       ? absoluteVaultPath(host.plugin.getVaultPath(), ref.path)
       : ref.kind === "external" ? ref.path : "");
   if (await openPathInElectron(absolutePath)) return;
-  new Notice(`无法使用系统默认应用打开：${ref.displayPath}`);
+  new Notice(conversationUiText(
+    host.plugin.settings.settingsLanguage,
+    `无法使用系统默认应用打开：${ref.displayPath}`,
+    `Could not open with the system default app: ${ref.displayPath}`
+  ));
 }
 
 export function attachActiveFile(host: CodexAttachmentHost): void {
   const file = currentDisplayedMarkdownFile(host.app);
   if (!file) {
-    new Notice("没有当前笔记");
+    new Notice(conversationUiText(host.plugin.settings.settingsLanguage, "没有当前笔记", "There is no current note"));
     return;
   }
   addComposerNoteMentionSelection(host.inputEl, {
@@ -141,9 +148,17 @@ export function pickKnowledgeBaseFiles(host: CodexAttachmentHost): void {
         path: filePath
       });
     }
-    void host.runKnowledgeBaseShortcut("文件收藏", async () => {
+    void host.runKnowledgeBaseShortcut(
+      conversationUiText(host.plugin.settings.settingsLanguage, "文件收藏", "Save files"),
+      async () => {
       const paths = await host.plugin.getKnowledgeSurfaceService()?.captureExternalFiles(attachments);
-      return paths?.length ? `已收藏文件：\n${paths.map((item) => `- ${item}`).join("\n")}` : "未选择文件。";
+      return paths?.length
+        ? conversationUiText(
+          host.plugin.settings.settingsLanguage,
+          `已收藏文件：\n${paths.map((item) => `- ${item}`).join("\n")}`,
+          `Saved files:\n${paths.map((item) => `- ${item}`).join("\n")}`
+        )
+        : conversationUiText(host.plugin.settings.settingsLanguage, "未选择文件。", "No files were selected.");
     });
   };
   input.click();
@@ -160,7 +175,12 @@ export function handleDroppedFiles(host: CodexAttachmentHost, event: DragEvent):
 function appendPiChatFile(host: CodexAttachmentHost, file: File): void {
   const filePath = (file as File & { path?: string }).path;
   if (!filePath) {
-    new Notice(`无法读取附件“${file.name || "未命名文件"}”的本地路径。`);
+    const name = file.name || conversationUiText(host.plugin.settings.settingsLanguage, "未命名文件", "Unnamed file");
+    new Notice(conversationUiText(
+      host.plugin.settings.settingsLanguage,
+      `无法读取附件“${name}”的本地路径。`,
+      `Could not read the local path for attachment “${name}”.`
+    ));
     return;
   }
   const type = classifyLocalAttachmentType(filePath, file.type);
@@ -174,7 +194,11 @@ function appendPiChatFile(host: CodexAttachmentHost, file: File): void {
   };
   if (type === "file" && !piDocumentKindForAttachment(attachment)) {
     new Notice(
-      `不支持附件“${file.name}”。普通 Pi Chat 仅支持 PDF、Word、Markdown、HTML 和图片。`
+      conversationUiText(
+        host.plugin.settings.settingsLanguage,
+        `不支持附件“${file.name}”。普通 Pi Chat 仅支持 PDF、Word、Markdown、HTML 和图片。`,
+        `Attachment “${file.name}” is not supported. Regular Pi Chat supports only PDF, Word, Markdown, HTML, and images.`
+      )
     );
     return;
   }
@@ -209,6 +233,6 @@ export async function handlePastedFiles(host: CodexAttachmentHost, event: Clipbo
     host.renderAttachments();
   } catch (error) {
     console.error("Codex paste image failed", error);
-    new Notice("粘贴图片失败");
+    new Notice(conversationUiText(host.plugin.settings.settingsLanguage, "粘贴图片失败", "Could not paste image"));
   }
 }

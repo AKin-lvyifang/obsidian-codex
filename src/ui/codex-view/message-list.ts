@@ -22,6 +22,11 @@ import { extractKnowledgeBaseResultTitle } from "../knowledge-base-result-title"
 import type { KnowledgeBaseMaintainReportPayload, KnowledgeBaseMaintainReportSectionItem, KnowledgeBaseMessageUiPayload, KnowledgeBaseRunPayload } from "../../knowledge-base/maintain-report-card";
 import { formatMessageHeaderTime } from "../message-time";
 import { openImageOverlay, renderPreformattedVaultNoteText, renderRichText } from "../render-message";
+import {
+  conversationUiLocale,
+  conversationUiText,
+  localizeKnownConversationSystemCopy
+} from "./ui-i18n";
 import { buildActionTimeline, isActionTimelineItem, type ActionGroupKind, type ActionItemViewModel } from "./action-timeline";
 import {
   buildAgentTurnProjection,
@@ -426,7 +431,8 @@ export class CodexMessageListRenderer {
         welcome,
         copy.message.suggestions,
         (suggestion) => env.onSuggestionSelect?.(suggestion.label),
-        copy.message.suggestionsAria
+        copy.message.suggestionsAria,
+        env.settingsLanguage
       );
       suggestions.addClass("codex-welcome-suggestions");
       return;
@@ -1152,13 +1158,16 @@ export class CodexMessageListRenderer {
       : wrapper;
     if (!emptyRunningAnswer && shouldRenderMessageTitle(message, options.showAgentHeader)) {
       const title = bodyHost.createDiv({ cls: "codex-message-title" });
-      title.createSpan({ cls: "codex-message-title-label", text: message.title ?? "" });
-      const time = messageTitleTime(message);
+      title.createSpan({
+        cls: "codex-message-title-label",
+        text: firstPartyMessageTitle(message, env.settingsLanguage)
+      });
+      const time = messageTitleTime(message, env.settingsLanguage);
       if (time) {
         title.createSpan({
           cls: "codex-message-title-time",
           text: time,
-          attr: { title: formatAbsoluteTime(message.createdAt) }
+          attr: { title: formatAbsoluteTime(message.createdAt, env.settingsLanguage) }
         });
       }
     }
@@ -1176,7 +1185,11 @@ export class CodexMessageListRenderer {
       this.renderMessageAttachments(
         bodyHost.createDiv({ cls: "codex-message-attachments" }),
         messageAttachments,
-        createAttachmentResourceResolver(env.app, env.vaultPath)
+        createAttachmentResourceResolver(
+          env.app,
+          env.vaultPath,
+          env.settingsLanguage
+        )
       );
     }
     const content = bodyHost.createDiv({ cls: "codex-message-content" });
@@ -1273,7 +1286,7 @@ export class CodexMessageListRenderer {
       this.renderKnowledgeUsageCards(wrapper, message.id, knowledgeUsageMessageData(message), message.citations);
       return;
     }
-    const displayText = displayTextForMessage(message);
+    const displayText = firstPartyMessageText(message, env.settingsLanguage);
     if (!this.renderKnowledgeBaseResultContent(content, message, displayText)) {
       if (isAgentAnswerMessage(message)) this.renderAgentAnswerContent(content, message);
       else renderRichText(env.app, env.component, content, displayText);
@@ -1314,6 +1327,7 @@ export class CodexMessageListRenderer {
         container.empty();
         const loader = renderSmoothAILoader(container, visualLabel, {
           accessibleLabel: copy.message.generatingReply,
+          language: env.settingsLanguage,
           labelClass: "codex-ai-elements-shimmer",
           visualLabelAriaHidden: true
         });
@@ -1337,7 +1351,13 @@ export class CodexMessageListRenderer {
     const existing = container.querySelector<HTMLElement>(
       ":scope > .codex-assistant-turn-failure-reason"
     );
-    const text = message.status === "failed" ? message.details?.trim() : "";
+    const text = message.status === "failed"
+      ? firstPartyMessageDetail(
+        message,
+        message.details?.trim() ?? "",
+        this.requireEnv().settingsLanguage
+      )
+      : "";
     if (!text) {
       existing?.remove();
       return;
@@ -1554,12 +1574,19 @@ export class CodexMessageListRenderer {
     container: HTMLElement,
     message: ChatMessage
   ): HTMLElement {
+    const language = this.requireEnv().settingsLanguage;
     const footer = container.createDiv({ cls: "codex-agent-footer" });
     const actions = footer.createDiv({ cls: "codex-agent-footer-actions" });
     this.renderMessageCopyAction(actions, message, false);
     const runtime = footer.createSpan({
       cls: "codex-agent-footer-runtime",
-      attr: { title: message.providerId || "历史消息未记录 Provider 身份" }
+      attr: {
+        title: message.providerId || conversationUiText(
+          language,
+          "历史消息未记录 Provider 身份",
+          "Provider information was not recorded for this historical message"
+        )
+      }
     });
     const providerIcon = runtime.createSpan({
       cls: "codex-agent-footer-provider-icon",
@@ -1568,9 +1595,9 @@ export class CodexMessageListRenderer {
     renderProviderBrandIcon(providerIcon, providerBrandForMessage(message));
     runtime.createSpan({
       cls: "codex-agent-footer-model",
-      text: message.modelId?.trim() || "未知模型"
+      text: message.modelId?.trim() || conversationUiText(language, "未知模型", "Unknown model")
     });
-    const time = formatAnswerFooterTime(message.completedAt ?? message.createdAt);
+    const time = formatAnswerFooterTime(message.completedAt ?? message.createdAt, language);
     if (time) footer.createSpan({ cls: "codex-agent-footer-time", text: time });
     return actions;
   }
@@ -1602,14 +1629,15 @@ export class CodexMessageListRenderer {
   }
 
   private renderKnowledgeBaseRunCard(container: HTMLElement, payload: KnowledgeBaseRunPayload, message: ChatMessage): void {
+    const language = this.requireEnv().settingsLanguage;
     const status = message.status ?? "running";
     const card = container.createDiv({ cls: `codex-kb-run-card codex-kb-run-card-${status}` });
     const head = card.createDiv({ cls: "codex-kb-run-head" });
     const mark = head.createSpan({ cls: "codex-kb-run-mark" });
     setIcon(mark, knowledgeBaseRunStatusIcon(payload, status));
     const text = head.createDiv({ cls: "codex-kb-run-copy" });
-    text.createDiv({ cls: "codex-kb-run-title", text: knowledgeBaseRunDisplayTitle(payload, status) });
-    const liveCopy = knowledgeBaseRunEventCopy(payload);
+    text.createDiv({ cls: "codex-kb-run-title", text: knowledgeBaseRunDisplayTitle(payload, status, language) });
+    const liveCopy = knowledgeBaseRunEventCopy(payload, language);
     if (liveCopy) text.createDiv({ cls: "codex-kb-run-subtitle", text: liveCopy });
     const track = card.createDiv({ cls: "codex-kb-run-track" });
     const eventProgress = knowledgeBaseRunProgressStateFromEvents(status, payload.events ?? [], payload.phases.length);
@@ -1643,6 +1671,7 @@ export class CodexMessageListRenderer {
   }
 
   private renderKnowledgeBaseMaintainReportCard(container: HTMLElement, payload: KnowledgeBaseMaintainReportPayload, message: ChatMessage): void {
+    const language = this.requireEnv().settingsLanguage;
     const card = container.createDiv({ cls: `codex-kb-maintain-card codex-kb-maintain-card-${payload.status}` });
     const header = card.createDiv({ cls: "codex-kb-maintain-header" });
     const icon = header.createSpan({ cls: "codex-kb-maintain-icon" });
@@ -1653,14 +1682,14 @@ export class CodexMessageListRenderer {
     if (payload.reportPath) {
       const open = header.createEl("button", { cls: "codex-kb-maintain-open", attr: { type: "button", title: payload.reportPath } });
       setIcon(open.createSpan({ cls: "codex-kb-maintain-open-icon" }), "external-link");
-      open.createSpan({ text: "打开报告" });
+      open.createSpan({ text: conversationUiText(language, "打开报告", "Open report") });
       open.onclick = (event) => {
         event.preventDefault();
         event.stopPropagation();
         void this.openKnowledgeBasePath(payload.reportPath);
       };
     }
-    const executionItems = knowledgeBaseMaintainExecutionItems(payload);
+    const executionItems = knowledgeBaseMaintainExecutionItems(payload, language);
     if (executionItems.length) {
       const execution = card.createDiv({ cls: "codex-kb-maintain-execution" });
       for (const item of executionItems) {
@@ -1668,7 +1697,10 @@ export class CodexMessageListRenderer {
       }
     }
     const care = card.createDiv({ cls: "codex-kb-maintain-care" });
-    care.createDiv({ cls: "codex-kb-maintain-section-title", text: "我应该关心" });
+    care.createDiv({
+      cls: "codex-kb-maintain-section-title",
+      text: conversationUiText(language, "我应该关心", "What matters")
+    });
     const careList = care.createDiv({ cls: "codex-kb-maintain-care-list" });
     for (const item of payload.careItems) {
       const row = careList.createDiv({ cls: `codex-kb-maintain-care-item codex-kb-maintain-care-${item.tone}` });
@@ -1707,7 +1739,10 @@ export class CodexMessageListRenderer {
             const title = row.createEl("button", {
               cls: "codex-kb-maintain-detail-title codex-kb-maintain-detail-link",
               text: item.title,
-              attr: { type: "button", title: `打开 ${itemPath}` }
+              attr: {
+                type: "button",
+                title: conversationUiText(language, `打开 ${itemPath}`, `Open ${itemPath}`)
+              }
             });
             title.onclick = (event) => {
               event.preventDefault();
@@ -1733,7 +1768,11 @@ export class CodexMessageListRenderer {
     }
     const absolute = `${env.vaultPath.replace(/\/$/, "")}/${normalized}`;
     if (showItemInFinder(absolute)) return;
-    new Notice(`没有在当前 Obsidian 仓库找到：${path}`);
+    new Notice(conversationUiText(
+      env.settingsLanguage,
+      `没有在当前 Obsidian 仓库找到：${path}`,
+      `Not found in the current Obsidian vault: ${path}`
+    ));
   }
 
   private renderKnowledgeUsageCards(
@@ -1893,7 +1932,11 @@ export class CodexMessageListRenderer {
     const env = this.requireEnv();
     const file = env.app.vault.getAbstractFileByPath(document.path);
     if (!(file instanceof TFile)) {
-      new Notice(`没有在当前 Obsidian 仓库找到：${document.path}`);
+      new Notice(conversationUiText(
+        env.settingsLanguage,
+        `没有在当前 Obsidian 仓库找到：${document.path}`,
+        `Not found in the current Obsidian vault: ${document.path}`
+      ));
       return;
     }
     await env.app.workspace.getLeaf("tab").openFile(file, { active: true });
@@ -1904,7 +1947,11 @@ export class CodexMessageListRenderer {
     const normalized = normalizePath(reference.vaultRelativePath);
     const file = env.app.vault.getAbstractFileByPath(normalized);
     if (!(file instanceof TFile)) {
-      new Notice(`没有在当前 Obsidian 仓库找到：${reference.vaultRelativePath}`);
+      new Notice(conversationUiText(
+        env.settingsLanguage,
+        `没有在当前 Obsidian 仓库找到：${reference.vaultRelativePath}`,
+        `Not found in the current Obsidian vault: ${reference.vaultRelativePath}`
+      ));
       return;
     }
     const leaf = env.app.workspace.getLeaf("tab");
@@ -2015,7 +2062,9 @@ export class CodexMessageListRenderer {
         || turn.status === "running"
         || turn.status === "completing"
       ) {
-        renderSmoothAILoader(empty, copy.message.preparingReply);
+        renderSmoothAILoader(empty, copy.message.preparingReply, {
+          language: env.settingsLanguage
+        });
         env.onScheduleRunProgress();
       } else {
         empty.setText(formatAgentTurnSummary(turn, env.settingsLanguage));
@@ -2164,7 +2213,9 @@ export class CodexMessageListRenderer {
     }
     if (source.itemType === "thinking") {
       if (source.status === "running") {
-        renderSmoothAILoader(container, source.text || this.copy().message.organizingContext);
+        renderSmoothAILoader(container, source.text || this.copy().message.organizingContext, {
+          language: this.requireEnv().settingsLanguage
+        });
       }
       return;
     }
@@ -2191,7 +2242,11 @@ export class CodexMessageListRenderer {
         `${turn.key}:${node.nodeId}`,
         node.title
       );
-      this.renderKnowledgeBaseResultContent(details.body, source, displayTextForMessage(source));
+      this.renderKnowledgeBaseResultContent(
+        details.body,
+        source,
+        firstPartyMessageText(source, this.requireEnv().settingsLanguage)
+      );
     }
   }
 
@@ -2796,7 +2851,11 @@ export class CodexMessageListRenderer {
       deciding = false;
       elements.root.setAttribute("aria-busy", "false");
       for (const button of buttons) button.disabled = false;
-      new Notice("该审批已失效，请等待状态刷新。");
+      new Notice(conversationUiText(
+        env.settingsLanguage,
+        "该审批已失效，请等待状态刷新。",
+        "This approval is no longer valid. Wait for the status to refresh."
+      ));
       this.rerenderPreservingScroll();
     };
     elements.approveButton.onclick = decide("approve");
@@ -2814,7 +2873,8 @@ export class CodexMessageListRenderer {
     attachments: readonly Readonly<StoredAttachment>[],
     attachmentResolver: EchoInkAttachmentResourceResolver
   ): void {
-    markAIElementsAttachments(container, "grid", "消息附件");
+    const language = this.requireEnv().settingsLanguage;
+    markAIElementsAttachments(container, "grid", conversationUiText(language, "消息附件", "Message attachments"));
     let imageIndex = 0;
     for (const attachment of attachments) {
       const resource = attachmentResolver.resolve(
@@ -2832,7 +2892,7 @@ export class CodexMessageListRenderer {
           || !resource.resourceUri
           || this.failedAttachmentResourceUris.has(resource.resourceUri)
         ) {
-          renderUnavailablePiImage(item, resource.displayName);
+          renderUnavailablePiImage(item, resource.displayName, language);
           continue;
         }
         const resourceUri = resource.resourceUri;
@@ -2841,8 +2901,8 @@ export class CodexMessageListRenderer {
           cls: "codex-message-attachment-preview",
           attr: {
             type: "button",
-            title: `打开 ${resource.displayName}`,
-            "aria-label": `打开图片：${resource.displayName}`
+            title: conversationUiText(language, `打开 ${resource.displayName}`, `Open ${resource.displayName}`),
+            "aria-label": conversationUiText(language, `打开图片：${resource.displayName}`, `Open image: ${resource.displayName}`)
           }
         });
         const img = preview.createEl("img", { attr: { alt: "", draggable: "false" } });
@@ -2851,7 +2911,7 @@ export class CodexMessageListRenderer {
           if (this.env?.sessionId !== sessionId) return;
           this.failedAttachmentResourceUris.add(resourceUri);
           preview.remove();
-          renderUnavailablePiImage(item, resource.displayName);
+          renderUnavailablePiImage(item, resource.displayName, language);
           this.scheduleMeasureIfVirtualRowHeightChanged(item, sessionId);
         };
         img.src = resourceUri;
@@ -2867,6 +2927,7 @@ export class CodexMessageListRenderer {
         displayName: resource.displayName,
         variant: "message",
         availability: resource.availability,
+        language,
         onOpen: () => {
           void this.openAttachment(attachment, resource.resourceUri);
         }
@@ -2897,15 +2958,16 @@ export class CodexMessageListRenderer {
   ): void {
     container.addClass("codex-note-mention-chips");
     container.setAttribute("role", "list");
-    container.setAttribute("aria-label", "消息中的笔记提及");
+    const language = this.requireEnv().settingsLanguage;
+    container.setAttribute("aria-label", conversationUiText(language, "消息中的笔记提及", "Note mentions in this message"));
     for (const mention of noteMentions) {
       const chip = container.createEl("button", {
         cls: "codex-note-mention-chip codex-message-note-mention-chip",
         attr: {
           type: "button",
           role: "listitem",
-          title: `打开 ${mention.fileName}`,
-          "aria-label": `打开笔记：${mention.fileName}`
+          title: conversationUiText(language, `打开 ${mention.fileName}`, `Open ${mention.fileName}`),
+          "aria-label": conversationUiText(language, `打开笔记：${mention.fileName}`, `Open note: ${mention.fileName}`)
         }
       });
       const icon = chip.createSpan({
@@ -2932,7 +2994,11 @@ export class CodexMessageListRenderer {
     const env = this.requireEnv();
     const file = env.app.vault.getAbstractFileByPath(normalizePath(vaultRelativePath));
     if (!(file instanceof TFile)) {
-      new Notice(`找不到笔记：${fileName}`);
+      new Notice(conversationUiText(
+        env.settingsLanguage,
+        `找不到笔记：${fileName}`,
+        `Note not found: ${fileName}`
+      ));
       return;
     }
     await env.app.workspace.getLeaf("tab").openFile(file, { active: true });
@@ -2946,9 +3012,13 @@ export class CodexMessageListRenderer {
     if (attachment.type === "image") {
       const resolved = resourceUri
         ? { resourceUri }
-        : createAttachmentResourceResolver(env.app, env.vaultPath).resolve(attachment);
+        : createAttachmentResourceResolver(
+          env.app,
+          env.vaultPath,
+          env.settingsLanguage
+        ).resolve(attachment);
       if (!resolved.resourceUri) {
-        new Notice("图片附件不可在本地打开");
+        new Notice(conversationUiText(env.settingsLanguage, "图片附件不可在本地打开", "This image attachment cannot be opened locally"));
         return;
       }
       openImageOverlay(resolved.resourceUri);
@@ -2956,7 +3026,7 @@ export class CodexMessageListRenderer {
     }
     const ref = normalizeProcessFileRef(attachment.path, env.vaultPath);
     if (!ref.openable) {
-      new Notice("这个文件路径无法打开");
+      new Notice(conversationUiText(env.settingsLanguage, "这个文件路径无法打开", "This file path cannot be opened"));
       return;
     }
     const absolutePath = ref.absolutePath
@@ -2964,7 +3034,11 @@ export class CodexMessageListRenderer {
         ? absoluteVaultPath(env.vaultPath, ref.path)
         : ref.kind === "external" ? ref.path : "");
     if (await openPathInElectron(absolutePath)) return;
-    new Notice(`无法使用系统默认应用打开：${ref.displayPath}`);
+    new Notice(conversationUiText(
+      env.settingsLanguage,
+      `无法使用系统默认应用打开：${ref.displayPath}`,
+      `Could not open with the system default application: ${ref.displayPath}`
+    ));
   }
 
   private renderThinkingMessage(container: HTMLElement, message: ChatMessage): void {
@@ -2986,7 +3060,11 @@ export class CodexMessageListRenderer {
     };
     if (message.status === "running") {
       const row = reasoning.body.createDiv({ cls: "codex-thinking-live" });
-      renderSmoothAILoader(row, message.text || copy.message.organizingContext);
+      renderSmoothAILoader(
+        row,
+        firstPartyMessageText(message, env.settingsLanguage) || copy.message.organizingContext,
+        { language: env.settingsLanguage }
+      );
       row.createSpan({
         cls: "codex-agent-live-copy",
         text: ` · ${rotatingChoice(copy.message.thinkingLiveCopies, message.createdAt)}`
@@ -2996,7 +3074,7 @@ export class CodexMessageListRenderer {
     }
     reasoning.body.createEl("em", {
       cls: "codex-response-footer",
-      text: message.text || copy.message.thinkingComplete
+      text: firstPartyMessageText(message, env.settingsLanguage) || copy.message.thinkingComplete
     });
   }
 
@@ -3047,7 +3125,16 @@ export class CodexMessageListRenderer {
         text: titleForItemType(message, this.requireEnv().settingsLanguage)
       });
       if (message.itemType === "fileChange" && message.diffSummary) this.renderDiffStats(main, message.diffSummary);
-      if (message.details) main.createDiv({ cls: "codex-process-detail", text: message.details });
+      if (message.details) {
+        main.createDiv({
+          cls: "codex-process-detail",
+          text: firstPartyMessageDetail(
+            message,
+            message.details,
+            this.requireEnv().settingsLanguage
+          )
+        });
+      }
       if (message.itemType === "fileChange" && message.files?.length) this.renderProcessFileChips(main.createDiv({ cls: "codex-process-files" }), message.files);
     }
     if (message.status) {
@@ -3095,7 +3182,10 @@ export class CodexMessageListRenderer {
       return;
     }
     if (this.renderApprovalPreviewDiff(body, message, approvalChange)) {
-      const text = displayTextForMessage(message).trim();
+      const text = firstPartyMessageText(
+        message,
+        this.requireEnv().settingsLanguage
+      ).trim();
       if (text) this.renderPlainTextBlock(body, text);
       return;
     }
@@ -3105,7 +3195,10 @@ export class CodexMessageListRenderer {
       this.renderDeferredRawText(body, message, fallback);
       return;
     }
-    const text = displayTextForMessage(message) || fallback;
+    const text = firstPartyMessageText(
+      message,
+      this.requireEnv().settingsLanguage
+    ) || fallback;
     if (rawLike || isLargeRawMessage(message)) {
       this.renderPlainTextBlock(body, text);
       return;
@@ -3422,7 +3515,9 @@ export class CodexMessageListRenderer {
 
   private renderProcessLoader(container: HTMLElement, label: string): HTMLElement {
     const host = container.createDiv({ cls: "codex-process-raw-loading" });
-    renderSmoothAILoader(host, label);
+    renderSmoothAILoader(host, label, {
+      language: this.requireEnv().settingsLanguage
+    });
     return host;
   }
 
@@ -3482,7 +3577,7 @@ export class CodexMessageListRenderer {
   private async openProcessFile(file: ProcessFileRef): Promise<void> {
     const env = this.requireEnv();
     if (!file.openable) {
-      new Notice("这个文件路径无法打开");
+      new Notice(conversationUiText(env.settingsLanguage, "这个文件路径无法打开", "This file path cannot be opened"));
       return;
     }
     if (file.kind === "vault") {
@@ -3492,11 +3587,15 @@ export class CodexMessageListRenderer {
         return;
       }
       if (file.absolutePath && showItemInFinder(file.absolutePath)) return;
-      new Notice(`没有在当前 Obsidian 仓库找到：${file.displayPath}`);
+      new Notice(conversationUiText(
+        env.settingsLanguage,
+        `没有在当前 Obsidian 仓库找到：${file.displayPath}`,
+        `Not found in the current Obsidian vault: ${file.displayPath}`
+      ));
       return;
     }
     if (file.kind === "external" && showItemInFinder(file.absolutePath ?? file.path)) return;
-    new Notice("无法打开这个文件位置");
+    new Notice(conversationUiText(env.settingsLanguage, "无法打开这个文件位置", "Could not open this file location"));
   }
 
   private pruneVirtualHeights(rowIds: string[]): void {
@@ -3675,8 +3774,11 @@ export function shouldRenderMessageTitle(message: ChatMessage, hasAgentHeader: b
   return !hasAgentHeader;
 }
 
-export function messageTitleTime(message: ChatMessage): string {
-  return isAgentAnswerMessage(message) ? "" : formatMessageHeaderTime(message.createdAt);
+export function messageTitleTime(
+  message: ChatMessage,
+  language: SettingsLanguage = "zh-CN"
+): string {
+  return isAgentAnswerMessage(message) ? "" : formatMessageHeaderTime(message.createdAt, language);
 }
 
 function agentModelLine(message: ChatMessage): string {
@@ -3702,8 +3804,13 @@ function noteNameForPath(path: string): string {
   return basename(path).replace(/\.md$/iu, "") || path;
 }
 
-function formatAnswerFooterTime(value: number): string {
-  return formatMessageHeaderTime(value)
+function formatAnswerFooterTime(
+  value: number,
+  language: SettingsLanguage = "zh-CN"
+): string {
+  const formatted = formatMessageHeaderTime(value, language);
+  if (language === "en") return formatted;
+  return formatted
     .replace(/^星期/, "周")
     .replace(/([一二三四五六日天])(?=\d{2}:\d{2}$)/, "$1 ");
 }
@@ -3964,7 +4071,7 @@ function titleForItemType(
   message: ChatMessage,
   language: SettingsLanguage = "zh-CN"
 ): string {
-  if (message.title) return message.title;
+  if (message.title) return firstPartyMessageTitle(message, language);
   return conversationCopy(language).action.itemTypeTitle(message.itemType);
 }
 
@@ -4136,14 +4243,15 @@ function isDetailsElement(element: HTMLElement): element is HTMLDetailsElement {
 
 function renderUnavailablePiImage(
   container: HTMLElement,
-  displayName: string
+  displayName: string,
+  language: SettingsLanguage = "zh-CN"
 ): HTMLElement {
   const unavailable = container.createDiv({
     cls: "codex-message-attachment-tile codex-message-attachment-unavailable is-disabled",
     attr: {
       role: "status",
-      title: `${displayName} · 图片附件不可在本地打开`,
-      "aria-label": `${displayName}：图片附件不可在本地打开`
+      title: conversationUiText(language, `${displayName} · 图片附件不可在本地打开`, `${displayName} · Image attachment cannot be opened locally`),
+      "aria-label": conversationUiText(language, `${displayName}：图片附件不可在本地打开`, `${displayName}: Image attachment cannot be opened locally`)
     }
   });
   const icon = unavailable.createSpan({ cls: "codex-message-attachment-icon" });
@@ -4232,8 +4340,11 @@ function hasRenderableDiff(files: ParsedDiffFile[]): boolean {
   ));
 }
 
-function formatAbsoluteTime(value: number): string {
-  return new Date(value).toLocaleString("zh-CN", {
+function formatAbsoluteTime(
+  value: number,
+  language: SettingsLanguage = "zh-CN"
+): string {
+  return new Date(value).toLocaleString(conversationUiLocale(language), {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
@@ -4241,13 +4352,17 @@ function formatAbsoluteTime(value: number): string {
   });
 }
 
-function knowledgeBaseRunDisplayTitle(payload: KnowledgeBaseRunPayload, status?: string): string {
-  if (status === "recovery-pending") return "正在恢复上次知识库维护";
-  if (status === "recovery-blocked") return "知识库维护恢复被阻断";
-  if (status === "interrupted") return "知识库任务已中断";
-  if (status === "canceled") return "知识库任务已取消";
-  if (status === "failed") return "知识库任务失败";
-  if (status === "completed") return "知识库任务已完成";
+function knowledgeBaseRunDisplayTitle(
+  payload: KnowledgeBaseRunPayload,
+  status?: string,
+  language: SettingsLanguage = "zh-CN"
+): string {
+  if (status === "recovery-pending") return conversationUiText(language, "正在恢复上次知识库维护", "Recovering the previous Knowledge maintenance run");
+  if (status === "recovery-blocked") return conversationUiText(language, "知识库维护恢复被阻断", "Knowledge maintenance recovery is blocked");
+  if (status === "interrupted") return conversationUiText(language, "知识库任务已中断", "Knowledge task interrupted");
+  if (status === "canceled") return conversationUiText(language, "知识库任务已取消", "Knowledge task cancelled");
+  if (status === "failed") return conversationUiText(language, "知识库任务失败", "Knowledge task failed");
+  if (status === "completed") return conversationUiText(language, "知识库任务已完成", "Knowledge task completed");
   return payload.title;
 }
 
@@ -4257,7 +4372,10 @@ function knowledgeBaseRunStatusIcon(payload: KnowledgeBaseRunPayload, status: st
   return payload.icon;
 }
 
-export function knowledgeBaseRunEventCopy(payload: KnowledgeBaseRunPayload): string {
+export function knowledgeBaseRunEventCopy(
+  payload: KnowledgeBaseRunPayload,
+  language: SettingsLanguage = "zh-CN"
+): string {
   const event = [...(payload.events ?? [])].reverse().find((candidate) =>
     candidate.type === "workflow.phase.started"
     || candidate.type === "workflow.phase.progress"
@@ -4267,42 +4385,107 @@ export function knowledgeBaseRunEventCopy(payload: KnowledgeBaseRunPayload): str
   if (event.message?.trim()) return event.message.trim();
   if (event.phaseId) {
     const phase = payload.phases.find((candidate) => candidate.id === event.phaseId);
-    if (phase) return `${phase.label}阶段`;
+    if (phase) return conversationUiText(language, `${phase.label}阶段`, `${phase.label} phase`);
   }
   return payload.subtitle;
 }
 
 export function knowledgeBaseMaintainExecutionItems(
-  payload: KnowledgeBaseMaintainReportPayload
+  payload: KnowledgeBaseMaintainReportPayload,
+  language: SettingsLanguage = "zh-CN"
 ): string[] {
   const items: string[] = [];
-  if (payload.completion === "noop") items.push("无新来源");
-  else if (payload.completion === "partial") items.push("部分完成");
-  else if (payload.completion === "recovered") items.push("自动恢复完成");
-  else if (payload.completion === "full") items.push("完整完成");
+  if (payload.completion === "noop") items.push(conversationUiText(language, "无新来源", "No new sources"));
+  else if (payload.completion === "partial") items.push(conversationUiText(language, "部分完成", "Partially complete"));
+  else if (payload.completion === "recovered") items.push(conversationUiText(language, "自动恢复完成", "Recovered automatically"));
+  else if (payload.completion === "full") items.push(conversationUiText(language, "完整完成", "Complete"));
 
   if (payload.performance) {
-    items.push(formatKnowledgeBaseRunDuration(payload.performance.totalMs));
-    if (!payload.performance.agentCalled) items.push("未调用 Agent");
+    items.push(formatKnowledgeBaseRunDuration(payload.performance.totalMs, language));
+    if (!payload.performance.agentCalled) items.push(conversationUiText(language, "未调用 Agent", "Agent was not called"));
     if (payload.performance.index) {
-      items.push(`索引复用 ${payload.performance.index.reused}，刷新 ${payload.performance.index.refreshed}`);
+      items.push(conversationUiText(language, `索引复用 ${payload.performance.index.reused}，刷新 ${payload.performance.index.refreshed}`, `Index reused ${payload.performance.index.reused}, refreshed ${payload.performance.index.refreshed}`));
     }
     const completedPhases = payload.performance.phases.filter((phase) => phase.status === "success").length;
     if (payload.performance.phases.length) {
-      items.push(`${completedPhases}/${payload.performance.phases.length} 阶段`);
+      items.push(conversationUiText(language, `${completedPhases}/${payload.performance.phases.length} 阶段`, `${completedPhases}/${payload.performance.phases.length} phases`));
     }
   }
   return items;
 }
 
-function formatKnowledgeBaseRunDuration(durationMs: number): string {
+function formatKnowledgeBaseRunDuration(
+  durationMs: number,
+  language: SettingsLanguage = "zh-CN"
+): string {
   const safeMs = Math.max(0, durationMs);
-  if (safeMs < 1000) return `用时 ${Math.round(safeMs)}ms`;
+  if (safeMs < 1000) return conversationUiText(language, `用时 ${Math.round(safeMs)}ms`, `${Math.round(safeMs)}ms`);
   const totalSeconds = Math.round(safeMs / 100) / 10;
-  if (totalSeconds < 60) return `用时 ${totalSeconds.toFixed(totalSeconds < 10 ? 1 : 0)} 秒`;
+  if (totalSeconds < 60) return conversationUiText(language, `用时 ${totalSeconds.toFixed(totalSeconds < 10 ? 1 : 0)} 秒`, `${totalSeconds.toFixed(totalSeconds < 10 ? 1 : 0)} sec`);
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = Math.round(totalSeconds % 60);
-  return seconds ? `用时 ${minutes} 分 ${seconds} 秒` : `用时 ${minutes} 分`;
+  return conversationUiText(language, seconds ? `用时 ${minutes} 分 ${seconds} 秒` : `用时 ${minutes} 分`, seconds ? `${minutes} min ${seconds} sec` : `${minutes} min`);
+}
+
+function firstPartyMessageTitle(
+  message: Readonly<ChatMessage>,
+  language: SettingsLanguage
+): string {
+  const title = message.title ?? "";
+  return isFirstPartySystemPresentation(message)
+    || (message.itemType === "knowledgeBase" && title === "知识库管理")
+    ? localizeKnownConversationSystemCopy(language, title)
+    : title;
+}
+
+function firstPartyMessageText(
+  message: Readonly<ChatMessage>,
+  language: SettingsLanguage
+): string {
+  const text = displayTextForMessage(message);
+  if (isFirstPartySystemPresentation(message)) {
+    return localizeKnownConversationSystemCopy(language, text);
+  }
+  if (message.itemType === "knowledgeBase" && text === "正在执行...") {
+    return localizeKnownConversationSystemCopy(language, text);
+  }
+  if (
+    message.role === "assistant"
+    && message.itemType === "assistant"
+    && text === "Agent 未返回可显示内容"
+  ) {
+    return localizeKnownConversationSystemCopy(language, text);
+  }
+  return text;
+}
+
+function firstPartyMessageDetail(
+  message: Readonly<ChatMessage>,
+  detail: string,
+  language: SettingsLanguage
+): string {
+  if (!isFirstPartySystemPresentation(message)) return detail;
+  const sourceNode = /^来源节点\s+(.+)$/u.exec(detail);
+  if (sourceNode) {
+    return conversationUiText(language, detail, `Source node ${sourceNode[1]}`);
+  }
+  const previousNode = /^原节点\s+(.+)$/u.exec(detail);
+  if (previousNode) {
+    return conversationUiText(language, detail, `Previous node ${previousNode[1]}`);
+  }
+  return localizeKnownConversationSystemCopy(language, detail);
+}
+
+function isFirstPartySystemPresentation(
+  message: Readonly<ChatMessage>
+): boolean {
+  if (message.role === "system") return true;
+  if (message.role !== "assistant") return false;
+  return message.itemType === "contextCompaction"
+    || message.itemType === "thinking"
+    || message.itemType === "plan"
+    || message.itemType === "image"
+    || message.itemType === "error";
 }
 
 function formatBytes(byteCount: number): string {

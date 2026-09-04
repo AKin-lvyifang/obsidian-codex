@@ -1,12 +1,17 @@
 import * as fs from "fs";
 import * as path from "path";
 import { getElectronDialog } from "../../core/electron";
+import type { SettingsLanguage } from "../../settings/settings";
+import { conversationUiText } from "./ui-i18n";
 
-export async function pickWorkspaceDirectory(defaultPath: string): Promise<string | null | undefined> {
+export async function pickWorkspaceDirectory(
+  defaultPath: string,
+  language: SettingsLanguage = "zh-CN"
+): Promise<string | null | undefined> {
   const dialog = getElectronDialog();
   if (!dialog?.showOpenDialog) return undefined;
   const result = await dialog.showOpenDialog({
-    title: "选择 Codex 工作区",
+    title: conversationUiText(language, "选择 Codex 工作区", "Choose Codex workspace"),
     defaultPath: normalizeWorkspacePath(defaultPath) || undefined,
     properties: ["openDirectory", "createDirectory"]
   });

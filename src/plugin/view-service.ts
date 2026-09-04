@@ -64,6 +64,20 @@ export class EchoInkViewService {
     if (home) void home.refresh().catch((error) => console.warn("EchoInk 首页刷新失败", error));
   }
 
+  async refreshLanguageSurfaces(): Promise<void> {
+    const refreshes: Promise<void>[] = [];
+    for (const leaf of this.plugin.app.workspace.getLeavesOfType(VIEW_TYPE_CODEX)) {
+      if (leaf.view instanceof CodexView) leaf.view.refreshLanguage();
+    }
+    for (const leaf of this.plugin.app.workspace.getLeavesOfType(VIEW_TYPE_ECHOINK_HOME)) {
+      if (!(leaf.view instanceof EchoInkHomeView)) continue;
+      refreshes.push(leaf.view.refreshLanguage().catch((error) => {
+        console.warn("EchoInk 首页语言刷新失败", error);
+      }));
+    }
+    await Promise.all(refreshes);
+  }
+
   async openWorkspaceResourceSettings(tab: ResourceManagementTab = "plugins"): Promise<void> {
     this.plugin.settings.settingsTab = "resources";
     this.plugin.settings.resourceManagementTab = tab;

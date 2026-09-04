@@ -1,6 +1,7 @@
 import { setIcon } from "obsidian";
-import { newId } from "../../settings/settings";
+import { newId, type SettingsLanguage } from "../../settings/settings";
 import type { KnowledgeBaseDashboardSnapshot } from "../../knowledge-base/dashboard";
+import { conversationUiLocale, conversationUiText } from "./ui-i18n";
 
 interface RectLike {
   left: number;
@@ -10,6 +11,7 @@ interface RectLike {
 }
 
 export interface KnowledgeDashboardRenderState {
+  language?: SettingsLanguage;
   visible: boolean;
   snapshot: KnowledgeBaseDashboardSnapshot | null;
   expanded: boolean;
@@ -67,6 +69,7 @@ export function renderKnowledgeDashboardView(
   actions: KnowledgeDashboardActions,
   tooltipState: KnowledgeDashboardTooltipState
 ): void {
+  const language = state.language ?? "zh-CN";
   clearKnowledgeDashboardHealthTooltips(tooltipState);
   container.empty();
   container.toggleClass("is-visible", state.visible);
@@ -89,24 +92,30 @@ export function renderKnowledgeDashboardView(
   const title = header.createDiv({ cls: "codex-kb-dashboard-title" });
   const titleIcon = title.createSpan({ cls: "codex-kb-dashboard-icon" });
   setIcon(titleIcon, "database");
-  title.createSpan({ text: "知识库状态" });
+  title.createSpan({ text: conversationUiText(language, "知识库状态", "Knowledge status") });
 
   const summary = header.createDiv({ cls: "codex-kb-dashboard-summary" });
   if (snapshot) {
     addKnowledgeDashboardMetric(summary, "Raw", `${snapshot.raw.fileCount}`);
     addKnowledgeDashboardMetric(summary, "Wiki", `${snapshot.wiki.fileCount}`);
     addKnowledgeDashboardMetric(summary, "Inbox", `${snapshot.inbox.fileCount}`);
-    addKnowledgeDashboardHealthMetric(summary, snapshot.health, tooltipState);
+    addKnowledgeDashboardHealthMetric(summary, snapshot.health, tooltipState, language);
   } else {
-    summary.createSpan({ cls: "codex-kb-dashboard-muted", text: state.error || "等待扫描" });
+    summary.createSpan({
+      cls: "codex-kb-dashboard-muted",
+      text: state.error || conversationUiText(language, "等待扫描", "Waiting to scan")
+    });
   }
 
   const dashboardActions = header.createDiv({ cls: "codex-kb-dashboard-actions" });
-  const refresh = dashboardActions.createEl("button", { cls: "codex-icon-button codex-kb-dashboard-button", attr: { type: "button", title: "刷新状态", "aria-label": "刷新状态" } });
+  const refreshLabel = conversationUiText(language, "刷新状态", "Refresh status");
+  const refresh = dashboardActions.createEl("button", { cls: "codex-icon-button codex-kb-dashboard-button", attr: { type: "button", title: refreshLabel, "aria-label": refreshLabel } });
   setIcon(refresh, state.loading ? "loader-circle" : "refresh-cw");
   refresh.disabled = state.loading;
   refresh.onclick = actions.onRefresh;
-  const toggleTitle = state.expanded ? "收起详情" : "展开详情";
+  const toggleTitle = state.expanded
+    ? conversationUiText(language, "收起详情", "Collapse details")
+    : conversationUiText(language, "展开详情", "Expand details");
   const toggle = dashboardActions.createEl("button", { cls: "codex-icon-button codex-kb-dashboard-button", attr: { type: "button", title: toggleTitle, "aria-label": toggleTitle } });
   setIcon(toggle, state.expanded ? "chevron-up" : "chevron-down");
   toggle.onclick = actions.onToggleExpanded;
@@ -128,10 +137,10 @@ export function renderKnowledgeDashboardView(
   if (!snapshot || !state.expanded) return;
 
   const details = container.createDiv({ cls: "codex-kb-dashboard-details" });
-  renderKnowledgeDashboardHealth(details, snapshot, tooltipState);
-  renderKnowledgeDashboardWiki(details, snapshot);
-  renderKnowledgeDashboardQueues(details, snapshot);
-  renderKnowledgeDashboardHeatmap(details, snapshot);
+  renderKnowledgeDashboardHealth(details, snapshot, tooltipState, language);
+  renderKnowledgeDashboardWiki(details, snapshot, language);
+  renderKnowledgeDashboardQueues(details, snapshot, language);
+  renderKnowledgeDashboardHeatmap(details, snapshot, language);
 }
 
 export function clearKnowledgeDashboardHealthTooltips(state: KnowledgeDashboardTooltipState): void {
@@ -192,50 +201,69 @@ function addKnowledgeDashboardMetric(container: HTMLElement, label: string, valu
   metric.createSpan({ cls: "codex-kb-dashboard-metric-value", text: value });
 }
 
-function addKnowledgeDashboardHealthMetric(container: HTMLElement, health: KnowledgeBaseDashboardSnapshot["health"], tooltipState: KnowledgeDashboardTooltipState): void {
-  const { status, label } = health;
+function addKnowledgeDashboardHealthMetric(
+  container: HTMLElement,
+  health: KnowledgeBaseDashboardSnapshot["health"],
+  tooltipState: KnowledgeDashboardTooltipState,
+  language: SettingsLanguage
+): void {
+  const { status } = health;
   const metric = container.createSpan({ cls: `codex-kb-dashboard-metric codex-kb-dashboard-health codex-kb-health-${status}` });
   metric.createSpan({ cls: "codex-kb-status-dot" });
-  metric.createSpan({ cls: "codex-kb-dashboard-metric-value", text: label });
-  addKnowledgeDashboardHealthTooltip(metric, health, "summary", tooltipState);
+  metric.createSpan({ cls: "codex-kb-dashboard-metric-value", text: knowledgeHealthStatusLabel(status, health.label, language) });
+  addKnowledgeDashboardHealthTooltip(metric, health, "summary", tooltipState, language);
 }
 
-function renderKnowledgeDashboardHealth(container: HTMLElement, snapshot: KnowledgeBaseDashboardSnapshot, tooltipState: KnowledgeDashboardTooltipState): void {
-  const section = addKnowledgeDashboardSection(container, "健康概览");
+function renderKnowledgeDashboardHealth(
+  container: HTMLElement,
+  snapshot: KnowledgeBaseDashboardSnapshot,
+  tooltipState: KnowledgeDashboardTooltipState,
+  language: SettingsLanguage
+): void {
+  const section = addKnowledgeDashboardSection(container, conversationUiText(language, "健康概览", "Health overview"));
   const overview = section.createDiv({ cls: "codex-kb-dashboard-health-overview" });
   addKnowledgeDashboardEnergyMeter(
     overview,
-    "知识库健康",
+    conversationUiText(language, "知识库健康", "Knowledge health"),
     snapshot.health.score,
     `codex-kb-health-${snapshot.health.status}`,
-    snapshot.health.label,
+    knowledgeHealthStatusLabel(snapshot.health.status, snapshot.health.label, language),
     tooltipState,
-    snapshot.health
+    snapshot.health,
+    language
   );
   addKnowledgeDashboardEnergyMeter(
     overview,
-    "体检新鲜度",
+    conversationUiText(language, "体检新鲜度", "Check freshness"),
     snapshot.checkFreshness.score,
     `codex-kb-freshness-${snapshot.checkFreshness.status}`,
-    snapshot.checkFreshness.label,
-    tooltipState
+    checkFreshnessStatusLabel(snapshot.checkFreshness.status, snapshot.checkFreshness.label, language),
+    tooltipState,
+    undefined,
+    language
   );
 
   const facts = section.createDiv({ cls: "codex-kb-dashboard-facts" });
-  addKnowledgeDashboardFact(facts, "最近体检", snapshot.checkFreshness.lastCheckAt ? formatAbsoluteTime(snapshot.checkFreshness.lastCheckAt) : "无记录");
-  addKnowledgeDashboardFact(facts, "新鲜度", snapshot.checkFreshness.daysSinceCheck >= 0 ? `${snapshot.checkFreshness.daysSinceCheck} 天前确认` : "无记录");
-  addKnowledgeDashboardFact(facts, "连续体检", snapshot.health.streakDays ? `${snapshot.health.streakDays} 天` : "0 天");
+  const noRecord = conversationUiText(language, "无记录", "No record");
+  addKnowledgeDashboardFact(facts, conversationUiText(language, "最近体检", "Latest check"), snapshot.checkFreshness.lastCheckAt ? formatAbsoluteTime(snapshot.checkFreshness.lastCheckAt, language) : noRecord);
+  addKnowledgeDashboardFact(facts, conversationUiText(language, "新鲜度", "Freshness"), snapshot.checkFreshness.daysSinceCheck >= 0
+    ? conversationUiText(language, `${snapshot.checkFreshness.daysSinceCheck} 天前确认`, `Confirmed ${snapshot.checkFreshness.daysSinceCheck} day${snapshot.checkFreshness.daysSinceCheck === 1 ? "" : "s"} ago`)
+    : noRecord);
+  addKnowledgeDashboardFact(facts, conversationUiText(language, "连续体检", "Check streak"), conversationUiText(language, snapshot.health.streakDays ? `${snapshot.health.streakDays} 天` : "0 天", `${snapshot.health.streakDays} day${snapshot.health.streakDays === 1 ? "" : "s"}`));
   addKnowledgeDashboardFact(
     facts,
-    "最近任务",
+    conversationUiText(language, "最近任务", "Latest task"),
     knowledgeRunStatusLabel(
       snapshot.lastRun.status,
       snapshot.lastRun.at,
       snapshot.lastRun.completion,
-      snapshot.lastRun.pendingSourceCount
+      snapshot.lastRun.pendingSourceCount,
+      language
     )
   );
-  addKnowledgeDashboardFact(facts, "Tracker", snapshot.tracker.exists ? `${snapshot.tracker.trackedCount} 条` : "缺失");
+  addKnowledgeDashboardFact(facts, "Tracker", snapshot.tracker.exists
+    ? conversationUiText(language, `${snapshot.tracker.trackedCount} 条`, `${snapshot.tracker.trackedCount} entries`)
+    : conversationUiText(language, "缺失", "Missing"));
 
   const healthReasons = snapshot.health.status === "healthy" ? [] : snapshot.health.reasons;
   const freshnessReasons = snapshot.checkFreshness.status === "fresh" ? [] : snapshot.checkFreshness.reasons;
@@ -256,7 +284,8 @@ function addKnowledgeDashboardEnergyMeter(
   statusClass: string,
   statusLabel: string,
   tooltipState: KnowledgeDashboardTooltipState,
-  healthTooltip?: KnowledgeBaseDashboardSnapshot["health"]
+  healthTooltip?: KnowledgeBaseDashboardSnapshot["health"],
+  language: SettingsLanguage = "zh-CN"
 ): void {
   const safeScore = Math.max(0, Math.min(100, Math.round(scoreValue)));
   const activeCellCount = Math.round((safeScore / 100) * KNOWLEDGE_DASHBOARD_ENERGY_CELL_COUNT);
@@ -267,7 +296,7 @@ function addKnowledgeDashboardEnergyMeter(
   row.createDiv({ cls: "codex-kb-dashboard-meter-label", text: label });
   const percent = row.createDiv({ cls: "codex-kb-dashboard-energy-percent" });
   const percentValue = percent.createSpan({ cls: "codex-kb-dashboard-energy-percent-value", text: `${safeScore}%` });
-  if (healthTooltip) addKnowledgeDashboardHealthTooltip(percentValue, healthTooltip, "meter", tooltipState);
+  if (healthTooltip) addKnowledgeDashboardHealthTooltip(percentValue, healthTooltip, "meter", tooltipState, language);
   const track = row.createDiv({ cls: "codex-kb-dashboard-energy-track", attr: { "aria-hidden": "true" } });
   for (let index = 0; index < KNOWLEDGE_DASHBOARD_ENERGY_CELL_COUNT; index++) {
     const cellClass = index < activeCellCount
@@ -284,7 +313,8 @@ function addKnowledgeDashboardHealthTooltip(
   container: HTMLElement,
   health: KnowledgeBaseDashboardSnapshot["health"],
   placement: "summary" | "meter",
-  state: KnowledgeDashboardTooltipState
+  state: KnowledgeDashboardTooltipState,
+  language: SettingsLanguage
 ): void {
   ensureKnowledgeDashboardHealthTooltipDelegates(state);
   const placementClass = placement === "summary" ? "codex-kb-health-tooltip-placement-summary" : "codex-kb-health-tooltip-placement-meter";
@@ -296,8 +326,8 @@ function addKnowledgeDashboardHealthTooltip(
     attr: {
       type: "button",
       tabindex: "0",
-      title: "健康分解释",
-      "aria-label": "解释知识库健康分",
+      title: conversationUiText(language, "健康分解释", "Health score explanation"),
+      "aria-label": conversationUiText(language, "解释知识库健康分", "Explain knowledge health score"),
       "aria-describedby": tooltipId,
       "aria-expanded": "false"
     }
@@ -306,20 +336,23 @@ function addKnowledgeDashboardHealthTooltip(
   const panel = document.body.createDiv({ cls: "codex-kb-health-tooltip-panel", attr: { id: tooltipId, role: "tooltip" } });
   state.panels.push(bridge);
   state.panels.push(panel);
-  panel.createDiv({ cls: "codex-kb-health-tooltip-title", text: "健康分解释" });
-  panel.createDiv({ cls: "codex-kb-health-tooltip-summary", text: `当前 ${health.score} 分，状态：${health.label}。` });
+  panel.createDiv({ cls: "codex-kb-health-tooltip-title", text: conversationUiText(language, "健康分解释", "Health score explanation") });
+  panel.createDiv({
+    cls: "codex-kb-health-tooltip-summary",
+    text: conversationUiText(language, `当前 ${health.score} 分，状态：${health.label}。`, `Current score: ${health.score}. Status: ${knowledgeHealthStatusLabel(health.status, health.label, language)}.`)
+  });
   const reasons = panel.createDiv({ cls: "codex-kb-health-tooltip-reasons" });
   const scoreReasons = health.scoreReasons ?? [];
   if (scoreReasons.length) {
     for (const reason of scoreReasons) {
-      reasons.createDiv({ cls: "codex-kb-health-tooltip-reason", text: knowledgeDashboardHealthReasonText(reason) });
+      reasons.createDiv({ cls: "codex-kb-health-tooltip-reason", text: knowledgeDashboardHealthReasonText(reason, language) });
     }
   } else {
-    reasons.createDiv({ cls: "codex-kb-health-tooltip-reason codex-kb-health-tooltip-reason-muted", text: "暂无扣分项" });
+    reasons.createDiv({ cls: "codex-kb-health-tooltip-reason codex-kb-health-tooltip-reason-muted", text: conversationUiText(language, "暂无扣分项", "No score deductions") });
   }
   const note = panel.createDiv({ cls: "codex-kb-health-tooltip-note" });
-  note.createDiv({ text: health.scoreCheckNote || "体检成功只代表检查完成；健康分反映检查发现的结构问题。" });
-  note.createDiv({ text: health.scoreThresholdText || "85+ 健康，60-84 风险，低于 60 异常。" });
+  note.createDiv({ text: language === "en" ? "A completed check only confirms that checking finished; the score reflects the structural issues it found." : health.scoreCheckNote || "体检成功只代表检查完成；健康分反映检查发现的结构问题。" });
+  note.createDiv({ text: language === "en" ? "85+ healthy, 60–84 at risk, below 60 unhealthy." : health.scoreThresholdText || "85+ 健康，60-84 风险，低于 60 异常。" });
 
   let tooltip: KnowledgeDashboardHealthTooltipEntry;
   const rememberTooltipPointer = (event: MouseEvent) => {
@@ -527,25 +560,39 @@ function positionKnowledgeDashboardHealthTooltip(button: HTMLElement, panel: HTM
   });
 }
 
-function renderKnowledgeDashboardWiki(container: HTMLElement, snapshot: KnowledgeBaseDashboardSnapshot): void {
+function renderKnowledgeDashboardWiki(container: HTMLElement, snapshot: KnowledgeBaseDashboardSnapshot, language: SettingsLanguage): void {
   const rows = snapshot.wiki.groups.length
     ? snapshot.wiki.groups.map((group) => [group.label, `${group.totalCount}`, `${group.sharePercent}%`, group.todayCount ? `+${group.todayCount}` : "-"])
-    : [["无一级目录", "0", "-", "-"]];
-  addKnowledgeDashboardTable(container, "Wiki 状态", ["一级目录", "总数量", "占比", "今日更新"], rows);
+    : [[conversationUiText(language, "无一级目录", "No top-level folders"), "0", "-", "-"]];
+  addKnowledgeDashboardTable(container, conversationUiText(language, "Wiki 状态", "Wiki status"), [
+    conversationUiText(language, "一级目录", "Top-level folder"),
+    conversationUiText(language, "总数量", "Total"),
+    conversationUiText(language, "占比", "Share"),
+    conversationUiText(language, "今日更新", "Updated today")
+  ], rows);
 }
 
-function renderKnowledgeDashboardQueues(container: HTMLElement, snapshot: KnowledgeBaseDashboardSnapshot): void {
-  addKnowledgeDashboardTable(container, "Raw / Inbox 状态", ["区域", "总数量", "今日新增", "待处理", "待校准"], [
+function renderKnowledgeDashboardQueues(container: HTMLElement, snapshot: KnowledgeBaseDashboardSnapshot, language: SettingsLanguage): void {
+  addKnowledgeDashboardTable(container, conversationUiText(language, "Raw / Inbox 状态", "Raw / Inbox status"), [
+    conversationUiText(language, "区域", "Area"),
+    conversationUiText(language, "总数量", "Total"),
+    conversationUiText(language, "今日新增", "Added today"),
+    conversationUiText(language, "待处理", "Pending"),
+    conversationUiText(language, "待校准", "Needs calibration")
+  ], [
     ["Raw", `${snapshot.raw.fileCount}`, snapshot.raw.todayCount ? `+${snapshot.raw.todayCount}` : "-", `${snapshot.raw.digestStatus.pending + snapshot.raw.digestStatus.changed}`, `${snapshot.raw.digestStatus.calibration}`],
     ["Inbox", `${snapshot.inbox.fileCount}`, snapshot.inbox.todayCount ? `+${snapshot.inbox.todayCount}` : "-", `${snapshot.inbox.fileCount}`, "-"]
   ]);
 }
 
-function renderKnowledgeDashboardHeatmap(container: HTMLElement, snapshot: KnowledgeBaseDashboardSnapshot): void {
-  const section = addKnowledgeDashboardSection(container, "体检热力图");
+function renderKnowledgeDashboardHeatmap(container: HTMLElement, snapshot: KnowledgeBaseDashboardSnapshot, language: SettingsLanguage): void {
+  const section = addKnowledgeDashboardSection(container, conversationUiText(language, "体检热力图", "Check heatmap"));
   const year = heatmapYear(snapshot);
   const completedChecks = snapshot.checkHeatmap.filter((day) => day.status === "success" || day.status === "failed").length;
-  section.createDiv({ cls: "codex-kb-heatmap-summary", text: `${year} 年 ${completedChecks} 次体检` });
+  section.createDiv({
+    cls: "codex-kb-heatmap-summary",
+    text: conversationUiText(language, `${year} 年 ${completedChecks} 次体检`, `${completedChecks} checks in ${year}`)
+  });
   const heatmap = section.createDiv({ cls: "codex-kb-dashboard-heatmap" });
   const grid = heatmap.createDiv({ cls: "codex-kb-heatmap-grid" });
   const yearStart = new Date(year, 0, 1, 12, 0, 0, 0);
@@ -578,7 +625,10 @@ function renderKnowledgeDashboardHeatmap(container: HTMLElement, snapshot: Knowl
     if (!date) continue;
     const cell = grid.createSpan({
       cls: `codex-kb-heatmap-cell is-${day.status}`,
-      attr: { title: `${day.date} · ${knowledgeHeatmapStatusLabel(day.status)}`, "aria-label": `${day.date} ${knowledgeHeatmapStatusLabel(day.status)}` }
+      attr: {
+        title: `${day.date} · ${knowledgeHeatmapStatusLabel(day.status, language)}`,
+        "aria-label": `${day.date} ${knowledgeHeatmapStatusLabel(day.status, language)}`
+      }
     });
     cell.setCssStyles({
       gridColumn: `${heatmapWeekIndex(day.date, yearStart) + 2}`,
@@ -593,7 +643,7 @@ function renderKnowledgeDashboardHeatmap(container: HTMLElement, snapshot: Knowl
   legend.createSpan({ cls: "codex-kb-dashboard-legend-label", text: "More" });
   const failed = legend.createSpan({ cls: "codex-kb-dashboard-legend-item" });
   failed.createSpan({ cls: "codex-kb-legend-dot is-failed" });
-  failed.createSpan({ text: "失败" });
+  failed.createSpan({ text: conversationUiText(language, "失败", "Failed") });
 }
 
 function addKnowledgeDashboardSection(container: HTMLElement, title: string): HTMLElement {
@@ -621,7 +671,32 @@ function addKnowledgeDashboardTable(container: HTMLElement, title: string, colum
   }
 }
 
-function knowledgeRunStatusLabel(status: string, at: number, completion = "", pendingSourceCount = 0): string {
+function knowledgeRunStatusLabel(
+  status: string,
+  at: number,
+  completion = "",
+  pendingSourceCount = 0,
+  language: SettingsLanguage = "zh-CN"
+): string {
+  if (language === "en") {
+    const labels: Record<string, string> = {
+      idle: "Not run",
+      running: "Running",
+      success: "Successful",
+      failed: "Failed",
+      canceled: "Cancelled"
+    };
+    const completionLabels: Record<string, string> = {
+      partial: pendingSourceCount ? `Partially complete (${pendingSourceCount} pending)` : "Partially complete",
+      recovered: "Recovered",
+      noop: "Checked (no new sources)",
+      full: "Successful"
+    };
+    const label = status === "success" && completion
+      ? completionLabels[completion] ?? labels[status]
+      : labels[status] ?? status;
+    return at ? `${label} · ${formatRelativeTime(at, language)}` : label;
+  }
   const labels: Record<string, string> = {
     idle: "未运行",
     running: "运行中",
@@ -638,10 +713,14 @@ function knowledgeRunStatusLabel(status: string, at: number, completion = "", pe
   const label = status === "success" && completion
     ? completionLabels[completion] ?? labels[status]
     : labels[status] ?? status;
-  return at ? `${label} · ${formatRelativeTime(at)}` : label;
+  return at ? `${label} · ${formatRelativeTime(at, language)}` : label;
 }
 
-function knowledgeDashboardHealthReasonText(reason: KnowledgeBaseDashboardSnapshot["health"]["scoreReasons"][number]): string {
+function knowledgeDashboardHealthReasonText(
+  reason: KnowledgeBaseDashboardSnapshot["health"]["scoreReasons"][number],
+  language: SettingsLanguage = "zh-CN"
+): string {
+  if (language === "en") return `${knowledgeDashboardHealthReasonLabel(reason.label)}${reason.count > 0 ? ` (${reason.count})` : ""}: ${knowledgeDashboardHealthReasonExplanation(reason.explanation)}`;
   return `${reason.label}${knowledgeDashboardHealthReasonCountText(reason)}：${reason.explanation}`;
 }
 
@@ -670,14 +749,14 @@ function parseHeatmapDateKey(value: string): Date | null {
   return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 12, 0, 0, 0);
 }
 
-function knowledgeHeatmapStatusLabel(status: string): string {
-  if (status === "success") return "成功";
-  if (status === "failed") return "失败";
-  return "无记录";
+function knowledgeHeatmapStatusLabel(status: string, language: SettingsLanguage = "zh-CN"): string {
+  if (status === "success") return conversationUiText(language, "成功", "Successful");
+  if (status === "failed") return conversationUiText(language, "失败", "Failed");
+  return conversationUiText(language, "无记录", "No record");
 }
 
-function formatAbsoluteTime(value: number): string {
-  return new Date(value).toLocaleString("zh-CN", {
+function formatAbsoluteTime(value: number, language: SettingsLanguage = "zh-CN"): string {
+  return new Date(value).toLocaleString(conversationUiLocale(language), {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
@@ -685,8 +764,16 @@ function formatAbsoluteTime(value: number): string {
   });
 }
 
-function formatRelativeTime(value: number): string {
+function formatRelativeTime(value: number, language: SettingsLanguage = "zh-CN"): string {
   const seconds = Math.max(0, Math.floor((Date.now() - value) / 1000));
+  if (language === "en") {
+    if (seconds < 60) return seconds ? `${seconds}s ago` : "just now";
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes} min ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    return `${Math.floor(hours / 24)}d ago`;
+  }
   if (seconds < 60) return `${seconds}s 前`;
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes} 分钟前`;
@@ -694,4 +781,61 @@ function formatRelativeTime(value: number): string {
   if (hours < 24) return `${hours} 小时前`;
   const days = Math.floor(hours / 24);
   return `${days} 天前`;
+}
+
+function knowledgeHealthStatusLabel(
+  status: KnowledgeBaseDashboardSnapshot["health"]["status"],
+  fallback: string,
+  language: SettingsLanguage
+): string {
+  if (language !== "en") return fallback;
+  return status === "healthy" ? "Healthy" : status === "risk" ? "At risk" : "Unhealthy";
+}
+
+function checkFreshnessStatusLabel(
+  status: KnowledgeBaseDashboardSnapshot["checkFreshness"]["status"],
+  fallback: string,
+  language: SettingsLanguage
+): string {
+  if (language !== "en") return fallback;
+  if (status === "fresh") return "Fresh";
+  if (status === "stale") return "Needs check";
+  if (status === "bad") return "Overdue";
+  return "No check";
+}
+
+function knowledgeDashboardHealthReasonLabel(value: string): string {
+  return ({
+    "raw 目录缺失": "Raw folder missing",
+    "wiki 目录缺失": "Wiki folder missing",
+    "wiki/index.md 缺失": "wiki/index.md missing",
+    "tracker 缺失": "Tracker missing",
+    "最近体检失败": "Latest check failed",
+    "Raw 待提炼": "Raw items need refinement",
+    "Raw 状态待校准": "Raw status needs calibration",
+    "Inbox 积压": "Inbox backlog",
+    "索引链接异常": "Index links invalid",
+    "断链": "Broken links",
+    "孤儿页面": "Orphan pages",
+    "过时/草稿": "Stale or draft items",
+    "警告": "Warnings"
+  } as Record<string, string>)[value] ?? value;
+}
+
+function knowledgeDashboardHealthReasonExplanation(value: string): string {
+  return ({
+    "说明原始来源区不可用。": "The source area is unavailable.",
+    "说明沉淀后的知识区不可用。": "The refined knowledge area is unavailable.",
+    "说明知识库入口页不存在。": "The knowledge base entry page is missing.",
+    "说明来源消化登记无法确认。": "Source processing records cannot be confirmed.",
+    "说明最近一次维护或体检没有成功完成。": "The latest maintenance run or check did not finish successfully.",
+    "来源还没有进入 Wiki / Projects 的结构化知识，或缺少可信来源证据。": "Sources have not reached structured Wiki / Projects knowledge, or lack trustworthy evidence.",
+    "说明历史记录显示可能已提炼，但还缺少可信机器标记。": "History suggests refinement may be complete, but trustworthy machine markers are missing.",
+    "说明临时输入区积压较多，尚未整理归位。": "The temporary input area has a backlog that has not been organized.",
+    "说明核心索引中存在不可用链接。": "The core index contains unavailable links.",
+    "说明 wiki 中有链接目标不存在。": "Some wiki link targets do not exist.",
+    "说明页面缺少有效入口或引用。": "Some pages lack a valid entry point or reference.",
+    "说明存在待补、TODO、draft 等内容。": "Some content is incomplete, TODO, or draft.",
+    "说明存在需要人工确认的结构风险。": "There are structural risks that need manual confirmation."
+  } as Record<string, string>)[value] ?? value;
 }

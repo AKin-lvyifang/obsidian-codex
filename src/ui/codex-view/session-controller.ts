@@ -18,6 +18,7 @@ import {
   rememberPiConversationProjection
 } from "./pi-conversation-support";
 import { piEntryIdFromProjectedMessageId } from "../../harness/pi-native/pi-chat-ui-projector";
+import { conversationUiText } from "./ui-i18n";
 
 export interface CodexSessionHost {
   readonly app: App;
@@ -66,7 +67,11 @@ export function renderTabsView(host: CodexSessionHost): void {
         try {
           await activateSession(host, session);
         } catch (error) {
-          new Notice(`打开会话失败：${errorMessage(error)}`);
+          new Notice(conversationUiText(
+            host.plugin.settings.settingsLanguage,
+            `打开会话失败：${errorMessage(error)}`,
+            `Could not open the conversation: ${errorMessage(error)}`
+          ));
         } finally {
           renderConversationShellChange(host);
         }
@@ -78,13 +83,18 @@ export function renderTabsView(host: CodexSessionHost): void {
         try {
           await host.createSession();
         } catch (error) {
-          new Notice(`新建会话失败：${errorMessage(error)}`);
+          new Notice(conversationUiText(
+            host.plugin.settings.settingsLanguage,
+            `新建会话失败：${errorMessage(error)}`,
+            `Could not create a conversation: ${errorMessage(error)}`
+          ));
         } finally {
           renderConversationShellChange(host);
         }
       })()
     },
-    host.running ? host.activeRunSessionId : ""
+    host.running ? host.activeRunSessionId : "",
+    host.plugin.settings.settingsLanguage
   );
 }
 
@@ -96,22 +106,35 @@ export function openSessionMenuView(host: CodexSessionHost, event: MouseEvent, s
       onArchive: () => void host.archiveSession(session.id),
       onResetCache: () => void resetSessionNativeCache(host, session),
       onDelete: () => void confirmDeleteSessions(host, [session.id])
-    }
+    },
+    host.plugin.settings.settingsLanguage
   );
 }
 
 export async function resetSessionNativeCache(host: CodexSessionHost, session: StoredSession): Promise<void> {
   if (host.running && host.activeRunSessionId === session.id) {
-    new Notice("当前会话正在运行，结束后再重置 Agent 缓存");
+    new Notice(conversationUiText(
+      host.plugin.settings.settingsLanguage,
+      "当前会话正在运行，结束后再重置 Agent 缓存",
+      "The current conversation is running. Reset the Agent cache after it finishes."
+    ));
     return;
   }
   try {
     await host.plugin.releasePiConversation(session.id);
     delete session.tokenUsage;
     await persistPiConversationShells(host);
-    new Notice("Agent 运行实例已释放，下次打开会从同一会话记录恢复");
+    new Notice(conversationUiText(
+      host.plugin.settings.settingsLanguage,
+      "Agent 运行实例已释放，下次打开会从同一会话记录恢复",
+      "The Agent runtime was released. It will restore from this conversation record when reopened."
+    ));
   } catch (error) {
-    new Notice(`重置 Agent 缓存失败：${errorMessage(error)}`);
+    new Notice(conversationUiText(
+      host.plugin.settings.settingsLanguage,
+      `重置 Agent 缓存失败：${errorMessage(error)}`,
+      `Could not reset the Agent cache: ${errorMessage(error)}`
+    ));
   }
 }
 
@@ -123,7 +146,7 @@ export async function refreshPiConversationShells(
   if (catalogEntries.length === 0) {
     catalogEntries = [await host.plugin.createPiConversation({
       conversationId: newId("conversation"),
-      title: "新会话",
+      title: conversationUiText(host.plugin.settings.settingsLanguage, "新会话", "New conversation"),
       cwd: host.plugin.getVaultPath(),
       defaultMemoryMode: "normal"
     })];
@@ -287,7 +310,11 @@ async function derivePiConversationInTransitionLane(
 ): Promise<void> {
   if (session.bodyAuthority !== "pi_session_only") return;
   if (host.running) {
-    new Notice("当前任务运行中，结束后再新建会话");
+    new Notice(conversationUiText(
+      host.plugin.settings.settingsLanguage,
+      "当前任务运行中，结束后再新建会话",
+      "A task is running. Create a conversation after it finishes."
+    ));
     return;
   }
   const entryId = targetEntryId.trim();
@@ -301,17 +328,29 @@ async function derivePiConversationInTransitionLane(
       sourceConversationId: session.id,
       targetConversationId: newId("conversation"),
       anchorEntryId: entryId,
-      title: derivedConversationTitle(session, entryId)
+      title: derivedConversationTitle(
+        session,
+        entryId,
+        host.plugin.settings.settingsLanguage
+      )
     });
   } catch (error) {
-    new Notice(`新建会话失败：${errorMessage(error)}`);
+    new Notice(conversationUiText(
+      host.plugin.settings.settingsLanguage,
+      `新建会话失败：${errorMessage(error)}`,
+      `Could not create a conversation: ${errorMessage(error)}`
+    ));
     return;
   }
   if (
     derivation.sourceConversationId !== session.id
     || derivation.projection.catalog.conversationId === session.id
   ) {
-    new Notice("新建会话失败：派生结果没有独立会话身份");
+    new Notice(conversationUiText(
+      host.plugin.settings.settingsLanguage,
+      "新建会话失败：派生结果没有独立会话身份",
+      "Could not create a conversation: the derived result has no independent conversation identity"
+    ));
     return;
   }
 
@@ -346,17 +385,25 @@ async function derivePiConversationInTransitionLane(
   try {
     await persistPiConversationShells(host);
   } catch (error) {
-    new Notice(`新会话已创建，但界面状态保存失败：${errorMessage(error)}`);
+    new Notice(conversationUiText(
+      host.plugin.settings.settingsLanguage,
+      `新会话已创建，但界面状态保存失败：${errorMessage(error)}`,
+      `The new conversation was created, but its UI state could not be saved: ${errorMessage(error)}`
+    ));
   }
   if (derivation.activation.status === "failed") {
     new Notice(
-      `会话已创建，但 Agent 暂未激活：${derivation.activation.message}`
+      conversationUiText(
+        host.plugin.settings.settingsLanguage,
+        `会话已创建，但 Agent 暂未激活：${derivation.activation.message}`,
+        `The conversation was created, but the Agent is not active yet: ${derivation.activation.message}`
+      )
     );
     return;
   }
   new Notice(derivation.anchorRole === "user"
-    ? "已新建会话，可编辑原提问后发送"
-    : "已从所选回复新建会话");
+    ? conversationUiText(host.plugin.settings.settingsLanguage, "已新建会话，可编辑原提问后发送", "A new conversation was created. You can edit the original question before sending it.")
+    : conversationUiText(host.plugin.settings.settingsLanguage, "已从所选回复新建会话", "A new conversation was created from the selected reply"));
 }
 
 function enqueueConversationTransition<T>(
@@ -386,7 +433,13 @@ function enqueueConversationTransition<T>(
 }
 
 export async function renameSession(host: CodexSessionHost, session: StoredSession): Promise<void> {
-  const name = await textInputModal(host.app, "重命名会话", "名称", session.title);
+  const language = host.plugin.settings.settingsLanguage;
+  const name = await textInputModal(
+    host.app,
+    conversationUiText(language, "重命名会话", "Rename conversation"),
+    conversationUiText(language, "名称", "Name"),
+    session.title
+  );
   const title = name?.trim();
   if (!title) return;
   const catalogEntry = await host.plugin.renamePiConversation(
@@ -408,15 +461,19 @@ export async function archiveSession(
   );
   if (!session) return;
   if (host.running && host.activeRunSessionId === session.id) {
-    new Notice("当前会话正在运行，结束后再归档");
+    new Notice(conversationUiText(
+      host.plugin.settings.settingsLanguage,
+      "当前会话正在运行，结束后再归档",
+      "The current conversation is running. Archive it after it finishes."
+    ));
     return;
   }
   const confirm = options.confirm ?? defaultRecordMutationConfirm(host);
   const accepted = await confirm(
-    `归档会话“${session.title}”？`,
-    "会话会从当前列表隐藏，但 Pi Session JSONL 和完整时间线会保留。",
-    "归档",
-    "取消"
+    conversationUiText(host.plugin.settings.settingsLanguage, `归档会话“${session.title}”？`, `Archive conversation “${session.title}”?`),
+    conversationUiText(host.plugin.settings.settingsLanguage, "会话会从当前列表隐藏，但 Pi Session JSONL 和完整时间线会保留。", "The conversation will be hidden from this list, while its Pi Session JSONL and full timeline are kept."),
+    conversationUiText(host.plugin.settings.settingsLanguage, "归档", "Archive"),
+    conversationUiText(host.plugin.settings.settingsLanguage, "取消", "Cancel")
   );
   if (!accepted) return;
   const fallbackGeneration =
@@ -435,8 +492,8 @@ export async function archiveSession(
   renderConversationShellChange(host);
   new Notice(
     fallbackError
-      ? `会话已归档；打开后续会话失败：${errorMessage(fallbackError)}`
-      : "会话已归档，Pi Session 记录已保留"
+      ? conversationUiText(host.plugin.settings.settingsLanguage, `会话已归档；打开后续会话失败：${errorMessage(fallbackError)}`, `Conversation archived; could not open a follow-up conversation: ${errorMessage(fallbackError)}`)
+      : conversationUiText(host.plugin.settings.settingsLanguage, "会话已归档，Pi Session 记录已保留", "Conversation archived; the Pi Session record was kept")
   );
 }
 
@@ -455,7 +512,11 @@ export async function restoreArchivedConversation(
   if (existing) applyPiCatalogEntryToShell(existing, restored);
   else host.plugin.settings.sessions.push(createPiConversationShell(host, restored));
   await persistPiConversationShells(host);
-  new Notice(`已恢复会话“${entry.title}”`);
+  new Notice(conversationUiText(
+    host.plugin.settings.settingsLanguage,
+    `已恢复会话“${entry.title}”`,
+    `Restored conversation “${entry.title}”`
+  ));
   return true;
 }
 
@@ -466,14 +527,18 @@ export async function deleteArchivedConversation(
 ): Promise<boolean> {
   const confirm = options.confirm ?? defaultRecordMutationConfirm(host);
   const accepted = await confirm(
-    `删除已归档会话“${entry.title}”？`,
-    "会话会从 EchoInk 列表移除，但 Pi Session JSONL 不会删除。",
-    "删除",
-    "取消"
+    conversationUiText(host.plugin.settings.settingsLanguage, `删除已归档会话“${entry.title}”？`, `Delete archived conversation “${entry.title}”?`),
+    conversationUiText(host.plugin.settings.settingsLanguage, "会话会从 EchoInk 列表移除，但 Pi Session JSONL 不会删除。", "The conversation will be removed from EchoInk's list, but its Pi Session JSONL will not be deleted."),
+    conversationUiText(host.plugin.settings.settingsLanguage, "删除", "Delete"),
+    conversationUiText(host.plugin.settings.settingsLanguage, "取消", "Cancel")
   );
   if (!accepted) return false;
   await host.plugin.setPiConversationStatus(entry.conversationId, "deleted");
-  new Notice(`已删除“${entry.title}”；Pi Session JSONL 已保留`);
+  new Notice(conversationUiText(
+    host.plugin.settings.settingsLanguage,
+    `已删除“${entry.title}”；Pi Session JSONL 已保留`,
+    `Deleted “${entry.title}”; the Pi Session JSONL was kept`
+  ));
   return true;
 }
 
@@ -499,7 +564,11 @@ export async function deleteSessions(
 ): Promise<void> {
   const candidates = deletableSessions(host, sessionIds);
   if (!candidates.length) {
-    new Notice("所选会话不可删除；知识库和运行中会话会被保留");
+    new Notice(conversationUiText(
+      host.plugin.settings.settingsLanguage,
+      "所选会话不可删除；知识库和运行中会话会被保留",
+      "The selected conversations cannot be deleted; Knowledge and running conversations are kept."
+    ));
     return;
   }
   const confirm = options.confirm ?? defaultRecordMutationConfirm(host);
@@ -508,17 +577,21 @@ export async function deleteSessions(
   for (const session of candidates) {
     try {
       const accepted = await confirm(
-        `删除会话“${session.title}”？`,
-        "会话会从 EchoInk 列表移除，但 Pi Session JSONL 不会删除。",
-        "删除",
-        "取消"
+        conversationUiText(host.plugin.settings.settingsLanguage, `删除会话“${session.title}”？`, `Delete conversation “${session.title}”?`),
+        conversationUiText(host.plugin.settings.settingsLanguage, "会话会从 EchoInk 列表移除，但 Pi Session JSONL 不会删除。", "The conversation will be removed from EchoInk's list, but its Pi Session JSONL will not be deleted."),
+        conversationUiText(host.plugin.settings.settingsLanguage, "删除", "Delete"),
+        conversationUiText(host.plugin.settings.settingsLanguage, "取消", "Cancel")
       );
       if (!accepted) continue;
       if (
         host.running
         && host.activeRunSessionId === session.id
       ) {
-        new Notice(`“${session.title}”正在运行，已跳过删除`);
+        new Notice(conversationUiText(
+          host.plugin.settings.settingsLanguage,
+          `“${session.title}”正在运行，已跳过删除`,
+          `“${session.title}” is running and was skipped`
+        ));
         continue;
       }
       if (
@@ -533,7 +606,11 @@ export async function deleteSessions(
       removeConversationShell(host, session.id);
     } catch (error) {
       new Notice(
-        `删除“${session.title}”失败：${errorMessage(error)}`
+        conversationUiText(
+          host.plugin.settings.settingsLanguage,
+          `删除“${session.title}”失败：${errorMessage(error)}`,
+          `Could not delete “${session.title}”: ${errorMessage(error)}`
+        )
       );
     }
   }
@@ -546,8 +623,8 @@ export async function deleteSessions(
     renderConversationShellChange(host);
     new Notice(
       fallbackError
-        ? `已删除 ${committedCount} 个会话并保留 Pi Session；打开后续会话失败：${errorMessage(fallbackError)}`
-        : `已删除 ${committedCount} 个会话；Pi Session JSONL 已保留`
+        ? conversationUiText(host.plugin.settings.settingsLanguage, `已删除 ${committedCount} 个会话并保留 Pi Session；打开后续会话失败：${errorMessage(fallbackError)}`, `Deleted ${committedCount} conversations and kept Pi Sessions; could not open a follow-up conversation: ${errorMessage(fallbackError)}`)
+        : conversationUiText(host.plugin.settings.settingsLanguage, `已删除 ${committedCount} 个会话；Pi Session JSONL 已保留`, `Deleted ${committedCount} conversations; Pi Session JSONL files were kept`)
     );
   }
 }
@@ -607,7 +684,11 @@ function deletableSessions(host: CodexSessionHost, sessionIds: string[]): Stored
 export function ensureSession(host: CodexSessionHost): StoredSession {
   const session = selectActiveConversationSession(host.plugin.settings);
   if (session) return session;
-  throw new Error("Pi Conversation Catalog 中没有可打开的普通会话");
+  throw new Error(conversationUiText(
+    host.plugin.settings.settingsLanguage,
+    "Pi Conversation Catalog 中没有可打开的普通会话",
+    "Pi Conversation Catalog has no openable regular conversation"
+  ));
 }
 
 export async function ensureInitialConversation(
@@ -623,11 +704,11 @@ export async function ensureInitialConversation(
 
 export async function createSession(
   host: CodexSessionHost,
-  title = "新会话"
+  title?: string
 ): Promise<StoredSession> {
   return await createSessionForSelection(
     host,
-    title,
+    title ?? conversationUiText(host.plugin.settings.settingsLanguage, "新会话", "New conversation"),
     beginConversationSelection(host)
   );
 }
@@ -664,7 +745,8 @@ async function createSessionForSelection(
 
 function derivedConversationTitle(
   source: StoredSession,
-  anchorEntryId: string
+  anchorEntryId: string,
+  language: "zh-CN" | "en"
 ): string {
   const anchorIndex = source.messages.findIndex(
     (message) => piEntryIdFromProjectedMessageId(message.id) === anchorEntryId
@@ -683,12 +765,13 @@ function derivedConversationTitle(
     const clipped = preview.length > 28
       ? `${preview.slice(0, 27)}…`
       : preview;
-    return `新会话 · ${clipped}`;
+    return conversationUiText(language, `新会话 · ${clipped}`, `New conversation · ${clipped}`);
   }
   const sourceTitle = source.title.trim();
-  return !sourceTitle || sourceTitle === "新会话"
-    ? "新会话"
-    : `继续 · ${sourceTitle}`;
+  const newConversation = conversationUiText(language, "新会话", "New conversation");
+  return !sourceTitle || sourceTitle === "新会话" || sourceTitle === "New conversation"
+    ? newConversation
+    : conversationUiText(language, `继续 · ${sourceTitle}`, `Continue · ${sourceTitle}`);
 }
 
 export function sessionById(host: CodexSessionHost, sessionId: string): StoredSession | null {
@@ -768,7 +851,11 @@ async function activateFallbackConversation(
   const fallback = host.plugin.settings.sessions[0];
   if (!fallback) {
     try {
-      await createSessionForSelection(host, "新会话", generation);
+      await createSessionForSelection(
+        host,
+        conversationUiText(host.plugin.settings.settingsLanguage, "新会话", "New conversation"),
+        generation
+      );
       return null;
     } catch (error) {
       return error instanceof Error ? error : new Error(String(error));

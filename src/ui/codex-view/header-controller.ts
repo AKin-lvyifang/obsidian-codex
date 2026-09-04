@@ -1,6 +1,7 @@
 import { Notice, type App } from "obsidian";
 import type CodexForObsidianPlugin from "../../main";
 import type { StoredSession } from "../../settings/settings";
+import { conversationUiText } from "./ui-i18n";
 
 type ObsidianSettingsApi = {
   setting?: {
@@ -33,7 +34,11 @@ export function applyStatus(host: CodexHeaderHost): void {
 export function openPluginSettings(host: CodexHeaderHost): void {
   const setting = (host.app as unknown as ObsidianSettingsApi).setting;
   if (!setting?.open || !setting?.openTabById) {
-    new Notice("无法打开插件设置页");
+    new Notice(conversationUiText(
+      host.plugin.settings.settingsLanguage,
+      "无法打开插件设置页",
+      "Could not open the plugin settings"
+    ));
     return;
   }
   setting.open();

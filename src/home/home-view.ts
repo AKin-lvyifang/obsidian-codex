@@ -1,5 +1,6 @@
 import { ItemView, Notice, TFile, WorkspaceLeaf, normalizePath, setIcon } from "obsidian";
 import type CodexForObsidianPlugin from "../main";
+import type { SettingsLanguage } from "../settings/settings";
 import type { KnowledgeBaseDashboardSnapshot } from "../knowledge-base/dashboard";
 import {
   homeEntryIndexPath,
@@ -33,18 +34,16 @@ import {
   type HomeConversationActionsIsland
 } from "./home-conversation-actions-island";
 import { JournalTemplateModal } from "./journal-template-modal";
+import {
+  formatHomeFullDate,
+  formatHomeMonth,
+  formatHomeRelativeTime,
+  homeCopy,
+  type HomeCopy
+} from "./home-i18n";
 import { openObsidianLocalGraphLeaf } from "./open-native-graph";
 
 export const VIEW_TYPE_ECHOINK_HOME = "codex-echoink-home";
-
-const ENTRY_ACTION: Record<HomeEntrySummary["id"], string> = {
-  wiki: "打开 Wiki",
-  outputs: "查看成果",
-  projects: "继续项目",
-  inbox: "处理输入",
-  journal: "写日记",
-  review: "开始复盘"
-};
 
 export class EchoInkHomeView extends ItemView {
   private readonly dataService: HomeWorkbenchDataService;
@@ -73,7 +72,7 @@ export class EchoInkHomeView extends ItemView {
   }
 
   getDisplayText(): string {
-    return "EchoInk 首页";
+    return this.copy.viewTitle;
   }
 
   getIcon(): string {
@@ -91,10 +90,7 @@ export class EchoInkHomeView extends ItemView {
   async onClose(): Promise<void> {
     if (this.homeRefreshTimer !== null) window.clearTimeout(this.homeRefreshTimer);
     this.homeRefreshTimer = null;
-    this.conversationActionsIsland?.unmount();
-    this.conversationActionsIsland = null;
-    this.bentoIsland?.unmount();
-    this.bentoIsland = null;
+    this.unmountIslands();
     this.contentEl.removeClass("codex-home-view", "echoink-home-view");
     this.contentEl.empty();
   }
@@ -108,17 +104,17 @@ export class EchoInkHomeView extends ItemView {
     const manager = this.plugin.getKnowledgeSurfaceService();
     const [dataResult, snapshotResult] = await Promise.allSettled([
       this.dataService.build(visibleMonth),
-      manager ? manager.getDashboardSnapshot() : Promise.reject(new Error("知识库管理器尚未准备好"))
+      manager ? manager.getDashboardSnapshot() : Promise.reject(new Error(this.copy.knowledgeServiceUnavailable))
     ]);
     if (dataResult.status === "fulfilled") {
       this.data = dataResult.value;
     } else {
-      this.error = `本地知识数据读取失败：${errorMessage(dataResult.reason)}`;
+      this.error = this.copy.localKnowledgeLoadFailed(errorMessage(dataResult.reason));
     }
     if (snapshotResult.status === "fulfilled") {
       this.snapshot = snapshotResult.value;
     } else if (!this.error) {
-      this.error = `维护快照暂不可用：${errorMessage(snapshotResult.reason)}`;
+      this.error = this.copy.maintenanceSnapshotUnavailable(errorMessage(snapshotResult.reason));
     }
     if (this.data && snapshotResult.status === "fulfilled") {
       this.data.activity = mergeHomeActivityDays(this.data.activity, snapshotResult.value.activity.days);
@@ -140,14 +136,21 @@ export class EchoInkHomeView extends ItemView {
     }, 180);
   }
 
+  async refreshLanguage(): Promise<void> {
+    this.unmountIslands();
+    this.renderShell();
+    await this.refresh();
+  }
+
   private renderShell(): void {
+    this.unmountIslands();
     this.contentEl.empty();
     this.pageEl = this.contentEl.createDiv({ cls: "echoink-home-page" });
     this.renderHeader();
 
     const conversationSection = this.pageEl.createEl("section", { cls: "echoink-home-conversation-section" });
-    const conversationHead = this.sectionTitle(conversationSection, "从一段对话开始");
-    conversationHead.createSpan({ cls: "echoink-home-section-note", text: "先说出来，再决定要不要留下" });
+    const conversationHead = this.sectionTitle(conversationSection, this.copy.conversationHeading);
+    conversationHead.createSpan({ cls: "echoink-home-section-note", text: this.copy.conversationNote });
     const rhythm = conversationSection.createDiv({ cls: "echoink-home-rhythm-grid" });
     const conversationHost = rhythm.createDiv({ cls: "echoink-home-conversation-island" });
     this.conversationActionsIsland = createHomeConversationActionsIsland(conversationHost);
@@ -157,8 +160,8 @@ export class EchoInkHomeView extends ItemView {
     this.calendarEl = rhythm.createEl("section", { cls: "echoink-home-calendar-panel" });
 
     this.entriesEl = this.pageEl.createEl("section", { cls: "echoink-home-entries-section" });
-    const entriesHead = this.sectionTitle(this.entriesEl, "知识工作入口");
-    entriesHead.createSpan({ cls: "echoink-home-section-note", text: "从真实状态继续阅读、整理、写作与复盘" });
+    const entriesHead = this.sectionTitle(this.entriesEl, this.copy.entriesHeading);
+    entriesHead.createSpan({ cls: "echoink-home-section-note", text: this.copy.entriesNote });
     const bentoHost = this.entriesEl.createDiv({ cls: "echoink-home-magic-ui" });
     this.bentoIsland = createHomeBentoIsland(bentoHost);
   }
@@ -169,26 +172,26 @@ export class EchoInkHomeView extends ItemView {
     const mark = brand.createSpan({ cls: "echoink-home-brand-mark" });
     setIcon(mark, "feather");
     const text = brand.createDiv();
-    text.createEl("h1", { text: "个人知识工作台" });
+    text.createEl("h1", { text: this.copy.workbenchTitle });
     this.headerStatusEl = header.createDiv({ cls: "echoink-home-header-status" });
     const actions = header.createDiv({ cls: "echoink-home-header-actions" });
-    this.iconButton(actions, "refresh-cw", "刷新本地数据", () => void this.refresh());
-    this.iconButton(actions, "settings", "插件设置", () => void this.plugin.openWorkspaceResourceSettings());
+    this.iconButton(actions, "refresh-cw", this.copy.refreshLocalData, () => void this.refresh());
+    this.iconButton(actions, "settings", this.copy.pluginSettings, () => void this.plugin.openWorkspaceResourceSettings());
   }
 
   private renderHeaderState(): void {
     if (!this.headerStatusEl) return;
     this.headerStatusEl.empty();
-    const vault = this.snapshot?.vaultName || this.app.vault.getName?.() || "当前知识库";
+    const vault = this.snapshot?.vaultName || this.app.vault.getName?.() || this.copy.currentKnowledgeBase;
     this.headerStatusEl.createSpan({ cls: "echoink-home-vault", text: vault });
     const state = this.headerStatusEl.createSpan({
       cls: `echoink-home-health is-${this.snapshot?.health.status ?? "unknown"}`,
       attr: { role: "status", "aria-live": "polite" },
       text: this.loading
-        ? "正在读取本地知识…"
+        ? this.copy.loadingLocalKnowledge
         : this.snapshot
-          ? `${this.snapshot.health.label} ${this.snapshot.health.score}/100`
-          : "本地模式"
+          ? `${this.copy.healthStatus(this.snapshot.health.status)} ${this.snapshot.health.score}/100`
+          : this.copy.localMode
     });
     if (this.error) {
       state.addClass("is-error");
@@ -198,21 +201,21 @@ export class EchoInkHomeView extends ItemView {
   }
 
   private renderConversationActions(): void {
-    const vaultName = this.snapshot?.vaultName || this.app.vault.getName?.() || "当前知识库";
+    const vaultName = this.snapshot?.vaultName || this.app.vault.getName?.() || this.copy.currentKnowledgeBase;
     const now = new Date();
     this.conversationActionsIsland?.render([
       {
         id: "daily",
-        accessibleName: "写日记：新建会话并预填日记草稿",
-        title: homeConversationTitle("daily", vaultName, now),
-        description: "把今天说出来，确认后再整理成日记",
+        accessibleName: this.copy.conversation.dailyAccessibleName,
+        title: homeConversationTitle("daily", vaultName, now, this.language),
+        description: this.copy.conversation.dailyDescription,
         onActivate: () => void this.openConversationAction("daily")
       },
       {
         id: "revisit",
-        accessibleName: "未完想法：新建会话并寻找一件未完成的事",
-        title: homeConversationTitle("revisit", vaultName, now),
-        description: "从长期记忆里，捡起一件还没说完的事",
+        accessibleName: this.copy.conversation.revisitAccessibleName,
+        title: homeConversationTitle("revisit", vaultName, now, this.language),
+        description: this.copy.conversation.revisitDescription,
         onActivate: () => void this.openConversationAction("revisit")
       }
     ]);
@@ -229,11 +232,11 @@ export class EchoInkHomeView extends ItemView {
     this.bentoIsland?.render((this.data?.entries ?? []).map((entry) => {
       return {
         id: entry.id,
-        label: entry.label,
-        ariaLabel: `${ENTRY_ACTION[entry.id]}：${entry.label}`,
-        kicker: entry.description,
+        label: this.copy.entry.label(entry.id),
+        ariaLabel: this.copy.entry.ariaLabel(entry.id),
+        kicker: this.copy.entry.description(entry.id),
         details: this.entryDetailNodes(entry),
-        cta: ENTRY_ACTION[entry.id],
+        cta: this.copy.entry.action(entry.id),
         onActivate: () => this.openEntry(entry)
       };
     }));
@@ -251,36 +254,36 @@ export class EchoInkHomeView extends ItemView {
           tag: "div",
           className: "echoink-home-entry-stat-row",
           children: [
-            { tag: "span", text: `${entry.count} 篇知识` },
-            { tag: "span", text: `今日更新 ${this.snapshot?.wiki.todayCount ?? 0}` }
+            { tag: "span", text: this.copy.entry.wikiKnowledgeCount(entry.count) },
+            { tag: "span", text: this.copy.entry.wikiUpdatedToday(this.snapshot?.wiki.todayCount ?? 0) }
           ]
         },
-        { tag: "small", className: "echoink-home-entry-path", text: target?.path ?? "等待建立 Wiki 索引" }
+        { tag: "small", className: "echoink-home-entry-path", text: target?.path ?? this.copy.entry.waitingForWikiIndex }
       ];
     }
     if (entry.id === "outputs") {
       return [
-        { tag: "span", className: "echoink-home-entry-value", text: target?.title ?? "还没有本地成果" },
-        { tag: "small", text: target ? `最近更新 ${formatRelativeTime(target.mtime)}` : "完成一次知识维护后会在这里出现" }
+        { tag: "span", className: "echoink-home-entry-value", text: target?.title ?? this.copy.entry.noLocalOutputs },
+        { tag: "small", text: target ? this.copy.entry.updatedRecently(formatHomeRelativeTime(target.mtime, this.language)) : this.copy.entry.outputsAfterMaintenance }
       ];
     }
     if (entry.id === "projects") {
       return [
-        { tag: "span", className: "echoink-home-entry-value", text: target?.title ?? "还没有项目笔记" },
-        { tag: "small", text: target ? "从最近项目继续下一步" : "可在 Projects 目录建立项目" }
+        { tag: "span", className: "echoink-home-entry-value", text: target?.title ?? this.copy.entry.noProjectNotes },
+        { tag: "small", text: target ? this.copy.entry.continueFromRecentProject : this.copy.entry.createProjectInProjects }
       ];
     }
     if (entry.id === "inbox") {
       return [
         { tag: "span", className: "echoink-home-entry-number", text: String(entry.count) },
-        { tag: "small", text: entry.count ? `最近输入：${target?.title ?? "待整理"}` : "当前没有待整理输入" }
+        { tag: "small", text: entry.count ? this.copy.entry.recentInput(target?.title ?? this.copy.entry.pendingOrganization) : this.copy.entry.noPendingInputs }
       ];
     }
     if (entry.id === "journal") {
       return [
-        { tag: "span", className: "echoink-home-entry-date", text: formatFullDate(today) },
-        { tag: "span", className: "echoink-home-entry-value", text: journalExists ? "今日日记已建立" : "默认使用“此刻速记”" },
-        { tag: "small", text: journalExists ? "继续打开，不覆盖已有内容" : "也可进入模板选择或导入 Markdown" }
+        { tag: "span", className: "echoink-home-entry-date", text: formatHomeFullDate(today, this.language) },
+        { tag: "span", className: "echoink-home-entry-value", text: journalExists ? this.copy.entry.journalCreated : this.copy.entry.journalDefaultTemplate },
+        { tag: "small", text: journalExists ? this.copy.entry.journalContinueWithoutOverwrite : this.copy.entry.journalTemplateOption }
       ];
     }
     const score = this.snapshot?.health.score;
@@ -290,7 +293,7 @@ export class EchoInkHomeView extends ItemView {
         className: "echoink-home-entry-review-row",
         children: [
           { tag: "span", className: "echoink-home-entry-number", text: score === undefined ? "—" : String(score) },
-          { tag: "span", text: this.snapshot?.health.label ?? "等待本地维护快照" }
+          { tag: "span", text: this.snapshot ? this.copy.healthStatus(this.snapshot.health.status) : this.copy.entry.waitingForMaintenanceSnapshot }
         ]
       }
     ];
@@ -298,11 +301,11 @@ export class EchoInkHomeView extends ItemView {
 
   private renderHeatmap(): void {
     this.heatmapEl.empty();
-    const head = this.sectionTitle(this.heatmapEl, "本地维护活动");
+    const head = this.sectionTitle(this.heatmapEl, this.copy.heatmap.heading);
     const year = new Date().getFullYear();
-    const contribution = buildHomeContributionGrid(this.data?.activity ?? [], year);
+    const contribution = buildHomeContributionGrid(this.data?.activity ?? [], year, this.language);
     const activityDays = contribution.weeks.flat().filter((day) => day.count > 0).length;
-    head.createSpan({ cls: "echoink-home-section-note", text: `${activityDays} 个活动日 · 文件最后修改时间 + 维护检查` });
+    head.createSpan({ cls: "echoink-home-section-note", text: this.copy.heatmap.note(activityDays) });
 
     /**
      * Native SmoothUI Contribution Graph adapter.
@@ -312,7 +315,7 @@ export class EchoInkHomeView extends ItemView {
      */
     const scroll = this.heatmapEl.createDiv({ cls: "echoink-home-heatmap-scroll" });
     const table = scroll.createEl("table", { cls: "echoink-home-heatmap-table" });
-    table.createEl("caption", { text: `${year} 年本地 Markdown 修改与知识维护活动` });
+    table.createEl("caption", { text: this.copy.heatmap.caption(year) });
     const thead = table.createEl("thead");
     const monthRow = thead.createEl("tr");
     monthRow.createEl("th", { cls: "echoink-home-heatmap-corner", attr: { scope: "col" } });
@@ -329,13 +332,16 @@ export class EchoInkHomeView extends ItemView {
       });
     }
     const tbody = table.createEl("tbody");
-    const weekdays = ["日", "一", "二", "三", "四", "五", "六"];
+    const weekdays = this.copy.heatmap.weekdays;
     for (let dayIndex = 0; dayIndex < HOME_CONTRIBUTION_DAYS; dayIndex += 1) {
       const row = tbody.createEl("tr");
-      row.createEl("th", { text: weekdays[dayIndex], attr: { scope: "row", title: `星期${weekdays[dayIndex]}` } });
+      row.createEl("th", {
+        text: weekdays[dayIndex],
+        attr: { scope: "row", title: this.copy.heatmap.weekdayTitle(weekdays[dayIndex]) }
+      });
       for (let weekIndex = 0; weekIndex < HOME_CONTRIBUTION_WEEKS; weekIndex += 1) {
         const day = contribution.weeks[weekIndex][dayIndex];
-        const description = `${day.date}：${day.fileCount} 个文件最后修改，${day.checkCount} 次维护检查`;
+        const description = this.copy.heatmap.dayDescription(day.date, day.fileCount, day.checkCount);
         const cell = row.createEl("td", { attr: { title: description, "aria-label": description } });
         cell.createSpan({
           cls: `echoink-home-heatmap-cell is-level-${day.level}`,
@@ -344,24 +350,27 @@ export class EchoInkHomeView extends ItemView {
       }
     }
     const legend = this.heatmapEl.createDiv({ cls: "echoink-home-heatmap-legend" });
-    legend.createSpan({ text: "少" });
+    legend.createSpan({ text: this.copy.heatmap.less });
     for (const level of [0, 1, 2, 3, 4]) {
       legend.createSpan({ cls: `echoink-home-heatmap-cell is-level-${level}`, attr: { "aria-hidden": "true" } });
     }
-    legend.createSpan({ text: "多" });
+    legend.createSpan({ text: this.copy.heatmap.more });
   }
 
   private renderCalendar(): void {
     this.calendarEl.empty();
     const visibleMonth = this.visibleMonth();
-    const head = this.sectionTitle(this.calendarEl, "日记日历");
+    const head = this.sectionTitle(this.calendarEl, this.copy.calendar.heading);
     const nav = head.createDiv({ cls: "echoink-home-calendar-nav" });
-    this.iconButton(nav, "chevron-left", "上个月", () => this.shiftCalendar(-1));
-    nav.createSpan({ text: `${visibleMonth.getFullYear()}年${visibleMonth.getMonth() + 1}月` });
-    this.iconButton(nav, "chevron-right", "下个月", () => this.shiftCalendar(1));
+    this.iconButton(nav, "chevron-left", this.copy.calendar.previousMonth, () => this.shiftCalendar(-1));
+    nav.createSpan({ text: formatHomeMonth(visibleMonth, this.language) });
+    this.iconButton(nav, "chevron-right", this.copy.calendar.nextMonth, () => this.shiftCalendar(1));
     const weekdays = this.calendarEl.createDiv({ cls: "echoink-home-calendar-weekdays" });
-    for (const day of ["一", "二", "三", "四", "五", "六", "日"]) weekdays.createSpan({ text: day });
-    const grid = this.calendarEl.createDiv({ cls: "echoink-home-calendar-grid", attr: { "aria-label": "日记月历" } });
+    const calendarWeekdays = this.language === "en"
+      ? ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+      : ["一", "二", "三", "四", "五", "六", "日"];
+    for (const day of calendarWeekdays) weekdays.createSpan({ text: day });
+    const grid = this.calendarEl.createDiv({ cls: "echoink-home-calendar-grid", attr: { "aria-label": this.copy.calendar.ariaLabel } });
     const journalByDate = new Map((this.data?.journalDays ?? []).map((day) => [day.date, day]));
     const activityByDate = new Map((this.data?.activity ?? []).map((day) => [day.date, day.count]));
     const first = new Date(visibleMonth.getFullYear(), visibleMonth.getMonth(), 1);
@@ -376,8 +385,8 @@ export class EchoInkHomeView extends ItemView {
         cls: `echoink-home-calendar-day ${currentMonth ? "" : "is-outside"} ${record?.exists ? "has-journal" : ""} ${key === dateKey(new Date()) ? "is-today" : ""}`,
         attr: {
           type: "button",
-          "aria-label": `${formatFullDate(date)}，${record?.exists ? "已有日记" : "没有日记"}，${activity} 条更新`,
-          title: `${formatFullDate(date)} · ${record?.exists ? "已有日记" : "没有日记"} · ${activity} 条更新`
+          "aria-label": this.copy.calendar.dayDescription(formatHomeFullDate(date, this.language), Boolean(record?.exists), activity),
+          title: this.copy.calendar.dayTitle(formatHomeFullDate(date, this.language), Boolean(record?.exists), activity)
         }
       });
       button.createSpan({ cls: "echoink-home-calendar-number", text: String(date.getDate()) });
@@ -394,7 +403,7 @@ export class EchoInkHomeView extends ItemView {
     ).length;
     this.calendarEl.createDiv({
       cls: "echoink-home-calendar-summary",
-      text: `有日记 · ${journalCount} 天`
+      text: this.copy.calendar.summary(journalCount)
     });
   }
 
@@ -402,23 +411,25 @@ export class EchoInkHomeView extends ItemView {
     try {
       await this.plugin.activateView();
       const view = this.plugin.getCodexView();
-      if (!view) throw new Error("右侧会话视图尚未准备好");
+      if (!view) throw new Error(this.copy.conversation.sidebarNotReady);
       const now = new Date();
-      const title = action === "daily" ? `写日记 · ${dateKey(now)}` : `未完想法 · ${dateKey(now)}`;
+      const title = action === "daily"
+        ? this.copy.conversation.dailySessionTitle(dateKey(now))
+        : this.copy.conversation.revisitSessionTitle(dateKey(now));
       const draft = action === "daily"
-        ? buildDailyConversationDraft(now)
-        : buildRevisitConversationDraft();
+        ? buildDailyConversationDraft(now, this.language)
+        : buildRevisitConversationDraft(this.language);
       await view.createDraftSession(title, draft);
     } catch (error) {
       console.warn("[EchoInk] Failed to prepare Home conversation draft:", error);
-      new Notice(`暂时无法新建会话：${errorMessage(error)}`);
+      new Notice(this.copy.conversation.cannotCreateSession(errorMessage(error)));
     }
   }
 
   private async openEntry(entry: HomeEntrySummary): Promise<void> {
     const indexPath = homeEntryIndexPath(entry.id);
     if (indexPath) {
-      await openObsidianLocalGraphLeaf(this.app, indexPath);
+      await openObsidianLocalGraphLeaf(this.app, indexPath, this.language);
       return;
     }
     if (entry.id === "journal") {
@@ -435,12 +446,12 @@ export class EchoInkHomeView extends ItemView {
     try {
       await this.plugin.activateView();
       const view = this.plugin.getCodexView();
-      if (!view) throw new Error("右侧会话视图尚未准备好");
+      if (!view) throw new Error(this.copy.conversation.sidebarNotReady);
       const now = new Date();
-      await view.createDraftSession(`知识复盘 · ${dateKey(now)}`, buildReviewConversationDraft(now));
+      await view.createDraftSession(this.copy.conversation.reviewSessionTitle(dateKey(now)), buildReviewConversationDraft(now));
     } catch (error) {
       console.warn("[EchoInk] Failed to prepare Home review draft:", error);
-      new Notice(`暂时无法新建复盘会话：${errorMessage(error)}`);
+      new Notice(this.copy.conversation.cannotCreateReviewSession(errorMessage(error)));
     }
   }
 
@@ -461,6 +472,7 @@ export class EchoInkHomeView extends ItemView {
       service: this.dataService,
       customTemplates: [...customTemplates],
       date,
+      language: this.language,
       onCreated: () => void this.refresh()
     }).open();
   }
@@ -476,6 +488,21 @@ export class EchoInkHomeView extends ItemView {
   private visibleMonth(): Date {
     const now = new Date();
     return new Date(now.getFullYear(), now.getMonth() + this.calendarMonthOffset, 1);
+  }
+
+  private get language(): SettingsLanguage {
+    return this.plugin.settings.settingsLanguage;
+  }
+
+  private get copy(): HomeCopy {
+    return homeCopy(this.language);
+  }
+
+  private unmountIslands(): void {
+    this.conversationActionsIsland?.unmount();
+    this.conversationActionsIsland = null;
+    this.bentoIsland?.unmount();
+    this.bentoIsland = null;
   }
 
   private sectionTitle(container: HTMLElement, title: string): HTMLElement {
@@ -495,22 +522,6 @@ export class EchoInkHomeView extends ItemView {
     button.onclick = onClick;
     return button;
   }
-}
-
-function formatRelativeTime(timestamp: number): string {
-  const delta = Math.max(0, Date.now() - timestamp);
-  const minutes = Math.floor(delta / 60_000);
-  if (minutes < 1) return "刚刚";
-  if (minutes < 60) return `${minutes} 分钟前`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} 小时前`;
-  const days = Math.floor(hours / 24);
-  if (days < 30) return `${days} 天前`;
-  return new Date(timestamp).toLocaleDateString();
-}
-
-function formatFullDate(date: Date): string {
-  return date.toLocaleDateString("zh-CN", { year: "numeric", month: "long", day: "numeric", weekday: "short" });
 }
 
 function errorMessage(error: unknown): string {

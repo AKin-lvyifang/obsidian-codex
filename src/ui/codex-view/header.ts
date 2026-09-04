@@ -1,6 +1,8 @@
 import { setIcon } from "obsidian";
+import type { SettingsLanguage } from "../../settings/settings";
 import { renderSettingsGearIcon } from "../codex-icon";
 import type { AgentIdentityView } from "./message-list";
+import { conversationUiText } from "./ui-i18n";
 
 export interface CodexHeaderCallbacks {
   onOpenWorkspaceResources: () => void;
@@ -15,7 +17,8 @@ const DEFAULT_AGENT_IDENTITY: AgentIdentityView = Object.freeze({
 export function renderCodexHeader(
   rootEl: HTMLElement,
   callbacks: CodexHeaderCallbacks,
-  identity: Readonly<AgentIdentityView> = DEFAULT_AGENT_IDENTITY
+  identity: Readonly<AgentIdentityView> = DEFAULT_AGENT_IDENTITY,
+  language: SettingsLanguage = "zh-CN"
 ): void {
   const header = rootEl.createDiv({ cls: "codex-header" });
   const title = header.createDiv({ cls: "codex-title" });
@@ -26,8 +29,9 @@ export function renderCodexHeader(
   const headerActions = header.createDiv({ cls: "codex-header-actions" });
   const resourceButton = headerActions.createEl("button", {
     cls: "codex-icon-button codex-resource-button",
-    attr: { type: "button", "aria-label": "插件 MCP Skills 管理", title: "插件 / MCP / Skills 管理" }
+    attr: { type: "button" }
   });
+  applyCodexHeaderCopy(resourceButton, language, "resource");
   setIcon(resourceButton, "blocks");
   resourceButton.onclick = callbacks.onOpenWorkspaceResources;
 
@@ -35,13 +39,31 @@ export function renderCodexHeader(
     cls: "codex-icon-button codex-settings-button",
     attr: {
       type: "button",
-      "aria-label": "打开插件设置",
-      title: "打开插件设置",
       "data-echoink-onboarding-anchor": "settings"
     }
   });
+  applyCodexHeaderCopy(settingsButton, language, "settings");
   renderSettingsGearIcon(settingsButton);
   settingsButton.onclick = callbacks.onOpenSettings;
+}
+
+export function refreshCodexHeaderCopy(rootEl: HTMLElement, language: SettingsLanguage): void {
+  const resourceButton = rootEl.querySelector<HTMLButtonElement>(".codex-resource-button");
+  if (resourceButton) applyCodexHeaderCopy(resourceButton, language, "resource");
+  const settingsButton = rootEl.querySelector<HTMLButtonElement>(".codex-settings-button");
+  if (settingsButton) applyCodexHeaderCopy(settingsButton, language, "settings");
+}
+
+function applyCodexHeaderCopy(
+  button: HTMLButtonElement,
+  language: SettingsLanguage,
+  kind: "resource" | "settings"
+): void {
+  const label = kind === "resource"
+    ? conversationUiText(language, "插件 MCP Skills 管理", "Manage plugins, MCP, and Skills")
+    : conversationUiText(language, "打开插件设置", "Open plugin settings");
+  button.setAttribute("aria-label", label);
+  button.setAttribute("title", label);
 }
 
 /**

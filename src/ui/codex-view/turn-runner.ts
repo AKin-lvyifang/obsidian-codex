@@ -48,13 +48,17 @@ import {
   selectedPiConversationDraftId
 } from "./pi-conversation-support";
 import { routeKnowledgeConversationCommand } from "../../knowledge-base/commands";
-import { preparePiChatImages } from "./pi-image-input";
+import {
+  PiImageInputError,
+  preparePiChatImages
+} from "./pi-image-input";
 import {
   PI_ANTHROPIC_PDF_DOCUMENT_ADAPTER,
   type PiDocumentCapabilityTarget
 } from "../../harness/pi-native/pi-document-context";
 import {
   buildPiDocumentContext,
+  PiDocumentInputError,
   preparePiChatDocuments,
   reconcilePiDocumentTransports,
   type PiChatPreparedDocumentSet
@@ -75,11 +79,35 @@ import {
   composerNoteMentionSelections,
   snapshotComposerNoteMentions
 } from "./note-mentions";
+import {
+  conversationUiText,
+  localizeKnownConversationSystemCopy
+} from "./ui-i18n";
 
 const activeComposerTransfers = new WeakMap<
   CodexViewTurnContext,
   Readonly<QueuedTurnItem>
 >();
+
+function uiText(
+  view: Pick<CodexViewTurnContext, "plugin">,
+  zh: string,
+  en: string
+): string {
+  return conversationUiText(
+    view.plugin?.settings?.settingsLanguage ?? "zh-CN",
+    zh,
+    en
+  );
+}
+
+function showNotice(
+  view: Pick<CodexViewTurnContext, "plugin">,
+  zh: string,
+  en: string
+): void {
+  new Notice(uiText(view, zh, en));
+}
 
 export async function sendMessage(view: CodexViewTurnContext): Promise<void> {
   const session = view.ensureSession();
@@ -89,7 +117,11 @@ export async function sendMessage(view: CodexViewTurnContext): Promise<void> {
     && action !== "stop-turn"
     && action !== "cancel-knowledge-task"
   ) {
-    new Notice("本地生命周期记录待恢复，暂不能开始新任务。");
+    showNotice(
+      view,
+      "本地生命周期记录待恢复，暂不能开始新任务。",
+      "Local lifecycle records need recovery before you can start a new task."
+    );
     return;
   }
   if (action === "enqueue") {
@@ -105,7 +137,11 @@ export async function sendMessage(view: CodexViewTurnContext): Promise<void> {
     return;
   }
   if (action === "cancel-knowledge-task") {
-    new Notice("旧知识库 Agent 运行时已退场；请在普通 EchoInk 会话中使用 /maintain。");
+    showNotice(
+      view,
+      "旧知识库 Agent 运行时已退场；请在普通 EchoInk 会话中使用 /maintain。",
+      "The legacy Knowledge Agent runtime is no longer available. Use /maintain in a regular EchoInk conversation."
+    );
     return;
   }
   const item = await view.createQueuedTurnFromComposer({ allowLocalKnowledgeCommands: true });
@@ -131,35 +167,59 @@ export async function enqueueComposerDraft(view: CodexViewTurnContext): Promise<
       routeKnowledgeConversationCommand(item.text.trim()).kind === "maintain"
       && item.attachments.length
     ) {
-      new Notice("运行中的 Pi Follow-up 只支持文字；附件或 Skill 请留到下一轮发送。");
+      showNotice(
+        view,
+        "运行中的 Pi Follow-up 只支持文字；附件或 Skill 请留到下一轮发送。",
+        "A running Pi follow-up supports text only. Send attachments or a Skill in the next turn."
+      );
       return;
     }
     if (item.noteMentions?.length) {
       if (hasMatchingQueuedComposerTransfer(view, item)) {
-        new Notice("这条笔记提及消息已在队列中，等待当前 Pi 任务结束后发送");
+        showNotice(
+          view,
+          "这条笔记提及消息已在队列中，等待当前 Pi 任务结束后发送",
+          "This note-mention message is already queued and will send after the current Pi task ends."
+        );
         return;
       }
       item.clearComposerAfterPiAcceptance = true;
       view.turnQueue.enqueue(item);
       view.renderQueue();
       view.renderToolbar();
-      new Notice("含笔记提及的消息已加入队列，将在当前 Pi 任务结束后发送");
+      showNotice(
+        view,
+        "含笔记提及的消息已加入队列，将在当前 Pi 任务结束后发送",
+        "The message with note mentions was queued and will send after the current Pi task ends."
+      );
       return;
     }
     if (item.attachments.length) {
       if (hasMatchingQueuedComposerTransfer(view, item)) {
-        new Notice("这条图片消息已在队列中，等待当前 Pi 任务结束后发送");
+        showNotice(
+          view,
+          "这条图片消息已在队列中，等待当前 Pi 任务结束后发送",
+          "This attachment message is already queued and will send after the current Pi task ends."
+        );
         return;
       }
       item.clearComposerAfterPiAcceptance = true;
       view.turnQueue.enqueue(item);
       view.renderQueue();
       view.renderToolbar();
-      new Notice("附件消息已加入队列，将在当前 Pi 任务结束后发送");
+      showNotice(
+        view,
+        "附件消息已加入队列，将在当前 Pi 任务结束后发送",
+        "The attachment message was queued and will send after the current Pi task ends."
+      );
       return;
     }
     if (!item.text.trim() || item.skill) {
-      new Notice("运行中的 Pi Follow-up 只支持文字；附件或 Skill 请留到下一轮发送。");
+      showNotice(
+        view,
+        "运行中的 Pi Follow-up 只支持文字；附件或 Skill 请留到下一轮发送。",
+        "A running Pi follow-up supports text only. Send attachments or a Skill in the next turn."
+      );
       return;
     }
     try {
@@ -167,9 +227,13 @@ export async function enqueueComposerDraft(view: CodexViewTurnContext): Promise<
       view.clearComposerDraft();
       view.renderQueue();
       view.renderToolbar();
-      new Notice("已加入当前 Pi 任务的后续消息");
+      showNotice(view, "已加入当前 Pi 任务的后续消息", "Added to the current Pi task as a follow-up.");
     } catch (error) {
-      new Notice(`加入 Pi Follow-up 失败：${normalizePiChatError(error).message}`);
+      new Notice(uiText(
+        view,
+        `加入 Pi Follow-up 失败：${localizedPiChatErrorMessage(view, error)}`,
+        `Could not add the Pi follow-up: ${localizedPiChatErrorMessage(view, error)}`
+      ));
     }
     return;
   }
@@ -177,7 +241,7 @@ export async function enqueueComposerDraft(view: CodexViewTurnContext): Promise<
   view.clearComposerDraft();
   view.renderQueue();
   view.renderToolbar();
-  new Notice("已加入队列");
+  showNotice(view, "已加入队列", "Added to the queue.");
   if (
     !view.running
     && !view.turnQueue.isSessionQueuePaused(item.sessionId)
@@ -192,7 +256,7 @@ export async function steerPiChatFromComposer(
 ): Promise<void> {
   const session = view.ensureSession();
   if (!isActivePiChatRun(view, session)) {
-    new Notice("当前没有可调整方向的 Pi Chat 任务。");
+    showNotice(view, "当前没有可调整方向的 Pi Chat 任务。", "There is no active Pi Chat task to steer.");
     return;
   }
   const text = view.inputEl.value.trim();
@@ -202,7 +266,11 @@ export async function steerPiChatFromComposer(
     || composerNoteMentionSelections(view.inputEl).length
     || view.selectedSkill
   ) {
-    new Notice("调整方向只支持文字；附件或 Skill 请留到下一轮发送。");
+    showNotice(
+      view,
+      "调整方向只支持文字；附件或 Skill 请留到下一轮发送。",
+      "Steering supports text only. Send attachments or a Skill in the next turn."
+    );
     return;
   }
   try {
@@ -210,9 +278,13 @@ export async function steerPiChatFromComposer(
     view.clearComposerDraft();
     view.renderQueue();
     view.renderToolbar();
-    new Notice("已调整当前 Pi 任务方向");
+    showNotice(view, "已调整当前 Pi 任务方向", "Updated the direction of the current Pi task.");
   } catch (error) {
-    new Notice(`调整 Pi 任务方向失败：${normalizePiChatError(error).message}`);
+    new Notice(uiText(
+      view,
+      `调整 Pi 任务方向失败：${localizedPiChatErrorMessage(view, error)}`,
+      `Could not steer the Pi task: ${localizedPiChatErrorMessage(view, error)}`
+    ));
   }
 }
 
@@ -225,11 +297,11 @@ export async function handlePiTaskPlanAction(
   if (
     session.bodyAuthority !== "pi_session_only"
   ) {
-    new Notice("任务计划只属于当前 Pi Conversation。");
+    showNotice(view, "任务计划只属于当前 Pi Conversation。", "Task plans belong only to the current Pi Conversation.");
     return;
   }
   if (view.running && action !== "pause") {
-    new Notice("当前计划正在执行，请先暂停。");
+    showNotice(view, "当前计划正在执行，请先暂停。", "The current plan is running. Pause it first.");
     return;
   }
   try {
@@ -246,11 +318,11 @@ export async function handlePiTaskPlanAction(
     view.renderMessagesIfActive(session);
 
     if (action === "pause") {
-      new Notice("任务计划已暂停");
+      showNotice(view, "任务计划已暂停", "Task plan paused.");
       return;
     }
     if (action === "cancel") {
-      new Notice("任务计划已取消");
+      showNotice(view, "任务计划已取消", "Task plan cancelled.");
       return;
     }
 
@@ -291,15 +363,21 @@ export async function handlePiTaskPlanAction(
       await view.afterTurnSettled(session.id, outcome === "completed");
     }
   } catch (error) {
-    new Notice(
-      `任务计划操作失败：${normalizePiChatError(error).message}`
-    );
+    new Notice(uiText(
+      view,
+      `任务计划操作失败：${localizedPiChatErrorMessage(view, error)}`,
+      `Task plan action failed: ${localizedPiChatErrorMessage(view, error)}`
+    ));
   }
 }
 
 export async function resumeQueuedTurns(view: CodexViewTurnContext, sessionId: string): Promise<void> {
   if (view.turnQueue.isSessionRecoveryRequired(sessionId)) {
-    new Notice("本地生命周期记录待恢复，队列暂不能继续。");
+    showNotice(
+      view,
+      "本地生命周期记录待恢复，队列暂不能继续。",
+      "Local lifecycle records need recovery before the queue can continue."
+    );
     view.renderQueue();
     view.renderToolbar();
     return;
@@ -383,8 +461,10 @@ export async function startNextQueuedTurn(view: CodexViewTurnContext, sessionId:
       .some((candidate) => candidate.id === item.id);
     await view.afterTurnSettled(item.sessionId, outcome === "completed");
     if (retainedBeforePiAcceptance && outcome !== "completed") {
-      new Notice(
-        "队列任务在 Pi 接收前失败；队首仅保留一份且队列已暂停，请处理错误后手动继续。"
+      showNotice(
+        view,
+        "队列任务在 Pi 接收前失败；队首仅保留一份且队列已暂停，请处理错误后手动继续。",
+        "The queued task failed before Pi accepted it. The queue head was kept once and paused; resolve the error before continuing manually."
       );
     }
   }
@@ -404,7 +484,7 @@ export async function createQueuedTurnFromComposer(view: CodexViewTurnContext, o
   try {
     noteMentions = await snapshotComposerNoteMentions(view.app, view.inputEl);
   } catch (error) {
-    new Notice(error instanceof Error ? error.message : String(error));
+    new Notice(localizedPiChatErrorMessage(view, error));
     return null;
   }
   const piDraftId = session.bodyAuthority === "pi_session_only"
@@ -415,8 +495,10 @@ export async function createQueuedTurnFromComposer(view: CodexViewTurnContext, o
     view.plugin.settings,
     turnOptions
   )) {
-    new Notice(
-      "当前 Provider、模型或思考强度已失效，本轮没有入队；请重新选择后发送。"
+    showNotice(
+      view,
+      "当前 Provider、模型或思考强度已失效，本轮没有入队；请重新选择后发送。",
+      "The current Provider, model, or reasoning level is no longer available. This turn was not queued; select it again before sending."
     );
     return null;
   }
@@ -438,7 +520,11 @@ export async function createQueuedTurnFromComposer(view: CodexViewTurnContext, o
       (candidate) => candidate.id === turnOptions.providerSettingsId
     );
     if (!provider) {
-      new Notice("当前 Provider 已不可用，本轮文档没有入队；请重新选择后发送。");
+      showNotice(
+        view,
+        "当前 Provider 已不可用，本轮文档没有入队；请重新选择后发送。",
+        "The current Provider is unavailable. The documents were not queued; select it again before sending."
+      );
       return null;
     }
     try {
@@ -453,7 +539,7 @@ export async function createQueuedTurnFromComposer(view: CodexViewTurnContext, o
       });
       preparedDocuments = prepared.documents;
     } catch (error) {
-      new Notice(normalizePiChatError(error).message);
+      new Notice(localizedPiChatErrorMessage(view, error));
       return null;
     }
   }
@@ -484,7 +570,7 @@ async function startPreparedQueuedTurnItem(
 ): Promise<QueuedTurnOutcome> {
   const session = view.sessionById(item.sessionId);
   if (!session) {
-    new Notice("队列所属会话已不存在");
+    showNotice(view, "队列所属会话已不存在", "The conversation for this queued item no longer exists.");
     return "failed";
   }
   return await view.startChatTurn(session, item, source);
@@ -494,8 +580,8 @@ export async function startQueuedTurnItemSafely(view: CodexViewTurnContext, item
   try {
     return await view.startQueuedTurnItem(item, source);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    new Notice(`任务收口失败：${message}`);
+    const message = localizedPiChatErrorMessage(view, error);
+    new Notice(uiText(view, `任务收口失败：${message}`, `Task finalization failed: ${message}`));
     return "failed";
   }
 }
@@ -508,8 +594,8 @@ async function startPreparedQueuedTurnItemSafely(
   try {
     return await startPreparedQueuedTurnItem(view, item, source);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    new Notice(`任务收口失败：${message}`);
+    const message = localizedPiChatErrorMessage(view, error);
+    new Notice(uiText(view, `任务收口失败：${message}`, `Task finalization failed: ${message}`));
     return "failed";
   }
 }
@@ -532,14 +618,30 @@ async function prepareTurnProviderModel(
     || validateApiProvider(target).length > 0
   ) {
     new Notice(retainQueueHead
-      ? "队列所选 Provider 或模型已不可用；队首已保留并暂停，请检查 Provider 设置后继续。"
-      : "所选 Provider 或模型已不可用，请检查 Provider 设置后重试。");
+      ? uiText(
+        view,
+        "队列所选 Provider 或模型已不可用；队首已保留并暂停，请检查 Provider 设置后继续。",
+        "The queued Provider or model is unavailable. The queue head was kept and paused; check Provider settings before continuing."
+      )
+      : uiText(
+        view,
+        "所选 Provider 或模型已不可用，请检查 Provider 设置后重试。",
+        "The selected Provider or model is unavailable. Check Provider settings and try again."
+      ));
     return false;
   }
   if (!frozenTurnReasoningSelectionIsValid(settings, selection)) {
     new Notice(retainQueueHead
-      ? "队列冻结的 Provider、模型或思考强度已与当前 Pi 能力不一致；队首已保留并暂停，请删除后重新发送。"
-      : "当前思考强度已不可用，请重新选择后重试。");
+      ? uiText(
+        view,
+        "队列冻结的 Provider、模型或思考强度已与当前 Pi 能力不一致；队首已保留并暂停，请删除后重新发送。",
+        "The queued Provider, model, or reasoning level no longer matches current Pi capabilities. The queue head was kept and paused; remove it and send again."
+      )
+      : uiText(
+        view,
+        "当前思考强度已不可用，请重新选择后重试。",
+        "The current reasoning level is unavailable. Select it again and try again."
+      ));
     return false;
   }
   if (
@@ -547,7 +649,10 @@ async function prepareTurnProviderModel(
     && routeKnowledgeConversationCommand(item.text.trim()).kind !== "maintain"
     && !apiProviderModelSupportsImage(targetModel)
   ) {
-    new Notice(PI_IMAGE_INPUT_UNSUPPORTED_MESSAGE);
+    new Notice(localizedPiChatErrorMessage(
+      view,
+      new Error(PI_IMAGE_INPUT_UNSUPPORTED_MESSAGE)
+    ));
     return false;
   }
   if (
@@ -576,10 +681,18 @@ async function prepareTurnProviderModel(
       activateApiProviderModel(candidateSettings, candidate, selection.model);
     });
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
+    const detail = localizedPiChatErrorMessage(view, error);
     new Notice(retainQueueHead
-      ? `切换队列 Provider/模型失败；队首已保留并暂停：${detail}`
-      : `切换 Provider/模型失败：${detail}`);
+      ? uiText(
+        view,
+        `切换队列 Provider/模型失败；队首已保留并暂停：${detail}`,
+        `Could not switch the queued Provider/model. The queue head was kept and paused: ${detail}`
+      )
+      : uiText(
+        view,
+        `切换 Provider/模型失败：${detail}`,
+        `Could not switch Provider/model: ${detail}`
+      ));
     return false;
   }
   view.selectedProviderSettingsId = selection.providerSettingsId;
@@ -615,7 +728,11 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
   });
   if (knowledgeCommand.kind === "maintain") {
     if (item.turnOptions.mode === "plan") {
-      new Notice("/maintain 只在 Agent 模式执行；请先退出 Plan 模式。");
+      showNotice(
+        view,
+        "/maintain 只在 Agent 模式执行；请先退出 Plan 模式。",
+        "/maintain runs only in Agent mode. Exit Plan mode first."
+      );
       return "failed";
     }
     try {
@@ -624,7 +741,7 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
         attachmentPaths: item.attachments.map((attachment) => attachment.path)
       });
     } catch (error) {
-      new Notice(error instanceof Error ? error.message : String(error));
+      new Notice(localizedPiChatErrorMessage(view, error));
       return "failed";
     }
   } else if (item.attachments.length) {
@@ -644,17 +761,21 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
             documentAttachments
           )
         ) {
-          throw new Error(
-            "文档冻结快照缺失或与附件不一致；为避免读取后来变化的磁盘内容，请保留草稿并重新发送。"
-          );
+          throw new Error(uiText(
+            view,
+            "文档冻结快照缺失或与附件不一致；为避免读取后来变化的磁盘内容，请保留草稿并重新发送。",
+            "The frozen document snapshot is missing or does not match the attachment. To avoid reading changed disk content, keep the draft and send it again."
+          ));
         }
         const provider = view.plugin.settings.apiProviders.find(
           (candidate) => candidate.id === item.turnOptions.providerSettingsId
         );
         if (!provider) {
-          throw new Error(
-            "入队后 Provider 已不可用；冻结快照仍保留，请恢复原 Provider 配置或重新发送。"
-          );
+          throw new Error(uiText(
+            view,
+            "入队后 Provider 已不可用；冻结快照仍保留，请恢复原 Provider 配置或重新发送。",
+            "The Provider became unavailable after queueing. The frozen snapshot was kept; restore the original Provider configuration or send again."
+          ));
         }
         const reconciledDocuments = reconcilePiDocumentTransports(
           preparedDocumentSet.documents,
@@ -669,9 +790,11 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
           submittedText
         );
         if (estimatedInputTokens > availableInputTokens) {
-          throw new Error(
-            `文档冻结文本预计需要 ${estimatedInputTokens} tokens，超过当前模型剩余的 ${availableInputTokens} tokens；请减少文档、新开会话或切换容量更大的模型。`
-          );
+          throw new Error(uiText(
+            view,
+            `文档冻结文本预计需要 ${estimatedInputTokens} tokens，超过当前模型剩余的 ${availableInputTokens} tokens；请减少文档、新开会话或切换容量更大的模型。`,
+            `The frozen document text needs about ${estimatedInputTokens} tokens, exceeding the model's remaining ${availableInputTokens} tokens. Reduce the documents, start a new conversation, or choose a model with more capacity.`
+          ));
         }
         preparedDocumentSet = Object.freeze({
           documents: reconciledDocuments,
@@ -684,7 +807,7 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
         });
       }
     } catch (error) {
-      new Notice(normalizePiChatError(error).message);
+      new Notice(localizedPiChatErrorMessage(view, error));
       return "failed";
     }
   }
@@ -695,18 +818,30 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
         await view.plugin.buildRuntimeEchoInkResourceCatalog()
       ).find((skill) => skill.id === item.skill?.id) ?? null;
     } catch {
-      new Notice("无法确认所选 Vault Skill 的当前启用状态，本轮没有发送。");
+      showNotice(
+        view,
+        "无法确认所选 Vault Skill 的当前启用状态，本轮没有发送。",
+        "Could not confirm whether the selected Vault Skill is enabled. This turn was not sent."
+      );
       return "failed";
     }
     if (!currentSkill) {
-      new Notice("所选 Vault Skill 已禁用或不存在，本轮没有发送。");
+      showNotice(
+        view,
+        "所选 Vault Skill 已禁用或不存在，本轮没有发送。",
+        "The selected Vault Skill is disabled or no longer exists. This turn was not sent."
+      );
       return "failed";
     }
   }
   const skillPath = currentSkill?.contentPath?.trim();
   const skillName = currentSkill?.name.trim();
   if (currentSkill && (!skillPath || !skillName)) {
-    new Notice("所选 Vault Skill 缺少可加载的 contentPath 或名称，本轮没有发送。");
+    showNotice(
+      view,
+      "所选 Vault Skill 缺少可加载的 contentPath 或名称，本轮没有发送。",
+      "The selected Vault Skill has no loadable contentPath or name. This turn was not sent."
+    );
     return "failed";
   }
   if (
@@ -778,7 +913,11 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
     }
     if (preparedImages.length || preparedDocumentSet.documents.length) {
       await view.plugin.persistPiNativeSettings().catch(() => {
-        new Notice("附件已发送，但本地重放信息保存失败；重启后可能无法恢复附件。");
+        showNotice(
+          view,
+          "附件已发送，但本地重放信息保存失败；重启后可能无法恢复附件。",
+          "The attachment was sent, but its local replay data could not be saved. It may not be recoverable after restart."
+        );
       });
     }
     if (source === "queue") {
@@ -829,7 +968,11 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
         .catch(() => {
           if (approvalProjectionRefreshFailed) return;
           approvalProjectionRefreshFailed = true;
-          new Notice("审批状态刷新失败，请等待当前工具状态更新。");
+          showNotice(
+            view,
+            "审批状态刷新失败，请等待当前工具状态更新。",
+            "Could not refresh approval status. Wait for the current Tool status update."
+          );
         });
     });
     clearComposerAfterPiAcceptance(view, item, source);
@@ -926,10 +1069,15 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
     view.renderMessagesIfActive(session);
 
     if (settledEvent.terminalState === "failed") {
+      const knownFailure = providerFailureText(settledRun.error);
       new Notice(
-        providerFailureText(settledRun.error)
-          ?? settledRun.error
-          ?? "EchoInk Pi Chat 执行失败。"
+        knownFailure
+          ? localizeKnownConversationSystemCopy(
+            view.plugin.settings.settingsLanguage,
+            knownFailure
+          )
+          : settledRun.error
+          ?? uiText(view, "EchoInk Pi Chat 执行失败。", "EchoInk Pi Chat failed.")
       );
     }
     return queuedTurnOutcomeForPiTerminal(settledEvent.terminalState);
@@ -958,7 +1106,11 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
         && (preparedImages.length || preparedDocumentSet.documents.length)
       ) {
         await view.plugin.persistPiNativeSettings().catch(() => {
-          new Notice("附件已发送，但本地重放信息保存失败；重启后可能无法恢复附件。");
+          showNotice(
+            view,
+            "附件已发送，但本地重放信息保存失败；重启后可能无法恢复附件。",
+            "The attachment was sent, but its local replay data could not be saved. It may not be recoverable after restart."
+          );
         });
       }
       clearComposerAfterPiAcceptance(view, item, source);
@@ -975,11 +1127,16 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
       applyPiConversationProjection(session, projection);
       view.renderMessagesIfActive(session);
     }
-    const message = normalizePiChatError(error).message;
+    const rawMessage = normalizePiChatError(error).message;
+    const message = localizedPiChatErrorMessage(view, error);
     new Notice(
-      message === PI_IMAGE_INPUT_UNSUPPORTED_MESSAGE
+      rawMessage === PI_IMAGE_INPUT_UNSUPPORTED_MESSAGE
         ? message
-        : `EchoInk Pi Chat 发送失败：${message}`
+        : uiText(
+          view,
+          `EchoInk Pi Chat 发送失败：${message}`,
+          `Could not send EchoInk Pi Chat: ${message}`
+        )
     );
     return "failed";
   } finally {
@@ -1315,6 +1472,176 @@ function normalizePiChatError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
+function localizedPiChatErrorMessage(
+  view: Pick<CodexViewTurnContext, "plugin">,
+  error: unknown
+): string {
+  if (error instanceof PiDocumentInputError) {
+    return localizedPiDocumentInputError(view, error);
+  }
+  if (error instanceof PiImageInputError) {
+    return localizedPiImageInputError(view, error);
+  }
+  return localizedKnownPiChatError(
+    view,
+    normalizePiChatError(error).message
+  );
+}
+
+function localizedPiDocumentInputError(
+  view: Pick<CodexViewTurnContext, "plugin">,
+  error: PiDocumentInputError
+): string {
+  const fileName = error.fileName ? `“${error.fileName}”` : "";
+  switch (error.code) {
+    case "unsupported_format":
+      return uiText(
+        view,
+        error.message,
+        `Document ${fileName} has an unsupported format. Choose a PDF, Word, Markdown, or HTML file.`
+      );
+    case "too_many_documents":
+      return uiText(
+        view,
+        error.message,
+        "You can add up to 8 documents in one turn. Remove some files and try again."
+      );
+    case "file_too_large":
+      return uiText(
+        view,
+        error.message,
+        `Document ${fileName} exceeds 20 MiB. Compress or split it and try again.`
+      );
+    case "total_too_large":
+      return uiText(
+        view,
+        error.message,
+        `Adding document ${fileName} exceeds the 50 MiB total limit. Remove some files and try again.`
+      );
+    case "unreadable":
+      return uiText(
+        view,
+        error.message,
+        `Could not read document ${fileName}. Check that it is still on this computer, has not moved, and EchoInk can read it.`
+      );
+    case "encrypted":
+      return uiText(
+        view,
+        error.message,
+        `Document ${fileName} is encrypted or password-protected. Remove the protection locally and try again.`
+      );
+    case "invalid_utf8":
+      return uiText(
+        view,
+        error.message,
+        `Document ${fileName} is not valid UTF-8. Save it with UTF-8 encoding and try again.`
+      );
+    case "damaged":
+      return uiText(
+        view,
+        error.message,
+        `Document ${fileName} cannot be parsed. It may be damaged or its format may not match its extension; save it again with its original app and try again.`
+      );
+    case "textless":
+      return uiText(
+        view,
+        error.message,
+        `Document ${fileName} has no text that EchoInk can use. Add the original file again and try sending it.`
+      );
+    case "input_budget_exceeded":
+      return uiText(
+        view,
+        error.message,
+        "The documents exceed the model's remaining input capacity. Reduce them, start a new conversation, or choose a model with more capacity."
+      );
+  }
+}
+
+function localizedPiImageInputError(
+  view: Pick<CodexViewTurnContext, "plugin">,
+  error: PiImageInputError
+): string {
+  const fileName = `“${error.fileName}”`;
+  switch (error.code) {
+    case "ordinary_file_unsupported":
+      return uiText(
+        view,
+        error.message,
+        `Regular Pi Chat accepts only image attachments. ${fileName} was not sent.`
+      );
+    case "image_unreadable":
+      return uiText(
+        view,
+        error.message,
+        `Could not read image attachment ${fileName}. Check that the local file still exists.`
+      );
+    case "image_format_unsupported":
+      return uiText(
+        view,
+        error.message,
+        `Could not identify the actual format of image attachment ${fileName}.`
+      );
+    case "image_conversion_failed":
+      return uiText(
+        view,
+        error.message,
+        `Could not convert image attachment ${fileName}. It was not sent in this turn.`
+      );
+    case "image_resize_failed":
+      return uiText(
+        view,
+        error.message,
+        `Could not process image attachment ${fileName}. It may be damaged or cannot be resized.`
+      );
+  }
+}
+
+function localizedKnownPiChatError(
+  view: Pick<CodexViewTurnContext, "plugin">,
+  message: string
+): string {
+  if (message === PI_IMAGE_INPUT_UNSUPPORTED_MESSAGE) {
+    return uiText(
+      view,
+      message,
+      "The current model does not support image input. Choose a model that supports images."
+    );
+  }
+  if (message === "Pi Chat 事件身份与当前运行不一致。") {
+    return uiText(
+      view,
+      message,
+      "The Pi Chat event identity does not match the current run."
+    );
+  }
+  if (message === "Pi Chat ProductRun 终态与耐久回读不一致。") {
+    return uiText(
+      view,
+      message,
+      "The Pi Chat ProductRun terminal state does not match the durable readback."
+    );
+  }
+  if (message === "Pi Chat ProductRun 在 agent_settled 之前进入正式终态。") {
+    return uiText(
+      view,
+      message,
+      "Pi Chat ProductRun reached its terminal state before agent_settled."
+    );
+  }
+  const missingMention = /^找不到提及的笔记：(.+)$/u.exec(message);
+  if (missingMention) {
+    return uiText(
+      view,
+      message,
+      `Could not find mentioned note: ${missingMention[1]}`
+    );
+  }
+  return localizeKnownConversationSystemCopy(
+    view.plugin.settings.settingsLanguage,
+    message
+  );
+}
+
 function piUserEntryWasAccepted(error: unknown): boolean {
   return Boolean(
     error
@@ -1494,10 +1821,10 @@ export async function runKnowledgeBaseShortcut(view: CodexViewTurnContext, label
   const assistantMessage: ChatMessage = {
     id: newId("msg"),
     role: "assistant",
-    title: "知识库管理",
+    title: uiText(view, "知识库管理", "Knowledge management"),
     itemType: "knowledgeBase",
     status: "running",
-    text: "正在执行...",
+    text: uiText(view, "正在执行...", "Running..."),
     createdAt: Date.now()
   };
   await withConversationMutation(view, active.id, async () => {
@@ -1517,7 +1844,11 @@ export async function runKnowledgeBaseShortcut(view: CodexViewTurnContext, label
   } catch (error) {
     terminalStatus = "failed";
     terminalText = error instanceof Error ? error.message : String(error);
-    new Notice(`知识库管理失败：${terminalText}`);
+    new Notice(uiText(
+      view,
+      `知识库管理失败：${terminalText}`,
+      `Knowledge management failed: ${terminalText}`
+    ));
   } finally {
     await withConversationMutation(view, active.id, async () => {
       assistantMessage.status = terminalStatus;

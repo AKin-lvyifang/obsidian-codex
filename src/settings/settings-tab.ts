@@ -616,6 +616,7 @@ export class CodexSettingTab extends PluginSettingTab {
       dropdown.onChange(async (value) => {
         this.plugin.settings.settingsLanguage = normalizeSettingsLanguage(value);
         await this.plugin.saveSettings(true);
+        await this.plugin.refreshLanguageSurfaces();
         this.scheduleDisplay();
       });
     }));
@@ -1384,6 +1385,7 @@ export class CodexSettingTab extends PluginSettingTab {
     renderKnowledgeDashboardView(
       container,
       {
+        language: this.plugin.settings.settingsLanguage,
         visible: true,
         snapshot: this.knowledgeDashboardSnapshot,
         expanded: this.knowledgeDashboardExpanded,

@@ -36,9 +36,17 @@ import {
   buildReviewConversationDraft,
   buildRevisitConversationDraft,
   HOME_DAILY_TITLES,
+  HOME_DAILY_TITLES_EN,
   HOME_REVISIT_TITLES,
+  HOME_REVISIT_TITLES_EN,
   homeConversationTitle
 } from "../home/home-conversation-actions";
+import {
+  formatHomeFullDate,
+  formatHomeMonth,
+  formatHomeRelativeTime,
+  homeCopy
+} from "../home/home-i18n";
 import { openTestNoticeMessages } from "./obsidian-shim";
 
 export async function runHomeWorkbenchTests(): Promise<void> {
@@ -49,6 +57,7 @@ export async function runHomeWorkbenchTests(): Promise<void> {
   assertTemplateImportAndPlaceholderPreservation();
   assertReviewRecognitionAndUtf8Import();
   assertHomeConversationActions();
+  assertHomeEnglishLocalization();
   assertHomeWorkbenchRemovalAndMagicUiContracts();
   await assertNativeGraphBehavior();
 }
@@ -85,6 +94,37 @@ function assertHomeConversationActions(): void {
   assert.match(reviewDraft, /选择主题并明确确认写入前/u);
   assert.match(reviewDraft, /journal\/2026-09-02\.md 的“知识复盘”部分/u);
   assert.match(reviewDraft, /是否另外整理到 outputs 由我决定/u);
+}
+
+function assertHomeEnglishLocalization(): void {
+  const now = new Date(2026, 8, 2, 9, 7);
+  const dailyDraft = buildDailyConversationDraft(now, "en");
+  const revisitDraft = buildRevisitConversationDraft("en");
+  const copy = homeCopy("en");
+
+  assert.equal(HOME_DAILY_TITLES_EN.length, 6);
+  assert.equal(HOME_REVISIT_TITLES_EN.length, 6);
+  assert.ok(HOME_DAILY_TITLES_EN.includes(
+    homeConversationTitle("daily", "EchoInk test vault", now, "en") as (typeof HOME_DAILY_TITLES_EN)[number]
+  ));
+  assert.ok(HOME_REVISIT_TITLES_EN.includes(
+    homeConversationTitle("revisit", "EchoInk test vault", now, "en") as (typeof HOME_REVISIT_TITLES_EN)[number]
+  ));
+  assert.match(dailyDraft, /Please help me make a journal entry for 2026-09-02/u);
+  assert.match(dailyDraft, /Do not create or edit any files until I explicitly confirm/u);
+  assert.match(dailyDraft, /--- Default template preview ---/u);
+  assert.match(dailyDraft, /2026-09-02 此刻速记/u);
+  assert.match(revisitDraft, /recommend 3–5 unfinished goals, tasks, or open loops/u);
+  assert.match(revisitDraft, /Do not change Memory before I choose/u);
+  assert.match(revisitDraft, /do not fabricate recommendations/u);
+  assert.equal(copy.viewTitle, "EchoInk Home");
+  assert.equal(copy.entry.description("journal"), "Journal, review, and time-based records");
+  assert.equal(copy.calendar.summary(1), "1 day with a journal");
+  assert.equal(copy.template.display("quick").name, "Quick note");
+  assert.match(formatHomeFullDate(now, "en"), /Sep/u);
+  assert.match(formatHomeMonth(now, "en"), /September/u);
+  assert.equal(formatHomeRelativeTime(now.getTime() - 60_000, "en", now.getTime()), "1 min ago");
+  assert.equal(formatHomeRelativeTime(now.getTime() - 60_000, "zh-CN", now.getTime()), "1 分钟前");
 }
 
 function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
@@ -163,7 +203,7 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
   assert.match(view, /this\.registerEvent\(this\.app\.vault\.on\("delete", \(\) => this\.scheduleHomeRefresh\(\)\)\)/u);
   assert.doesNotMatch(view, /metadataCache\.on\("resolved"|workspace\.on\("css-change"|visibilitychange/u);
   assert.match(view, /entry\.targetPath[\s\S]*this\.data\?\.records\.find\(\(record\) => record\.path === entry\.targetPath\)/u);
-  assert.match(view, /formatRelativeTime\(target\.mtime\)/u);
+  assert.match(view, /formatHomeRelativeTime\(target\.mtime, this\.language\)/u);
   assert.ok(shellSource.indexOf("this.renderHeader();") < shellSource.indexOf("echoink-home-entries-section"));
   assert.ok(shellSource.indexOf("echoink-home-conversation-section") < shellSource.indexOf("echoink-home-rhythm-grid"));
   assert.ok(shellSource.indexOf("echoink-home-rhythm-grid") < shellSource.indexOf("echoink-home-entries-section"));
@@ -178,7 +218,7 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
     view.match(/private async openConversationAction\([\s\S]*?\n  \}/u)?.[0] ?? "",
     /sendMessage|Provider|\.create\(|\.modify\(/u
   );
-  assert.match(view, /const indexPath = homeEntryIndexPath\(entry\.id\);[\s\S]*openObsidianLocalGraphLeaf\(this\.app, indexPath\)/u);
+  assert.match(view, /const indexPath = homeEntryIndexPath\(entry\.id\);[\s\S]*openObsidianLocalGraphLeaf\(this\.app, indexPath, this\.language\)/u);
   assert.match(view, /entry\.id === "journal"\)[\s\S]*this\.openJournalTemplate\(new Date\(\)\)/u);
   assert.match(view, /entry\.id === "review"\)[\s\S]*this\.openReviewConversation\(\)/u);
   assert.doesNotMatch(view, /runReview\("knowledge-base"\)/u);
@@ -235,7 +275,7 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
   assert.match(view, /createHomeBentoIsland\(bentoHost\)/u);
   assert.match(view, /this\.bentoIsland\?\.render/u);
   assert.match(view, /this\.bentoIsland\?\.unmount\(\)/u);
-  assert.match(view, /kicker: entry\.description/u);
+  assert.match(view, /kicker: this\.copy\.entry\.description\(entry\.id\)/u);
   assert.doesNotMatch(view, /entry\.id !== "review"/u);
   assert.match(data, /projects: \{ label: "Projects", description: "正在推进的项目知识"/u);
   assert.match(data, /inbox: \{ label: "Inbox", description: "等待归类的输入"/u);
@@ -343,7 +383,7 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
   assert.match(styles, /@container echoink-home \(min-width: 1260px\)[\s\S]*\.echoink-home-heatmap-legend\s*\{[^}]*margin-top: auto;[^}]*padding-top: 9px;/u);
   assert.doesNotMatch(rhythmStyles, /\bheight\s*:|position:\s*absolute|display:\s*contents/u);
   assert.match(styles, /\.echoink-home-heatmap,[\s\S]*\.echoink-home-calendar-panel\s*\{[^}]*padding: 20px;[^}]*border: 1px solid/u);
-  assert.match(view, /echoink-home-calendar-summary[\s\S]*有日记 · \$\{journalCount\} 天/u);
+  assert.match(view, /echoink-home-calendar-summary[\s\S]*this\.copy\.calendar\.summary\(journalCount\)/u);
   assert.doesNotMatch(styles, /\.echoink-home-magic-ui &/u);
   assert.match(
     desktopEntryStyles,
@@ -395,9 +435,9 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
   assert.match(textShimmerWave, /y: \[0, -2, 0\]/u);
   assert.match(styles, /@container echoink-home \(max-width: 800px\)[\s\S]*\.echoink-home-conversation-action\s*\{[^}]*gap: 14px;[^}]*padding: 18px;/u);
   assert.match(styles, /@container echoink-home \(max-width: 720px\)[\s\S]*\.echoink-home-conversation-actions\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\);/u);
-  assert.match(view, /今日日记已建立|默认使用“此刻速记”/u);
-  assert.doesNotMatch(view, /最近维护 \$\{formatRelativeTime\(this\.snapshot\.lastRun\.at\)\}|尚无维护记录，可开始一次复盘/u);
-  assert.match(view, /echoink-home-entry-review-row[\s\S]*echoink-home-entry-number[\s\S]*health\.label/u);
+  assert.match(view, /this\.copy\.entry\.journalCreated|this\.copy\.entry\.journalDefaultTemplate/u);
+  assert.doesNotMatch(view, /最近维护 \$\{formatHomeRelativeTime\(this\.snapshot\.lastRun\.at\)|尚无维护记录，可开始一次复盘/u);
+  assert.match(view, /echoink-home-entry-review-row[\s\S]*echoink-home-entry-number[\s\S]*this\.copy\.healthStatus/u);
   assert.match(bentoIsland, /shimmerWidth = 100|AnimatedShinyText/u);
   assert.doesNotMatch(styles, /@keyframes echoink-home-shiny-text|animation: echoink-home-shiny-text/u);
   assert.match(styles, /@container echoink-home \(max-width: 800px\)[\s\S]*\.echoink-home-entry-cta\s*\{[^}]*opacity: 1;[^}]*transform: translateY\(0\);/u);

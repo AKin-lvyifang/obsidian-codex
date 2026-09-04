@@ -59,6 +59,7 @@ export type PiImageInputErrorCode =
 export class PiImageInputError extends Error {
   constructor(
     readonly code: PiImageInputErrorCode,
+    readonly fileName: string,
     message: string,
     options?: ErrorOptions
   ) {
@@ -76,6 +77,7 @@ export async function preparePiChatImages(
     if (attachment.type !== "image") {
       throw new PiImageInputError(
         "ordinary_file_unsupported",
+        displayName,
         `普通 Pi Chat 只支持图片附件：“${displayName}”不会发送。`
       );
     }
@@ -92,6 +94,7 @@ export async function preparePiChatImage(
   if (attachment.type !== "image") {
     throw new PiImageInputError(
       "ordinary_file_unsupported",
+      displayName,
       `普通 Pi Chat 只支持图片附件：“${displayName}”不会发送。`
     );
   }
@@ -102,6 +105,7 @@ export async function preparePiChatImage(
   } catch (error) {
     throw new PiImageInputError(
       "image_unreadable",
+      displayName,
       `无法读取图片附件“${displayName}”，请确认本地文件仍然存在。`,
       { cause: error }
     );
@@ -111,6 +115,7 @@ export async function preparePiChatImage(
   if (!detectedMimeType) {
     throw new PiImageInputError(
       "image_format_unsupported",
+      displayName,
       `无法识别图片附件“${displayName}”的真实格式。`
     );
   }
@@ -127,6 +132,7 @@ export async function preparePiChatImage(
     } catch (error) {
       throw new PiImageInputError(
         "image_conversion_failed",
+        displayName,
         `无法转换图片附件“${displayName}”，本轮没有发送。`,
         { cause: error }
       );
@@ -138,6 +144,7 @@ export async function preparePiChatImage(
     ) {
       throw new PiImageInputError(
         "image_conversion_failed",
+        displayName,
         `无法转换图片附件“${displayName}”，本轮没有发送。`
       );
     }
@@ -151,6 +158,7 @@ export async function preparePiChatImage(
   } catch (error) {
     throw new PiImageInputError(
       "image_resize_failed",
+      displayName,
       `无法处理图片附件“${displayName}”，图片可能已损坏或无法缩放。`,
       { cause: error }
     );
@@ -158,6 +166,7 @@ export async function preparePiChatImage(
   if (!resized) {
     throw new PiImageInputError(
       "image_resize_failed",
+      displayName,
       `无法处理图片附件“${displayName}”，图片可能已损坏或无法缩放。`
     );
   }
@@ -166,6 +175,7 @@ export async function preparePiChatImage(
   if (!preparedMimeType || !validBase64Payload(resized.data)) {
     throw new PiImageInputError(
       "image_resize_failed",
+      displayName,
       `无法处理图片附件“${displayName}”，Pi 未返回有效图片内容。`
     );
   }

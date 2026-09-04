@@ -1,5 +1,5 @@
 import { setIcon } from "obsidian";
-import type { ChatMessage } from "../../settings/settings";
+import type { ChatMessage, SettingsLanguage } from "../../settings/settings";
 import {
   taskPlanProgress,
   type EchoInkTaskPlanSnapshot,
@@ -8,6 +8,7 @@ import {
   type EchoInkTaskPlanStepStatus
 } from "../../types/task-plan";
 import { markSmoothAITaskList } from "./smooth-chat-ui";
+import { conversationUiText } from "./ui-i18n";
 
 export const TASK_PLAN_DOCK_CLOSEOUT_MS = 2_000;
 
@@ -19,6 +20,7 @@ export interface TaskPlanDockClock {
 
 export interface TaskPlanDockRenderInput {
   readonly sessionId: string;
+  readonly language?: SettingsLanguage;
   readonly messages: readonly Readonly<ChatMessage>[];
   readonly onAction?: (
     planId: string,
@@ -124,7 +126,7 @@ export class TaskPlanDockController {
       },
       onAction: input.onAction,
       onModify: input.onModify
-    });
+    }, input.language ?? "zh-CN");
   }
 
   dispose(): void {
@@ -215,7 +217,8 @@ function renderTaskPlanDock(
     onToggle(): void;
     onAction?: TaskPlanDockRenderInput["onAction"];
     onModify?: TaskPlanDockRenderInput["onModify"];
-  }>
+  }>,
+  language: SettingsLanguage
 ): void {
   container.empty();
   container.addClass("is-visible");
@@ -223,7 +226,9 @@ function renderTaskPlanDock(
   const progress = taskPlanProgress(plan);
   const card = container.createDiv({
     cls: `codex-task-plan-card codex-task-plan-dock-card is-${plan.status}`,
-    attr: { "aria-label": `当前任务：${plan.title}` }
+    attr: {
+      "aria-label": conversationUiText(language, `当前任务：${plan.title}`, `Current task: ${plan.title}`)
+    }
   });
   markSmoothAITaskList(card);
   const contentId = `codex-task-plan-dock-${safeDomIdentity(plan.planId)}`;
@@ -233,18 +238,21 @@ function renderTaskPlanDock(
       type: "button",
       "aria-controls": contentId,
       "aria-expanded": String(state.expanded),
-      title: state.expanded ? "收起当前任务" : "展开当前任务"
+      title: state.expanded
+        ? conversationUiText(language, "收起当前任务", "Collapse current task")
+        : conversationUiText(language, "展开当前任务", "Expand current task")
     }
   });
   renderStatusIcon(
     header.createSpan({ cls: "codex-task-plan-status" }),
-    plan.status
+    plan.status,
+    language
   );
   const heading = header.createSpan({ cls: "codex-task-plan-heading" });
   heading.createSpan({ cls: "codex-task-plan-title", text: plan.title });
   heading.createSpan({
     cls: "codex-task-plan-progress",
-    text: taskPlanDockStatus(plan.status, progress.current, progress.total)
+    text: taskPlanDockStatus(plan.status, progress.current, progress.total, language)
   });
   const disclosure = header.createSpan({
     cls: "codex-task-plan-disclosure",
@@ -259,31 +267,33 @@ function renderTaskPlanDock(
   });
   if (state.expanded) {
     const steps = body.createDiv({ cls: "codex-task-plan-steps" });
-    for (const step of plan.steps) renderStep(steps, step);
+    for (const step of plan.steps) renderStep(steps, step, language);
     if (plan.reason) {
       body.createDiv({ cls: "codex-task-plan-reason", text: plan.reason });
     }
-    renderActions(body, plan, callbacks);
+    renderActions(body, plan, callbacks, language);
     return;
   }
   const currentStep = explicitCurrentStep(plan);
   if (currentStep) {
     const steps = body.createDiv({ cls: "codex-task-plan-steps" });
-    const row = renderStep(steps, currentStep);
+    const row = renderStep(steps, currentStep, language);
     row.addClass("codex-task-plan-step-current");
   }
 }
 
 function renderStep(
   container: HTMLElement,
-  step: Readonly<EchoInkTaskPlanStep>
+  step: Readonly<EchoInkTaskPlanStep>,
+  language: SettingsLanguage
 ): HTMLElement {
   const row = container.createDiv({
     cls: `codex-task-plan-step is-${step.status}`
   });
   renderStatusIcon(
     row.createSpan({ cls: "codex-task-plan-step-status" }),
-    step.status
+    step.status,
+    language
   );
   const copy = row.createDiv({ cls: "codex-task-plan-step-copy" });
   copy.createDiv({ cls: "codex-task-plan-step-text", text: step.text });
@@ -299,7 +309,8 @@ function renderActions(
   callbacks: Readonly<{
     onAction?: TaskPlanDockRenderInput["onAction"];
     onModify?: TaskPlanDockRenderInput["onModify"];
-  }>
+  }>,
+  language: SettingsLanguage
 ): void {
   const actions = container.createDiv({ cls: "codex-task-plan-actions" });
   const addAction = (
@@ -327,21 +338,21 @@ function renderActions(
     if (!callbacks.onModify) return;
     const button = actions.createEl("button", {
       cls: "codex-task-plan-action is-secondary",
-      text: "修改计划",
+      text: conversationUiText(language, "修改计划", "Edit plan"),
       attr: { type: "button" }
     });
     button.onclick = () => callbacks.onModify?.(plan.planId, plan.title);
   };
   if (plan.status === "pending") {
-    addAction("执行", "execute", "primary");
+    addAction(conversationUiText(language, "执行", "Run"), "execute", "primary");
     addModify();
-    addAction("取消", "cancel", "danger");
+    addAction(conversationUiText(language, "取消", "Cancel"), "cancel", "danger");
   } else if (plan.status === "in_progress") {
-    addAction("暂停/中止", "pause", "danger");
+    addAction(conversationUiText(language, "暂停/中止", "Pause / stop"), "pause", "danger");
   } else if (plan.status === "paused") {
-    addAction("继续", "continue", "primary");
+    addAction(conversationUiText(language, "继续", "Continue"), "continue", "primary");
     addModify();
-    addAction("取消", "cancel", "danger");
+    addAction(conversationUiText(language, "取消", "Cancel"), "cancel", "danger");
   }
   if (!actions.childElementCount) actions.remove();
 }
@@ -358,37 +369,40 @@ function explicitCurrentStep(
 
 function renderStatusIcon(
   container: HTMLElement,
-  status: EchoInkTaskPlanStatus | EchoInkTaskPlanStepStatus
+  status: EchoInkTaskPlanStatus | EchoInkTaskPlanStepStatus,
+  language: SettingsLanguage = "zh-CN"
 ): void {
   container.addClass(`is-${status}`);
   container.setAttribute("role", "img");
-  container.setAttribute("aria-label", statusLabel(status));
+  container.setAttribute("aria-label", statusLabel(status, language));
   setIcon(container, statusIcon(status));
 }
 
 function taskPlanDockStatus(
   status: EchoInkTaskPlanStatus,
   current: number,
-  total: number
+  total: number,
+  language: SettingsLanguage = "zh-CN"
 ): string {
-  if (status === "completed") return `${current}/${total} · 已完成`;
-  if (status === "failed") return "任务失败";
-  if (status === "cancelled") return "已取消";
-  if (status === "paused") return `${current}/${total} · 已中断，可继续`;
-  if (status === "pending") return `${current}/${total} · 等待开始`;
-  return `${current}/${total} · 进行中`;
+  if (status === "completed") return conversationUiText(language, `${current}/${total} · 已完成`, `${current}/${total} · Completed`);
+  if (status === "failed") return conversationUiText(language, "任务失败", "Task failed");
+  if (status === "cancelled") return conversationUiText(language, "已取消", "Cancelled");
+  if (status === "paused") return conversationUiText(language, `${current}/${total} · 已中断，可继续`, `${current}/${total} · Interrupted, can continue`);
+  if (status === "pending") return conversationUiText(language, `${current}/${total} · 等待开始`, `${current}/${total} · Waiting to start`);
+  return conversationUiText(language, `${current}/${total} · 进行中`, `${current}/${total} · In progress`);
 }
 
 function statusLabel(
-  status: EchoInkTaskPlanStatus | EchoInkTaskPlanStepStatus
+  status: EchoInkTaskPlanStatus | EchoInkTaskPlanStepStatus,
+  language: SettingsLanguage = "zh-CN"
 ): string {
-  if (status === "pending") return "待执行";
-  if (status === "in_progress") return "进行中";
-  if (status === "completed") return "已完成";
-  if (status === "failed") return "失败";
-  if (status === "paused") return "已暂停";
-  if (status === "interrupted") return "已中断";
-  return "已取消";
+  if (status === "pending") return conversationUiText(language, "待执行", "Pending");
+  if (status === "in_progress") return conversationUiText(language, "进行中", "In progress");
+  if (status === "completed") return conversationUiText(language, "已完成", "Completed");
+  if (status === "failed") return conversationUiText(language, "失败", "Failed");
+  if (status === "paused") return conversationUiText(language, "已暂停", "Paused");
+  if (status === "interrupted") return conversationUiText(language, "已中断", "Interrupted");
+  return conversationUiText(language, "已取消", "Cancelled");
 }
 
 function statusIcon(

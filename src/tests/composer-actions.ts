@@ -7,6 +7,7 @@ import {
   renderComposerNoteMentionMenu,
   renderComposerResourcePanel,
   renderComposerToolbar,
+  refreshComposerShellCopy,
   labelFor,
   type ComposerToolbarCallbacks,
   type ComposerToolbarState
@@ -102,6 +103,32 @@ export async function runComposerActionTests(): Promise<void> {
     const disabled = renderAction({ promptEnhancerRunning: true });
     assert.equal(disabled.primary.disabled, true);
     assert.equal(disabled.primary.getAttribute("aria-label"), "提示词增强中");
+
+    const englishSend = renderAction({ language: "en" });
+    assert.equal(englishSend.context.getAttribute("aria-label"), "View context usage");
+    assert.equal(englishSend.primary.getAttribute("aria-label"), "Send");
+    assert.equal(englishSend.mic.getAttribute("aria-label"), "Voice input");
+
+    const persistentComposerShell = new ComposerTestElement("div");
+    const persistentDraft = persistentComposerShell.createEl("textarea", {
+      cls: "codex-input"
+    });
+    persistentDraft.value = "这段用户输入必须保持不变";
+    const commandMenu = persistentComposerShell.createDiv({
+      cls: "codex-knowledge-command-menu"
+    });
+    const persistentResourcePanel = persistentComposerShell.createDiv({
+      cls: "codex-composer-resource-panel"
+    });
+    const noteMentionPanel = persistentComposerShell.createDiv({
+      cls: "codex-composer-resource-panel codex-note-mention-menu"
+    });
+    refreshComposerShellCopy(persistentComposerShell as unknown as HTMLElement, "en");
+    assert.equal(persistentDraft.value, "这段用户输入必须保持不变");
+    assert.equal(persistentDraft.getAttribute("aria-label"), "Enter a message, command, or enabled Skill");
+    assert.equal(commandMenu.getAttribute("aria-label"), "Commands and enabled Skills");
+    assert.equal(persistentResourcePanel.getAttribute("aria-label"), "Add resources");
+    assert.equal(noteMentionPanel.getAttribute("aria-label"), "Mention notes");
 
     const attachmentContainer = new ComposerTestElement("div");
     const removedAttachments: string[] = [];
@@ -380,12 +407,21 @@ export async function runComposerActionTests(): Promise<void> {
     assert.equal(missing.resourceUri, undefined);
 
     const composerSource = readFileSync("src/ui/codex-view/composer.ts", "utf8");
+    const codexViewSource = readFileSync("src/ui/codex-view.ts", "utf8");
     const iconSource = readFileSync("src/ui/animate-icon.ts", "utf8");
     const css = readFileSync("styles.css", "utf8");
     const turnRunnerSource = readFileSync("src/ui/codex-view/turn-runner.ts", "utf8");
     assert.match(composerSource, /renderAnimateIcon\(sendButton, "send-horizontal"\)/u);
     assert.match(composerSource, /renderAnimateIcon\(sendButton, "circle-stop"\)/u);
     assert.match(composerSource, /queueEl[\s\S]*workspaceEl[\s\S]*attachmentsEl[\s\S]*inputEl/u);
+    const refreshLanguageSource = codexViewSource.match(
+      /refreshLanguage\(\): void \{[\s\S]*?\n  \}/u
+    )?.[0] ?? "";
+    assert.match(refreshLanguageSource, /refreshViewShellCopy\(this\.shellHost\(\)\)/u);
+    assert.match(refreshLanguageSource, /this\.renderMessages\(\{ preserveScroll: true \}\)/u);
+    assert.match(refreshLanguageSource, /this\.renderToolbar\(\)/u);
+    assert.doesNotMatch(refreshLanguageSource, /this\.render\(\)/u,
+      "language refresh changes existing chrome instead of rebuilding the Composer and losing its draft");
     assert.match(iconSource, /M19 10v2a7 7 0 0 1-14 0v-2/u);
     assert.match(iconSource, /M3\.714 3\.048/u);
     assert.match(iconSource, /circle\("12", "12", "10"/u);
@@ -1054,7 +1090,13 @@ class ComposerTestElement {
   matches(selector: string): boolean {
     const tag = selector.match(/^[a-z][a-z0-9-]*/iu)?.[0];
     if (tag && this.tagName.toLowerCase() !== tag.toLowerCase()) return false;
-    for (const className of selector.matchAll(/\.([a-z0-9_-]+)/giu)) {
+    const excludedClassNames = Array.from(
+      selector.matchAll(/:not\(\.([a-z0-9_-]+)\)/giu),
+      (match) => match[1]!
+    );
+    if (excludedClassNames.some((className) => this.hasClass(className))) return false;
+    const requiredSelector = selector.replace(/:not\(\.[a-z0-9_-]+\)/giu, "");
+    for (const className of requiredSelector.matchAll(/\.([a-z0-9_-]+)/giu)) {
       if (!this.hasClass(className[1])) return false;
     }
     return Boolean(tag || selector.includes("."));

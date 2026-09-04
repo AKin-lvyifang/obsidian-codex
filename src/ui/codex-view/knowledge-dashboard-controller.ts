@@ -30,6 +30,7 @@ export function renderKnowledgeDashboard(host: CodexKnowledgeDashboardHost): voi
     host.knowledgeDashboardEl,
     {
       visible: true,
+      language: host.plugin.settings.settingsLanguage,
       snapshot: host.knowledgeDashboardSnapshot,
       expanded: host.knowledgeDashboardExpanded,
       loading: host.knowledgeDashboardLoading,
