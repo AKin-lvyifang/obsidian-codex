@@ -1,10 +1,11 @@
 import { setIcon } from "obsidian";
-import type { StoredAttachment } from "../../settings/settings";
+import type { SettingsLanguage, StoredAttachment } from "../../settings/settings";
 import {
   attachmentPresentationIcon,
   attachmentPresentationKind,
   type EchoInkAttachmentAvailability
 } from "./attachment-resource";
+import { conversationUiText } from "./ui-i18n";
 
 export type EchoInkFileCardVariant = "compact" | "message";
 
@@ -13,6 +14,7 @@ export interface EchoInkFileCardOptions {
   readonly displayName: string;
   readonly variant: EchoInkFileCardVariant;
   readonly availability: EchoInkAttachmentAvailability;
+  readonly language?: SettingsLanguage;
   readonly onOpen: () => void;
   readonly onRemove?: () => void;
 }
@@ -21,6 +23,7 @@ export function renderFileCard(
   container: HTMLElement,
   options: EchoInkFileCardOptions
 ): HTMLElement {
+  const language = options.language ?? "zh-CN";
   const kind = attachmentPresentationKind(options.attachment);
   const available = options.availability === "available";
   const root = container.createDiv({
@@ -29,7 +32,7 @@ export function renderFileCard(
       "data-attachment-kind": kind,
       title: available
         ? options.displayName
-        : `${options.displayName} · 文件不可用`
+        : conversationUiText(language, `${options.displayName} · 文件不可用`, `${options.displayName} · File unavailable`)
     }
   });
   root.toggleClass("is-unavailable", !available);
@@ -39,8 +42,8 @@ export function renderFileCard(
     attr: {
       type: "button",
       "aria-label": available
-        ? `打开附件：${options.displayName}`
-        : `附件不可用：${options.displayName}`
+        ? conversationUiText(language, `打开附件：${options.displayName}`, `Open attachment: ${options.displayName}`)
+        : conversationUiText(language, `附件不可用：${options.displayName}`, `Attachment unavailable: ${options.displayName}`)
     }
   });
   open.disabled = !available;
@@ -69,8 +72,12 @@ export function renderFileCard(
   copy.createSpan({
     cls: "codex-file-card-meta",
     text: available
-      ? formatFileSize(options.attachment.sizeBytes)
-      : `${formatFileSize(options.attachment.sizeBytes)} · 文件不可用`
+      ? formatFileSize(options.attachment.sizeBytes, language)
+      : conversationUiText(
+        language,
+        `${formatFileSize(options.attachment.sizeBytes, language)} · 文件不可用`,
+        `${formatFileSize(options.attachment.sizeBytes, language)} · File unavailable`
+      )
   });
 
   if (options.onRemove) {
@@ -78,8 +85,8 @@ export function renderFileCard(
       cls: "codex-file-card-remove",
       attr: {
         type: "button",
-        "aria-label": `移除文件：${options.displayName}`,
-        title: `移除 ${options.displayName}`
+        "aria-label": conversationUiText(language, `移除文件：${options.displayName}`, `Remove file: ${options.displayName}`),
+        title: conversationUiText(language, `移除 ${options.displayName}`, `Remove ${options.displayName}`)
       }
     });
     setIcon(remove, "x");
@@ -92,9 +99,12 @@ export function renderFileCard(
   return root;
 }
 
-export function formatFileSize(sizeBytes: number | undefined): string {
+export function formatFileSize(
+  sizeBytes: number | undefined,
+  language: SettingsLanguage = "zh-CN"
+): string {
   if (!Number.isFinite(sizeBytes) || sizeBytes === undefined || sizeBytes < 0) {
-    return "大小未知";
+    return conversationUiText(language, "大小未知", "Unknown size");
   }
   if (sizeBytes < 1024) return `${Math.trunc(sizeBytes)} B`;
   const units = ["KB", "MB", "GB"] as const;

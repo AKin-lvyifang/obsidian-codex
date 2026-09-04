@@ -6,7 +6,8 @@ import {
   TFile,
   type App
 } from "obsidian";
-import type { StoredAttachment } from "../../settings/settings";
+import type { SettingsLanguage, StoredAttachment } from "../../settings/settings";
+import { conversationUiText } from "./ui-i18n";
 
 export type EchoInkAttachmentAvailability = "available" | "unavailable";
 
@@ -104,7 +105,8 @@ export function attachmentPathIdentity(
 /** Shared resource resolver used by Composer and durable message attachments. */
 export function createAttachmentResourceResolver(
   app: App,
-  vaultPath: string
+  vaultPath: string,
+  language: SettingsLanguage = "zh-CN"
 ): EchoInkAttachmentResourceResolver {
   const normalizedVaultPath = normalizeAbsolutePath(vaultPath);
   return Object.freeze({
@@ -115,33 +117,41 @@ export function createAttachmentResourceResolver(
       app,
       normalizedVaultPath,
       attachment,
-      displayIndex
+      displayIndex,
+      language
     )
   });
 }
 
 export function attachmentDisplayName(
   attachment: Readonly<StoredAttachment>,
-  displayIndex = 0
+  displayIndex = 0,
+  language: SettingsLanguage = "zh-CN"
 ): string {
   const supplied = attachment.name.trim();
-  const fallback = fileNameFromPath(attachment.path) || "附件";
+  const fallback = fileNameFromPath(attachment.path)
+    || conversationUiText(language, "附件", "Attachment");
   const name = supplied || fallback;
   if (!/^clipboard-[0-9]+-[0-9]+(?:\.[A-Za-z0-9]+)?$/u.test(name)) {
     return name;
   }
   const extension = fileExtension(name);
   const ordinal = Math.max(0, Math.trunc(displayIndex)) + 1;
-  return `粘贴图片 ${ordinal}${extension ? `.${extension}` : ""}`;
+  return conversationUiText(
+    language,
+    `粘贴图片 ${ordinal}${extension ? `.${extension}` : ""}`,
+    `Pasted image ${ordinal}${extension ? `.${extension}` : ""}`
+  );
 }
 
 function resolveAttachmentResource(
   app: App,
   vaultPath: string,
   attachment: Readonly<StoredAttachment>,
-  displayIndex: number
+  displayIndex: number,
+  language: SettingsLanguage
 ): Readonly<EchoInkAttachmentResourceView> {
-  const displayName = attachmentDisplayName(attachment, displayIndex);
+  const displayName = attachmentDisplayName(attachment, displayIndex, language);
   const base = {
     attachment: Object.freeze({ ...attachment }),
     displayName

@@ -14,6 +14,7 @@ import { textInputModal } from "../modals";
 import { openWorkspaceMenu as showWorkspaceMenu } from "./menus";
 import { normalizeWorkspacePath, pickWorkspaceDirectory, workspaceDirectoryExists, workspaceDisplayName } from "./workspace-utils";
 import { resolveComposerReasoningState } from "../composer-reasoning";
+import { conversationUiText } from "./ui-i18n";
 
 export interface CodexWorkspaceHost {
   readonly app: App;
@@ -41,22 +42,28 @@ export function openWorkspaceMenu(host: CodexWorkspaceHost, event: MouseEvent, s
 }
 
 export async function chooseChatWorkspace(host: CodexWorkspaceHost, session: StoredSession): Promise<boolean> {
+  const language = host.plugin.settings.settingsLanguage;
   if (host.running) {
-    new Notice("当前会话运行中，结束后再切换工作区");
+    new Notice(conversationUiText(language, "当前会话运行中，结束后再切换工作区", "This conversation is running. Switch workspaces after it finishes."));
     return false;
   }
-  const pickedPath = await pickWorkspaceDirectory(session.cwd);
+  const pickedPath = await pickWorkspaceDirectory(session.cwd, language);
   const selectedPath = pickedPath === undefined
-    ? await textInputModal(host.app, "选择工作区", "文件夹路径", session.cwd)
+    ? await textInputModal(
+      host.app,
+      conversationUiText(language, "选择工作区", "Choose workspace"),
+      conversationUiText(language, "文件夹路径", "Folder path"),
+      session.cwd
+    )
     : pickedPath;
   if (!selectedPath) return false;
   if (host.running) {
-    new Notice("当前会话运行中，结束后再切换工作区");
+    new Notice(conversationUiText(language, "当前会话运行中，结束后再切换工作区", "This conversation is running. Switch workspaces after it finishes."));
     return false;
   }
   const workspacePath = normalizeWorkspacePath(selectedPath);
   if (!workspaceDirectoryExists(workspacePath)) {
-    new Notice("请选择一个存在的文件夹作为工作区");
+    new Notice(conversationUiText(language, "请选择一个存在的文件夹作为工作区", "Choose an existing folder as the workspace."));
     return false;
   }
   const changed = normalizeWorkspacePath(session.cwd) !== workspacePath;
@@ -64,22 +71,23 @@ export async function chooseChatWorkspace(host: CodexWorkspaceHost, session: Sto
     try {
       await commitChatWorkspaceSelection(host, session, workspacePath);
     } catch (error) {
-      new Notice(`切换工作区失败：${error instanceof Error ? error.message : String(error)}`);
+      const detail = error instanceof Error ? error.message : String(error);
+      new Notice(conversationUiText(language, `切换工作区失败：${detail}`, `Could not switch workspace: ${detail}`));
       return false;
     }
   }
   host.renderToolbar();
   host.updateInputPlaceholder();
   host.renderMessages();
-  new Notice(changed
-    ? `工作区已设为：${workspaceDisplayName(workspacePath)}`
-    : `工作区已设为：${workspaceDisplayName(workspacePath)}`);
+  const displayName = workspaceDisplayName(workspacePath);
+  new Notice(conversationUiText(language, `工作区已设为：${displayName}`, `Workspace set to: ${displayName}`));
   return true;
 }
 
 export async function clearChatWorkspace(host: CodexWorkspaceHost, session: StoredSession): Promise<void> {
+  const language = host.plugin.settings.settingsLanguage;
   if (host.running) {
-    new Notice("当前会话运行中，结束后再清除工作区");
+    new Notice(conversationUiText(language, "当前会话运行中，结束后再清除工作区", "This conversation is running. Clear the workspace after it finishes."));
     return;
   }
   session.cwd = "";
@@ -88,7 +96,7 @@ export async function clearChatWorkspace(host: CodexWorkspaceHost, session: Stor
   host.renderToolbar();
   host.updateInputPlaceholder();
   host.renderMessages();
-  new Notice("已清除工作区");
+  new Notice(conversationUiText(language, "已清除工作区", "Workspace cleared"));
 }
 
 export async function commitChatWorkspaceSelection(
@@ -105,7 +113,11 @@ export async function ensureChatWorkspaceSelected(host: CodexWorkspaceHost, sess
   const workspacePath = normalizeWorkspacePath(session.cwd);
   if (workspacePath && workspaceDirectoryExists(workspacePath)) return true;
   const picked = await chooseChatWorkspace(host, session);
-  if (!picked) new Notice("普通会话需要先选择一个文件夹作为工作区");
+  if (!picked) new Notice(conversationUiText(
+    host.plugin.settings.settingsLanguage,
+    "普通会话需要先选择一个文件夹作为工作区",
+    "Choose a folder as the workspace before starting a regular conversation."
+  ));
   return picked;
 }
 

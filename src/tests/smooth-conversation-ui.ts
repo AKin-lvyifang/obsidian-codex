@@ -675,6 +675,35 @@ async function assertInteractionDockContracts(): Promise<void> {
     "question"
   );
   assert.equal(container.findByClass("codex-interaction-progress")?.textContent, "1/2");
+  controller.render(container as unknown as HTMLElement, {
+    sessionId: "ui-session-en",
+    language: "en",
+    ...questionInput
+  });
+  assert.equal(
+    container.findByClass("codex-interaction-card")?.attributes.get("aria-label"),
+    "Your input is needed"
+  );
+  assert.equal(
+    container.findByClass("codex-interaction-heading-primary")?.textContent,
+    "Your input is needed"
+  );
+  assert.equal(
+    container.findByClass("codex-interaction-progress")?.attributes.get("aria-label"),
+    "Question 1 of 2"
+  );
+  assert.equal(container.findByClass("codex-interaction-prompt")?.textContent, "采用哪种方案？");
+  assert.deepEqual(
+    container.findAllByClass("codex-interaction-option-label").map((option) => option.textContent),
+    ["简单方案", "扩展方案"],
+    "Question prompts and options remain verbatim in English mode"
+  );
+  assert.equal(container.findByClass("codex-interaction-action")?.textContent, "Next");
+
+  controller.render(container as unknown as HTMLElement, {
+    sessionId: "ui-session-a",
+    ...questionInput
+  });
   const firstSessionControls = container.findAllByClass("codex-interaction-option-control");
   firstSessionControls[0]!.checked = true;
   firstSessionControls[0]!.onchange?.();
@@ -737,6 +766,7 @@ async function assertInteractionDockContracts(): Promise<void> {
   let confirmationResolved = 0;
   controller.render(container as unknown as HTMLElement, {
     sessionId: "ui-session-confirmation",
+    language: "en",
     confirmation: {
       binding: confirmationBinding!,
       onResolved: () => { confirmationResolved += 1; }
@@ -748,6 +778,12 @@ async function assertInteractionDockContracts(): Promise<void> {
     container.findByClass("codex-ai-elements-confirmation")?.attributes.get("data-ai-elements-pattern"),
     "confirmation"
   );
+  assert.match(renderedText(container), /Awaiting approval to run/u);
+  assert.match(renderedText(container), /写入 disposable\.md/u);
+  assert.match(renderedText(container), /仅写入一次/u,
+    "approval target and preview remain verbatim in English mode");
+  assert.equal(container.findByClass("is-reject")?.textContent, "Reject");
+  assert.equal(container.findByClass("is-approve")?.textContent, "Approve");
   const approve = container.findByClass("is-approve")!;
   clickElement(approve);
   clickElement(approve);
@@ -835,6 +871,56 @@ export async function runSmoothConversationUiTests(): Promise<void> {
   await Promise.resolve();
   assert.deepEqual(noteMentionContext.openedPaths, ["projects/Alpha.md"],
     "historical note chips open their Vault-relative note without a line target");
+
+  const englishSystemRenderer = new CodexMessageListRenderer();
+  bindRenderer(englishSystemRenderer, noteMentionContext, "en");
+  const legacySystemError = renderMessage(englishSystemRenderer, {
+    id: "legacy-system-error",
+    role: "system",
+    itemType: "error",
+    title: "回答失败",
+    text: "网络连接中断，回答未完成。",
+    status: "failed",
+    createdAt: 2
+  }, { showAgentFooter: false, showAgentHeader: false });
+  assert.match(renderedText(legacySystemError), /Answer failed/u);
+  assert.match(
+    renderedText(legacySystemError),
+    /The network connection was interrupted, so the answer was not completed\./u,
+    "known legacy EchoInk system failures are localized in English mode"
+  );
+  const unknownSystemError = renderMessage(englishSystemRenderer, {
+    id: "unknown-system-error",
+    role: "system",
+    itemType: "error",
+    title: "会话诊断",
+    text: "provider-gateway-52",
+    status: "failed",
+    createdAt: 3
+  }, { showAgentFooter: false, showAgentHeader: false });
+  assert.match(renderedText(unknownSystemError), /provider-gateway-52/u,
+    "unclassified Provider diagnostics stay verbatim");
+  const preservedUserContent = renderMessage(englishSystemRenderer, {
+    id: "preserved-user-content",
+    role: "user",
+    itemType: "user",
+    text: "网络连接中断，回答未完成。",
+    createdAt: 4
+  }, { showAgentFooter: false, showAgentHeader: false });
+  assert.match(renderedText(preservedUserContent), /网络连接中断，回答未完成。/u,
+    "user-authored history is never translated by the system-copy mapper");
+  const preservedToolContent = renderMessage(englishSystemRenderer, {
+    id: "preserved-tool-content",
+    role: "tool",
+    itemType: "error",
+    title: "回答失败",
+    text: "网络连接中断，回答未完成。",
+    status: "failed",
+    createdAt: 5
+  }, { showAgentFooter: false, showAgentHeader: false });
+  assert.match(renderedText(preservedToolContent), /回答失败/u);
+  assert.match(renderedText(preservedToolContent), /网络连接中断，回答未完成。/u,
+    "Tool-returned text is never translated by the system-copy mapper");
   const initialDisclosure = nextReasoningDisclosureState(undefined, "running");
   assert.deepEqual(initialDisclosure, {
     open: true,
@@ -1036,6 +1122,44 @@ export async function runSmoothConversationUiTests(): Promise<void> {
   );
   dock.dispose();
 
+  const englishDock = new TaskPlanDockController(new FakeTaskPlanDockClock());
+  const englishDockHost = new FakeElement("div");
+  englishDock.render(englishDockHost as unknown as HTMLElement, {
+    sessionId: "session-english",
+    language: "en",
+    messages: [inProgressMessage],
+    onAction: async () => undefined
+  });
+  assert.equal(
+    englishDockHost.findByClass("codex-task-plan-card")?.attributes.get("aria-label"),
+    "Current task: 共享计划"
+  );
+  assert.equal(
+    englishDockHost.findByClass("codex-task-plan-progress")?.textContent,
+    "2/2 · In progress"
+  );
+  assert.equal(
+    englishDockHost.findByClass("codex-task-plan-status")?.attributes.get("aria-label"),
+    "In progress"
+  );
+  assert.match(renderedText(englishDockHost), /共享计划/u);
+  assert.match(renderedText(englishDockHost), /更新界面/u,
+    "plan titles and steps remain verbatim while dock chrome is localized");
+  assert.equal(
+    englishDockHost.findByClass("codex-task-plan-header")?.attributes.get("title"),
+    "Expand current task"
+  );
+  clickElement(englishDockHost.findByClass("codex-task-plan-header")!);
+  assert.equal(
+    englishDockHost.findByClass("codex-task-plan-header")?.attributes.get("title"),
+    "Collapse current task"
+  );
+  assert.equal(
+    englishDockHost.findByClass("codex-task-plan-action")?.textContent,
+    "Pause / stop"
+  );
+  englishDock.dispose();
+
   const completionClock = new FakeTaskPlanDockClock();
   const completedPlan: Readonly<EchoInkTaskPlanSnapshot> = Object.freeze({
     ...versionTwoPlan,
@@ -1236,6 +1360,33 @@ export async function runSmoothConversationUiTests(): Promise<void> {
   );
   suggestionButtons[1].onclick?.({} as never);
   assert.deepEqual(selectedSuggestions, ["总结当前笔记"], "suggestion click only selects its exact visible text");
+
+  const englishEmptyMessages = new FakeElement("div");
+  const englishEmptyVirtualList = new FakeElement("div");
+  new CodexMessageListRenderer().render({
+    app: {} as never,
+    component: {} as never,
+    messagesEl: englishEmptyMessages as unknown as HTMLElement,
+    virtualListEl: englishEmptyVirtualList as unknown as HTMLElement,
+    sessionId: "empty-conversation-en",
+    welcomeCopy: { title: "EchoInk", subtitle: "Start with a question" },
+    settingsLanguage: "en",
+    messages: [],
+    vaultPath: "/test-vault",
+    readRawMessageText: async () => "",
+    onScheduleMeasure: () => undefined,
+    onScheduleRunProgress: () => undefined
+  });
+  assert.equal(
+    englishEmptyVirtualList.findByClass("codex-smooth-ai-suggestions")?.attributes.get("aria-label"),
+    "Suggested questions"
+  );
+  assert.deepEqual(
+    englishEmptyVirtualList
+      .findAllByClass("codex-smooth-ai-suggestion")
+      .map((button) => button.textContent),
+    ["Organize knowledge", "Summarize current note", "Search knowledge"]
+  );
 
   assert.deepEqual(
     extractProcessFileRefs("读取 Foo.md 后继续", "/test-vault").map((file) => file.path),
@@ -1635,6 +1786,29 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     );
     assert.doesNotMatch(renderedText(imageAttachments), /clipboard-/u);
 
+    const englishAttachmentRenderer = new CodexMessageListRenderer();
+    bindRenderer(englishAttachmentRenderer, context, "en");
+    const englishImageAttachment = renderMessage(englishAttachmentRenderer, {
+      id: "user-image-english",
+      role: "user",
+      text: "用户输入保持原样",
+      attachments: [{
+        type: "image",
+        name: "clipboard-1720000000000-0.png",
+        path: "images/missing.png",
+        mimeType: "image/png",
+        availability: "unavailable"
+      }],
+      createdAt: 1_700_000_000_550
+    }, { showAgentFooter: false, showAgentHeader: false });
+    assert.match(renderedText(englishImageAttachment), /用户输入保持原样/u);
+    assert.equal(
+      englishImageAttachment
+        .findByClass("codex-message-attachment-unavailable")
+        ?.attributes.get("aria-label"),
+      "Pasted image 1.png: Image attachment cannot be opened locally"
+    );
+
     const failedImageRenderer = new CodexMessageListRenderer();
     bindRenderer(failedImageRenderer, context);
     let failedImageMeasureSchedules = 0;
@@ -1981,6 +2155,38 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     assert.equal(completedEmptyAnswer.findAllByClass("codex-smooth-ai-loader").length, 0);
     assert.equal(waitingProgressSchedules, 2,
       "terminal empty answers never restart waiting-copy scheduling");
+
+    const englishWaitingRenderer = new CodexMessageListRenderer();
+    bindRenderer(englishWaitingRenderer, context, "en");
+    const englishRendererEnv = (englishWaitingRenderer as unknown as {
+      env: { agentIdentity?: { displayName: string; avatarUrl: string | null; personalityTemplateId?: string | null } };
+    }).env;
+    englishRendererEnv.agentIdentity = {
+      displayName: "EchoInk",
+      avatarUrl: null,
+      personalityTemplateId: "executor"
+    };
+    const englishWaitingCreatedAt = 1_700_000_001_150;
+    Date.now = () => englishWaitingCreatedAt;
+    const englishWaitingAnswer = renderMessage(englishWaitingRenderer, {
+      id: "answer-running-empty-en",
+      role: "assistant",
+      text: "",
+      status: "running",
+      createdAt: englishWaitingCreatedAt
+    }, { showAgentFooter: false, showAgentHeader: false });
+    assert.equal(
+      englishWaitingAnswer
+        .findByClass("codex-smooth-ai-loader")
+        ?.attributes.get("aria-label"),
+      "Generating reply"
+    );
+    assert.equal(
+      englishWaitingAnswer
+        .findByClass("codex-smooth-ai-loader-label")
+        ?.textContent,
+      "Going straight to the point"
+    );
     rendererEnv.onScheduleRunProgress = () => undefined;
 
     const reasoningMessage = renderMessage(renderer, {
@@ -4309,6 +4515,9 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     guidedSessionSource,
     /outcome === "failed" && item\.piUserEntryAccepted !== true[\s\S]*discardUnacceptedSession/u
   );
+  assert.match(guidedSessionSource, /The Agent is currently running/u);
+  assert.match(guidedSessionSource, /knowledge review Skill/u);
+  assert.match(guidedSessionSource, /did not accept the knowledge review prompt/u);
   assert.doesNotMatch(
     guidedSessionSource,
     /inputEl\.value\s*=|turnQueue\.enqueue|\/review/u,

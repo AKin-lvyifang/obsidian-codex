@@ -27,6 +27,7 @@ interface SmoothReasoningOptions {
 
 export interface SmoothAILoaderOptions {
   accessibleLabel?: string;
+  language?: SettingsLanguage;
   labelClass?: string;
   visualLabelAriaHidden?: boolean;
 }
@@ -380,7 +381,9 @@ export function renderSmoothAILoader(
   options: SmoothAILoaderOptions = {}
 ): HTMLElement {
   const visualLabel = label.trim();
-  const accessibleLabel = options.accessibleLabel?.trim() || visualLabel || "正在加载";
+  const accessibleLabel = options.accessibleLabel?.trim()
+    || visualLabel
+    || ((options.language ?? "zh-CN") === "en" ? "Loading" : "正在加载");
   const root = container.createSpan({
     cls: "codex-smooth-ai-loader",
     attr: {
@@ -429,12 +432,14 @@ export function renderSmoothAISuggestions(
   container: HTMLElement,
   suggestions: readonly SmoothAISuggestion[],
   onSelect: (suggestion: SmoothAISuggestion) => void,
-  accessibleLabel = "推荐问题"
+  accessibleLabel?: string,
+  language: SettingsLanguage = "zh-CN"
 ): HTMLElement {
   const root = container.createDiv({
     cls: "codex-smooth-ai-suggestions",
     attr: {
-      "aria-label": accessibleLabel,
+      "aria-label": accessibleLabel?.trim()
+        || conversationCopy(language).message.suggestionsAria,
       "data-smooth-ui-pattern": "ai-suggestions"
     }
   });

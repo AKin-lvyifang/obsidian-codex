@@ -72,6 +72,7 @@ import {
   resolveComposerReasoningState,
   type ComposerReasoningState
 } from "../composer-reasoning";
+import { conversationUiText } from "./ui-i18n";
 
 let contextPopoverId = 0;
 
@@ -154,6 +155,7 @@ export function renderToolbar(host: CodexComposerHost): void {
     host.toolbarEl,
     host.workspaceEl,
     {
+      language: host.plugin.settings.settingsLanguage,
       session,
       knowledgeTaskRunning,
       selectedSkill: host.selectedSkill,
@@ -178,9 +180,17 @@ export function renderToolbar(host: CodexComposerHost): void {
     {
       onOpenAddMenu: (event) => openAddMenu(host, event),
       onEnhancePrompt: () => host.enhancePrompt(),
-      onCaptureKnowledgeSource: () => host.runKnowledgeBaseShortcut("收藏", async () => {
+      onCaptureKnowledgeSource: () => host.runKnowledgeBaseShortcut(
+        conversationUiText(host.plugin.settings.settingsLanguage, "收藏", "Save"),
+        async () => {
         const paths = await host.plugin.getKnowledgeSurfaceService()?.captureLink();
-        return paths?.length ? `已收藏：\n${paths.map((item) => `- ${item}`).join("\n")}` : "未收藏内容。";
+        return paths?.length
+          ? conversationUiText(
+            host.plugin.settings.settingsLanguage,
+            `已收藏：\n${paths.map((item) => `- ${item}`).join("\n")}`,
+            `Saved:\n${paths.map((item) => `- ${item}`).join("\n")}`
+          )
+          : conversationUiText(host.plugin.settings.settingsLanguage, "未收藏内容。", "Nothing was saved.");
       }),
       onPermissionChange: (value) => {
         host.selectedPermission = value;
@@ -198,7 +208,11 @@ export function renderToolbar(host: CodexComposerHost): void {
         host.renderToolbar();
         host.contextPanelEl?.focus();
       },
-      onMicInput: () => new Notice("语音输入暂未接入"),
+      onMicInput: () => new Notice(conversationUiText(
+        host.plugin.settings.settingsLanguage,
+        "语音输入暂未接入",
+        "Voice input is not available yet"
+      )),
       onCancelKnowledgeTask: () => {
         void knowledgeManager?.cancelMaintenance().then((cancellation) => {
           if (cancellation.accepted) {
@@ -273,6 +287,7 @@ export function renderQueue(host: CodexComposerHost): void {
   renderTurnQueue(
     host.queueEl,
     {
+      language: host.plugin.settings.settingsLanguage,
       items: host.turnQueue.itemsForSession(session.id),
       paused: host.turnQueue.isSessionQueuePaused(session.id)
         || host.turnQueue.isSessionRecoveryRequired(session.id),
@@ -341,7 +356,11 @@ export function editPiConversationDraft(
     draftId
   );
   if (!draft) {
-    new Notice("这条 Pi 草稿已经不存在，请刷新后重试。");
+    new Notice(conversationUiText(
+      host.plugin.settings.settingsLanguage,
+      "这条 Pi 草稿已经不存在，请刷新后重试。",
+      "This Pi draft no longer exists. Refresh and try again."
+    ));
     return false;
   }
   host.inputEl.value = draft.text;
@@ -365,10 +384,14 @@ export async function removePiConversationDraft(
     await refreshPiConversationSupport(host.plugin, conversationId);
     clearSelectedPiConversationDraft(host.plugin, conversationId);
     host.renderToolbar();
-    if (removed) new Notice("Pi 草稿已删除");
+    if (removed) new Notice(conversationUiText(host.plugin.settings.settingsLanguage, "Pi 草稿已删除", "Pi draft deleted"));
     return removed;
   } catch (error) {
-    new Notice(`删除 Pi 草稿失败：${errorMessage(error)}`);
+    new Notice(conversationUiText(
+      host.plugin.settings.settingsLanguage,
+      `删除 Pi 草稿失败：${errorMessage(error)}`,
+      `Could not delete the Pi draft: ${errorMessage(error)}`
+    ));
     return false;
   }
 }
@@ -405,13 +428,21 @@ export async function recoverPiConversation(
     host.resetVirtualWindow();
     host.renderMessages({ forceBottom: true });
     new Notice(
-      `已恢复 ${recovered.recoveredEntryCount} 条可验证记录；原损坏文件已保留。`
+      conversationUiText(
+        host.plugin.settings.settingsLanguage,
+        `已恢复 ${recovered.recoveredEntryCount} 条可验证记录；原损坏文件已保留。`,
+        `Recovered ${recovered.recoveredEntryCount} verifiable records; the original damaged file was kept.`
+      )
     );
     return true;
   } catch (error) {
     await refreshPiConversationSupport(host.plugin, session.id)
       .catch(() => undefined);
-    new Notice(`恢复 Pi 会话失败：${errorMessage(error)}`);
+    new Notice(conversationUiText(
+      host.plugin.settings.settingsLanguage,
+      `恢复 Pi 会话失败：${errorMessage(error)}`,
+      `Could not recover the Pi conversation: ${errorMessage(error)}`
+    ));
     return false;
   } finally {
     setPiConversationRecovering(host.plugin, session.id, false);
@@ -435,7 +466,10 @@ export function openSkillMenu(host: CodexComposerHost, event: MouseEvent): void 
   showSkillMenu(
     event,
     { skillMenuEl: host.skillMenuEl, knowledgeCommandMenuEl: host.knowledgeCommandMenuEl },
-    { skillsRequested: host.skillsRequested },
+    {
+      language: host.plugin.settings.settingsLanguage,
+      skillsRequested: host.skillsRequested
+    },
     {
       onSkillsRequested: () => {
         host.skillsRequested = true;
@@ -481,7 +515,11 @@ function closeResourcePanel(host: CodexComposerHost, restoreFocus: boolean): voi
 
 export function openKnowledgeCommandMenu(host: CodexComposerHost, event: MouseEvent): void {
   closeComposerNoteMentionMenu(host.inputEl);
-  showKnowledgeCommandMenu(event, (command) => fillKnowledgeBaseCommand(host, command));
+  showKnowledgeCommandMenu(
+    event,
+    (command) => fillKnowledgeBaseCommand(host, command),
+    host.plugin.settings.settingsLanguage
+  );
 }
 
 export function fillKnowledgeBaseCommand(host: CodexComposerHost, command: string): void {
@@ -508,17 +546,18 @@ export function openModelMenu(host: CodexComposerHost, event: MouseEvent): void 
 export function composerModelMenuState(host: CodexComposerHost) {
   const reasoning = ensureComposerReasoningPreference(host);
   return {
+    language: host.plugin.settings.settingsLanguage,
     providerModels: composerProviderModelOptions(host),
     selectedProviderSettingsId: host.selectedProviderSettingsId,
     selectedModel: host.selectedModel,
     selectedReasoning: reasoning?.effort ?? null,
-    reasoningCurrentValue: composerReasoningCurrentValue(reasoning),
-    reasoningDisabledReason: composerReasoningDisabledReason(reasoning),
+    reasoningCurrentValue: composerReasoningCurrentValue(reasoning, host.plugin.settings.settingsLanguage),
+    reasoningDisabledReason: composerReasoningDisabledReason(reasoning, host.plugin.settings.settingsLanguage),
     reasoningAdjustable: reasoning?.adjustable ?? false,
     reasoningOptions: reasoning?.adjustable
       ? reasoning.enabledOptions.map((option) => ({
           effort: option.effort,
-          label: composerReasoningOptionLabel(option)
+          label: composerReasoningOptionLabel(option, host.plugin.settings.settingsLanguage)
         }))
       : [],
     selectedMode: host.selectedMode
@@ -569,7 +608,11 @@ export async function selectComposerModel(
       host.plugin.settings.openAICodexCredential
     )
   ) {
-    new Notice("所选 Provider 或模型已不可用，请先检查 Provider 设置");
+    new Notice(conversationUiText(
+      host.plugin.settings.settingsLanguage,
+      "所选 Provider 或模型已不可用，请先检查 Provider 设置",
+      "The selected Provider or model is unavailable. Check Provider settings first."
+    ));
     return false;
   }
   try {
@@ -598,7 +641,11 @@ export async function selectComposerModel(
     });
   } catch (error) {
     new Notice(
-      `切换 Provider/模型失败：${error instanceof Error ? error.message : String(error)}`
+      conversationUiText(
+        host.plugin.settings.settingsLanguage,
+        `切换 Provider/模型失败：${error instanceof Error ? error.message : String(error)}`,
+        `Could not switch Provider/model: ${error instanceof Error ? error.message : String(error)}`
+      )
     );
     return false;
   }
@@ -606,7 +653,10 @@ export async function selectComposerModel(
   host.selectedModel = selection.modelId;
   ensureComposerReasoningPreference(host);
   host.renderToolbar();
-  if (correctedReasoning) showComposerReasoningFallbackNotice(correctedReasoning);
+  if (correctedReasoning) showComposerReasoningFallbackNotice(
+    correctedReasoning,
+    host.plugin.settings.settingsLanguage
+  );
   const providerName = apiProviderConfiguredDisplayName(
     normalizeApiProviderId(
       target.providerId,
@@ -631,14 +681,14 @@ export function selectComposerReasoning(host: CodexComposerHost, reasoning: Reas
     || !state.enabledOptions.some((option) => option.effort === reasoning)
   ) {
     new Notice(state && !state.enabled
-      ? "请先在模型设置中开启深度思考"
+      ? conversationUiText(host.plugin.settings.settingsLanguage, "请先在模型设置中开启深度思考", "Enable reasoning in Model settings first")
       : state && !state.adjustable
-        ? "当前模型的思考强度由模型决定"
-        : "当前模型不支持这个思考强度，请重新选择");
+        ? conversationUiText(host.plugin.settings.settingsLanguage, "当前模型的思考强度由模型决定", "This model determines its own reasoning effort")
+        : conversationUiText(host.plugin.settings.settingsLanguage, "当前模型不支持这个思考强度，请重新选择", "This model does not support that reasoning effort. Choose another one."));
     return;
   }
   state.model.reasoningEffort = reasoning;
-  saveComposerSettings(host, "思考强度");
+  saveComposerSettings(host, conversationUiText(host.plugin.settings.settingsLanguage, "思考强度", "reasoning effort"));
   host.renderToolbar();
 }
 
@@ -649,7 +699,8 @@ export function selectComposerMode(host: CodexComposerHost, mode: UiMode): void 
 }
 
 export function currentComposerSummary(host: CodexComposerHost): string {
-  const model = shortModelLabel(host.effectiveModel());
+  const language = host.plugin.settings.settingsLanguage;
+  const model = shortModelLabel(host.effectiveModel(), language);
   const reasoning = ensureComposerReasoningPreference(host);
   if (!reasoning?.supported || !reasoning.enabled || reasoning.effort === "none") {
     return model;
@@ -658,12 +709,18 @@ export function currentComposerSummary(host: CodexComposerHost): string {
     (candidate) => candidate.effort === reasoning.effort
   );
   return `${model} ${option?.display === "toggle"
-    ? "默认"
-    : compactReasoningLabel(reasoning.effort)}`;
+    ? conversationUiText(language, "默认", "Default")
+    : compactReasoningLabel(reasoning.effort, language)}`;
 }
 
 export function currentComposerSummaryTitle(host: CodexComposerHost): string {
-  return `模型：${host.effectiveModel() || "未选择"}\n打开模型和运行参数`;
+  const language = host.plugin.settings.settingsLanguage;
+  const model = host.effectiveModel() || conversationUiText(language, "未选择", "Not selected");
+  return conversationUiText(
+    language,
+    `模型：${model}\n打开模型和运行参数`,
+    `Model: ${model}\nOpen model and run settings`
+  );
 }
 
 export function currentComposerProviderBrand(host: CodexComposerHost): ProviderBrandId {
@@ -688,7 +745,7 @@ export function persistComposerDefaults(host: CodexComposerHost): void {
   host.plugin.settings.defaultModel = host.selectedModel;
   host.plugin.settings.defaultPermission = host.selectedPermission;
   host.plugin.settings.defaultMode = host.selectedMode;
-  saveComposerSettings(host, "运行参数");
+  saveComposerSettings(host, conversationUiText(host.plugin.settings.settingsLanguage, "运行参数", "run settings"));
 }
 
 export function ensureComposerReasoningPreference(
@@ -704,70 +761,83 @@ export function ensureComposerReasoningPreference(
     host.selectedModel
   );
   if (!state || !applyComposerReasoningFallback(state)) return state;
-  saveComposerSettings(host, "思考强度");
+  saveComposerSettings(host, conversationUiText(host.plugin.settings.settingsLanguage, "思考强度", "reasoning effort"));
   if (notify && state.status === "invalid") {
-    showComposerReasoningFallbackNotice(state);
+    showComposerReasoningFallbackNotice(state, host.plugin.settings.settingsLanguage);
   }
   return state;
 }
 
 function showComposerReasoningFallbackNotice(
-  state: Readonly<ComposerReasoningState>
+  state: Readonly<ComposerReasoningState>,
+  language: "zh-CN" | "en"
 ): void {
   const modelName = state.model.displayName || state.model.id;
   if (state.effort) {
     new Notice(
-      `${modelName} 原思考强度已不可用，已回落为${composerReasoningEffortLabel(
-        state
-      )}`
+      conversationUiText(
+        language,
+        `${modelName} 原思考强度已不可用，已回落为${composerReasoningEffortLabel(state, language)}`,
+        `${modelName}'s saved reasoning effort is no longer available and was reset to ${composerReasoningEffortLabel(state, language)}`
+      )
     );
   } else {
-    new Notice(`${modelName} 已不支持可配置深度思考，原偏好已移除`);
+    new Notice(conversationUiText(
+      language,
+      `${modelName} 已不支持可配置深度思考，原偏好已移除`,
+      `${modelName} no longer supports configurable reasoning; the saved preference was removed`
+    ));
   }
 }
 
 function composerReasoningEffortLabel(
-  state: Readonly<ComposerReasoningState>
+  state: Readonly<ComposerReasoningState>,
+  language: "zh-CN" | "en"
 ): string {
   const option = state.enabledOptions.find(
     (candidate) => candidate.effort === state.effort
   );
-  return option ? composerReasoningOptionLabel(option) : "合法默认值";
+  return option
+    ? composerReasoningOptionLabel(option, language)
+    : conversationUiText(language, "合法默认值", "a valid default");
 }
 
 function composerReasoningOptionLabel(
-  option: Readonly<EchoInkPiReasoningOption>
+  option: Readonly<EchoInkPiReasoningOption>,
+  language: "zh-CN" | "en" = "zh-CN"
 ): string {
-  return labelFor(option.effort);
+  return labelFor(option.effort, language);
 }
 
 function composerReasoningCurrentValue(
-  state: Readonly<ComposerReasoningState> | null
+  state: Readonly<ComposerReasoningState> | null,
+  language: "zh-CN" | "en"
 ): string {
   if (!state?.supported || !state.enabled || state.effort === "none") {
-    return "关闭";
+    return conversationUiText(language, "关闭", "Off");
   }
   const option = state.enabledOptions.find(
     (candidate) => candidate.effort === state.effort
   );
   return !state.adjustable && option?.display === "toggle"
-    ? "模型默认"
-    : labelFor(state.effort);
+    ? conversationUiText(language, "模型默认", "Model default")
+    : labelFor(state.effort, language);
 }
 
 function composerReasoningDisabledReason(
-  state: Readonly<ComposerReasoningState> | null
+  state: Readonly<ComposerReasoningState> | null,
+  language: "zh-CN" | "en"
 ): string {
-  if (!state) return "请先选择可用模型";
-  if (!state.supported) return "当前模型不支持深度思考";
-  if (!state.enabled) return "请先在模型设置中开启深度思考";
+  if (!state) return conversationUiText(language, "请先选择可用模型", "Choose an available model first");
+  if (!state.supported) return conversationUiText(language, "当前模型不支持深度思考", "This model does not support reasoning");
+  if (!state.enabled) return conversationUiText(language, "请先在模型设置中开启深度思考", "Enable reasoning in Model settings first");
   if (state.adjustable) return "";
   const option = state.enabledOptions.find(
     (candidate) => candidate.effort === state.effort
   );
   return option?.display === "toggle"
-    ? "当前模型只支持开启或关闭，思考强度由模型自动决定"
-    : "当前模型只有一个可用思考强度";
+    ? conversationUiText(language, "当前模型只支持开启或关闭，思考强度由模型自动决定", "This model only supports on/off; it selects the reasoning effort automatically")
+    : conversationUiText(language, "当前模型只有一个可用思考强度", "This model has only one available reasoning effort");
 }
 
 function saveComposerSettings(
@@ -776,7 +846,9 @@ function saveComposerSettings(
 ): void {
   void host.plugin.saveSettings(true).catch((error) => {
     console.error("Codex composer defaults save failed", error);
-    new Notice(`${label}保存失败：${error instanceof Error ? error.message : String(error)}`);
+    new Notice(host.plugin.settings.settingsLanguage === "en"
+      ? `Could not save ${label}: ${error instanceof Error ? error.message : String(error)}`
+      : `${label}保存失败：${error instanceof Error ? error.message : String(error)}`);
   });
 }
 
@@ -842,7 +914,13 @@ function renderNoteMentionAutocomplete(host: CodexComposerHost): void {
   };
   const render = () => {
     const state = composerNoteMentionMenuState(host.inputEl);
-    renderComposerNoteMentionMenu(menu, host.inputEl, state, { onSelect: select });
+    renderComposerNoteMentionMenu(
+      menu,
+      host.inputEl,
+      state,
+      { onSelect: select },
+      host.plugin.settings.settingsLanguage
+    );
   };
   setComposerNoteMentionMenu(host.inputEl, {
     results,
@@ -872,6 +950,7 @@ export function renderSkillMatches(host: CodexComposerHost, query = "", loadedSk
     host.skillMenuEl,
     query,
     {
+      language: host.plugin.settings.settingsLanguage,
       skills: enabledSkillsForComposerMenu(
         loadedSkills ?? host.currentEchoInkResourceCatalog()
       ),
@@ -905,6 +984,7 @@ export function renderKnowledgeCommandMatches(
     host.inputEl,
     query,
     {
+      language: host.plugin.settings.settingsLanguage,
       skills: enabledSkillsForComposerMenu(
         loadedSkills ?? host.currentEchoInkResourceCatalog()
       ),
@@ -994,14 +1074,21 @@ export function updateContextForSession(host: CodexComposerHost, session: Stored
   const view = contextUsageView(tokenUsage, session.contextLedger);
   host.contextEl.setCssProps({ "--codex-context-angle": `${view.angle}deg` });
   const tooltip = view.percent === null || view.effectiveInputBudget === null
-    ? "暂未读取到上下文用量"
-    : `${view.percent}% · ${formatContextValue(view.totalTokens)} / ${formatContextValue(view.effectiveInputBudget)} 上下文已使用`;
+    ? conversationUiText(host.plugin.settings.settingsLanguage, "暂未读取到上下文用量", "Context usage is not available yet")
+    : host.plugin.settings.settingsLanguage === "en"
+      ? `${view.percent}% · ${formatContextValue(view.totalTokens)} / ${formatContextValue(view.effectiveInputBudget)} context used`
+      : `${view.percent}% · ${formatContextValue(view.totalTokens)} / ${formatContextValue(view.effectiveInputBudget)} 上下文已使用`;
   host.contextEl.setAttr("aria-label", tooltip);
   host.contextEl.setAttr("title", tooltip);
   host.contextEl.toggleClass("is-empty", view.percent === null);
   host.contextEl.toggleClass("is-warning", (view.percent ?? 0) >= 80);
   if (host.contextPanelOpen && host.contextPanelEl) {
-    renderContextPanel(host.contextPanelEl, session.contextLedger, () => closeContextPopover(host, true));
+    renderContextPanel(
+      host.contextPanelEl,
+      session.contextLedger,
+      () => closeContextPopover(host, true),
+      host.plugin.settings.settingsLanguage
+    );
     host.contextPanelReposition?.();
   }
 }
@@ -1030,14 +1117,19 @@ function syncContextPopover(
     attr: {
       id: panelId,
       role: "dialog",
-      "aria-label": "上下文用量明细",
+      "aria-label": conversationUiText(host.plugin.settings.settingsLanguage, "上下文用量明细", "Context usage details"),
       tabindex: "-1"
     }
   });
   host.contextPanelEl = panel;
   host.contextEl.setAttribute("aria-expanded", "true");
   host.contextEl.setAttribute("aria-controls", panelId);
-  renderContextPanel(panel, ledger, () => closeContextPopover(host, true));
+  renderContextPanel(
+    panel,
+    ledger,
+    () => closeContextPopover(host, true),
+    host.plugin.settings.settingsLanguage
+  );
 
   const reposition = () => {
     if (!host.contextEl.isConnected || !panel.isConnected) {

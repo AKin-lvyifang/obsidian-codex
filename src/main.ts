@@ -416,6 +416,7 @@ export default class CodexForObsidianPlugin extends Plugin {
   }
   getCodexView(): CodexView | null { return this.getViewService().getCodexView(); }
   refreshKnowledgeBaseSurfaces(): void { this.getViewService().refreshKnowledgeBaseSurfaces(); }
+  async refreshLanguageSurfaces(): Promise<void> { await this.getViewService().refreshLanguageSurfaces(); }
   async openWorkspaceResourceSettings(tab: ResourceManagementTab = "plugins"): Promise<void> { return this.getViewService().openWorkspaceResourceSettings(tab); }
   async openReviewHtmlPreview(relativePath: string): Promise<void> { return this.getViewService().openReviewHtmlPreview(relativePath); }
   async listEchoInkMcpTools(resourceId: string, timeoutMs = 30000, signal?: AbortSignal): Promise<unknown[]> {

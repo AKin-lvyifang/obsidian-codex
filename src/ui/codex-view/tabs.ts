@@ -1,5 +1,9 @@
 import { setIcon } from "obsidian";
-import type { StoredSession } from "../../settings/settings";
+import type { SettingsLanguage, StoredSession } from "../../settings/settings";
+import {
+  conversationUiText,
+  formatConversationRelativeTime
+} from "./ui-i18n";
 
 export interface CodexTabsCallbacks {
   onActivate: (session: StoredSession) => void;
@@ -144,16 +148,18 @@ export function buildCodexSessionNavigatorModel(
   sessions: StoredSession[],
   activeSessionId: string,
   runningSessionId = "",
-  query = ""
+  query = "",
+  language: SettingsLanguage = "zh-CN"
 ): CodexSessionNavigatorModel {
-  const normalizedQuery = query.trim().toLocaleLowerCase("zh-CN");
+  const locale = language === "en" ? "en-US" : "zh-CN";
+  const normalizedQuery = query.trim().toLocaleLowerCase(locale);
   const matchingSessions = sessions.filter((session) =>
-    !normalizedQuery || session.title.toLocaleLowerCase("zh-CN").includes(normalizedQuery)
+    !normalizedQuery || session.title.toLocaleLowerCase(locale).includes(normalizedQuery)
   );
   const tabSessions = [...matchingSessions]
-    .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id, "zh-CN"));
+    .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id, locale));
   const chatSessions = [...matchingSessions]
-    .sort((left, right) => right.updatedAt - left.updatedAt || right.createdAt - left.createdAt || left.title.localeCompare(right.title, "zh-CN"));
+    .sort((left, right) => right.updatedAt - left.updatedAt || right.createdAt - left.createdAt || left.title.localeCompare(right.title, locale));
   return {
     activeSession: sessions.find((session) =>
       session.id === activeSessionId
@@ -174,21 +180,15 @@ function compareSessionUseAscending(
     || left.id.localeCompare(right.id, "zh-CN");
 }
 
-export function formatSessionUpdatedAt(updatedAt: number, now = Date.now()): string {
-  if (!Number.isFinite(updatedAt) || updatedAt <= 0) return "较早";
-  const elapsed = Math.max(0, now - updatedAt);
-  if (elapsed < 60_000) return "刚刚";
-  if (elapsed < 60 * 60_000) return `${Math.max(1, Math.floor(elapsed / 60_000))} 分钟前`;
-
-  const updated = new Date(updatedAt);
-  const current = new Date(now);
-  if (sameLocalDate(updated, current)) return `今天 ${twoDigits(updated.getHours())}:${twoDigits(updated.getMinutes())}`;
-
-  const yesterday = new Date(current);
-  yesterday.setDate(current.getDate() - 1);
-  if (sameLocalDate(updated, yesterday)) return "昨天";
-  if (updated.getFullYear() === current.getFullYear()) return `${updated.getMonth() + 1} 月 ${updated.getDate()} 日`;
-  return `${updated.getFullYear()}/${updated.getMonth() + 1}/${updated.getDate()}`;
+export function formatSessionUpdatedAt(
+  updatedAt: number,
+  now = Date.now(),
+  language: SettingsLanguage = "zh-CN"
+): string {
+  if (!Number.isFinite(updatedAt) || updatedAt <= 0) {
+    return conversationUiText(language, "较早", "Earlier");
+  }
+  return formatConversationRelativeTime(updatedAt, language, now);
 }
 
 /**
@@ -200,9 +200,11 @@ export function sessionSummaryTooltip(
     StoredSession,
     "title" | "messages" | "updatedAt"
   >,
-  now = Date.now()
+  now = Date.now(),
+  language: SettingsLanguage = "zh-CN"
 ): string {
-  const title = normalizedSessionPreviewLine(session.title) || "未命名会话";
+  const title = normalizedSessionPreviewLine(session.title)
+    || conversationUiText(language, "未命名会话", "Untitled conversation");
   const firstUserIntent = session.messages.find((message) =>
     message.role === "user"
     && Boolean(normalizedSessionPreviewLine(message.text || message.previewText || ""))
@@ -214,8 +216,10 @@ export function sessionSummaryTooltip(
       ),
       120
     )
-    : "尚无用户提问";
-  return `${title}\n首条提问：${intent}\n更新：${formatSessionUpdatedAt(session.updatedAt, now)}`;
+    : conversationUiText(language, "尚无用户提问", "No user question yet");
+  return language === "en"
+    ? `${title}\nFirst question: ${intent}\nUpdated: ${formatSessionUpdatedAt(session.updatedAt, now, language)}`
+    : `${title}\n首条提问：${intent}\n更新：${formatSessionUpdatedAt(session.updatedAt, now, language)}`;
 }
 
 export function sessionTrackOverflowState(
@@ -334,7 +338,8 @@ export function renderCodexTabs(
   sessions: StoredSession[],
   activeSessionId: string,
   callbacks: CodexTabsCallbacks,
-  runningSessionId = ""
+  runningSessionId = "",
+  language: SettingsLanguage = "zh-CN"
 ): void {
   const state = navigatorStateFor(container);
   state.backwardFocused = false;
@@ -346,7 +351,13 @@ export function renderCodexTabs(
   state.trackCleanup = undefined;
   const renderGeneration = state.renderGeneration + 1;
   state.renderGeneration = renderGeneration;
-  const allModel = buildCodexSessionNavigatorModel(sessions, activeSessionId, runningSessionId);
+  const allModel = buildCodexSessionNavigatorModel(
+    sessions,
+    activeSessionId,
+    runningSessionId,
+    "",
+    language
+  );
   state.tabUiStateIds = retainSessionTabUiStateIds(
     sessions,
     state.tabUiStateIds,
@@ -381,7 +392,8 @@ export function renderCodexTabs(
     sessions,
     activeSessionId,
     callbacks,
-    runningSessionId
+    runningSessionId,
+    language
   );
   const activate = (session: StoredSession) => {
     markSessionTabUiStateUsed(state, session.id);
@@ -427,7 +439,7 @@ export function renderCodexTabs(
     cls: "codex-session-track",
     attr: {
       role: "tablist",
-      "aria-label": "会话切换",
+      "aria-label": conversationUiText(language, "会话切换", "Conversation switcher"),
       "aria-orientation": "horizontal"
     }
   });
@@ -436,7 +448,7 @@ export function renderCodexTabs(
     const active = session.id === activeSessionId;
     const tabStop = session.id === state.trackRovingSessionId;
     const running = session.id === runningSessionId;
-    const summary = sessionSummaryTooltip(session);
+    const summary = sessionSummaryTooltip(session, Date.now(), language);
     const tab = track.createEl("button", {
       cls: [
         "codex-session-tab",
@@ -448,7 +460,7 @@ export function renderCodexTabs(
         role: "tab",
         "data-session-id": session.id,
         "aria-selected": String(active),
-        "aria-label": session.title || "未命名会话",
+        "aria-label": session.title || conversationUiText(language, "未命名会话", "Untitled conversation"),
         "aria-description": summary,
         tabindex: tabStop ? "0" : "-1"
       }
@@ -541,7 +553,7 @@ export function renderCodexTabs(
     cls: "codex-session-track-controls",
     attr: {
       role: "group",
-      "aria-label": "会话导航",
+      "aria-label": conversationUiText(language, "会话导航", "Conversation navigation"),
       "aria-hidden": "true"
     }
   });
@@ -549,8 +561,8 @@ export function renderCodexTabs(
     cls: "codex-session-track-control codex-session-backward",
     attr: {
       type: "button",
-      "aria-label": "向左查看更多会话",
-      title: "向左查看更多会话"
+      "aria-label": conversationUiText(language, "向左查看更多会话", "Show earlier conversations"),
+      title: conversationUiText(language, "向左查看更多会话", "Show earlier conversations")
     }
   });
   setIcon(backwardButton, "chevron-left");
@@ -568,8 +580,8 @@ export function renderCodexTabs(
     cls: "codex-session-track-control codex-session-forward",
     attr: {
       type: "button",
-      "aria-label": "向右查看更多会话",
-      title: "向右查看更多会话"
+      "aria-label": conversationUiText(language, "向右查看更多会话", "Show later conversations"),
+      title: conversationUiText(language, "向右查看更多会话", "Show later conversations")
     }
   });
   setIcon(forwardButton, "chevron-right");
@@ -717,14 +729,21 @@ export function renderCodexTabs(
     cls: `codex-session-all ${state.open ? "is-active" : ""}`.trim(),
     attr: {
       type: "button",
-      title: "查看全部会话",
-      "aria-label": `查看全部 ${allModel.chatCount} 个会话`,
+      title: conversationUiText(language, "查看全部会话", "View all conversations"),
+      "aria-label": conversationUiText(
+        language,
+        `查看全部 ${allModel.chatCount} 个会话`,
+        `View all ${allModel.chatCount} conversations`
+      ),
       "aria-expanded": state.open ? "true" : "false"
     }
   });
   const allIcon = allButton.createSpan({ cls: "codex-session-all-icon" });
   setIcon(allIcon, "list");
-  allButton.createSpan({ cls: "codex-session-all-text", text: "全部" });
+  allButton.createSpan({
+    cls: "codex-session-all-text",
+    text: conversationUiText(language, "全部", "All")
+  });
   allButton.createSpan({ cls: "codex-session-count", text: String(allModel.chatCount) });
   allButton.onfocus = () => {
     state.pendingFocusRequest = null;
@@ -737,8 +756,8 @@ export function renderCodexTabs(
     cls: "codex-tab-new codex-session-new",
     attr: {
       type: "button",
-      "aria-label": "新建会话",
-      title: "新建会话"
+      "aria-label": conversationUiText(language, "新建会话", "New conversation"),
+      title: conversationUiText(language, "新建会话", "New conversation")
     }
   });
   setIcon(newButton, "plus");
@@ -765,7 +784,17 @@ export function renderCodexTabs(
   });
 
   if (state.open) {
-    renderSessionPicker(container, sessions, activeSessionId, runningSessionId, callbacks, state, activate, rerender);
+    renderSessionPicker(
+      container,
+      sessions,
+      activeSessionId,
+      runningSessionId,
+      callbacks,
+      state,
+      activate,
+      rerender,
+      language
+    );
   }
 }
 
@@ -777,13 +806,14 @@ function renderSessionPicker(
   callbacks: CodexTabsCallbacks,
   state: CodexSessionNavigatorState,
   activate: (session: StoredSession) => void,
-  rerender: () => void
+  rerender: () => void,
+  language: SettingsLanguage
 ): void {
   const backdrop = container.createEl("button", {
     cls: "codex-session-picker-backdrop",
     attr: {
       type: "button",
-      "aria-label": "关闭全部会话"
+      "aria-label": conversationUiText(language, "关闭全部会话", "Close all conversations")
     }
   });
   backdrop.onclick = () => closeSessionPicker(state, rerender);
@@ -792,22 +822,27 @@ function renderSessionPicker(
     cls: "codex-session-picker",
     attr: {
       role: "dialog",
-      "aria-label": "全部会话",
+      "aria-label": conversationUiText(language, "全部会话", "All conversations"),
       "aria-modal": "false"
     }
   });
   const header = picker.createDiv({ cls: "codex-session-picker-header" });
   const heading = header.createDiv({ cls: "codex-session-picker-heading" });
   const headingLine = heading.createDiv({ cls: "codex-session-picker-title-line" });
-  headingLine.createEl("h2", { text: "全部会话" });
+  headingLine.createEl("h2", { text: conversationUiText(language, "全部会话", "All conversations") });
   const totalCount = sessions.length;
   headingLine.createSpan({ cls: "codex-session-count", text: String(totalCount) });
-  heading.createDiv({ cls: "codex-session-picker-subtitle", text: "按最近使用排序" });
+  heading.createDiv({
+    cls: "codex-session-picker-subtitle",
+    text: conversationUiText(language, "按最近使用排序", "Sorted by most recent use")
+  });
 
   const headerActions = header.createDiv({ cls: "codex-session-picker-header-actions" });
   const manageButton = headerActions.createEl("button", {
     cls: `codex-session-manage ${state.managing ? "is-active" : ""}`.trim(),
-    text: state.managing ? "完成" : "管理",
+    text: state.managing
+      ? conversationUiText(language, "完成", "Done")
+      : conversationUiText(language, "管理", "Manage"),
     attr: {
       type: "button",
       "aria-pressed": state.managing ? "true" : "false"
@@ -823,8 +858,8 @@ function renderSessionPicker(
     cls: "codex-session-picker-close",
     attr: {
       type: "button",
-      "aria-label": "关闭全部会话",
-      title: "关闭"
+      "aria-label": conversationUiText(language, "关闭全部会话", "Close all conversations"),
+      title: conversationUiText(language, "关闭", "Close")
     }
   });
   setIcon(closeButton, "x");
@@ -837,8 +872,8 @@ function renderSessionPicker(
     cls: "codex-session-search-input",
     attr: {
       type: "search",
-      placeholder: "搜索会话",
-      "aria-label": "搜索会话",
+      placeholder: conversationUiText(language, "搜索会话", "Search conversations"),
+      "aria-label": conversationUiText(language, "搜索会话", "Search conversations"),
       autocomplete: "off"
     }
   });
@@ -852,7 +887,13 @@ function renderSessionPicker(
     body.empty();
     footer.empty();
     focusedRow = null;
-    const model = buildCodexSessionNavigatorModel(sessions, activeSessionId, runningSessionId, state.query);
+    const model = buildCodexSessionNavigatorModel(
+      sessions,
+      activeSessionId,
+      runningSessionId,
+      state.query,
+      language
+    );
     const selectableIds = model.chatSessions.filter((session) => session.id !== runningSessionId).map((session) => session.id);
     const selectableSet = new Set(selectableIds);
     state.selectedIds = new Set([...state.selectedIds].filter((sessionId) => selectableSet.has(sessionId)));
@@ -866,12 +907,17 @@ function renderSessionPicker(
     );
 
     const sectionHeading = body.createDiv({ cls: "codex-session-section-heading" });
-    sectionHeading.createDiv({ cls: "codex-session-section-label", text: "最近会话" });
+    sectionHeading.createDiv({
+      cls: "codex-session-section-label",
+      text: conversationUiText(language, "最近会话", "Recent conversations")
+    });
     if (state.managing && selectableIds.length > 0) {
       const allSelected = selectableIds.every((sessionId) => state.selectedIds.has(sessionId));
       const selectAllButton = sectionHeading.createEl("button", {
         cls: "codex-session-select-all",
-        text: allSelected ? "取消全选" : `全选可删除 ${selectableIds.length} 项`,
+        text: allSelected
+          ? conversationUiText(language, "取消全选", "Clear selection")
+          : conversationUiText(language, `全选可删除 ${selectableIds.length} 项`, `Select all ${selectableIds.length} deletable conversations`),
         attr: { type: "button" }
       });
       selectAllButton.onclick = () => {
@@ -884,7 +930,7 @@ function renderSessionPicker(
       cls: "codex-session-list",
       attr: {
         role: "listbox",
-        "aria-label": "会话列表",
+        "aria-label": conversationUiText(language, "会话列表", "Conversation list"),
         "aria-multiselectable": state.managing ? "true" : "false"
       }
     });
@@ -914,7 +960,9 @@ function renderSessionPicker(
           cls: `codex-session-checkbox ${selected ? "is-selected" : ""}`.trim(),
           attr: {
             type: "button",
-            "aria-label": running ? `${session.title} 正在运行，不能选择` : `选择 ${session.title}`,
+            "aria-label": running
+              ? conversationUiText(language, `${session.title} 正在运行，不能选择`, `${session.title} is running and cannot be selected`)
+              : conversationUiText(language, `选择 ${session.title}`, `Select ${session.title}`),
             "aria-pressed": selected ? "true" : "false"
           }
         });
@@ -937,8 +985,17 @@ function renderSessionPicker(
       const copy = row.createDiv({ cls: "codex-session-row-copy" });
       copy.createDiv({ cls: "codex-session-row-title", text: session.title });
       const meta = copy.createDiv({ cls: "codex-session-row-meta" });
-      meta.createSpan({ text: running ? "Agent 正在运行" : formatSessionUpdatedAt(session.updatedAt) });
-      if (active) meta.createSpan({ cls: "codex-session-current-badge", text: "当前" });
+      meta.createSpan({
+        text: running
+          ? conversationUiText(language, "Agent 正在运行", "Agent is running")
+          : formatSessionUpdatedAt(session.updatedAt, Date.now(), language)
+      });
+      if (active) {
+        meta.createSpan({
+          cls: "codex-session-current-badge",
+          text: conversationUiText(language, "当前", "Current")
+        });
+      }
 
       if (!state.managing) {
         const actions = row.createDiv({ cls: "codex-session-row-actions" });
@@ -946,8 +1003,8 @@ function renderSessionPicker(
           cls: "codex-session-row-action",
           attr: {
             type: "button",
-            "aria-label": `重命名 ${session.title}`,
-            title: "重命名"
+            "aria-label": conversationUiText(language, `重命名 ${session.title}`, `Rename ${session.title}`),
+            title: conversationUiText(language, "重命名", "Rename")
           }
         });
         setIcon(renameButton, "pencil");
@@ -959,8 +1016,12 @@ function renderSessionPicker(
           cls: "codex-session-row-action is-danger",
           attr: {
             type: "button",
-            "aria-label": running ? "运行中的会话不能删除" : `删除 ${session.title}`,
-            title: running ? "运行中的会话不能删除" : "删除"
+            "aria-label": running
+              ? conversationUiText(language, "运行中的会话不能删除", "A running conversation cannot be deleted")
+              : conversationUiText(language, `删除 ${session.title}`, `Delete ${session.title}`),
+            title: running
+              ? conversationUiText(language, "运行中的会话不能删除", "A running conversation cannot be deleted")
+              : conversationUiText(language, "删除", "Delete")
           }
         });
         deleteButton.disabled = running;
@@ -989,8 +1050,14 @@ function renderSessionPicker(
       const empty = list.createDiv({ cls: "codex-session-empty" });
       const emptyIcon = empty.createSpan();
       setIcon(emptyIcon, "search");
-      empty.createDiv({ cls: "codex-session-empty-title", text: "没有找到会话" });
-      empty.createDiv({ cls: "codex-session-empty-copy", text: "换一个关键词试试" });
+      empty.createDiv({
+        cls: "codex-session-empty-title",
+        text: conversationUiText(language, "没有找到会话", "No conversations found")
+      });
+      empty.createDiv({
+        cls: "codex-session-empty-copy",
+        text: conversationUiText(language, "换一个关键词试试", "Try a different keyword")
+      });
     }
 
     if (visibleSessions.length < model.chatSessions.length) {
@@ -998,10 +1065,14 @@ function renderSessionPicker(
       const batchSize = Math.min(SESSION_PICKER_BATCH_SIZE, remaining);
       const loadMore = footer.createEl("button", {
         cls: "codex-session-load-more",
-        text: `加载更多 ${batchSize} 条（剩余 ${remaining}）`,
+        text: conversationUiText(
+          language,
+          `加载更多 ${batchSize} 条（剩余 ${remaining}）`,
+          `Load ${batchSize} more (${remaining} remaining)`
+        ),
         attr: {
           type: "button",
-          "aria-label": `加载更多会话，剩余 ${remaining} 条`
+          "aria-label": conversationUiText(language, `加载更多会话，剩余 ${remaining} 条`, `Load more conversations, ${remaining} remaining`)
         }
       });
       loadMore.onclick = () => {
@@ -1017,30 +1088,44 @@ function renderSessionPicker(
       footer.addClass("is-managing");
       footer.createSpan({
         cls: "codex-session-selection-summary",
-        text: state.selectedIds.size ? `已选 ${state.selectedIds.size} 个` : "选择要删除的会话"
+        text: state.selectedIds.size
+          ? conversationUiText(language, `已选 ${state.selectedIds.size} 个`, `${state.selectedIds.size} selected`)
+          : conversationUiText(language, "选择要删除的会话", "Select conversations to delete")
       });
       const deleteSelected = footer.createEl("button", {
         cls: "codex-session-delete-selected",
         attr: {
           type: "button",
-          "aria-label": state.selectedIds.size ? `删除 ${state.selectedIds.size} 个会话` : "删除会话"
+          "aria-label": state.selectedIds.size
+            ? conversationUiText(language, `删除 ${state.selectedIds.size} 个会话`, `Delete ${state.selectedIds.size} conversations`)
+            : conversationUiText(language, "删除会话", "Delete conversations")
         }
       });
       const deleteIcon = deleteSelected.createSpan();
       setIcon(deleteIcon, "trash-2");
-      deleteSelected.createSpan({ text: state.selectedIds.size ? `删除 ${state.selectedIds.size}` : "删除" });
+      deleteSelected.createSpan({
+        text: state.selectedIds.size
+          ? conversationUiText(language, `删除 ${state.selectedIds.size}`, `Delete ${state.selectedIds.size}`)
+          : conversationUiText(language, "删除", "Delete")
+      });
       deleteSelected.disabled = state.selectedIds.size === 0;
       deleteSelected.onclick = () => callbacks.onDeleteSessions([...state.selectedIds]);
     } else {
       footer.removeClass("is-managing");
-      renderShortcut(footer, ["↑", "↓"], "选择");
-      renderShortcut(footer, ["Enter"], "打开");
-      renderShortcut(footer, ["Esc"], "关闭");
+      renderShortcut(footer, ["↑", "↓"], conversationUiText(language, "选择", "Select"));
+      renderShortcut(footer, ["Enter"], conversationUiText(language, "打开", "Open"));
+      renderShortcut(footer, ["Esc"], conversationUiText(language, "关闭", "Close"));
     }
   };
 
   const handleKeyDown = (event: KeyboardEvent) => {
-    const model = buildCodexSessionNavigatorModel(sessions, activeSessionId, runningSessionId, state.query);
+    const model = buildCodexSessionNavigatorModel(
+      sessions,
+      activeSessionId,
+      runningSessionId,
+      state.query,
+      language
+    );
     if (event.key === "/") {
       if (event.target !== searchInput) {
         event.preventDefault();

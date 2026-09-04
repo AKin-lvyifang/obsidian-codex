@@ -61,6 +61,7 @@ export function sessionMessageStoreFor(host: CodexMessageHost): SessionMessageSt
     getActiveRunId: () => host.activeRunId ?? "",
     getActiveTurnId: () => host.activeTurnId ?? "",
     getVaultPath: () => host.plugin.getVaultPath(),
+    getSettingsLanguage: () => host.plugin.settings.settingsLanguage,
     externalizeMessageText: async (message, text) => {
       await host.plugin.externalizeMessageText(message, text);
     },

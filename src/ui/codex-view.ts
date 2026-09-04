@@ -120,7 +120,8 @@ import {
   stopTurn as stopTurnAction,
   type CodexTurnLifecycleHost
 } from "./codex-view/turn-lifecycle";
-import { renderViewShell, type CodexViewShellHost } from "./codex-view/view-shell";
+import { refreshViewShellCopy, renderViewShell, type CodexViewShellHost } from "./codex-view/view-shell";
+import { conversationUiText } from "./codex-view/ui-i18n";
 import { TaskPlanDockController } from "./codex-view/task-plan-dock";
 import { InteractionDockController } from "./codex-view/interaction-dock";
 import { piToolCallIdFromProjectedMessageId } from "../harness/pi-native/pi-chat-ui-projector";
@@ -289,6 +290,18 @@ export class CodexView extends ItemView {
     this.renderMessages({ preserveScroll: true });
   }
 
+  refreshLanguage(): void {
+    if (!this.rootEl) return;
+    refreshViewShellCopy(this.shellHost());
+    this.renderTabs();
+    this.renderMessages({ preserveScroll: true });
+    this.renderToolbar();
+    const session = this.sessionById(this.plugin.settings.activeSessionId) ?? this.ensureSession();
+    this.renderTaskPlanDock(session);
+    this.renderInteractionDock(session);
+    if (this.mcpPanelEl?.hasClass("is-visible")) void this.loadMcpPanel();
+  }
+
   async onOpen(): Promise<void> {
     this.viewLifecycleAbortController?.abort();
     this.viewLifecycleGeneration = (
@@ -302,7 +315,7 @@ export class CodexView extends ItemView {
     } catch (error) {
       console.error("Pi Conversation Catalog refresh failed", error);
       new Notice(
-        `读取会话列表失败：${error instanceof Error ? error.message : String(error)}`
+        `${conversationUiText(this.plugin.settings.settingsLanguage, "读取会话列表失败：", "Could not load the conversation list: ")}${error instanceof Error ? error.message : String(error)}`
       );
     }
     const initialConversation = await ensureInitialConversationAction(this.sessionHost());
@@ -313,7 +326,7 @@ export class CodexView extends ItemView {
       } catch (error) {
         console.error("Pi Conversation activation failed", error);
         new Notice(
-          `恢复会话失败：${error instanceof Error ? error.message : String(error)}`
+          `${conversationUiText(this.plugin.settings.settingsLanguage, "恢复会话失败：", "Could not restore the conversation: ")}${error instanceof Error ? error.message : String(error)}`
         );
       }
     }
@@ -451,7 +464,13 @@ export class CodexView extends ItemView {
     input: Readonly<HomeConversationStartInput>
   ): Promise<StoredSession> {
     const message = input.message.trim();
-    if (!message) throw new Error("首页会话开场消息不能为空");
+    if (!message) {
+      throw new Error(conversationUiText(
+        this.plugin.settings.settingsLanguage,
+        "首页会话开场消息不能为空",
+        "The Home conversation opening message cannot be empty"
+      ));
+    }
     this.playHomeAttentionFrame();
     const session = await this.createSession(input.title, {
       ...(input.defaultSkillId ? { defaultSkillId: input.defaultSkillId } : {}),
@@ -507,7 +526,11 @@ export class CodexView extends ItemView {
       || this.queueStartInProgress
       || Boolean(this.plugin.getKnowledgeSurfaceService()?.isRunning)
     ) {
-      throw new Error("当前 Agent 正在运行，请结束后再开始知识复盘");
+      throw new Error(conversationUiText(
+        this.plugin.settings.settingsLanguage,
+        "当前 Agent 正在运行，请结束后再开始知识复盘",
+        "The Agent is currently running. Wait for it to finish before starting a knowledge review."
+      ));
     }
     this.guidedSessionStartInProgress = true;
     let session: StoredSession | null = null;
@@ -519,9 +542,11 @@ export class CodexView extends ItemView {
         input.defaultSkillId
       ));
       if (!skill?.contentPath?.trim() || !skill.name.trim()) {
-        throw new Error(
-          `知识复盘 Skill ${input.defaultSkillId} 已禁用、不存在或无法加载`
-        );
+        throw new Error(conversationUiText(
+          this.plugin.settings.settingsLanguage,
+          `知识复盘 Skill ${input.defaultSkillId} 已禁用、不存在或无法加载`,
+          `The knowledge review Skill ${input.defaultSkillId} is disabled, missing, or could not be loaded.`
+        ));
       }
       session = await this.createSession(input.title, {
         defaultSkillId: input.defaultSkillId
@@ -544,7 +569,11 @@ export class CodexView extends ItemView {
       if (outcome === "failed" && item.piUserEntryAccepted !== true) {
         await discardUnacceptedSession(this.sessionHost(), session.id);
         session = null;
-        throw new Error("知识复盘提示语未被 Agent 接受，请检查 Provider 后重试");
+        throw new Error(conversationUiText(
+          this.plugin.settings.settingsLanguage,
+          "知识复盘提示语未被 Agent 接受，请检查 Provider 后重试",
+          "The Agent did not accept the knowledge review prompt. Check the Provider and try again."
+        ));
       }
       return session;
     } catch (error) {
@@ -570,6 +599,7 @@ export class CodexView extends ItemView {
   private renderTaskPlanDock(session: StoredSession): void {
     this.taskPlanDock.render(this.taskPlanDockEl, {
       sessionId: session.id,
+      language: this.plugin.settings.settingsLanguage,
       messages: session.bodyAuthority === "pi_session_only"
         ? session.messages
         : [],
@@ -595,6 +625,7 @@ export class CodexView extends ItemView {
       : null;
     this.interactionDock.render(this.interactionDockEl, {
       sessionId: session.id,
+      language: this.plugin.settings.settingsLanguage,
       ...(questionBinding
         ? {
             question: {
@@ -614,7 +645,11 @@ export class CodexView extends ItemView {
           }
         : {}),
       onStale: () => {
-        new Notice("该交互已失效，请等待当前会话状态刷新。");
+        new Notice(conversationUiText(
+          this.plugin.settings.settingsLanguage,
+          "该交互已失效，请等待当前会话状态刷新。",
+          "This interaction is no longer valid. Wait for the conversation state to refresh."
+        ));
         this.renderInteractionDock(session);
       },
       onScheduleMeasure: () => this.scheduleMeasureVirtualRows()
@@ -708,7 +743,7 @@ export class CodexView extends ItemView {
 
   private async sendMessage(): Promise<void> {
     if (this.promptEnhancerRunning) {
-      new Notice("提示词正在增强，请稍候");
+      new Notice(conversationUiText(this.plugin.settings.settingsLanguage, "提示词正在增强，请稍候", "The prompt is being enhanced. Please wait."));
       return;
     }
     await sendMessageRunner(this.turnRunnerContext);
@@ -716,14 +751,14 @@ export class CodexView extends ItemView {
 
   private async enqueueComposerDraft(): Promise<void> {
     if (this.promptEnhancerRunning) {
-      new Notice("提示词正在增强，请稍候");
+      new Notice(conversationUiText(this.plugin.settings.settingsLanguage, "提示词正在增强，请稍候", "The prompt is being enhanced. Please wait."));
       return;
     }
     await enqueueComposerDraftRunner(this.turnRunnerContext);
   }
   private async steerPiChatFromComposer(): Promise<void> {
     if (this.promptEnhancerRunning) {
-      new Notice("提示词正在增强，请稍候");
+      new Notice(conversationUiText(this.plugin.settings.settingsLanguage, "提示词正在增强，请稍候", "The prompt is being enhanced. Please wait."));
       return;
     }
     await steerPiChatFromComposerRunner(this.turnRunnerContext);
@@ -736,7 +771,11 @@ export class CodexView extends ItemView {
   }
   private preparePiTaskPlanModification(planId: string, title: string): void {
     if (this.running) {
-      new Notice("请先暂停当前计划，再修改计划。");
+      new Notice(conversationUiText(
+        this.plugin.settings.settingsLanguage,
+        "请先暂停当前计划，再修改计划。",
+        "Pause the current plan before editing it."
+      ));
       return;
     }
     selectComposerModeAction(this.composerHost(), "plan");
@@ -777,14 +816,16 @@ export class CodexView extends ItemView {
     this.mcpPanelEl.toggleClass("is-visible", willOpen);
     if (!willOpen) return;
     this.mcpPanelEl.empty();
-    this.mcpPanelEl.createDiv({ cls: "codex-mcp-title", text: "MCP 状态" });
-    this.mcpPanelEl.createDiv({ cls: "codex-mcp-empty", text: "正在读取 MCP 状态..." });
+    const language = this.plugin.settings.settingsLanguage;
+    this.mcpPanelEl.createDiv({ cls: "codex-mcp-title", text: conversationUiText(language, "MCP 状态", "MCP status") });
+    this.mcpPanelEl.createDiv({ cls: "codex-mcp-empty", text: conversationUiText(language, "正在读取 MCP 状态...", "Loading MCP status...") });
     await this.loadMcpPanel();
   }
 
   private async loadMcpPanel(): Promise<void> {
     await loadMcpPanelView({
       container: this.mcpPanelEl,
+      language: this.plugin.settings.settingsLanguage,
       loadResources: () => mcpResourceEnablement(
         this.currentEchoInkResourceCatalog()
       )
@@ -819,10 +860,14 @@ export class CodexView extends ItemView {
   private resetVirtualWindow(): void { resetVirtualWindowAction(this.messageHost()); }
   private ensureSession(): StoredSession { return ensureSessionAction(this.sessionHost()); }
   private async createSession(
-    title = "新会话",
+    title?: string,
     options: CreateSessionOptions = {}
   ): Promise<StoredSession> {
-    return await createSessionAction(this.sessionHost(), title, options);
+    return await createSessionAction(
+      this.sessionHost(),
+      title ?? conversationUiText(this.plugin.settings.settingsLanguage, "新会话", "New conversation"),
+      options
+    );
   }
   private attachActiveFile(): void { attachActiveFileAction(this.attachmentHost()); }
   private pickFiles(imagesOnly: boolean): void { pickFilesAction(this.attachmentHost(), imagesOnly); }

@@ -1,4 +1,6 @@
 import { App, TFile, normalizePath } from "obsidian";
+import type { SettingsLanguage } from "../settings/settings";
+import { homeCopy } from "./home-i18n";
 import {
   DEFAULT_JOURNAL_DIRECTORY,
   normalizeJournalDirectory
@@ -93,9 +95,9 @@ export class HomeWorkbenchDataService {
     return journalPathForDate(date, this.getJournalDirectory());
   }
 
-  async ensureJournalDirectory(): Promise<string> {
+  async ensureJournalDirectory(language: SettingsLanguage = "zh-CN"): Promise<string> {
     const directory = this.getJournalDirectory();
-    await this.ensureFolder(directory);
+    await this.ensureFolder(directory, language);
     return directory;
   }
 
@@ -116,27 +118,35 @@ export class HomeWorkbenchDataService {
     };
   }
 
-  async readTemplate(choice: HomeJournalTemplateChoice): Promise<string> {
+  async readTemplate(choice: HomeJournalTemplateChoice, language: SettingsLanguage = "zh-CN"): Promise<string> {
     if (choice.kind === "built-in") return choice.template.content;
     const file = this.app.vault.getAbstractFileByPath(normalizePath(choice.path));
-    if (!(file instanceof TFile)) throw new Error(`没有找到模板：${choice.path}`);
+    if (!(file instanceof TFile)) throw new Error(homeCopy(language).template.templateNotFound(choice.path));
     return await this.app.vault.read(file);
   }
 
-  async createOrOpenJournal(choice: HomeJournalTemplateChoice, date = new Date()): Promise<HomeJournalCreateResult> {
+  async createOrOpenJournal(
+    choice: HomeJournalTemplateChoice,
+    date = new Date(),
+    language: SettingsLanguage = "zh-CN"
+  ): Promise<HomeJournalCreateResult> {
     const path = normalizePath(this.journalPathForDate(date));
     const existing = this.app.vault.getAbstractFileByPath(path);
     if (existing instanceof TFile) return { file: existing, created: false };
-    if (existing) throw new Error(`日记路径已被文件夹占用：${path}`);
-    const source = await this.readTemplate(choice);
+    if (existing) throw new Error(homeCopy(language).template.pathOccupiedByFolder(path));
+    const source = await this.readTemplate(choice, language);
     const content = applyJournalTemplate(source, date);
-    await this.ensureFolder(path.slice(0, path.lastIndexOf("/")));
+    await this.ensureFolder(path.slice(0, path.lastIndexOf("/")), language);
     const file = await this.app.vault.create(path, content);
     return { file, created: true };
   }
 
-  previewImportedTemplate(fileName: string, content: string): ImportedJournalTemplate {
-    return parseImportedJournalTemplate(fileName, content);
+  previewImportedTemplate(
+    fileName: string,
+    content: string,
+    language: SettingsLanguage = "zh-CN"
+  ): ImportedJournalTemplate {
+    return parseImportedJournalTemplate(fileName, content, language);
   }
 
   listCustomTemplates(): HomeCustomTemplateSummary[] {
@@ -149,7 +159,8 @@ export class HomeWorkbenchDataService {
 
   async saveImportedTemplate(
     template: ImportedJournalTemplate,
-    conflictResolution: "cancel" | "safe-copy" = "cancel"
+    conflictResolution: "cancel" | "safe-copy" = "cancel",
+    language: SettingsLanguage = "zh-CN"
   ): Promise<HomeTemplateSaveResult> {
     const path = normalizePath(importedTemplatePath(template.name));
     const existing = this.app.vault.getAbstractFileByPath(path);
@@ -158,16 +169,17 @@ export class HomeWorkbenchDataService {
       return {
         status: "conflict",
         path,
-        safeCopyPath: nextAvailableImportedTemplatePath(template.name, paths)
+        safeCopyPath: nextAvailableImportedTemplatePath(template.name, paths, language)
       };
     }
     const targetPath = existing
       ? normalizePath(nextAvailableImportedTemplatePath(
-        template.name,
-        new Set(this.app.vault.getMarkdownFiles().map((file) => file.path))
+          template.name,
+        new Set(this.app.vault.getMarkdownFiles().map((file) => file.path)),
+        language
       ))
       : path;
-    await this.ensureFolder(JOURNAL_TEMPLATE_DIRECTORY);
+    await this.ensureFolder(JOURNAL_TEMPLATE_DIRECTORY, language);
     const file = await this.app.vault.create(targetPath, template.content);
     return { status: "saved", path: targetPath, file };
   }
@@ -194,13 +206,13 @@ export class HomeWorkbenchDataService {
     };
   }
 
-  private async ensureFolder(path: string): Promise<void> {
+  private async ensureFolder(path: string, language: SettingsLanguage): Promise<void> {
     const parts = normalizePath(path).split("/").filter(Boolean);
     let current = "";
     for (const part of parts) {
       current = current ? `${current}/${part}` : part;
       const existing = this.app.vault.getAbstractFileByPath(current);
-      if (existing instanceof TFile) throw new Error(`无法创建目录，路径已被文件占用：${current}`);
+      if (existing instanceof TFile) throw new Error(homeCopy(language).template.folderOccupiedByFile(current));
       if (existing) continue;
       await this.app.vault.createFolder(current);
     }

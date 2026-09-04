@@ -1,3 +1,5 @@
+import type { SettingsLanguage } from "../settings/settings";
+import { homeContributionMonthLabel, homeCopy } from "./home-i18n";
 import {
   DEFAULT_JOURNAL_DIRECTORY,
   normalizeJournalDirectory
@@ -198,7 +200,8 @@ export function mergeHomeActivityDays(
  */
 export function buildHomeContributionGrid(
   activity: readonly HomeActivityDay[],
-  year: number
+  year: number,
+  language: SettingsLanguage = "zh-CN"
 ): HomeContributionGrid {
   const byDate = new Map(activity.map((day) => [day.date, day]));
   const firstDay = new Date(year, 0, 1);
@@ -242,7 +245,7 @@ export function buildHomeContributionGrid(
         weekCount
       })) {
         months.push({
-          label: `${currentMonth + 1}月`,
+          label: homeContributionMonthLabel(currentMonth, language),
           colSpan: weekCount,
           startWeek: monthStartWeek
         });
@@ -263,7 +266,7 @@ export function buildHomeContributionGrid(
     weekCount
   })) {
     months.push({
-      label: `${currentMonth + 1}月`,
+      label: homeContributionMonthLabel(currentMonth, language),
       colSpan: weekCount,
       startWeek: monthStartWeek
     });
@@ -350,9 +353,14 @@ export function extractFirstLocalImageTarget(markdown: string): string | null {
   return null;
 }
 
-export function parseImportedJournalTemplate(fileName: string, content: string): ImportedJournalTemplate {
-  if (!/\.md$/iu.test(fileName)) throw new Error("只支持本地 .md 模板");
-  if (content.includes("\0")) throw new Error("模板包含无法保存的空字符");
+export function parseImportedJournalTemplate(
+  fileName: string,
+  content: string,
+  language: SettingsLanguage = "zh-CN"
+): ImportedJournalTemplate {
+  const copy = homeCopy(language);
+  if (!/\.md$/iu.test(fileName)) throw new Error(copy.template.unsupportedMarkdown);
+  if (content.includes("\0")) throw new Error(copy.template.containsNullCharacter);
   const name = sanitizeTemplateName(fileName.replace(/\.md$/iu, ""));
   return {
     name,
@@ -363,11 +371,11 @@ export function parseImportedJournalTemplate(fileName: string, content: string):
   };
 }
 
-export function decodeImportedMarkdown(bytes: ArrayBuffer): string {
+export function decodeImportedMarkdown(bytes: ArrayBuffer, language: SettingsLanguage = "zh-CN"): string {
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch {
-    throw new Error("模板不是有效的 UTF-8 Markdown 文本");
+    throw new Error(homeCopy(language).template.invalidUtf8);
   }
 }
 
@@ -381,7 +389,11 @@ export function importedTemplatePath(name: string): string {
   return `${JOURNAL_TEMPLATE_DIRECTORY}/${sanitizeTemplateName(name)}.md`;
 }
 
-export function nextAvailableImportedTemplatePath(name: string, existingPaths: ReadonlySet<string>): string {
+export function nextAvailableImportedTemplatePath(
+  name: string,
+  existingPaths: ReadonlySet<string>,
+  language: SettingsLanguage = "zh-CN"
+): string {
   const base = sanitizeTemplateName(name);
   const first = importedTemplatePath(base);
   if (!existingPaths.has(first)) return first;
@@ -389,7 +401,7 @@ export function nextAvailableImportedTemplatePath(name: string, existingPaths: R
     const candidate = importedTemplatePath(`${base}-副本-${index}`);
     if (!existingPaths.has(candidate)) return candidate;
   }
-  throw new Error("无法为同名模板生成安全副本名");
+  throw new Error(homeCopy(language).template.safeCopyUnavailable);
 }
 
 export function applyJournalTemplate(content: string, date: Date): string {

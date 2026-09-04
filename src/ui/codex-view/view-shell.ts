@@ -2,8 +2,9 @@ import { setIcon, type Component } from "obsidian";
 import type CodexForObsidianPlugin from "../../main";
 import type { StoredSession } from "../../settings/settings";
 import { shouldCloseComposerMenusForClick } from "../composer-menu";
-import { renderComposerShell } from "./composer";
-import { renderCodexHeader } from "./header";
+import { refreshComposerShellCopy, renderComposerShell } from "./composer";
+import { refreshCodexHeaderCopy, renderCodexHeader } from "./header";
+import { conversationUiText } from "./ui-i18n";
 
 export interface CodexViewShellHost extends Component {
   readonly contentEl: HTMLElement;
@@ -61,7 +62,7 @@ export function renderViewShell(host: CodexViewShellHost): void {
         })
         .catch(() => host.openPluginSettings());
     }
-  }, host.plugin.getEchoInkAgentIdentityView());
+  }, host.plugin.getEchoInkAgentIdentityView(), host.plugin.settings.settingsLanguage);
   host.registerDomEvent(document, "click", (event) => {
     const target = event.target instanceof Node ? event.target : null;
     if (!target) return;
@@ -85,11 +86,7 @@ export function renderViewShell(host: CodexViewShellHost): void {
   host.registerDomEvent(host.messagesEl, "scroll", () => host.handleMessagesScroll());
   host.jumpToLatestEl = messagesShell.createEl("button", {
     cls: "codex-jump-to-latest",
-    attr: {
-      type: "button",
-      title: "跳到最新消息",
-      "aria-label": "跳到最新消息"
-    }
+    attr: { type: "button" }
   });
   host.jumpToLatestEl.hidden = true;
   const jumpIcon = host.jumpToLatestEl.createSpan({
@@ -97,22 +94,22 @@ export function renderViewShell(host: CodexViewShellHost): void {
     attr: { "aria-hidden": "true" }
   });
   setIcon(jumpIcon, "arrow-down");
-  host.jumpToLatestEl.createSpan({ cls: "codex-jump-to-latest-label", text: "跳到最新" });
+  host.jumpToLatestEl.createSpan({ cls: "codex-jump-to-latest-label" });
   host.registerDomEvent(host.jumpToLatestEl, "click", () => host.jumpToLatest());
   host.taskPlanDockEl = host.rootEl.createDiv({ cls: "codex-task-plan-dock" });
   host.interactionDockEl = host.rootEl.createDiv({
     cls: "codex-interaction-dock",
     attr: {
-      "aria-label": "当前会话交互",
       "aria-live": "polite"
     }
   });
+  applyViewShellCopy(host);
   const composerRefs = renderComposerShell(host.rootEl, {
     onInputChanged: () => host.onInputChanged(),
     onPasteFiles: (event) => void host.handlePastedFiles(event),
     onSendMessage: () => void host.sendMessage(),
     onDropFiles: (event) => host.handleDroppedFiles(event)
-  });
+  }, host.plugin.settings.settingsLanguage);
   host.queueEl = composerRefs.queueEl;
   host.attachmentsEl = composerRefs.attachmentsEl;
   host.workspaceEl = composerRefs.workspaceEl;
@@ -126,4 +123,24 @@ export function renderViewShell(host: CodexViewShellHost): void {
   host.mcpPanelEl = host.rootEl.createDiv({ cls: "codex-mcp-panel" });
   host.renderToolbar();
   host.updateInputPlaceholder();
+}
+
+export function refreshViewShellCopy(host: CodexViewShellHost): void {
+  if (!host.rootEl) return;
+  refreshCodexHeaderCopy(host.rootEl, host.plugin.settings.settingsLanguage);
+  refreshComposerShellCopy(host.rootEl, host.plugin.settings.settingsLanguage);
+  applyViewShellCopy(host);
+}
+
+function applyViewShellCopy(host: CodexViewShellHost): void {
+  const language = host.plugin.settings.settingsLanguage;
+  const jumpLabel = conversationUiText(language, "跳到最新消息", "Jump to latest message");
+  host.jumpToLatestEl?.setAttribute("title", jumpLabel);
+  host.jumpToLatestEl?.setAttribute("aria-label", jumpLabel);
+  const jumpText = host.jumpToLatestEl?.querySelector<HTMLElement>(".codex-jump-to-latest-label");
+  if (jumpText) jumpText.setText(conversationUiText(language, "跳到最新", "Jump to latest"));
+  host.interactionDockEl?.setAttribute(
+    "aria-label",
+    conversationUiText(language, "当前会话交互", "Current conversation interactions")
+  );
 }

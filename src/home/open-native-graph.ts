@@ -1,10 +1,12 @@
 import { Notice, TFile, normalizePath, type App } from "obsidian";
+import type { SettingsLanguage } from "../settings/settings";
+import { homeCopy } from "./home-i18n";
 
 /**
  * Opens Obsidian's core Graph View through the public Workspace leaf API.
  * The graph implementation and its settings remain entirely owned by Obsidian.
  */
-export async function openObsidianGraphLeaf(app: App): Promise<boolean> {
+export async function openObsidianGraphLeaf(app: App, language: SettingsLanguage = "zh-CN"): Promise<boolean> {
   try {
     let leaf = app.workspace.getLeavesOfType("graph")[0];
     if (!leaf) {
@@ -18,7 +20,7 @@ export async function openObsidianGraphLeaf(app: App): Promise<boolean> {
     return true;
   } catch (error) {
     console.warn("EchoInk 无法打开 Obsidian 原生图谱", error);
-    new Notice("暂时无法打开 Obsidian 原生图谱，请稍后重试。");
+    new Notice(homeCopy(language).graph.cannotOpenGraph);
     return false;
   }
 }
@@ -28,11 +30,15 @@ export async function openObsidianGraphLeaf(app: App): Promise<boolean> {
  * EchoInk supplies only the center file; Obsidian owns the graph neighborhood,
  * rendering, filters, and interaction.
  */
-export async function openObsidianLocalGraphLeaf(app: App, indexPath: string): Promise<boolean> {
+export async function openObsidianLocalGraphLeaf(
+  app: App,
+  indexPath: string,
+  language: SettingsLanguage = "zh-CN"
+): Promise<boolean> {
   const normalizedPath = normalizePath(indexPath);
   const indexFile = app.vault.getAbstractFileByPath(normalizedPath);
   if (!(indexFile instanceof TFile)) {
-    new Notice(`没有在当前 Vault 找到：${normalizedPath}`);
+    new Notice(homeCopy(language).graph.missingVaultFile(normalizedPath));
     return false;
   }
 
@@ -51,7 +57,7 @@ export async function openObsidianLocalGraphLeaf(app: App, indexPath: string): P
     return true;
   } catch (error) {
     console.warn("EchoInk 无法打开 Obsidian 原生局部图谱", error);
-    new Notice("暂时无法打开 Obsidian 原生局部图谱，请稍后重试。");
+    new Notice(homeCopy(language).graph.cannotOpenLocalGraph);
     return false;
   }
 }

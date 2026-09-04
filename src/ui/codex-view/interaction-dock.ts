@@ -3,15 +3,18 @@ import type {
   EchoInkQuestionInteraction,
   EchoInkQuestionPrompt
 } from "../../types/conversation-turn";
+import type { SettingsLanguage } from "../../settings/settings";
 import type { PiAgentApprovalDecisionBinding } from "../../plugin/pi-agent-approval-broker";
 import type { PiTurnInteractionDecisionBinding } from "../../plugin/pi-turn-interaction-broker";
 import {
   createAIElementsConfirmation,
   markAIElementsQuestion
 } from "./smooth-chat-ui";
+import { conversationUiText } from "./ui-i18n";
 
 export interface InteractionDockRenderInput {
   readonly sessionId: string;
+  readonly language?: SettingsLanguage;
   readonly question?: Readonly<{
     binding: Readonly<PiTurnInteractionDecisionBinding>;
     onResolved(): void;
@@ -53,11 +56,11 @@ export class InteractionDockController {
     this.lastRender = { container, input };
     const question = input.question?.binding.interaction;
     if (question?.kind === "question" && question.status === "pending") {
-      this.renderQuestion(container, input, input.question!.binding, question);
+      this.renderQuestion(container, input, input.question!.binding, question, input.language ?? "zh-CN");
       return;
     }
     if (input.confirmation) {
-      this.renderConfirmation(container, input, input.confirmation.binding);
+      this.renderConfirmation(container, input, input.confirmation.binding, input.language ?? "zh-CN");
       return;
     }
     this.hide(container);
@@ -73,7 +76,8 @@ export class InteractionDockController {
     container: HTMLElement,
     input: Readonly<InteractionDockRenderInput>,
     binding: Readonly<PiTurnInteractionDecisionBinding>,
-    interaction: Readonly<EchoInkQuestionInteraction>
+    interaction: Readonly<EchoInkQuestionInteraction>,
+    language: SettingsLanguage
   ): void {
     const key = questionStateKey(input.sessionId, interaction);
     const state = this.questionState(key, interaction);
@@ -92,7 +96,7 @@ export class InteractionDockController {
       cls: "codex-interaction-card codex-interaction-question-card",
       attr: {
         "aria-busy": String(state.submitting),
-        "aria-label": "需要你的选择",
+        "aria-label": conversationUiText(language, "需要你的选择", "Your input is needed"),
         role: "region"
       }
     });
@@ -101,12 +105,21 @@ export class InteractionDockController {
     const heading = header.createEl("h2", {
       cls: "codex-interaction-heading"
     });
-    heading.createSpan({ cls: "codex-interaction-heading-primary", text: "需要你的选择" });
+    heading.createSpan({
+      cls: "codex-interaction-heading-primary",
+      text: conversationUiText(language, "需要你的选择", "Your input is needed")
+    });
     heading.createSpan({ cls: "codex-interaction-heading-secondary", text: "Question" });
     header.createSpan({
       cls: "codex-interaction-progress",
       text: `${index + 1}/${interaction.questions.length}`,
-      attr: { "aria-label": `第 ${index + 1} 个问题，共 ${interaction.questions.length} 个` }
+      attr: {
+        "aria-label": conversationUiText(
+          language,
+          `第 ${index + 1} 个问题，共 ${interaction.questions.length} 个`,
+          `Question ${index + 1} of ${interaction.questions.length}`
+        )
+      }
     });
 
     const errorId = `codex-interaction-error-${safeDomIdentity(interaction.interactionId)}-${safeDomIdentity(question.questionId)}`;
@@ -125,11 +138,11 @@ export class InteractionDockController {
     legend.id = `codex-interaction-prompt-${safeDomIdentity(interaction.interactionId)}-${safeDomIdentity(question.questionId)}`;
     const instruction = question.allowSupplement
       ? question.selection === "multiple"
-        ? "可选择多项，也可填写补充说明。"
-        : "请选择一项，也可填写补充说明。"
+        ? conversationUiText(language, "可选择多项，也可填写补充说明。", "Select one or more options, and add details if needed.")
+        : conversationUiText(language, "请选择一项，也可填写补充说明。", "Select one option, and add details if needed.")
       : question.selection === "multiple"
-        ? "可选择多项。"
-        : "请选择一项。";
+        ? conversationUiText(language, "可选择多项。", "Select one or more options.")
+        : conversationUiText(language, "请选择一项。", "Select one option.");
     fieldset.createDiv({
       cls: "codex-interaction-instruction",
       text: instruction
@@ -190,7 +203,7 @@ export class InteractionDockController {
       const supplementGroup = fieldset.createDiv({ cls: "codex-interaction-supplement" });
       supplementGroup.createEl("label", {
         cls: "codex-interaction-supplement-label",
-        text: "补充说明（可选）",
+        text: conversationUiText(language, "补充说明（可选）", "Additional details (optional)"),
         attr: { for: supplementId }
       });
       supplement = supplementGroup.createEl("textarea", {
@@ -222,17 +235,17 @@ export class InteractionDockController {
     if (state.invalidQuestionId === question.questionId) {
       fieldset.setAttribute("aria-invalid", "true");
       error.textContent = question.allowSupplement
-        ? "请选择至少一项，或填写补充说明后继续。"
+        ? conversationUiText(language, "请选择至少一项，或填写补充说明后继续。", "Select at least one option or add details to continue.")
         : question.selection === "multiple"
-          ? "请至少选择一项后继续。"
-          : "请选择一项后继续。";
+          ? conversationUiText(language, "请至少选择一项后继续。", "Select at least one option to continue.")
+          : conversationUiText(language, "请选择一项后继续。", "Select one option to continue.");
     }
 
     const actions = card.createDiv({ cls: "codex-interaction-actions" });
     if (index > 0) {
       const previous = actions.createEl("button", {
         cls: "codex-interaction-action is-secondary",
-        text: "上一步",
+        text: conversationUiText(language, "上一步", "Back"),
         attr: { type: "button" }
       });
       previous.disabled = state.submitting;
@@ -245,7 +258,9 @@ export class InteractionDockController {
     }
     const primary = actions.createEl("button", {
       cls: "codex-interaction-action is-primary mod-cta",
-      text: index + 1 < interaction.questions.length ? "下一步" : "提交回答",
+      text: index + 1 < interaction.questions.length
+        ? conversationUiText(language, "下一步", "Next")
+        : conversationUiText(language, "提交回答", "Submit answers"),
       attr: { type: "button" }
     });
     primary.disabled = state.submitting;
@@ -300,7 +315,8 @@ export class InteractionDockController {
   private renderConfirmation(
     container: HTMLElement,
     input: Readonly<InteractionDockRenderInput>,
-    binding: Readonly<PiAgentApprovalDecisionBinding>
+    binding: Readonly<PiAgentApprovalDecisionBinding>,
+    language: SettingsLanguage
   ): void {
     const key = `confirmation\0${input.sessionId}\0${binding.target}\0${binding.preview}`;
     const firstPresentation = this.activeSurfaceKey !== key;
@@ -317,7 +333,8 @@ export class InteractionDockController {
       state: "waiting_approval",
       target: binding.target,
       preview: binding.preview,
-      controlled: true
+      controlled: true,
+      language
     });
     if (!elements.approveButton || !elements.rejectButton) return;
     let deciding = false;

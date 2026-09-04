@@ -40,12 +40,25 @@ import {
 } from "../home/open-native-graph";
 import {
   HOME_DAILY_MESSAGE,
+  HOME_DAILY_MESSAGE_EN,
   HOME_DAILY_TITLES,
   HOME_REVISIT_MESSAGE,
+  HOME_REVISIT_MESSAGE_EN,
   HOME_REVIEW_PROMPT,
+  HOME_REVIEW_PROMPT_EN,
+  HOME_DAILY_TITLES_EN,
   HOME_REVISIT_TITLES,
-  homeConversationTitle
+  HOME_REVISIT_TITLES_EN,
+  homeConversationMessage,
+  homeConversationTitle,
+  homeReviewPrompt
 } from "../home/home-conversation-actions";
+import {
+  formatHomeFullDate,
+  formatHomeMonth,
+  formatHomeRelativeTime,
+  homeCopy
+} from "../home/home-i18n";
 import { openTestNoticeMessages } from "./obsidian-shim";
 import { EchoInkHomeView } from "../home/home-view";
 
@@ -57,6 +70,7 @@ export async function runHomeWorkbenchTests(): Promise<void> {
   assertTemplateImportAndPlaceholderPreservation();
   assertReviewRecognitionAndUtf8Import();
   assertHomeConversationActions();
+  assertHomeEnglishLocalization();
   assertHomeWorkbenchRemovalAndMagicUiContracts();
   await assertHomeConversationLaunchFlow();
   await assertCustomJournalDirectoryBehavior();
@@ -74,7 +88,10 @@ async function assertHomeConversationLaunchFlow(): Promise<void> {
   };
   const plugin = {
     app: {},
-    settings: { journalDirectory: "notes/daily" },
+    settings: {
+      journalDirectory: "notes/daily",
+      settingsLanguage: "zh-CN" as "zh-CN" | "en"
+    },
     requireAvailableEchoInkSkill: async (skillId: string) => {
       calls.push(`skill:${skillId}`);
     },
@@ -130,7 +147,27 @@ async function assertHomeConversationLaunchFlow(): Promise<void> {
   });
 
   calls.length = 0;
+  starts.length = 0;
+  plugin.settings.settingsLanguage = "en";
+  await (home as unknown as {
+    openConversationAction(action: "daily" | "revisit"): Promise<void>;
+  }).openConversationAction("daily");
+  assert.deepEqual(calls, [
+    "skill:daily-journal",
+    "ensure-directory",
+    "open-sidebar",
+    "get-view",
+    "start"
+  ]);
+  const englishDailyStart = starts[0] as Readonly<Record<string, unknown>>;
+  assert.match(String(englishDailyStart.title), /^Journal · \d{4}-\d{2}-\d{2}$/u);
+  assert.equal(englishDailyStart.message, HOME_DAILY_MESSAGE_EN);
+  assert.equal(englishDailyStart.defaultSkillId, "daily-journal");
+  assert.equal(englishDailyStart.journalDirectory, "notes/daily");
+
+  calls.length = 0;
   openTestNoticeMessages.length = 0;
+  plugin.settings.settingsLanguage = "zh-CN";
   plugin.requireAvailableEchoInkSkill = async (skillId: string) => {
     calls.push(`skill:${skillId}`);
     throw new Error("Skill daily-journal 已停用。");
@@ -139,7 +176,19 @@ async function assertHomeConversationLaunchFlow(): Promise<void> {
     openConversationAction(action: "daily" | "revisit"): Promise<void>;
   }).openConversationAction("daily");
   assert.deepEqual(calls, ["skill:daily-journal", "settings:daily-journal"]);
-  assert.match(openTestNoticeMessages.at(-1) ?? "", /暂时无法开始日记：Skill daily-journal 已停用/u);
+  assert.match(openTestNoticeMessages.at(-1) ?? "", /暂时无法新建会话：Skill daily-journal 已停用/u);
+
+  calls.length = 0;
+  openTestNoticeMessages.length = 0;
+  plugin.settings.settingsLanguage = "en";
+  await (home as unknown as {
+    openConversationAction(action: "daily" | "revisit"): Promise<void>;
+  }).openConversationAction("daily");
+  assert.deepEqual(calls, ["skill:daily-journal", "settings:daily-journal"]);
+  assert.equal(
+    openTestNoticeMessages.at(-1),
+    "Could not create a new conversation: The daily-journal Skill is disabled, missing, or could not be loaded."
+  );
 }
 
 function assertHomeConversationActions(): void {
@@ -168,6 +217,41 @@ function assertHomeConversationActions(): void {
     "请从我最近积累和修改的知识中，找出 3 个值得重新思考的主题。先说明它们为什么值得回看，等我选择后再带我逐步复盘；未经我确认，不要写入笔记。"
   );
   assert.doesNotMatch(HOME_REVIEW_PROMPT, /\/review/u);
+  assert.equal(homeConversationMessage("daily"), HOME_DAILY_MESSAGE);
+  assert.equal(homeConversationMessage("revisit"), HOME_REVISIT_MESSAGE);
+  assert.equal(homeReviewPrompt(), HOME_REVIEW_PROMPT);
+}
+
+function assertHomeEnglishLocalization(): void {
+  const now = new Date(2026, 8, 2, 9, 7);
+  const copy = homeCopy("en");
+
+  assert.equal(HOME_DAILY_TITLES_EN.length, 6);
+  assert.equal(HOME_REVISIT_TITLES_EN.length, 6);
+  assert.ok(HOME_DAILY_TITLES_EN.includes(
+    homeConversationTitle("daily", "EchoInk test vault", now, "en") as (typeof HOME_DAILY_TITLES_EN)[number]
+  ));
+  assert.ok(HOME_REVISIT_TITLES_EN.includes(
+    homeConversationTitle("revisit", "EchoInk test vault", now, "en") as (typeof HOME_REVISIT_TITLES_EN)[number]
+  ));
+  assert.equal(homeConversationMessage("daily", "en"), HOME_DAILY_MESSAGE_EN);
+  assert.equal(homeConversationMessage("revisit", "en"), HOME_REVISIT_MESSAGE_EN);
+  assert.equal(homeReviewPrompt("en"), HOME_REVIEW_PROMPT_EN);
+  assert.match(HOME_DAILY_MESSAGE_EN, /write down what happened today/u);
+  assert.match(HOME_REVISIT_MESSAGE_EN, /unfinished thought in my long-term memory/u);
+  assert.match(HOME_REVIEW_PROMPT_EN, /3 topics worth reconsidering/u);
+  assert.doesNotMatch(
+    [HOME_DAILY_MESSAGE_EN, HOME_REVISIT_MESSAGE_EN, HOME_REVIEW_PROMPT_EN].join("\n"),
+    /\/daily|\/revisit|Default template preview/u
+  );
+  assert.equal(copy.viewTitle, "EchoInk Home");
+  assert.equal(copy.entry.description("journal"), "Journal, review, and time-based records");
+  assert.equal(copy.calendar.summary(1), "1 day with a journal");
+  assert.equal(copy.template.display("quick").name, "Quick note");
+  assert.match(formatHomeFullDate(now, "en"), /Sep/u);
+  assert.match(formatHomeMonth(now, "en"), /September/u);
+  assert.equal(formatHomeRelativeTime(now.getTime() - 60_000, "en", now.getTime()), "1 min ago");
+  assert.equal(formatHomeRelativeTime(now.getTime() - 60_000, "zh-CN", now.getTime()), "1 分钟前");
 }
 
 function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
@@ -246,7 +330,7 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
   assert.match(view, /this\.registerEvent\(this\.app\.vault\.on\("delete", \(\) => this\.scheduleHomeRefresh\(\)\)\)/u);
   assert.doesNotMatch(view, /metadataCache\.on\("resolved"|workspace\.on\("css-change"|visibilitychange/u);
   assert.match(view, /entry\.targetPath[\s\S]*this\.data\?\.records\.find\(\(record\) => record\.path === entry\.targetPath\)/u);
-  assert.match(view, /formatRelativeTime\(target\.mtime\)/u);
+  assert.match(view, /formatHomeRelativeTime\(target\.mtime, this\.language\)/u);
   assert.ok(shellSource.indexOf("this.renderHeader();") < shellSource.indexOf("echoink-home-entries-section"));
   assert.ok(shellSource.indexOf("echoink-home-conversation-section") < shellSource.indexOf("echoink-home-rhythm-grid"));
   assert.ok(shellSource.indexOf("echoink-home-rhythm-grid") < shellSource.indexOf("echoink-home-entries-section"));
@@ -261,10 +345,10 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
   )?.[0] ?? "";
   assert.ok(
     conversationActionSource.indexOf('requireAvailableEchoInkSkill("daily-journal")')
-      < conversationActionSource.indexOf("ensureJournalDirectory()")
+      < conversationActionSource.indexOf("ensureJournalDirectory(this.language)")
   );
   assert.ok(
-    conversationActionSource.indexOf("ensureJournalDirectory()")
+    conversationActionSource.indexOf("ensureJournalDirectory(this.language)")
       < conversationActionSource.indexOf("await this.plugin.activateView()")
   );
   assert.ok(
@@ -279,6 +363,10 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
     conversationActionSource,
     /defaultSkillId: "daily-journal",[\s\S]*journalDirectory: journalDirectory!/u
   );
+  assert.match(
+    conversationActionSource,
+    /message: homeConversationMessage\(action, this\.language\)/u
+  );
   assert.doesNotMatch(
     conversationActions,
     /\/daily|\/revisit|默认模板预览|3–5 个仍未完成/u
@@ -291,7 +379,7 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
     codexView,
     /async createDraftSession\([\s\S]*?this\.inputEl\.value = draft;[\s\S]*?return session;/u
   );
-  assert.match(view, /const indexPath = homeEntryIndexPath\(entry\.id\);[\s\S]*openObsidianLocalGraphLeaf\(this\.app, indexPath\)/u);
+  assert.match(view, /const indexPath = homeEntryIndexPath\(entry\.id\);[\s\S]*openObsidianLocalGraphLeaf\(this\.app, indexPath, this\.language\)/u);
   assert.match(view, /entry\.id === "journal"\)[\s\S]*this\.openJournalTemplate\(new Date\(\)\)/u);
   assert.match(view, /entry\.id === "review"\)[\s\S]*this\.openReviewConversation\(\)/u);
   assert.doesNotMatch(view, /runReview\("knowledge-base"\)/u);
@@ -300,7 +388,7 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
   )?.[0] ?? "";
   assert.match(
     reviewSource,
-    /createAndStartGuidedSession\(\{[\s\S]*title: `知识复盘 · \$\{dateKey\(now\)\}`,[\s\S]*prompt: HOME_REVIEW_PROMPT,[\s\S]*defaultSkillId: "knowledge-review"/u
+    /createAndStartGuidedSession\(\{[\s\S]*title: this\.copy\.conversation\.reviewSessionTitle\(dateKey\(now\)\),[\s\S]*prompt: homeReviewPrompt\(this\.language\),[\s\S]*defaultSkillId: "knowledge-review"/u
   );
   assert.doesNotMatch(reviewSource, /createDraftSession|buildReviewConversationDraft|runReview/u);
   assert.match(view, /private async openJournal\(date: Date\)[\s\S]*existing instanceof TFile[\s\S]*openFile\(existing,[\s\S]*this\.openJournalTemplate\(date\)/u);
@@ -351,7 +439,7 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
   assert.match(view, /createHomeBentoIsland\(bentoHost\)/u);
   assert.match(view, /this\.bentoIsland\?\.render/u);
   assert.match(view, /this\.bentoIsland\?\.unmount\(\)/u);
-  assert.match(view, /kicker: entry\.description/u);
+  assert.match(view, /kicker: this\.copy\.entry\.description\(entry\.id\)/u);
   assert.doesNotMatch(view, /entry\.id !== "review"/u);
   assert.match(data, /projects: \{ label: "Projects", description: "正在推进的项目知识"/u);
   assert.match(data, /inbox: \{ label: "Inbox", description: "等待归类的输入"/u);
@@ -459,7 +547,7 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
   assert.match(styles, /@container echoink-home \(min-width: 1260px\)[\s\S]*\.echoink-home-heatmap-legend\s*\{[^}]*margin-top: auto;[^}]*padding-top: 9px;/u);
   assert.doesNotMatch(rhythmStyles, /\bheight\s*:|position:\s*absolute|display:\s*contents/u);
   assert.match(styles, /\.echoink-home-heatmap,[\s\S]*\.echoink-home-calendar-panel\s*\{[^}]*padding: 20px;[^}]*border: 1px solid/u);
-  assert.match(view, /echoink-home-calendar-summary[\s\S]*有日记 · \$\{journalCount\} 天/u);
+  assert.match(view, /echoink-home-calendar-summary[\s\S]*this\.copy\.calendar\.summary\(journalCount\)/u);
   assert.doesNotMatch(styles, /\.echoink-home-magic-ui &/u);
   assert.match(
     desktopEntryStyles,
@@ -511,9 +599,9 @@ function assertHomeWorkbenchRemovalAndMagicUiContracts(): void {
   assert.match(textShimmerWave, /y: \[0, -2, 0\]/u);
   assert.match(styles, /@container echoink-home \(max-width: 800px\)[\s\S]*\.echoink-home-conversation-action\s*\{[^}]*gap: 14px;[^}]*padding: 18px;/u);
   assert.match(styles, /@container echoink-home \(max-width: 720px\)[\s\S]*\.echoink-home-conversation-actions\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\);/u);
-  assert.match(view, /今日日记已建立|默认使用“此刻速记”/u);
-  assert.doesNotMatch(view, /最近维护 \$\{formatRelativeTime\(this\.snapshot\.lastRun\.at\)\}|尚无维护记录，可开始一次复盘/u);
-  assert.match(view, /echoink-home-entry-review-row[\s\S]*echoink-home-entry-number[\s\S]*health\.label/u);
+  assert.match(view, /this\.copy\.entry\.journalCreated|this\.copy\.entry\.journalDefaultTemplate/u);
+  assert.doesNotMatch(view, /最近维护 \$\{formatHomeRelativeTime\(this\.snapshot\.lastRun\.at\)|尚无维护记录，可开始一次复盘/u);
+  assert.match(view, /echoink-home-entry-review-row[\s\S]*echoink-home-entry-number[\s\S]*this\.copy\.healthStatus/u);
   assert.match(bentoIsland, /shimmerWidth = 100|AnimatedShinyText/u);
   assert.doesNotMatch(styles, /@keyframes echoink-home-shiny-text|animation: echoink-home-shiny-text/u);
   assert.match(styles, /@container echoink-home \(max-width: 800px\)[\s\S]*\.echoink-home-entry-cta\s*\{[^}]*opacity: 1;[^}]*transform: translateY\(0\);/u);

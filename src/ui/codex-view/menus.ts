@@ -1,4 +1,5 @@
 import { Menu, Notice, setIcon } from "obsidian";
+import type { SettingsLanguage } from "../../settings/settings";
 import { filterSkillResources } from "../../resources/registry";
 import type { EchoInkResource } from "../../resources/types";
 import type { ReasoningEffort, UiMode } from "../../types/app-server";
@@ -6,6 +7,7 @@ import { knowledgeCommandOptions, type KnowledgeBaseCommandOption } from "../../
 import { selectKnowledgeCommandItem, setKnowledgeCommandMenuOpen } from "../knowledge-command-menu";
 import { labelFor } from "./composer";
 import { positionAnchoredMenu, positionSubmenu } from "./floating-menu-position";
+import { conversationUiText } from "./ui-i18n";
 
 export interface SkillMenuElements {
   skillMenuEl: HTMLElement;
@@ -13,6 +15,7 @@ export interface SkillMenuElements {
 }
 
 export interface SkillMenuState {
+  language?: SettingsLanguage;
   skillsRequested: boolean;
 }
 
@@ -23,6 +26,7 @@ export interface SkillMenuCallbacks {
 }
 
 export interface SkillMatchesState {
+  language?: SettingsLanguage;
   skills: EchoInkResource[];
   selectedSkill: EchoInkResource | null;
 }
@@ -48,6 +52,7 @@ export interface WorkspaceMenuCallbacks {
 }
 
 export interface ModelMenuState {
+  language?: SettingsLanguage;
   providerModels: ComposerProviderModelOption[];
   selectedProviderSettingsId: string;
   selectedModel: string;
@@ -128,7 +133,10 @@ export function openSkillMenu(event: MouseEvent, elements: SkillMenuElements, st
   callbacks.onSkillsRequested();
   if (!state.skillsRequested) {
     elements.skillMenuEl.empty();
-    elements.skillMenuEl.createDiv({ cls: "codex-skill-empty", text: "正在加载 skills..." });
+    elements.skillMenuEl.createDiv({
+      cls: "codex-skill-empty",
+      text: conversationUiText(state.language ?? "zh-CN", "正在加载 skills...", "Loading Skills...")
+    });
     elements.skillMenuEl.addClass("is-visible");
   } else {
     callbacks.onRenderMatches();
@@ -136,38 +144,47 @@ export function openSkillMenu(event: MouseEvent, elements: SkillMenuElements, st
   void callbacks.onLoadSkills().then((skills) => callbacks.onRenderMatches(skills));
 }
 
-export function openAddMenu(event: MouseEvent, callbacks: AddMenuCallbacks): void {
+export function openAddMenu(
+  event: MouseEvent,
+  callbacks: AddMenuCallbacks,
+  language: SettingsLanguage = "zh-CN"
+): void {
   event.preventDefault();
   const menu = new Menu();
   menu.addItem((item) =>
     item
-      .setTitle("添加当前笔记（只作上下文）")
+      .setTitle(conversationUiText(language, "添加当前笔记（只作上下文）", "Add current note (context only)"))
       .setIcon("file-text")
       .onClick(callbacks.onAttachActiveFile)
   );
   menu.addItem((item) =>
     item
-      .setTitle("添加文件（只作上下文）")
+      .setTitle(conversationUiText(language, "添加文件（只作上下文）", "Add file (context only)"))
       .setIcon("folder")
       .onClick(() => callbacks.onPickFiles(false))
   );
   menu.addItem((item) =>
     item
-      .setTitle("添加图片")
+      .setTitle(conversationUiText(language, "添加图片", "Add image"))
       .setIcon("image")
       .onClick(() => callbacks.onPickFiles(true))
   );
   menu.addSeparator();
   menu.addItem((item) =>
     item
-      .setTitle("MCP 状态")
+      .setTitle(conversationUiText(language, "MCP 状态", "MCP status"))
       .setIcon("blocks")
       .onClick(callbacks.onToggleMcpPanel)
   );
   menu.showAtMouseEvent(event);
 }
 
-export function openWorkspaceMenu(event: MouseEvent, workspacePath: string, callbacks: WorkspaceMenuCallbacks): void {
+export function openWorkspaceMenu(
+  event: MouseEvent,
+  workspacePath: string,
+  callbacks: WorkspaceMenuCallbacks,
+  language: SettingsLanguage = "zh-CN"
+): void {
   event.preventDefault();
   const menu = new Menu();
   if (workspacePath) {
@@ -176,22 +193,26 @@ export function openWorkspaceMenu(event: MouseEvent, workspacePath: string, call
   }
   menu.addItem((item) =>
     item
-      .setTitle(workspacePath ? "更换工作区" : "选择工作区")
+      .setTitle(workspacePath
+        ? conversationUiText(language, "更换工作区", "Change workspace")
+        : conversationUiText(language, "选择工作区", "Choose workspace"))
       .setIcon("folder-plus")
       .onClick(callbacks.onChooseWorkspace)
   );
   if (workspacePath) {
     menu.addItem((item) =>
       item
-        .setTitle("在 Finder 显示")
+        .setTitle(conversationUiText(language, "在 Finder 显示", "Show in Finder"))
         .setIcon("external-link")
         .onClick(() => {
-          if (!callbacks.onRevealWorkspace()) new Notice("无法打开这个文件夹");
+          if (!callbacks.onRevealWorkspace()) {
+            new Notice(conversationUiText(language, "无法打开这个文件夹", "Could not open this folder"));
+          }
         })
     );
     menu.addItem((item) =>
       item
-        .setTitle("清除工作区")
+        .setTitle(conversationUiText(language, "清除工作区", "Clear workspace"))
         .setIcon("x")
         .onClick(callbacks.onClearWorkspace)
     );
@@ -199,13 +220,18 @@ export function openWorkspaceMenu(event: MouseEvent, workspacePath: string, call
   menu.showAtMouseEvent(event);
 }
 
-export function openKnowledgeCommandMenu(event: MouseEvent, onFillCommand: (command: string) => void): void {
+export function openKnowledgeCommandMenu(
+  event: MouseEvent,
+  onFillCommand: (command: string) => void,
+  language: SettingsLanguage = "zh-CN"
+): void {
   event.preventDefault();
   const menu = new Menu();
   for (const command of knowledgeCommandOptions()) {
+    const copy = localizedKnowledgeCommandOption(command, language);
     menu.addItem((item) =>
       item
-        .setTitle(command.title)
+        .setTitle(copy.title)
         .setIcon(command.icon)
         .onClick(() => onFillCommand(command.text))
     );
@@ -214,7 +240,13 @@ export function openKnowledgeCommandMenu(event: MouseEvent, onFillCommand: (comm
 }
 
 export function openModelMenu(event: MouseEvent, state: ModelMenuState, callbacks: ModelMenuCallbacks): void {
-  openComposerParameterMenu(event, parameterSections(state, callbacks, true), "模型和运行参数");
+  const language = state.language ?? "zh-CN";
+  openComposerParameterMenu(
+    event,
+    parameterSections(state, callbacks, true),
+    conversationUiText(language, "模型和运行参数", "Model and run settings"),
+    language
+  );
 }
 
 export function closeComposerParameterMenu(): void {
@@ -230,31 +262,32 @@ export function closeComposerParameterMenu(): void {
 
 export function openSessionMenu(
   event: MouseEvent,
-  callbacks: SessionMenuCallbacks
+  callbacks: SessionMenuCallbacks,
+  language: SettingsLanguage = "zh-CN"
 ): void {
   event.preventDefault();
   const menu = new Menu();
   menu.addItem((item) =>
     item
-      .setTitle("重命名会话")
+      .setTitle(conversationUiText(language, "重命名会话", "Rename conversation"))
       .setIcon("pencil")
       .onClick(callbacks.onRename)
   );
   menu.addItem((item) =>
     item
-      .setTitle("归档会话")
+      .setTitle(conversationUiText(language, "归档会话", "Archive conversation"))
       .setIcon("archive")
       .onClick(callbacks.onArchive)
   );
   menu.addItem((item) =>
     item
-      .setTitle("重置 Agent 缓存")
+      .setTitle(conversationUiText(language, "重置 Agent 缓存", "Reset Agent cache"))
       .setIcon("rotate-ccw")
       .onClick(callbacks.onResetCache)
   );
   menu.addItem((item) =>
     item
-      .setTitle("删除会话")
+      .setTitle(conversationUiText(language, "删除会话", "Delete conversation"))
       .setIcon("trash")
       .setWarning(true)
       .onClick(callbacks.onDelete)
@@ -263,6 +296,7 @@ export function openSessionMenu(
 }
 
 export function renderSkillMatches(container: HTMLElement, query: string, state: SkillMatchesState, callbacks: SkillMatchesCallbacks): void {
+  const language = state.language ?? "zh-CN";
   container.empty();
   const matches = filterSkillResources(state.skills, query);
   for (const skill of matches) {
@@ -275,7 +309,12 @@ export function renderSkillMatches(container: HTMLElement, query: string, state:
     item.createDiv({ cls: "codex-skill-desc", text: skill.description || skill.contentPath || skill.source });
     item.onclick = () => callbacks.onSelectSkill(skill);
   }
-  if (matches.length === 0) container.createDiv({ cls: "codex-skill-empty", text: "没有匹配的 skill" });
+  if (matches.length === 0) {
+    container.createDiv({
+      cls: "codex-skill-empty",
+      text: conversationUiText(language, "没有匹配的 skill", "No matching Skills")
+    });
+  }
   container.addClass("is-visible");
 }
 
@@ -286,17 +325,37 @@ export function renderKnowledgeCommandMatches(
   state: SkillMatchesState,
   callbacks: SlashMenuCallbacks
 ): void {
+  const language = state.language ?? "zh-CN";
   container.empty();
   const commands = knowledgeCommandOptions(query);
   const skills = filterSkillResources(state.skills, query);
   let index = 0;
   for (const command of commands) {
-    container.appendChild(createKnowledgeCommandItem(container, input, command, index++, callbacks.onFillCommand));
+    container.appendChild(createKnowledgeCommandItem(
+      container,
+      input,
+      localizedKnowledgeCommandOption(command, language),
+      index++,
+      callbacks.onFillCommand
+    ));
   }
   for (const skill of skills) {
-    container.appendChild(createSlashSkillItem(container, input, skill, index++, state.selectedSkill?.id === skill.id, callbacks.onSelectSkill));
+    container.appendChild(createSlashSkillItem(
+      container,
+      input,
+      skill,
+      index++,
+      state.selectedSkill?.id === skill.id,
+      callbacks.onSelectSkill,
+      language
+    ));
   }
-  if (index === 0) container.createDiv({ cls: "codex-skill-empty", text: "没有匹配的命令或已启用 Skill" });
+  if (index === 0) {
+    container.createDiv({
+      cls: "codex-skill-empty",
+      text: conversationUiText(language, "没有匹配的命令或已启用 Skill", "No matching commands or enabled Skills")
+    });
+  }
   container.scrollTop = 0;
   setKnowledgeCommandMenuOpen(input, container, true);
   selectKnowledgeCommandItem(input, container, index > 0 ? 0 : -1);
@@ -307,6 +366,7 @@ function parameterSections(
   callbacks: ModelMenuCallbacks,
   includeRuntimeOptions: boolean
 ): ComposerParameterSection[] {
+  const language = state.language ?? "zh-CN";
   const selectedModel = state.providerModels.find((model) =>
     model.providerSettingsId === state.selectedProviderSettingsId
     && model.modelId === state.selectedModel
@@ -314,8 +374,8 @@ function parameterSections(
   const sections: ComposerParameterSection[] = [{
       id: "model",
       icon: "box",
-      label: "模型",
-      currentValue: selectedModel?.modelName || state.selectedModel || "未选择",
+      label: conversationUiText(language, "模型", "Model"),
+      currentValue: selectedModel?.modelName || state.selectedModel || conversationUiText(language, "未选择", "Not selected"),
       options: state.providerModels.map((model) => ({
         value: model.modelId,
         label: model.modelName,
@@ -336,7 +396,7 @@ function parameterSections(
   sections.push({
     id: "reasoning",
     icon: "brain",
-    label: "思考强度",
+    label: conversationUiText(language, "思考强度", "Reasoning effort"),
     currentValue: state.reasoningCurrentValue,
     disabled: !state.reasoningAdjustable
       || Boolean(state.reasoningDisabledReason),
@@ -353,11 +413,11 @@ function parameterSections(
   sections.push({
       id: "mode",
       icon: "route",
-      label: "模式",
-      currentValue: labelFor(state.selectedMode),
+      label: conversationUiText(language, "模式", "Mode"),
+      currentValue: labelFor(state.selectedMode, language),
       options: (["agent", "plan"] as UiMode[]).map((mode) => ({
         value: mode,
-        label: labelFor(mode),
+        label: labelFor(mode, language),
         selected: state.selectedMode === mode
       })),
       onSelect: (option) => callbacks.onSelectMode(option.value as UiMode)
@@ -365,7 +425,12 @@ function parameterSections(
   return sections;
 }
 
-function openComposerParameterMenu(event: MouseEvent, sections: ComposerParameterSection[], ariaLabel: string): void {
+function openComposerParameterMenu(
+  event: MouseEvent,
+  sections: ComposerParameterSection[],
+  ariaLabel: string,
+  language: SettingsLanguage
+): void {
   event.preventDefault();
   event.stopPropagation();
   const anchor = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
@@ -399,7 +464,7 @@ function openComposerParameterMenu(event: MouseEvent, sections: ComposerParamete
   anchor.setAttribute("aria-expanded", "true");
 
   for (const section of sections) {
-    const trigger = createParameterTrigger(root, section);
+    const trigger = createParameterTrigger(root, section, language);
     trigger.onmouseenter = () => {
       if (section.disabled) {
         closeActiveParameterSubmenu(active);
@@ -477,7 +542,11 @@ function openComposerParameterMenu(event: MouseEvent, sections: ComposerParamete
   root.querySelector<HTMLButtonElement>("button")?.focus();
 }
 
-function createParameterTrigger(container: HTMLElement, section: ComposerParameterSection): HTMLButtonElement {
+function createParameterTrigger(
+  container: HTMLElement,
+  section: ComposerParameterSection,
+  language: SettingsLanguage
+): HTMLButtonElement {
   const trigger = container.createEl("button", {
     cls: "codex-parameter-menu-item codex-parameter-menu-trigger",
     attr: {
@@ -492,7 +561,9 @@ function createParameterTrigger(container: HTMLElement, section: ComposerParamet
       trigger.setAttribute("title", section.disabledReason);
       trigger.setAttribute(
         "aria-label",
-        `${section.label}：${section.currentValue}。${section.disabledReason}`
+        language === "en"
+          ? `${section.label}: ${section.currentValue}. ${section.disabledReason}`
+          : `${section.label}：${section.currentValue}。${section.disabledReason}`
       );
     }
   } else {
@@ -639,7 +710,8 @@ function createSlashSkillItem(
   skill: EchoInkResource,
   index: number,
   selected: boolean,
-  onSelectSkill: (skill: EchoInkResource) => void
+  onSelectSkill: (skill: EchoInkResource) => void,
+  language: SettingsLanguage
 ): HTMLElement {
   const item = document.createElement("button");
   item.setAttribute("type", "button");
@@ -654,11 +726,28 @@ function createSlashSkillItem(
   body.createSpan({ cls: "codex-command-text", text: skill.name });
   body.createSpan({
     cls: "codex-command-desc",
-    text: skill.description || skill.contentPath || "已启用 Skill"
+    text: skill.description || skill.contentPath || conversationUiText(language, "已启用 Skill", "Enabled Skill")
   });
-  item.createSpan({ cls: "codex-command-shortcut", text: selected ? "已选择" : "↵" });
+  item.createSpan({
+    cls: "codex-command-shortcut",
+    text: selected ? conversationUiText(language, "已选择", "Selected") : "↵"
+  });
   item.onmouseenter = () => selectKnowledgeCommandItem(input, container, index);
   item.onmousedown = (event) => event.preventDefault();
   item.onclick = () => onSelectSkill(skill);
   return item;
+}
+
+function localizedKnowledgeCommandOption(
+  command: KnowledgeBaseCommandOption,
+  language: SettingsLanguage
+): KnowledgeBaseCommandOption {
+  if (language !== "en") return command;
+  if (command.text.trim() === "/ask") {
+    return { ...command, title: "Ask", description: "Ask the knowledge base" };
+  }
+  if (command.text.trim() === "/maintain") {
+    return { ...command, title: "Maintain Knowledge", description: "Refine, write, and verify knowledge" };
+  }
+  return command;
 }
