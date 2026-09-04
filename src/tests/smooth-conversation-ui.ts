@@ -689,6 +689,11 @@ async function assertInteractionDockContracts(): Promise<void> {
     "Your input is needed"
   );
   assert.equal(
+    container.findByClass("codex-interaction-heading-secondary"),
+    null,
+    "the localized heading must not repeat a visible English Question label"
+  );
+  assert.equal(
     container.findByClass("codex-interaction-progress")?.attributes.get("aria-label"),
     "Question 1 of 2"
   );
@@ -707,6 +712,8 @@ async function assertInteractionDockContracts(): Promise<void> {
   const firstSessionControls = container.findAllByClass("codex-interaction-option-control");
   firstSessionControls[0]!.checked = true;
   firstSessionControls[0]!.onchange?.();
+  assert.equal(questionResolved, 0, "selecting an option must preserve the optional supplement step");
+  assert.equal(container.hasClass("is-visible"), true, "selection alone must not dismiss the Question dock");
   clickElement(container.findByClass("codex-interaction-action")!);
   assert.equal(container.findByClass("codex-interaction-progress")?.textContent, "2/2");
 
@@ -726,6 +733,10 @@ async function assertInteractionDockContracts(): Promise<void> {
     ...questionInput
   });
   assert.equal(container.findByClass("codex-interaction-progress")?.textContent, "2/2");
+  assert.equal(
+    container.findByClass("codex-interaction-instruction")?.textContent,
+    "选择一项或多项，或填写自己的回答，也可以两者都填。"
+  );
   const secondQuestionControls = container.findAllByClass("codex-interaction-option-control");
   secondQuestionControls[1]!.checked = true;
   secondQuestionControls[1]!.onchange?.();
@@ -733,6 +744,12 @@ async function assertInteractionDockContracts(): Promise<void> {
   supplement.value = "保留真实 Provider 证据";
   supplement.oninput?.();
   const submit = container.findAllByClass("codex-interaction-action").at(-1)!;
+  assert.equal(submit.textContent, "提交回答");
+  assert.equal(
+    submit.closest(".codex-interaction-question"),
+    null,
+    "the primary action must stay outside the independently scrolling Question body"
+  );
   clickElement(submit);
   clickElement(submit);
   assert.equal(questionResolved, 1, "Question resolves exactly once");
@@ -747,6 +764,78 @@ async function assertInteractionDockContracts(): Promise<void> {
     supplement: "保留真实 Provider 证据"
   }]);
   assert.equal(questionBinding!.submit([]), false, "resolved Question binding cannot be replayed");
+
+  const singleQuestionBroker = new PiTurnInteractionBroker();
+  const singleInteraction: EchoInkQuestionInteraction = {
+    kind: "question",
+    interactionId: "single-question-interaction",
+    conversationId: "conversation-single-question",
+    piSessionId: "pi-single-question",
+    turnId: "turn-single-question",
+    status: "pending",
+    questions: [{
+      questionId: "custom-answer",
+      prompt: "What should we review?",
+      selection: "single",
+      options: [{ optionId: "boundaries", label: "Product boundaries" }],
+      allowSupplement: true
+    }],
+    createdAt: 2,
+    updatedAt: 2
+  };
+  const singleAnswerPromise = singleQuestionBroker.waitForAnswers({
+    conversationId: singleInteraction.conversationId,
+    piSessionId: singleInteraction.piSessionId,
+    productRunId: singleInteraction.turnId,
+    interactionId: singleInteraction.interactionId,
+    interaction: singleInteraction
+  });
+  const singleBinding = singleQuestionBroker.bindingFor({
+    conversationId: singleInteraction.conversationId,
+    piSessionId: singleInteraction.piSessionId,
+    productRunId: singleInteraction.turnId,
+    interactionId: singleInteraction.interactionId
+  });
+  assert.ok(singleBinding);
+  const singleInput = {
+    question: {
+      binding: singleBinding!,
+      onResolved: () => undefined
+    },
+    onStale: () => assert.fail("a live single-Question binding must not go stale"),
+    onScheduleMeasure: () => undefined
+  } as const;
+  controller.render(container as unknown as HTMLElement, {
+    sessionId: "ui-session-single",
+    language: "en",
+    ...singleInput
+  });
+  assert.equal(
+    container.findByClass("codex-interaction-progress"),
+    null,
+    "a single question must not show a redundant 1/1 progress label"
+  );
+  assert.equal(
+    container.findByClass("codex-interaction-instruction")?.textContent,
+    "Select an option or write your own answer. You can also do both."
+  );
+  controller.render(container as unknown as HTMLElement, {
+    sessionId: "ui-session-single",
+    ...singleInput
+  });
+  assert.equal(
+    container.findByClass("codex-interaction-instruction")?.textContent,
+    "选择一项或填写自己的回答，也可以两者都填。"
+  );
+  const customAnswer = container.findByClass("codex-interaction-supplement-input")!;
+  customAnswer.value = "复盘真实运行边界";
+  customAnswer.oninput?.();
+  clickElement(container.findByClass("codex-interaction-action")!);
+  assert.deepEqual(await singleAnswerPromise, [{
+    questionId: "custom-answer",
+    selectedOptionIds: [],
+    supplement: "复盘真实运行边界"
+  }]);
 
   const approvalBroker = new PiAgentApprovalBroker();
   const approvalIdentity = {
@@ -4458,7 +4547,46 @@ export async function runSmoothConversationUiTests(): Promise<void> {
   assert.match(styles, /\.codex-assistant-turn-resource\s*\{[\s\S]*?border:\s*0;/u);
   assert.match(styles, /\.codex-assistant-turn-resource\[open\]\s*\{[\s\S]*?border:\s*1px solid var\(--background-modifier-border\);/u);
   assert.match(styles, /\.codex-interaction-progress\s*\{[\s\S]*?font-variant-numeric:\s*tabular-nums;/u);
-  assert.match(styles, /\.codex-interaction-heading-secondary\s*\{[\s\S]*?font-weight:\s*400;/u);
+  assert.doesNotMatch(styles, /\.codex-interaction-heading-secondary\s*\{/u);
+  const questionCardRule = styles.match(
+    /\.codex-interaction-question-card\s*\{([^}]*)\}/u
+  )?.[1] ?? "";
+  assert.match(questionCardRule, /display:\s*flex;/u);
+  assert.match(questionCardRule, /flex-direction:\s*column;/u);
+  assert.match(questionCardRule, /overflow:\s*hidden;/u,
+    "the bounded Question card must not scroll its persistent controls away");
+  const questionBodyRule = styles.match(
+    /\.codex-interaction-question\s*\{([^}]*)\}/u
+  )?.[1] ?? "";
+  assert.match(questionBodyRule, /flex:\s*1\s+1\s+auto;/u);
+  assert.match(questionBodyRule, /min-height:\s*0;/u);
+  assert.match(questionBodyRule, /overflow-y:\s*auto;/u,
+    "only the growing Question body may scroll inside the bounded card");
+  assert.match(questionBodyRule, /overscroll-behavior:\s*contain;/u);
+  assert.match(questionBodyRule, /scrollbar-gutter:\s*stable;/u);
+  assert.match(questionBodyRule, /padding:\s*4px;/u,
+    "the Question scrollport must preserve the complete keyboard focus ring");
+  const interactionActionsRule = styles.match(
+    /\.codex-interaction-actions\s*\{([^}]*)\}/u
+  )?.[1] ?? "";
+  assert.match(interactionActionsRule, /flex:\s*0\s+0\s+auto;/u,
+    "the Question action footer must remain visible when its body overflows");
+  assert.match(interactionActionsRule, /border-block-start:\s*1px solid var\(--background-modifier-border\);/u);
+  const narrowInteractionStart = styles.lastIndexOf("@container (max-width: 420px)");
+  assert.notEqual(narrowInteractionStart, -1);
+  const narrowInteractionRules = styles.slice(narrowInteractionStart);
+  assert.match(
+    narrowInteractionRules,
+    /\.codex-interaction-actions\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\);/u
+  );
+  assert.match(
+    narrowInteractionRules,
+    /\.codex-interaction-action\s*\{[^}]*width:\s*100%;[^}]*min-width:\s*0;[^}]*min-height:\s*40px;/u
+  );
+  assert.match(
+    narrowInteractionRules,
+    /\.codex-interaction-action:only-child\s*\{[^}]*grid-column:\s*1\s*\/\s*-1;/u
+  );
 
   const helperSource = readFileSync("src/ui/codex-view/smooth-chat-ui.ts", "utf8");
   assert.doesNotMatch(helperSource, /from\s+["'](?:react|motion\/react|tailwindcss|lucide-react|@radix-ui\/react-collapsible)["']/u);

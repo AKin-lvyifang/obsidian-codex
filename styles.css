@@ -18813,9 +18813,16 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
   font-family: var(--font-interface);
 }
 
+.codex-interaction-question-card {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
 .codex-interaction-header {
   display: flex;
   align-items: baseline;
+  flex: 0 0 auto;
   gap: var(--echoink-conversation-space-2);
   min-width: 0;
   margin-bottom: var(--echoink-conversation-space-3);
@@ -18840,13 +18847,6 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
   font: inherit;
 }
 
-.codex-interaction-heading-secondary {
-  color: var(--text-faint);
-  font-size: var(--echoink-conversation-font-label-secondary);
-  font-weight: 400;
-  line-height: var(--echoink-conversation-line-label);
-}
-
 .codex-interaction-progress {
   flex: 0 0 auto;
   margin-left: auto;
@@ -18858,10 +18858,16 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
 }
 
 .codex-interaction-question {
+  flex: 1 1 auto;
   min-width: 0;
+  min-height: 0;
   margin: 0;
-  padding: 0;
+  padding: 4px;
   border: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scroll-padding-block: var(--echoink-conversation-space-2);
 }
 
 .codex-interaction-prompt {
@@ -19003,10 +19009,13 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
 .codex-interaction-actions {
   display: flex;
   justify-content: flex-end;
+  flex: 0 0 auto;
   flex-wrap: wrap;
   gap: var(--echoink-conversation-space-2);
   min-width: 0;
-  margin-top: 6px;
+  margin-block-start: var(--echoink-conversation-space-2);
+  padding-block-start: var(--echoink-conversation-space-2);
+  border-block-start: 1px solid var(--background-modifier-border);
 }
 
 .codex-interaction-action {
@@ -19105,7 +19114,21 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
     font-size: 16px;
   }
 
-  .codex-interaction-action,
+  .codex-interaction-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .codex-interaction-action {
+    width: 100%;
+    min-width: 0;
+    min-height: 40px;
+  }
+
+  .codex-interaction-action:only-child {
+    grid-column: 1 / -1;
+  }
+
   .codex-interaction-confirmation-card .codex-smooth-ai-approval-button {
     min-height: 36px;
   }
