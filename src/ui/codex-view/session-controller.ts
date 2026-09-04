@@ -674,31 +674,96 @@ async function createSessionForSelection(
   options: CreateSessionOptions = {}
 ): Promise<StoredSession> {
   const conversationId = newId("conversation");
+  let createdConversationId = conversationId;
+  const previousActiveSessionId = host.plugin.settings.activeSessionId;
+  let catalogCreated = false;
   bindConversationSelectionTarget(host, generation, conversationId);
-  const catalogEntry = await host.plugin.createPiConversation({
-    conversationId,
-    title,
-    cwd: host.plugin.getVaultPath(),
-    defaultMemoryMode: "normal",
-    ...(options.defaultSkillId
-      ? { defaultSkillId: options.defaultSkillId }
-      : {})
-  });
-  const session = createPiConversationShell(host, catalogEntry);
-  host.plugin.settings.sessions.push(session);
-  const outcome = await enqueueConversationTransition(
-    host,
-    async () => await activateSessionInTransitionLane(
+  try {
+    const catalogEntry = await host.plugin.createPiConversation({
+      conversationId,
+      title,
+      cwd: host.plugin.getVaultPath(),
+      defaultMemoryMode: "normal",
+      ...(options.defaultSkillId
+        ? { defaultSkillId: options.defaultSkillId }
+        : {})
+    });
+    createdConversationId = catalogEntry.conversationId;
+    catalogCreated = true;
+    const session = createPiConversationShell(host, catalogEntry);
+    host.plugin.settings.sessions.push(session);
+    const outcome = await enqueueConversationTransition(
       host,
-      session,
-      generation
-    )
-  );
-  await persistPiConversationShells(host);
-  if (outcome.status === "selected" && "error" in outcome) {
-    throw outcome.error;
+      async () => await activateSessionInTransitionLane(
+        host,
+        session,
+        generation
+      )
+    );
+    if (outcome.status === "selected" && "error" in outcome) {
+      throw outcome.error;
+    }
+    await persistPiConversationShells(host);
+    return session;
+  } catch (error) {
+    if (catalogCreated) {
+      await rollbackFailedSessionCreation(
+        host,
+        createdConversationId,
+        previousActiveSessionId,
+        generation,
+        error
+      );
+    }
+    throw error;
   }
-  return session;
+}
+
+async function rollbackFailedSessionCreation(
+  host: CodexSessionHost,
+  conversationId: string,
+  previousActiveSessionId: string,
+  generation: number,
+  originalError: unknown
+): Promise<void> {
+  const session = host.plugin.settings.sessions.find(
+    (candidate) => candidate.id === conversationId
+  );
+  if (session?.messages.length) return;
+
+  const cleanupErrors: unknown[] = [];
+  try {
+    await host.plugin.setPiConversationStatus(conversationId, "deleted");
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+  host.turnQueue.clearSessionQueue(conversationId);
+  removeConversationShell(host, conversationId);
+  if (host.plugin.settings.activeSessionId === conversationId) {
+    host.plugin.settings.activeSessionId = host.plugin.settings.sessions.some(
+      (candidate) => candidate.id === previousActiveSessionId
+    )
+      ? previousActiveSessionId
+      : "";
+  }
+  if (isCurrentConversationSelection(host, generation)) {
+    beginConversationSelection(
+      host,
+      host.plugin.settings.activeSessionId || undefined
+    );
+  }
+  try {
+    await persistPiConversationShells(host);
+  } catch (error) {
+    cleanupErrors.push(error);
+  }
+  renderConversationShellChange(host);
+  if (cleanupErrors.length) {
+    throw new AggregateError(
+      [originalError, ...cleanupErrors],
+      "新会话创建失败，且未能完整回滚"
+    );
+  }
 }
 
 function derivedConversationTitle(

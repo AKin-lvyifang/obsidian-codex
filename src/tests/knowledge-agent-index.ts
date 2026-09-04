@@ -117,6 +117,52 @@ export async function runKnowledgeAgentIndexTests(): Promise<void> {
         && error.code === "invalid_query"
     );
 
+    const ordinaryBeforeMetadata = await index.search({
+      query: "COMMON_DEEP_TOKEN",
+      kinds: ["wiki"],
+      limit: 2
+    });
+    assert.ok(ordinaryBeforeMetadata.continuationCursor);
+    await utimes(
+      path.join(vaultPath, "wiki/deep-003.md"),
+      new Date(recentBase + 2_000),
+      new Date(recentBase + 2_000)
+    );
+    const metadataRefresh = await index.refresh();
+    assert.equal(metadataRefresh.generation, firstRefresh.generation);
+    assert.equal(metadataRefresh.indexed, 1);
+    assert.equal(metadataRefresh.changedPaths.includes("wiki/deep-003.md"), false);
+    await assert.rejects(
+      index.search({
+        mode: "recent",
+        kinds: ["wiki"],
+        limit: 2,
+        cursor: recent.continuationCursor
+      }),
+      (error) => error instanceof KnowledgeAgentIndexError
+        && error.code === "cursor_stale"
+    );
+    const ordinaryAfterMetadata = await index.search({
+      query: "COMMON_DEEP_TOKEN",
+      kinds: ["wiki"],
+      limit: 2,
+      cursor: ordinaryBeforeMetadata.continuationCursor
+    });
+    assert.deepEqual(
+      ordinaryAfterMetadata.hits.map((hit) => hit.vaultRelativePath),
+      ["wiki/deep-003.md", "wiki/deep-004.md"]
+    );
+    const refreshedRecent = await index.search({
+      mode: "recent",
+      kinds: ["wiki"],
+      limit: 2
+    });
+    assert.notEqual(refreshedRecent.generation, recent.generation);
+    assert.deepEqual(refreshedRecent.hits.map((hit) => hit.vaultRelativePath), [
+      "wiki/deep-003.md",
+      "wiki/deep-002.md"
+    ]);
+
     const visited: string[] = [];
     let cursor: string | undefined;
     let pageCount = 0;

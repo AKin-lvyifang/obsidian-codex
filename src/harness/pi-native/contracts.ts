@@ -23,6 +23,10 @@ import type {
 
 export type PiConversationMemoryMode = "normal" | "no_memory";
 export type PiChatMode = "agent" | "plan";
+export type PiKnowledgeReviewWriteScope =
+  | "read_only"
+  | "journal"
+  | "outputs";
 export type PiConversationCatalogStatus = "active" | "archived" | "deleted";
 
 export const PI_IMAGE_INPUT_UNSUPPORTED_MESSAGE =
@@ -360,6 +364,8 @@ export interface PiChatSubmitRequest {
   /** Exact per-turn selection to map to Pi's Provider thinking level. */
   reasoning: ReasoningEffort;
   memoryMode?: PiConversationMemoryMode;
+  /** Stable Resource identity for runtime policy; never inferred from display name. */
+  skillId?: string;
   skillPath?: string;
   skillName?: string;
   /** A durable queued draft explicitly selected by the user for resubmission. */

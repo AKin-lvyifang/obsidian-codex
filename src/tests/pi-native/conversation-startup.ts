@@ -17,12 +17,65 @@ export async function runPiConversationStartupTests(): Promise<void> {
   await rendersLocalHistoryBeforeSettingsPersistenceCompletes();
   await rapidSelectionIsNotBlockedByEarlierSettingsPersistence();
   await lateEarlierProjectionCannotReplaceTheLatestSelection();
+  await failedConversationCreationRollsBackCatalogAndShell();
   await laterExistingSelectionBeatsAnEarlierConversationCreation();
   await laterConversationCreationBeatsAnEarlierExistingSelection();
   await archivingAPendingSelectionInvalidatesItsLateProjection();
   await deletingAPendingSelectionInvalidatesItsLateProjection();
   await laterFallbackSelectionBeatsAnEarlierExistingSelection();
   await laterExistingSelectionPreventsAnEarlierFallbackActivation();
+}
+
+async function failedConversationCreationRollsBackCatalogAndShell(): Promise<void> {
+  for (const failureStage of ["activation", "persistence"] as const) {
+    const current = storedSession(`conversation-current-${failureStage}-failure`);
+    const created = storedSession(`conversation-created-${failureStage}-failure`);
+    const emptyProjection = {
+      ...conversationProjection(created, "unused"),
+      messages: []
+    } satisfies PiConversationProjection;
+    const statusChanges: Array<[string, string]> = [];
+    const clearedQueues: string[] = [];
+    let saveAttempts = 0;
+    const host = conversationHost({
+      sessions: [current],
+      activeSessionId: current.id,
+      switchPiConversation: async () => {
+        if (failureStage === "activation") {
+          throw new Error("activation_failed");
+        }
+        return emptyProjection;
+      },
+      saveSettings: async () => {
+        saveAttempts += 1;
+        if (failureStage === "persistence" && saveAttempts === 1) {
+          throw new Error("persistence_failed");
+        }
+      },
+      rendered: []
+    });
+    host.plugin.createPiConversation = async () =>
+      emptyProjection.catalog;
+    host.plugin.getVaultPath = () => "/disposable-vault";
+    host.plugin.setPiConversationStatus = async (conversationId: string, status: string) => {
+      statusChanges.push([conversationId, status]);
+    };
+    host.turnQueue = {
+      clearSessionQueue: (conversationId: string) => {
+        clearedQueues.push(conversationId);
+      }
+    };
+
+    await assert.rejects(
+      createSession(host),
+      new RegExp(`${failureStage}_failed`, "u")
+    );
+    assert.deepEqual(host.plugin.settings.sessions, [current]);
+    assert.equal(host.plugin.settings.activeSessionId, current.id);
+    assert.deepEqual(statusChanges, [[created.id, "deleted"]]);
+    assert.deepEqual(clearedQueues, [created.id]);
+    assert.equal(saveAttempts, failureStage === "activation" ? 1 : 2);
+  }
 }
 
 async function createsOneCurrentConversationForAnEmptyProductGeneration(): Promise<void> {

@@ -1716,6 +1716,7 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
     piSessionId: session.piSessionId,
     productRunId: "product-run-turn-runner"
   }, "turn runner subscribes to the exact active Approval run");
+  assert.equal(submittedRequest?.skillId, "knowledge-review");
   assert.equal(submittedRequest?.skillPath, "skills/knowledge-review/SKILL.md");
   assert.equal(submittedRequest?.skillName, "knowledge-review");
   assert.equal(submittedRequest?.memoryMode, "normal");

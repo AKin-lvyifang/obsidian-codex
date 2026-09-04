@@ -716,6 +716,9 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
   }
   const skillPath = currentSkill?.contentPath?.trim();
   const skillName = currentSkill?.name.trim();
+  const skillId = currentSkill
+    ? stableSkillIdForResource(currentSkill)
+    : "";
   if (currentSkill && (!skillPath || !skillName)) {
     new Notice("所选 Vault Skill 缺少可加载的 contentPath 或名称，本轮没有发送。");
     return "failed";
@@ -763,7 +766,7 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
       memoryMode: piChatMemoryModeForGlobalSetting(
         view.plugin.settings?.memory?.useLongTermMemory !== false
       ),
-      ...(skillPath && skillName ? { skillPath, skillName } : {}),
+      ...(skillPath && skillName ? { skillId, skillPath, skillName } : {}),
       ...(item.piDraftId ? { draftId: item.piDraftId } : {}),
       ...(maintenanceScope ? { maintenanceScope } : {}),
       ...(preparedImages.length ? { images: preparedImages } : {}),
@@ -1032,6 +1035,13 @@ export function resourceMatchesSkillId(
     ? skill.metadata.resourceId.trim()
     : "";
   return skill.id === normalizedId || resourceId === normalizedId;
+}
+
+function stableSkillIdForResource(skill: Readonly<EchoInkResource>): string {
+  const resourceId = typeof skill.metadata?.resourceId === "string"
+    ? skill.metadata.resourceId.trim()
+    : "";
+  return resourceId || skill.id.trim();
 }
 
 function frozenTurnReasoningSelectionIsValid(
