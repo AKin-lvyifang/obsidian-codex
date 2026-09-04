@@ -497,6 +497,7 @@ function assertSessionSummaryTooltipLifecycle(): void {
         },
         onContextMenu: () => undefined,
         onRename: () => undefined,
+        onArchive: () => undefined,
         onDeleteSessions: () => undefined,
         onCreateSession: () => undefined
       }
@@ -597,6 +598,75 @@ function assertSessionSummaryTooltipLifecycle(): void {
     assert.equal(tooltipAfterKeyboardSwitch.hasClass("is-visible"), true);
     selectedAfterKeyboardSwitch.blur();
     assert.equal(tooltipAfterKeyboardSwitch.hasClass("is-visible"), false);
+  } finally {
+    if (originalDocument) Object.defineProperty(testGlobal, "document", originalDocument);
+    else delete testGlobal.document;
+    if (originalHTMLElement) {
+      Object.defineProperty(testGlobal, "HTMLElement", originalHTMLElement);
+    } else {
+      delete testGlobal.HTMLElement;
+    }
+  }
+}
+
+function assertSessionPickerArchiveActions(): void {
+  const testGlobal = globalThis as unknown as Record<string, unknown>;
+  const originalDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
+  const originalHTMLElement = Object.getOwnPropertyDescriptor(globalThis, "HTMLElement");
+  const testDocument: { activeElement: FakeElement | null } = { activeElement: null };
+  Object.defineProperty(testGlobal, "document", {
+    configurable: true,
+    value: testDocument
+  });
+  Object.defineProperty(testGlobal, "HTMLElement", {
+    configurable: true,
+    value: FakeElement
+  });
+
+  try {
+    const container = new FakeElement("div");
+    const sessions = [
+      testConversationSession("idle", "可归档会话", 1),
+      testConversationSession("running", "运行会话", 2)
+    ];
+    const archivedSessionIds: string[] = [];
+    renderCodexTabs(
+      container as unknown as HTMLElement,
+      sessions,
+      "idle",
+      {
+        onActivate: () => undefined,
+        onContextMenu: () => undefined,
+        onRename: () => undefined,
+        onArchive: (session) => archivedSessionIds.push(session.id),
+        onDeleteSessions: () => undefined,
+        onCreateSession: () => undefined
+      },
+      "running"
+    );
+    container.findByClass("codex-session-all")?.onclick?.({
+      isTrusted: true,
+      detail: 1,
+      preventDefault: () => undefined,
+      stopPropagation: () => undefined
+    });
+
+    const rows = container.findAllByClass("codex-session-row");
+    const idleRow = rows.find((row) => row.getAttribute("data-session-id") === "idle");
+    const runningRow = rows.find((row) => row.getAttribute("data-session-id") === "running");
+    assert.ok(idleRow && runningRow);
+    const idleActions = idleRow.findAllByClass("codex-session-row-action");
+    const runningActions = runningRow.findAllByClass("codex-session-row-action");
+    assert.deepEqual(
+      idleActions.map((button) => button.getAttribute("title")),
+      ["重命名", "归档", "删除"],
+      "row actions keep rename, archive, and delete in that order"
+    );
+    assert.equal(runningActions.length, 3);
+    assert.equal(runningActions[1]?.disabled, true, "running conversations cannot be archived");
+    clickElement(idleActions[1]!);
+    clickElement(runningActions[1]!);
+    assert.deepEqual(archivedSessionIds, ["idle"], "only the matching idle row archives");
   } finally {
     if (originalDocument) Object.defineProperty(testGlobal, "document", originalDocument);
     else delete testGlobal.document;
@@ -840,6 +910,7 @@ function taskPlanMessage(
 
 export async function runSmoothConversationUiTests(): Promise<void> {
   assertSessionSummaryTooltipLifecycle();
+  assertSessionPickerArchiveActions();
   assert.equal(
     settingsCopy("zh-CN").general.settingsLanguageDesc,
     "控制 EchoInk 界面语言；不会改写 Prompt、会话内容或用户自定义名称。"

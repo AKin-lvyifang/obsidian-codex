@@ -1,12 +1,15 @@
 import * as assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import type { PiConversationCatalogEntry, PiConversationProjection } from "../../harness/pi-native/contracts";
 import type { StoredSession } from "../../settings/settings";
 import {
   activateSession,
   archiveSession,
   createSession,
+  deleteArchivedConversation,
   deleteSessions,
-  ensureInitialConversation
+  ensureInitialConversation,
+  restoreArchivedConversation
 } from "../../ui/codex-view/session-controller";
 
 export async function runPiConversationStartupTests(): Promise<void> {
@@ -20,6 +23,7 @@ export async function runPiConversationStartupTests(): Promise<void> {
   await failedConversationCreationRollsBackCatalogAndShell();
   await laterExistingSelectionBeatsAnEarlierConversationCreation();
   await laterConversationCreationBeatsAnEarlierExistingSelection();
+  await archivesWithoutConfirmationAndKeepsRunningConversation();
   await archivingAPendingSelectionInvalidatesItsLateProjection();
   await deletingAPendingSelectionInvalidatesItsLateProjection();
   await laterFallbackSelectionBeatsAnEarlierExistingSelection();
@@ -432,6 +436,118 @@ Promise<void> {
   );
 }
 
+async function archivesWithoutConfirmationAndKeepsRunningConversation(): Promise<void> {
+  const active = storedSession("conversation-archive-active");
+  const target = storedSession("conversation-archive-target");
+  const archivedStatusChanges: Array<[string, string]> = [];
+  const host = conversationHost({
+    sessions: [active, target],
+    activeSessionId: active.id,
+    switchPiConversation: async () => conversationProjection(active, "history-active"),
+    saveSettings: async () => undefined,
+    rendered: []
+  });
+  host.plugin.setPiConversationStatus = async (conversationId: string, status: string) => {
+    archivedStatusChanges.push([conversationId, status]);
+    return { ...conversationProjection(target, "history-target").catalog, status };
+  };
+  host.plugin.getVaultPath = () => "/disposable-vault";
+  host.turnQueue = { clearSessionQueue: () => undefined };
+
+  await archiveSession(host, target.id);
+
+  assert.deepEqual(archivedStatusChanges, [[target.id, "archived"]]);
+  assert.deepEqual(
+    host.plugin.settings.sessions.map((session: StoredSession) => session.id),
+    [active.id],
+    "archiving directly removes only the selected conversation shell"
+  );
+
+  const archivedEntry = {
+    ...conversationProjection(target, "history-target").catalog,
+    status: "archived" as const
+  };
+  await restoreArchivedConversation(host, archivedEntry);
+  assert.deepEqual(archivedStatusChanges, [
+    [target.id, "archived"],
+    [target.id, "active"]
+  ]);
+  assert.deepEqual(
+    host.plugin.settings.sessions.map((session: StoredSession) => session.id),
+    [active.id, target.id],
+    "an archived conversation returns to the active shells when restored"
+  );
+
+  const deleteConfirmation: { title: string; body: string } = { title: "", body: "" };
+  const deleted = await deleteArchivedConversation(host, archivedEntry, {
+    confirm: async (title, body) => {
+      deleteConfirmation.title = title;
+      deleteConfirmation.body = body;
+      return true;
+    }
+  });
+  assert.equal(deleted, true);
+  assert.deepEqual(archivedStatusChanges, [
+    [target.id, "archived"],
+    [target.id, "active"],
+    [target.id, "deleted"]
+  ]);
+  assert.match(deleteConfirmation.title, /删除会话/u);
+  assert.doesNotMatch(deleteConfirmation.title, /已归档|Pi|JSONL|Catalog/u);
+  assert.equal(deleteConfirmation.body, "删除后无法在设置中恢复。");
+
+  const sessionControllerSource = readFileSync(
+    "src/ui/codex-view/session-controller.ts",
+    "utf8"
+  );
+  const archiveSessionSource = sessionControllerSource.slice(
+    sessionControllerSource.indexOf("export async function archiveSession"),
+    sessionControllerSource.indexOf("export async function deleteSession")
+  );
+  assert.doesNotMatch(archiveSessionSource, /defaultRecordMutationConfirm|Pi Session|JSONL/u);
+  assert.match(archiveSessionSource, /会话已归档，可在设置中恢复。/u);
+  assert.ok(sessionControllerSource.includes("onArchive: () => void host.archiveSession(session.id)"));
+  const deleteArchivedConversationSource = sessionControllerSource.slice(
+    sessionControllerSource.indexOf("export async function deleteArchivedConversation"),
+    sessionControllerSource.indexOf("type ConversationRecordMutationConfirm")
+  );
+  assert.ok(deleteArchivedConversationSource.includes("删除后无法在设置中恢复。"));
+  assert.ok(deleteArchivedConversationSource.includes("\"已删除会话\""));
+  assert.doesNotMatch(deleteArchivedConversationSource, /Pi Session|JSONL/u);
+  const deleteSessionsSource = sessionControllerSource.slice(
+    sessionControllerSource.indexOf("export async function deleteSessions"),
+    sessionControllerSource.indexOf("function defaultRecordMutationConfirm")
+  );
+  assert.ok(deleteSessionsSource.includes("删除后无法在设置中恢复。"));
+  assert.ok(deleteSessionsSource.includes("committedCount === 1 ? \"已删除会话\""));
+  assert.doesNotMatch(deleteSessionsSource, /Pi Session|JSONL/u);
+
+  const running = storedSession("conversation-archive-running");
+  const runningStatusChanges: Array<[string, string]> = [];
+  const runningHost = conversationHost({
+    sessions: [running],
+    activeSessionId: running.id,
+    switchPiConversation: async () => conversationProjection(running, "history-running"),
+    saveSettings: async () => undefined,
+    rendered: []
+  });
+  runningHost.running = true;
+  runningHost.activeRunSessionId = running.id;
+  runningHost.plugin.setPiConversationStatus = async (conversationId: string, status: string) => {
+    runningStatusChanges.push([conversationId, status]);
+    return { ...conversationProjection(running, "history-running").catalog, status };
+  };
+
+  await archiveSession(runningHost, running.id);
+
+  assert.deepEqual(runningStatusChanges, []);
+  assert.deepEqual(
+    runningHost.plugin.settings.sessions.map((session: StoredSession) => session.id),
+    [running.id],
+    "a running conversation remains available and is not archived"
+  );
+}
+
 async function archivingAPendingSelectionInvalidatesItsLateProjection():
 Promise<void> {
   const current = storedSession("conversation-current-archive-pending");
@@ -461,9 +577,7 @@ Promise<void> {
 
   const openingTarget = activateSession(host, target);
   await flushMicrotasks();
-  await archiveSession(host, target.id, {
-    confirm: async () => true
-  });
+  await archiveSession(host, target.id);
   targetProjection.resolve(conversationProjection(
     target,
     "history-archived-selection-stale"

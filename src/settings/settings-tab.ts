@@ -2037,8 +2037,8 @@ export class CodexSettingTab extends PluginSettingTab {
     createSettingsNavigationRow(managementGroup, {
       title: zh ? "已归档会话" : "Archived conversations",
       description: zh
-        ? "搜索、恢复或从 EchoInk 列表软删除已归档会话；原始 Pi Session JSONL 始终保留。"
-        : "Search, restore, or soft-delete archived conversations. Original Pi Session JSONL remains intact.",
+        ? "搜索、恢复或删除已归档会话；删除后无法在设置中恢复。"
+        : "Search, restore, or delete archived conversations. Deleted conversations cannot be restored in Settings.",
       value: this.archivedConversations
         ? String(this.archivedConversations.length)
         : (zh ? "查看" : "View"),
@@ -2088,8 +2088,8 @@ export class CodexSettingTab extends PluginSettingTab {
     const page = createSettingsPage(container, {
       title: zh ? "已归档会话" : "Archived conversations",
       description: zh
-        ? "恢复后会话立即回到活动列表；删除只改变 Catalog 状态，不物理删除 Pi Session JSONL。"
-        : "Restored conversations return to the active list immediately. Delete only changes Catalog state and never removes Pi Session JSONL.",
+        ? "你可以搜索、恢复或删除会话；删除后无法在设置中恢复。"
+        : "You can search, restore, or delete conversations. Deleted conversations cannot be restored in Settings.",
       detail: true,
       backLabel: zh ? "返回复盘" : "Back to Review",
       onBack: () => void this.closeSettingsDetail()
@@ -2209,10 +2209,10 @@ export class CodexSettingTab extends PluginSettingTab {
     if (this.archivedConversationBusyId) return;
     const accepted = await confirmModal(
       this.app,
-      `${this.plugin.settings.settingsLanguage === "en" ? "Delete" : "删除已归档会话"}“${entry.title}”？`,
+      `${this.plugin.settings.settingsLanguage === "en" ? "Delete conversation" : "删除会话"}“${entry.title}”？`,
       this.plugin.settings.settingsLanguage === "en"
-        ? "The conversation leaves EchoInk, but its Pi Session JSONL remains on disk."
-        : "会话会从 EchoInk 列表移除，但 Pi Session JSONL 不会物理删除。",
+        ? "You cannot restore this conversation in Settings after deletion."
+        : "删除后无法在设置中恢复。",
       this.plugin.settings.settingsLanguage === "en" ? "Delete" : "删除",
       this.plugin.settings.settingsLanguage === "en" ? "Cancel" : "取消"
     );
@@ -2222,7 +2222,7 @@ export class CodexSettingTab extends PluginSettingTab {
     try {
       await this.plugin.setPiConversationStatus(entry.conversationId, "deleted");
       this.removeArchivedConversation(entry.conversationId);
-      new Notice(`${this.plugin.settings.settingsLanguage === "en" ? "Deleted" : "已删除"}“${entry.title}”；Pi Session JSONL 已保留`);
+      new Notice(this.plugin.settings.settingsLanguage === "en" ? "Conversation deleted." : "已删除会话");
     } catch (error) {
       this.archivedConversationsError = error instanceof Error ? error.message : String(error);
     } finally {

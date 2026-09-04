@@ -2569,11 +2569,33 @@ async function assertSettingsAccessibleNamesAndOverflow(): Promise<void> {
   tab.display();
   assert.match(tab.containerEl.textContent, /归档会话样例/u);
   assert.match(tab.containerEl.textContent, /归档时间/u);
+  assert.match(tab.containerEl.textContent, /你可以搜索、恢复或删除会话；删除后无法在设置中恢复。/u);
   assert.ok(tab.containerEl.querySelector('input[aria-label="搜索已归档会话"]'));
   for (const label of ["恢复 归档会话样例", "删除 归档会话样例"]) {
     assert.ok(tab.containerEl.querySelector(`button[aria-label="${label}"]`));
   }
   assert.doesNotMatch(tab.containerEl.textContent, /pi-session\.jsonl|conversation-archived/u);
+  assert.doesNotMatch(tab.containerEl.textContent, /Pi Session|JSONL|Catalog|软删除/u);
+  const settingsTabSourceForArchivedConversation = readFileSync(
+    "src/settings/settings-tab.ts",
+    "utf8"
+  );
+  const archivedConversationActionStart = settingsTabSourceForArchivedConversation.indexOf(
+    "private async softDeleteArchivedConversation"
+  );
+  const archivedConversationActionEnd = settingsTabSourceForArchivedConversation.indexOf(
+    "\n  private removeArchivedConversation",
+    archivedConversationActionStart
+  );
+  const archivedConversationActionSource = settingsTabSourceForArchivedConversation.slice(
+    archivedConversationActionStart,
+    archivedConversationActionEnd
+  );
+  assert.match(archivedConversationActionSource, /Delete conversation/u);
+  assert.match(archivedConversationActionSource, /删除后无法在设置中恢复/u);
+  assert.match(archivedConversationActionSource, /Conversation deleted\./u);
+  assert.match(archivedConversationActionSource, /已删除会话/u);
+  assert.doesNotMatch(archivedConversationActionSource, /Pi Session|JSONL|soft-delete|软删除/u);
 
   mutable.settingsDetail = "review-memory";
   mutable.personalMemoryState = identityState;

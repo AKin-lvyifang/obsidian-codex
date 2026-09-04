@@ -83,6 +83,7 @@ export function renderTabsView(host: CodexSessionHost): void {
       })(),
       onContextMenu: (event, session) => openSessionMenuView(host, event, session),
       onRename: (session) => void host.renameSession(session),
+      onArchive: (session) => void host.archiveSession(session.id),
       onDeleteSessions: (sessionIds) => void confirmDeleteSessions(host, sessionIds),
       onCreateSession: () => void (async () => {
         try {
@@ -458,8 +459,7 @@ export async function renameSession(host: CodexSessionHost, session: StoredSessi
 
 export async function archiveSession(
   host: CodexSessionHost,
-  sessionId: string,
-  options: ConversationRecordMutationUiOptions = {}
+  sessionId: string
 ): Promise<void> {
   const session = host.plugin.settings.sessions.find(
     (candidate) => candidate.id === sessionId
@@ -473,14 +473,6 @@ export async function archiveSession(
     ));
     return;
   }
-  const confirm = options.confirm ?? defaultRecordMutationConfirm(host);
-  const accepted = await confirm(
-    conversationUiText(host.plugin.settings.settingsLanguage, `归档会话“${session.title}”？`, `Archive conversation “${session.title}”?`),
-    conversationUiText(host.plugin.settings.settingsLanguage, "会话会从当前列表隐藏，但 Pi Session JSONL 和完整时间线会保留。", "The conversation will be hidden from this list, while its Pi Session JSONL and full timeline are kept."),
-    conversationUiText(host.plugin.settings.settingsLanguage, "归档", "Archive"),
-    conversationUiText(host.plugin.settings.settingsLanguage, "取消", "Cancel")
-  );
-  if (!accepted) return;
   const fallbackGeneration =
     host.plugin.settings.activeSessionId === session.id
       || isConversationSelectionTarget(host, session.id)
@@ -497,8 +489,8 @@ export async function archiveSession(
   renderConversationShellChange(host);
   new Notice(
     fallbackError
-      ? conversationUiText(host.plugin.settings.settingsLanguage, `会话已归档；打开后续会话失败：${errorMessage(fallbackError)}`, `Conversation archived; could not open a follow-up conversation: ${errorMessage(fallbackError)}`)
-      : conversationUiText(host.plugin.settings.settingsLanguage, "会话已归档，Pi Session 记录已保留", "Conversation archived; the Pi Session record was kept")
+      ? conversationUiText(host.plugin.settings.settingsLanguage, "会话已归档，可在设置中恢复。无法打开后续会话，请重试。", "Conversation archived. You can restore it in Settings. Could not open the next conversation. Please try again.")
+      : conversationUiText(host.plugin.settings.settingsLanguage, "会话已归档，可在设置中恢复。", "Conversation archived. You can restore it in Settings.")
   );
 }
 
@@ -561,8 +553,8 @@ export async function deleteArchivedConversation(
 ): Promise<boolean> {
   const confirm = options.confirm ?? defaultRecordMutationConfirm(host);
   const accepted = await confirm(
-    conversationUiText(host.plugin.settings.settingsLanguage, `删除已归档会话“${entry.title}”？`, `Delete archived conversation “${entry.title}”?`),
-    conversationUiText(host.plugin.settings.settingsLanguage, "会话会从 EchoInk 列表移除，但 Pi Session JSONL 不会删除。", "The conversation will be removed from EchoInk's list, but its Pi Session JSONL will not be deleted."),
+    conversationUiText(host.plugin.settings.settingsLanguage, `删除会话“${entry.title}”？`, `Delete conversation “${entry.title}”?`),
+    conversationUiText(host.plugin.settings.settingsLanguage, "删除后无法在设置中恢复。", "You cannot restore this conversation in Settings after deletion."),
     conversationUiText(host.plugin.settings.settingsLanguage, "删除", "Delete"),
     conversationUiText(host.plugin.settings.settingsLanguage, "取消", "Cancel")
   );
@@ -570,8 +562,8 @@ export async function deleteArchivedConversation(
   await host.plugin.setPiConversationStatus(entry.conversationId, "deleted");
   new Notice(conversationUiText(
     host.plugin.settings.settingsLanguage,
-    `已删除“${entry.title}”；Pi Session JSONL 已保留`,
-    `Deleted “${entry.title}”; the Pi Session JSONL was kept`
+    "已删除会话",
+    "Conversation deleted."
   ));
   return true;
 }
@@ -612,7 +604,7 @@ export async function deleteSessions(
     try {
       const accepted = await confirm(
         conversationUiText(host.plugin.settings.settingsLanguage, `删除会话“${session.title}”？`, `Delete conversation “${session.title}”?`),
-        conversationUiText(host.plugin.settings.settingsLanguage, "会话会从 EchoInk 列表移除，但 Pi Session JSONL 不会删除。", "The conversation will be removed from EchoInk's list, but its Pi Session JSONL will not be deleted."),
+        conversationUiText(host.plugin.settings.settingsLanguage, "删除后无法在设置中恢复。", "You cannot restore this conversation in Settings after deletion."),
         conversationUiText(host.plugin.settings.settingsLanguage, "删除", "Delete"),
         conversationUiText(host.plugin.settings.settingsLanguage, "取消", "Cancel")
       );
@@ -657,8 +649,16 @@ export async function deleteSessions(
     renderConversationShellChange(host);
     new Notice(
       fallbackError
-        ? conversationUiText(host.plugin.settings.settingsLanguage, `已删除 ${committedCount} 个会话并保留 Pi Session；打开后续会话失败：${errorMessage(fallbackError)}`, `Deleted ${committedCount} conversations and kept Pi Sessions; could not open a follow-up conversation: ${errorMessage(fallbackError)}`)
-        : conversationUiText(host.plugin.settings.settingsLanguage, `已删除 ${committedCount} 个会话；Pi Session JSONL 已保留`, `Deleted ${committedCount} conversations; Pi Session JSONL files were kept`)
+        ? conversationUiText(
+          host.plugin.settings.settingsLanguage,
+          `${committedCount === 1 ? "已删除会话" : `已删除 ${committedCount} 个会话`}；无法打开后续会话，请重试。`,
+          `${committedCount === 1 ? "Conversation deleted." : `${committedCount} conversations deleted.`} Could not open the next conversation. Please try again.`
+        )
+        : conversationUiText(
+          host.plugin.settings.settingsLanguage,
+          committedCount === 1 ? "已删除会话" : `已删除 ${committedCount} 个会话`,
+          committedCount === 1 ? "Conversation deleted." : `${committedCount} conversations deleted.`
+        )
     );
   }
 }

@@ -9,6 +9,7 @@ export interface CodexTabsCallbacks {
   onActivate: (session: StoredSession) => void;
   onContextMenu: (event: MouseEvent, session: StoredSession) => void;
   onRename: (session: StoredSession) => void;
+  onArchive: (session: StoredSession) => void;
   onDeleteSessions: (sessionIds: string[]) => void;
   onCreateSession: () => void;
 }
@@ -1011,6 +1012,24 @@ function renderSessionPicker(
         renameButton.onclick = (event) => {
           event.stopPropagation();
           callbacks.onRename(session);
+        };
+        const archiveButton = actions.createEl("button", {
+          cls: "codex-session-row-action",
+          attr: {
+            type: "button",
+            "aria-label": running
+              ? conversationUiText(language, "运行中的会话不能归档", "A running conversation cannot be archived")
+              : conversationUiText(language, `归档 ${session.title}`, `Archive ${session.title}`),
+            title: running
+              ? conversationUiText(language, "运行中的会话不能归档", "A running conversation cannot be archived")
+              : conversationUiText(language, "归档", "Archive")
+          }
+        });
+        archiveButton.disabled = running;
+        setIcon(archiveButton, "archive");
+        archiveButton.onclick = (event) => {
+          event.stopPropagation();
+          if (!running) callbacks.onArchive(session);
         };
         const deleteButton = actions.createEl("button", {
           cls: "codex-session-row-action is-danger",
