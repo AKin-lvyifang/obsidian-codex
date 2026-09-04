@@ -5,10 +5,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import type {
-  PiKnowledgeReference,
-  PiKnowledgeReviewWriteScope
-} from "./contracts";
+import type { PiKnowledgeReference } from "./contracts";
 import {
   canonicalJsonStringify,
   isWriteToolAuthorizationContext,
@@ -33,7 +30,6 @@ import {
   secureVaultToolResult,
   type VaultToolResultEgressPort
 } from "./vault-tool-result-safety";
-import { normalizeVaultRelativePath } from "./vault-target-resolver";
 
 export type PiVaultToolBlockReason =
   | "approval_denied"
@@ -91,9 +87,6 @@ export interface CreatePiVaultToolSecurityAdapterOptions {
   readonly authorization: PiVaultToolAuthorizationPort;
   /** Required fail-closed port; there is no unsanitized result default. */
   readonly resultCorrection: PiVaultToolResultCorrectionPort;
-  /** Null outside knowledge-review; otherwise constrains writes before approval. */
-  readonly currentKnowledgeReviewWriteScope:
-    () => PiKnowledgeReviewWriteScope | null;
   /** Phase 3 production only: persist a citation envelope on note_read. */
   readonly includeNoteReadKnowledgeReferences?: boolean;
   /** One separately policy-bound product Tool may share the sole Extension. */
@@ -145,7 +138,6 @@ implements PiVaultToolExecutionSecurityPort {
     if (
       !options.authorization
       || !options.resultCorrection
-      || !options.currentKnowledgeReviewWriteScope
     ) {
       throw new TypeError("pi_vault_security_ports_required");
     }
@@ -236,19 +228,6 @@ implements PiVaultToolExecutionSecurityPort {
       return block("tool_policy_blocked");
     }
     const policy = policyFor(event.toolName);
-    let reviewWriteScope: PiKnowledgeReviewWriteScope | null;
-    try {
-      reviewWriteScope = this.options.currentKnowledgeReviewWriteScope();
-    } catch {
-      return block("tool_policy_blocked");
-    }
-    if (!knowledgeReviewToolCallAllowed(
-      reviewWriteScope,
-      event.toolName,
-      normalizedArguments
-    )) {
-      return block("tool_policy_blocked");
-    }
     try {
       const value = await this.options.authorization.authorize(Object.freeze({
         toolCallId: event.toolCallId,
@@ -327,30 +306,6 @@ implements PiVaultToolExecutionSecurityPort {
     } finally {
       this.records.delete(event.toolCallId);
     }
-  }
-}
-
-function knowledgeReviewToolCallAllowed(
-  scope: PiKnowledgeReviewWriteScope | null,
-  toolId: PiVaultToolId,
-  argumentsValue: Readonly<Record<string, unknown>>
-): boolean {
-  if (scope === null) return true;
-  if (scope !== "read_only" && scope !== "journal" && scope !== "outputs") {
-    return false;
-  }
-  if (toolId === "vault_search" || toolId === "note_read") return true;
-  if (
-    scope === "read_only"
-    || (toolId !== "note_create" && toolId !== "note_update")
-  ) return false;
-  try {
-    const relativePath = normalizeVaultRelativePath(
-      argumentsValue.relativePath
-    );
-    return relativePath.startsWith(`${scope}/`);
-  } catch {
-    return false;
   }
 }
 

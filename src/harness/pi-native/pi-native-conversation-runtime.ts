@@ -58,7 +58,6 @@ import type {
   PiChatNoteMention,
   PiChatPreparedDocument,
   PiChatSubmitRequest,
-  PiKnowledgeReviewWriteScope,
   PiChatPreparedImage,
   PiConversationCatalogEntry,
   PiConversationDerivationResult,
@@ -201,7 +200,6 @@ export interface PiNativeAgentSessionFactoryInput {
     vaultId: string;
     userEntryId: string;
     userEntryText: string;
-    knowledgeReviewWriteScope: PiKnowledgeReviewWriteScope | null;
   }>;
   currentKnowledgeTurnContext(): Readonly<PiNativeKnowledgeTurnContext> | null;
   currentSkillTurnContext?(): Readonly<PiNativeSkillTurnContext> | null;
@@ -687,7 +685,6 @@ interface ActiveProductRun {
   requestText: string;
   commandKind: "chat" | "ask" | "maintain";
   selectedSkillIds: readonly string[];
-  knowledgeReviewWriteScope: PiKnowledgeReviewWriteScope | null;
   requiresFreshnessVerification: boolean;
   successfulCapabilityIds: Set<string>;
   projectId?: string;
@@ -1437,9 +1434,6 @@ export class PiNativeConversationRuntime {
       : request.skillId?.trim()
         ? [request.skillId.trim()]
         : request.skillName ? [request.skillName] : []);
-    const knowledgeReviewPolicySelected = selectedRuntimeSkill
-      ? selectedRuntimeSkills.some((skill) => skill.id === "knowledge-review")
-      : request.skillId?.trim() === "knowledge-review";
     const execution: ActiveProductRun = {
       productRunId,
       submittedAt: request.submittedAt,
@@ -1457,9 +1451,6 @@ export class PiNativeConversationRuntime {
       requestText: request.text,
       commandKind: knowledgeCommand.kind,
       selectedSkillIds,
-      knowledgeReviewWriteScope: knowledgeReviewPolicySelected
-        ? resolveKnowledgeReviewWriteScope(request.text)
-        : null,
       requiresFreshnessVerification:
         selectedRuntimeSkill?.requiresFreshnessVerification === true,
       successfulCapabilityIds: new Set<string>(),
@@ -2473,8 +2464,7 @@ export class PiNativeConversationRuntime {
           productRunId: run.productRunId,
           vaultId: catalog.vaultId,
           userEntryId: userEntry.id,
-          userEntryText: publicMessageText(userEntry.message),
-          knowledgeReviewWriteScope: run.knowledgeReviewWriteScope
+          userEntryText: publicMessageText(userEntry.message)
         };
       },
       currentKnowledgeTurnContext: () =>
@@ -6314,40 +6304,6 @@ function normalizePiChatMode(value: unknown): PiChatMode {
   if (value === undefined || value === "agent") return "agent";
   if (value === "plan") return "plan";
   throw new TypeError("Pi Chat mode must be agent or plan");
-}
-
-function resolveKnowledgeReviewWriteScope(
-  text: string
-): PiKnowledgeReviewWriteScope {
-  const positiveText = positiveKnowledgeReviewSaveText(text);
-  if (!knowledgeReviewSaveIntentPattern().test(positiveText)) {
-    return "read_only";
-  }
-  const namesJournal = /\bjournal\b|日记|日志/iu.test(positiveText);
-  const namesOutputs = /\boutputs?\b|输出目录|输出文件夹/iu.test(positiveText);
-  if (namesJournal && namesOutputs) return "read_only";
-  return namesOutputs ? "outputs" : "journal";
-}
-
-function positiveKnowledgeReviewSaveText(text: string): string {
-  const normalized = text.normalize("NFKC").trim();
-  if (!normalized) return "";
-  const reviewTopic = /(?:保存|写入|写到|写进|存入|存到|记录到|记录进|归档到|落盘)|\b(?:save|write|persist|store|record|append|journal|outputs?)\b|日记|日志|输出目录|输出文件夹/iu;
-  const blocker = /(?:不要|不必|无需|不用|别|先不|暂不|暂时不|不可|禁止|不能|无法|没法|不可以|不想|不愿|拒绝|取消|放弃|还没|尚未|未确认|没有确认|待确认|犹豫|不确定|再想想|考虑一下|稍后|晚点|以后|回头|等会儿?|待会儿?|下次|改天|延后|推迟|暂缓|之后再|再说)|\b(?:do\s+not|don't|dont|never|without|no\s+need\s+to|cannot|can't|cant|unable|not\s+yet|unconfirmed|decline|refuse|cancel|hesitate|unsure|maybe|later|eventually|postpone|delay|another\s+time)\b/iu;
-  if (reviewTopic.test(normalized) && blocker.test(normalized)) return "";
-  const question = /[吗？?]/u;
-  const questionLead = /(?:是否|能否|可否|要不要|能不能|该不该).{0,20}(?:保存|写入|写到|写进|存入|存到|记录到|记录进|归档到|落盘)|\b(?:can|could|would|should|may)\b.{0,30}\b(?:save|write|persist|store|record|append)\b/iu;
-  return normalized
-    .split(/[,，。；;！!\n]+/u)
-    .map((clause) => clause.trim())
-    .filter(Boolean)
-    .filter((clause) => !(knowledgeReviewSaveIntentPattern().test(clause)
-      && (question.test(clause) || questionLead.test(clause))))
-    .join(" ");
-}
-
-function knowledgeReviewSaveIntentPattern(): RegExp {
-  return /(?:保存|写入|写到|写进|存入|存到|记录到|记录进|归档到|落盘)|\b(?:save|write|persist|store|record|append)\b/iu;
 }
 
 function assertValidSkillBinding(

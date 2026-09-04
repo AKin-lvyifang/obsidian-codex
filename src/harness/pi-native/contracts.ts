@@ -23,10 +23,6 @@ import type {
 
 export type PiConversationMemoryMode = "normal" | "no_memory";
 export type PiChatMode = "agent" | "plan";
-export type PiKnowledgeReviewWriteScope =
-  | "read_only"
-  | "journal"
-  | "outputs";
 export type PiConversationCatalogStatus = "active" | "archived" | "deleted";
 
 export const PI_IMAGE_INPUT_UNSUPPORTED_MESSAGE =

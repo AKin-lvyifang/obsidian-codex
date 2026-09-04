@@ -50,7 +50,6 @@ import type {
   PiChatPreparedImage,
   PiChatSubmitRequest,
   PiChatRuntimeEvent,
-  PiKnowledgeReviewWriteScope,
   PiKnowledgeRuntimePort,
   PiKnowledgeReference
 } from "../../harness/pi-native/contracts";
@@ -117,7 +116,7 @@ export async function runPiNativeConversationRuntimeTests(): Promise<void> {
   await assertRelatedNormalChatPreflightsAndReadsKnowledge();
   await assertZeroReferenceNormalChatSkipsUsageAndSettles();
   await assertKnowledgeUsageFailureRemainsTerminal();
-  await assertKnowledgeReviewWritePolicyPrecedesApproval();
+  await assertVaultWritesUseExistingApproval();
   await assertUserQuestionUsesCentralFailClosedSecurity();
   assertReasoningSummaryLifecycleSemantics();
   await assertReasoningSummaryRuntimeLifecycle();
@@ -136,7 +135,6 @@ export async function runPiNativeConversationRuntimeTests(): Promise<void> {
   await runPiNativeDurableSettlementProjectionRegressionTest();
   await assertAgentSessionWarningsUseConversationSupport();
   await assertSkillPromptAndBindingValidation();
-  await assertKnowledgeReviewWriteScopeIsTurnBound();
   await assertDurableDraftRequiresExplicitSuccessfulResubmission();
   await assertImagePromptsRequireCapabilityAndPreserveOrder();
   await assertDocumentSnapshotsAreTurnBoundAndValidatedBeforePrompt();
@@ -1117,8 +1115,7 @@ async function assertReasoningSelectionFailsClosedBeforePiPrompt(): Promise<void
   });
 }
 
-async function assertKnowledgeReviewWritePolicyPrecedesApproval(): Promise<void> {
-  let scope: PiKnowledgeReviewWriteScope | null = "read_only";
+async function assertVaultWritesUseExistingApproval(): Promise<void> {
   const authorizationCalls: string[] = [];
   const adapter = createPiVaultToolSecurityAdapter({
     authorization: {
@@ -1127,7 +1124,6 @@ async function assertKnowledgeReviewWritePolicyPrecedesApproval(): Promise<void>
         throw new PiVaultToolAuthorizationError("approval_denied");
       }
     },
-    currentKnowledgeReviewWriteScope: () => scope,
     resultCorrection: {
       async correct() {
         throw new Error("unexpected_vault_result_correction");
@@ -1149,97 +1145,25 @@ async function assertKnowledgeReviewWritePolicyPrecedesApproval(): Promise<void>
   ) => await handleToolCall({ toolName, toolCallId, input }, {
     signal: undefined
   });
-  const blocked = {
-    block: true,
-    reason: "tool_policy_blocked"
-  } as const;
   const reachedApproval = {
     block: true,
     reason: "approval_denied"
   } as const;
 
-  assert.deepEqual(await call("note_create", "review-readonly-create", {
+  assert.deepEqual(await call("note_create", "generic-create", {
     relativePath: "journal/2026-09-04.md",
-    content: "must not reach approval"
-  }), blocked);
-  assert.deepEqual(await call("note_update", "review-readonly-update", {
-    relativePath: "journal/2026-09-04.md",
-    expectedVersion: `sha256:${"a".repeat(64)}`,
-    content: "must not reach approval"
-  }), blocked);
-  assert.deepEqual(authorizationCalls, [],
-    "read-only Review turns block model-initiated writes before approval");
-
-  scope = "journal";
-  assert.deepEqual(await call("note_create", "review-journal-wrong-root", {
+    content: "agent-decided content"
+  }), reachedApproval);
+  assert.deepEqual(await call("note_update", "generic-update", {
     relativePath: "outputs/review.md",
-    content: "wrong root"
-  }), blocked);
-  assert.deepEqual(await call("note_create", "review-journal-absolute", {
-    relativePath: "/journal/review.md",
-    content: "absolute"
-  }), blocked);
-  assert.deepEqual(await call("note_create", "review-journal-traversal", {
-    relativePath: "journal/../outputs/review.md",
-    content: "traversal"
-  }), blocked);
-  assert.deepEqual(await call("metadata_update", "review-journal-metadata", {
-    relativePath: "journal/2026-09-04.md",
-    expectedVersion: `sha256:${"b".repeat(64)}`,
-    patch: { set: { reviewed: true } }
-  }), blocked);
-  assert.deepEqual(await call("note_move", "review-journal-move", {
-    sourcePath: "journal/a.md",
-    targetPath: "journal/b.md",
-    expectedVersion: `sha256:${"c".repeat(64)}`
-  }), blocked);
-  assert.deepEqual(await call("note_delete", "review-journal-delete", {
-    relativePath: "journal/a.md",
-    expectedVersion: `sha256:${"d".repeat(64)}`
-  }), blocked);
-  assert.deepEqual(await call("note_create", "review-journal-allowed", {
-    relativePath: "journal/2026-09-04.md",
-    content: "approved candidate"
+    expectedVersion: `sha256:${"a".repeat(64)}`,
+    content: "agent-decided content"
   }), reachedApproval);
-  assert.deepEqual(await call("note_update", "review-journal-update-allowed", {
-    relativePath: "journal/2026-09-04.md",
-    expectedVersion: `sha256:${"e".repeat(64)}`,
-    content: "approved candidate"
-  }), reachedApproval);
-
-  scope = "outputs";
-  assert.deepEqual(await call("note_create", "review-outputs-wrong-root", {
-    relativePath: "journal/2026-09-04.md",
-    content: "wrong root"
-  }), blocked);
-  assert.deepEqual(await call("note_create", "review-outputs-allowed", {
-    relativePath: "outputs/reviews/knowledge-review.md",
-    content: "approved candidate"
-  }), reachedApproval);
-  assert.deepEqual(await call("note_update", "review-outputs-update-allowed", {
-    relativePath: "outputs/reviews/knowledge-review.md",
-    expectedVersion: `sha256:${"f".repeat(64)}`,
-    content: "approved candidate"
-  }), reachedApproval);
-
-  scope = null;
-  assert.deepEqual(await call("note_create", "ordinary-create", {
-    relativePath: "projects/ordinary.md",
-    content: "ordinary behavior"
-  }), reachedApproval);
-  assert.deepEqual(await call("metadata_update", "ordinary-metadata", {
-    relativePath: "projects/ordinary.md",
-    expectedVersion: `sha256:${"0".repeat(64)}`,
-    patch: { set: { status: "active" } }
-  }), reachedApproval);
-  assert.deepEqual(authorizationCalls, [
-    "review-journal-allowed",
-    "review-journal-update-allowed",
-    "review-outputs-allowed",
-    "review-outputs-update-allowed",
-    "ordinary-create",
-    "ordinary-metadata"
-  ], "only allowed Review targets and ordinary Tools enter existing approval");
+  assert.deepEqual(
+    authorizationCalls,
+    ["generic-create", "generic-update"],
+    "valid note writes enter the existing approval flow without workflow-specific intent parsing"
+  );
 }
 
 async function assertUserQuestionUsesCentralFailClosedSecurity(): Promise<void> {
@@ -1250,7 +1174,6 @@ async function assertUserQuestionUsesCentralFailClosedSecurity(): Promise<void> 
         throw new Error("unexpected_vault_authorization");
       }
     },
-    currentKnowledgeReviewWriteScope: () => null,
     additionalToolSecurities: [questionSecurity],
     resultCorrection: {
       async correct() {
@@ -4312,74 +4235,6 @@ async function assertSkillPromptAndBindingValidation(): Promise<void> {
       plainSession.finishSuccessful("plain answer");
       assert.equal((await plainHandle.result).terminalState, "completed");
       assert.equal(fixture.runtime.releaseProductRun(plainHandle.productRunId), true);
-    }
-  );
-}
-
-async function assertKnowledgeReviewWriteScopeIsTurnBound(): Promise<void> {
-  const cases: readonly Readonly<{
-    text: string;
-    expected: PiKnowledgeReviewWriteScope;
-  }>[] = [
-    { text: "好的", expected: "read_only" },
-    { text: "继续", expected: "read_only" },
-    { text: "下一个", expected: "read_only" },
-    { text: "Journal", expected: "read_only" },
-    { text: "Outputs", expected: "read_only" },
-    { text: "不要保存到 Outputs", expected: "read_only" },
-    { text: "继续，我还没确认保存", expected: "read_only" },
-    { text: "好的，但现在不能保存", expected: "read_only" },
-    { text: "下一个，我不想保存", expected: "read_only" },
-    { text: "继续，我拒绝保存", expected: "read_only" },
-    { text: "好的，稍后再保存", expected: "read_only" },
-    { text: "下一个，我还在犹豫是否保存", expected: "read_only" },
-    { text: "能否保存到 Journal？", expected: "read_only" },
-    { text: "确认保存", expected: "journal" },
-    { text: "确认保存，但不要写入 Outputs", expected: "read_only" },
-    { text: "我还没想好，保存到 Journal", expected: "read_only" },
-    { text: "写入今天日记", expected: "journal" },
-    { text: "请保存到 Outputs", expected: "outputs" },
-    { text: "不要写 Journal，只保存到 Outputs", expected: "read_only" },
-    { text: "请同时保存到 Journal 和 Outputs", expected: "read_only" }
-  ];
-  await withFixture(
-    cases.map((_, index) => `review-scope-${index}`).concat("ordinary-scope"),
-    async (fixture) => {
-      const binding = {
-        skillId: "knowledge-review",
-        skillPath: path.join(fixture.root, "knowledge-review", "SKILL.md"),
-        skillName: "knowledge-review"
-      } as const;
-      for (const testCase of cases) {
-        const handle = await fixture.submit({
-          conversationId: "review-write-scope",
-          text: testCase.text,
-          submittedAt: 10,
-          ...binding
-        });
-        assert.equal(
-          fixture.currentToolExecution().knowledgeReviewWriteScope,
-          testCase.expected,
-          testCase.text
-        );
-        fixture.latestSession().finishSuccessful("review turn complete");
-        await handle.result;
-      }
-
-      const ordinary = await fixture.submit({
-        conversationId: "ordinary-write-scope",
-        text: "请保存到 Outputs",
-        submittedAt: 11,
-        skillPath: path.join(fixture.root, "ordinary", "SKILL.md"),
-        skillName: "knowledge-review"
-      });
-      assert.equal(
-        fixture.currentToolExecution().knowledgeReviewWriteScope,
-        null,
-        "a display-name collision without the stable Skill ID keeps ordinary behavior"
-      );
-      fixture.latestSession().finishSuccessful("ordinary turn complete");
-      await ordinary.result;
     }
   );
 }

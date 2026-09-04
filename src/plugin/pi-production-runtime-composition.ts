@@ -1791,8 +1791,6 @@ async function createProductionAgentSession(input: {
   const mcpSnapshot = await discoverPiMcpTools(input, mcpSecurity);
   const security = createPiVaultToolSecurityAdapter({
     authorization,
-    currentKnowledgeReviewWriteScope: () =>
-      input.input.currentToolExecutionContext().knowledgeReviewWriteScope,
     includeNoteReadKnowledgeReferences: true,
     additionalToolSecurity: maintenanceSecurity,
     additionalToolSecurities: [
