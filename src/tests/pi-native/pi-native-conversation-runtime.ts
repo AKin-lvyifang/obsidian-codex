@@ -82,6 +82,11 @@ import {
   createKnowledgeMaintenanceResultEnvelope
 } from "../../knowledge-base/knowledge-maintenance-result";
 import {
+  FileKnowledgeUsageStore,
+  KnowledgeUsageBridge,
+  knowledgeReferenceEntryDetails
+} from "../../knowledge-base/usage";
+import {
   PI_CONTEXT_LEDGER_CUSTOM_TYPE,
   buildPiContextLedger,
   calculatePiEffectiveInputBudget
@@ -559,7 +564,8 @@ async function assertRelatedNormalChatPreflightsAndReadsKnowledge(): Promise<voi
     publishedAt: "2026-08-30",
     verificationStatus: "local_revision_verified"
   });
-  const usage: string[] = [];
+  let usageBridge: KnowledgeUsageBridge | null = null;
+  let usageCalls = 0;
   const knowledge: PiKnowledgeRuntimePort = {
     async retrieveAsk() {
       throw new Error("ask_not_expected");
@@ -589,10 +595,33 @@ async function assertRelatedNormalChatPreflightsAndReadsKnowledge(): Promise<voi
       });
     },
     async recordUsage(input) {
-      usage.push(input.event.workflow);
+      usageCalls += 1;
+      assert.ok(usageBridge);
+      const { personalMemorySources, ...event } = input.event;
+      await usageBridge.record({
+        event: {
+          ...event,
+          referenceIds: [...event.referenceIds],
+          producedPaths: [...event.producedPaths],
+          ...(personalMemorySources === undefined
+            ? {}
+            : {
+                personalMemorySources: personalMemorySources.map(
+                  (source) => ({ ...source })
+                )
+              })
+        },
+        entries: input.entries
+      });
     }
   };
   await withFixture(["run-normal-knowledge-preflight"], async (fixture) => {
+    const usageStore = new FileKnowledgeUsageStore({
+      storageRootPath: fixture.catalog.storageRootPath,
+      vaultId: fixture.catalog.vaultId
+    });
+    await usageStore.initialize();
+    usageBridge = new KnowledgeUsageBridge(usageStore);
     fixture.configureFactoryTools({
       registered: ["knowledge_search", "knowledge_read", "note_read"],
       defaults: ["knowledge_search", "knowledge_read", "note_read"],
@@ -611,9 +640,42 @@ async function assertRelatedNormalChatPreflightsAndReadsKnowledge(): Promise<voi
     );
     assert.equal(session.activeToolSelections.at(-1)?.includes("knowledge_search"), true);
     assert.equal(session.activeToolSelections.at(-1)?.includes("knowledge_read"), true);
+    const referenceDetails = knowledgeReferenceEntryDetails([{ ...reference }]);
+    const referenceEntryId = session.sessionManager.appendCustomMessageEntry(
+      "echoink-knowledge-chat-resource-v1",
+      "BOUNDED_PERSONAL_KNOWLEDGE_PREFLIGHT",
+      false,
+      referenceDetails
+    );
     session.finishSuccessful("依据项目原文，当前决定是优先使用个人知识。");
-    assert.equal((await run.result).terminalState, "completed");
-    assert.deepEqual(usage, ["normal_read"]);
+    const settled = await run.result;
+    assert.equal(settled.terminalState, "completed");
+    assert.equal(usageCalls, 1);
+    const recordedUsage = await usageStore.list({ conversationId: run.conversationId });
+    assert.equal(recordedUsage.length, 1);
+    assert.equal(recordedUsage[0]?.workflow, "normal_read");
+    assert.deepEqual(recordedUsage[0]?.referenceIds, [reference.referenceId]);
+
+    const sessionFile = session.sessionManager.getSessionFile();
+    assert.ok(sessionFile);
+    const reopened = SessionManager.open(
+      sessionFile,
+      fixture.catalog.sessionRootPath,
+      fixture.root
+    );
+    const durableReferenceEntry = reopened.getBranch().find(
+      (entry) => entry.id === referenceEntryId
+    );
+    assert.equal(durableReferenceEntry?.type, "custom_message");
+    if (durableReferenceEntry?.type === "custom_message") {
+      assert.deepEqual(durableReferenceEntry.details, referenceDetails);
+    }
+    assert.equal(
+      (await fixture.catalog.diagnostics(run.conversationId)).some(
+        (diagnostic) => diagnostic.code === "runtime_interrupted"
+      ),
+      false
+    );
   }, { knowledge });
 }
 

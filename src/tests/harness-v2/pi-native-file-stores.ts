@@ -15,8 +15,13 @@ import {
   PI_NATIVE_FILE_SCHEMA_VERSION,
   PiNativeFileStoreError
 } from "../../harness/pi-native/file-store-utils";
+import {
+  knowledgeReferenceEntryDetails
+} from "../../knowledge-base/usage";
+import type { KnowledgeReference } from "../../knowledge-base/types";
 
 export async function runPiNativeFileStoreTests(): Promise<void> {
+  assertKnowledgeReferenceContract();
   const storageRootPath = await mkdtemp(
     path.join(os.tmpdir(), "echoink-pi-native-file-stores-")
   );
@@ -293,6 +298,52 @@ export async function runPiNativeFileStoreTests(): Promise<void> {
     assert.equal(allFiles.some((name) => name.endsWith(".tmp")), false);
   } finally {
     await rm(storageRootPath, { recursive: true, force: true });
+  }
+}
+
+function assertKnowledgeReferenceContract(): void {
+  const legacyReference: KnowledgeReference = {
+    referenceId: `knowledge-reference:${"a".repeat(64)}`,
+    vaultRelativePath: "projects/echoink.md",
+    title: "EchoInk",
+    excerpt: "项目决定优先使用个人知识。",
+    contentRevision: `sha256:${"b".repeat(64)}`,
+    lineStart: 1,
+    lineEnd: 1
+  };
+  const currentReference: KnowledgeReference = {
+    ...legacyReference,
+    sourceType: "projects",
+    recordedAt: 1_700_000_000_000.25,
+    publishedAt: "2026-08-30",
+    verificationStatus: "local_revision_verified"
+  };
+
+  const currentDetails = knowledgeReferenceEntryDetails([currentReference]);
+  assert.deepEqual(currentDetails.references, [currentReference]);
+  assert.equal(Object.isFrozen(currentDetails), true);
+  assert.equal(Object.isFrozen(currentDetails.references[0]), true);
+  assert.deepEqual(
+    knowledgeReferenceEntryDetails([legacyReference]).references,
+    [legacyReference]
+  );
+
+  const invalidReferences: Record<string, unknown>[] = [
+    { ...currentReference, unknownField: true },
+    { ...currentReference, sourceType: "journal" },
+    { ...currentReference, recordedAt: Number.NaN },
+    { ...currentReference, recordedAt: -1 },
+    { ...currentReference, publishedAt: "2026-08-30\nforged" },
+    { ...currentReference, publishedAt: "x".repeat(101) },
+    { ...currentReference, verificationStatus: "web_verified" }
+  ];
+  for (const reference of invalidReferences) {
+    assert.throws(
+      () => knowledgeReferenceEntryDetails([
+        reference as unknown as KnowledgeReference
+      ]),
+      isStoreError("invalid-input")
+    );
   }
 }
 
