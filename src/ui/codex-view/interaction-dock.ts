@@ -109,18 +109,19 @@ export class InteractionDockController {
       cls: "codex-interaction-heading-primary",
       text: conversationUiText(language, "需要你的选择", "Your input is needed")
     });
-    heading.createSpan({ cls: "codex-interaction-heading-secondary", text: "Question" });
-    header.createSpan({
-      cls: "codex-interaction-progress",
-      text: `${index + 1}/${interaction.questions.length}`,
-      attr: {
-        "aria-label": conversationUiText(
-          language,
-          `第 ${index + 1} 个问题，共 ${interaction.questions.length} 个`,
-          `Question ${index + 1} of ${interaction.questions.length}`
-        )
-      }
-    });
+    if (interaction.questions.length > 1) {
+      header.createSpan({
+        cls: "codex-interaction-progress",
+        text: `${index + 1}/${interaction.questions.length}`,
+        attr: {
+          "aria-label": conversationUiText(
+            language,
+            `第 ${index + 1} 个问题，共 ${interaction.questions.length} 个`,
+            `Question ${index + 1} of ${interaction.questions.length}`
+          )
+        }
+      });
+    }
 
     const errorId = `codex-interaction-error-${safeDomIdentity(interaction.interactionId)}-${safeDomIdentity(question.questionId)}`;
     const fieldset = card.createEl("fieldset", {
@@ -138,8 +139,16 @@ export class InteractionDockController {
     legend.id = `codex-interaction-prompt-${safeDomIdentity(interaction.interactionId)}-${safeDomIdentity(question.questionId)}`;
     const instruction = question.allowSupplement
       ? question.selection === "multiple"
-        ? conversationUiText(language, "可选择多项，也可填写补充说明。", "Select one or more options, and add details if needed.")
-        : conversationUiText(language, "请选择一项，也可填写补充说明。", "Select one option, and add details if needed.")
+        ? conversationUiText(
+            language,
+            "选择一项或多项，或填写自己的回答，也可以两者都填。",
+            "Select one or more options, or write your own answer. You can also do both."
+          )
+        : conversationUiText(
+            language,
+            "选择一项或填写自己的回答，也可以两者都填。",
+            "Select an option or write your own answer. You can also do both."
+          )
       : question.selection === "multiple"
         ? conversationUiText(language, "可选择多项。", "Select one or more options.")
         : conversationUiText(language, "请选择一项。", "Select one option.");
