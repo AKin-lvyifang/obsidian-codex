@@ -1,4 +1,6 @@
 import type { SettingsLanguage } from "../settings/settings";
+import { moment } from "obsidian";
+import { DEFAULT_JOURNAL_DATE_FORMAT, QUICK_JOURNAL_TEMPLATE, renderNativeJournalTemplate } from "./native-journal";
 import { homeContributionMonthLabel, homeCopy } from "./home-i18n";
 import {
   DEFAULT_JOURNAL_DIRECTORY,
@@ -83,23 +85,7 @@ export const BUILT_IN_JOURNAL_TEMPLATES: readonly JournalTemplateDefinition[] = 
     id: "quick",
     name: "此刻速记",
     description: "一句话也可以，系统始终默认",
-    content: [
-      "---",
-      "date: {{date}}",
-      "template: 此刻速记",
-      "tags:",
-      "  - journal",
-      "---",
-      "",
-      "# {{date}} 此刻速记",
-      "",
-      "## 现在发生了什么",
-      "",
-      "",
-      "## 想记住的一点",
-      "",
-      ""
-    ].join("\n")
+    content: QUICK_JOURNAL_TEMPLATE
   },
   {
     id: "morning",
@@ -300,12 +286,13 @@ export function buildHomeJournalDays(
   records: readonly HomeVaultFileRecord[],
   activity: readonly HomeActivityDay[],
   visibleMonth: Date,
-  journalDirectory = DEFAULT_JOURNAL_DIRECTORY
+  journalDirectory = DEFAULT_JOURNAL_DIRECTORY,
+  journalFormat = DEFAULT_JOURNAL_DATE_FORMAT
 ): HomeJournalDay[] {
   const activityByDate = new Map(activity.map((day) => [day.date, day.count]));
   const journalByDate = new Map<string, HomeVaultFileRecord>();
   for (const record of records) {
-    const date = journalDateFromPath(record.path, journalDirectory);
+    const date = journalDateFromPath(record.path, journalDirectory, journalFormat);
     if (date) journalByDate.set(date, record);
   }
   const year = visibleMonth.getFullYear();
@@ -328,21 +315,27 @@ export function buildHomeJournalDays(
 
 export function journalDateFromPath(
   path: string,
-  journalDirectory = DEFAULT_JOURNAL_DIRECTORY
+  journalDirectory = DEFAULT_JOURNAL_DIRECTORY,
+  journalFormat = DEFAULT_JOURNAL_DATE_FORMAT
 ): string | null {
   const normalizedPath = path.replace(/\\/gu, "/").replace(/^\/+|\/+$/gu, "");
   const directory = normalizeJournalDirectory(journalDirectory);
   const prefix = `${directory}/`;
   if (!normalizedPath.toLocaleLowerCase().startsWith(prefix.toLocaleLowerCase())) return null;
-  const match = normalizedPath.slice(prefix.length).match(/^(\d{4}-\d{2}-\d{2})\.md$/iu);
-  return match?.[1] ?? null;
+  if (!normalizedPath.endsWith(".md")) return null;
+  const name = normalizedPath.slice(prefix.length, -3);
+  for (const format of [journalFormat, DEFAULT_JOURNAL_DATE_FORMAT, "YYYY-MM-DD"]) {
+    const parsed = moment(name, format, true);
+    if (parsed.isValid() && parsed.format(format) === name) return parsed.format("YYYY-MM-DD");
+  }
+  return null;
 }
 
 export function journalPathForDate(
   date: Date,
   journalDirectory = DEFAULT_JOURNAL_DIRECTORY
 ): string {
-  return `${normalizeJournalDirectory(journalDirectory)}/${dateKey(date)}.md`;
+  return `${normalizeJournalDirectory(journalDirectory)}/${moment(date).format(DEFAULT_JOURNAL_DATE_FORMAT)}.md`;
 }
 
 export function extractFirstLocalImageTarget(markdown: string): string | null {
@@ -411,7 +404,8 @@ export function applyJournalTemplate(content: string, date: Date): string {
     datetime: `${dateKey(date)} ${timeKey(date)}`,
     title: dateKey(date)
   };
-  return content.replace(/\{\{(date|time|datetime|title)\}\}/gu, (_, key: keyof typeof values) => values[key]);
+  return renderNativeJournalTemplate(content, date, dateKey(date))
+    .replace(/\{\{(date|time|datetime|title)\}\}/gu, (_, key: keyof typeof values) => values[key]);
 }
 
 export function mostRecentRecordInFolder(records: readonly HomeVaultFileRecord[], folder: string): HomeVaultFileRecord | null {

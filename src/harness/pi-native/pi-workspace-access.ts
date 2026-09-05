@@ -15,7 +15,7 @@ export function normalizePiWorkspacePermission(value: unknown): PermissionMode {
 
 const CONTENT_READ_TOOLS = new Set([
   "vault_search", "note_read", "knowledge_search", "knowledge_read",
-  "memory_search", "memory_read", "task_update", "user_question"
+  "memory_search", "memory_read", "task_update", "user_question", "obsidian_context", "obsidian_cli"
 ]);
 
 /** Commands describe intent. Only this turn's access and tool metadata grant capability. */

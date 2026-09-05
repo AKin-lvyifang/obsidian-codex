@@ -781,7 +781,7 @@ async function assertConflictCancellationAndProviderRecoveryStops(): Promise<voi
     await waitUntil(() => host.batchCalls.length === 1);
     const cancelled = await initializer.cancel();
     assert.equal(cancelled?.status, "cancelled");
-    await waitUntil(() => !initializer.isRunning);
+    await waitForTerminal(initializer);
     assert.equal(host.read("notes/move-before-cancel.md"), null);
     assert.equal(
       host.read("raw/imported/notes/move-before-cancel.md"),
@@ -897,7 +897,7 @@ async function assertRestartPausesWithoutProviderReplay(): Promise<void> {
     await first.initialize();
     await first.startPreview("recommended");
     await first.confirm();
-    await waitUntil(() => first.snapshot()?.status === "active");
+    await waitUntil(() => host.folderCreationBlocked);
     const resumed = new KnowledgeBaseInitializer(host);
     await resumed.initialize();
     assert.equal(resumed.snapshot()?.status, "paused");
@@ -1032,7 +1032,10 @@ async function waitForTerminal(
 ): Promise<Readonly<KnowledgeInitializationJob>> {
   await waitUntil(() => {
     const status = initializer.snapshot()?.status;
-    return Boolean(status && status !== "active" && status !== "preview");
+    // Terminal status precedes its final disk write. Keep the temporary host
+    // alive until that write and the execution's cleanup have both finished.
+    const execution = initializer as unknown as { runFlight: Promise<void> | null };
+    return Boolean(status && status !== "active" && status !== "preview" && execution.runFlight === null);
   });
   const snapshot = initializer.snapshot();
   assert.ok(snapshot);
@@ -1077,6 +1080,7 @@ class MemoryKnowledgeInitializationHost implements KnowledgeInitializationHost {
   batchOutcome: "completed" | "failed" | "write_uncertain" = "completed";
   blockBatchUntilAbort = false;
   blockFolders = false;
+  folderCreationBlocked = false;
   stateChangedCalls = 0;
   moveCalls = 0;
   failPathExists = false;
@@ -1174,7 +1178,10 @@ class MemoryKnowledgeInitializationHost implements KnowledgeInitializationHost {
   }
 
   async createFolder(relativePath: string): Promise<void> {
-    if (this.blockFolders) await new Promise<void>(() => {});
+    if (this.blockFolders) {
+      this.folderCreationBlocked = true;
+      await new Promise<void>(() => {});
+    }
     if (
       !relativePath
       || relativePath === "."

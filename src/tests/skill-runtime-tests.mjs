@@ -20,6 +20,7 @@ await esbuild.build({
     loader: "ts"
   },
   bundle: true,
+  loader: { ".md": "text" },
   platform: "node",
   target: "node22",
   format: "esm",

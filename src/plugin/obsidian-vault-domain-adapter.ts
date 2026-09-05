@@ -97,7 +97,7 @@ export class ObsidianVaultDomainAdapter implements VaultDomainAdapter {
       ? `${input.scope.relativePath}/`
       : "";
     const results: VaultAdapterSearchResult[] = [];
-    for (const file of this.app.vault.getMarkdownFiles()) {
+    for (const file of this.app.vault.getFiles().filter((entry) => /\.(md|base|canvas)$/iu.test(entry.path))) {
       if (results.length >= input.maxResults) break;
       if (
         scopePrefix

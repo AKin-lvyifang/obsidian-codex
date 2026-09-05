@@ -1483,10 +1483,7 @@ export class PiNativeConversationRuntime {
       noteMentions,
       documents,
       skillTurnContext: dailyJournalSkillTurnContext({
-        catalog,
-        selectedRuntimeSkill,
-        explicitSkillSelected: Boolean(request.skillPath),
-        submittedAt: request.submittedAt
+        selectedSkillIds
       }),
       firstAssistantTextSeen: false,
       providerReasoningBlocks: new Map(),
@@ -6398,44 +6395,14 @@ function assertValidSkillBinding(
 }
 
 function dailyJournalSkillTurnContext(input: Readonly<{
-  catalog: Readonly<PiConversationCatalogEntry>;
-  selectedRuntimeSkill: Readonly<PiRuntimeResolvedSkill> | null;
-  explicitSkillSelected: boolean;
-  submittedAt: number;
+  selectedSkillIds: readonly string[];
 }>): Readonly<PiNativeSkillTurnContext> | null {
-  if (
-    input.explicitSkillSelected
-    || input.catalog.defaultSkillId !== "daily-journal"
-    || input.selectedRuntimeSkill?.id !== "daily-journal"
-  ) return null;
-  const journalDirectory = input.catalog.journalDirectory;
-  const date = new Date(input.submittedAt);
-  if (!journalDirectory || !Number.isFinite(input.submittedAt)
-    || Number.isNaN(date.getTime())) {
-    throw new PiNativeConversationRuntimeError(
-      "skill_binding_invalid",
-      "daily-journal 会话缺少有效的固定目录或提交时间，本轮没有发送。"
-    );
-  }
-  const dateKey = [
-    date.getFullYear(),
-    String(date.getMonth() + 1).padStart(2, "0"),
-    String(date.getDate()).padStart(2, "0")
-  ].join("-");
-  const timeKey = [
-    String(date.getHours()).padStart(2, "0"),
-    String(date.getMinutes()).padStart(2, "0")
-  ].join(":");
+  if (!input.selectedSkillIds.includes("daily-journal")) return null;
   return Object.freeze({
     skillId: "daily-journal",
     content: [
-      "当前轮已绑定 daily-journal Skill，固定使用 Skill 内完整的 此刻速记 模板。",
-      "开场直接与用户交流，不要先搜索模板或全库资料；只有用户明确回看旧资料时才按需检索。",
-      `会话固定日记目录：${journalDirectory}`,
-      `当前日期：${dateKey}`,
-      `当前时间：${timeKey}`,
-      `目标文件：${journalDirectory}/${dateKey}.md`,
-      "这些值来自会话创建时冻结的目录和本轮提交时间；不要改用会话 cwd 或设置页的新值。"
+      "当前使用 daily-journal Skill。直接交流，用户继续表达时继续聊；开场不检查文件、模板或目录。",
+      "用户明确要保存时，再调用 obsidian_context 获取当前原生日记设置、当天精确路径和已渲染模板，使用现有 note 工具保存。"
     ].join("\n")
   });
 }

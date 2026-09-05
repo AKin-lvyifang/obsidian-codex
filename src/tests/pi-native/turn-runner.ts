@@ -1930,9 +1930,9 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
     piSessionId: session.piSessionId,
     productRunId: "product-run-turn-runner"
   }, "turn runner subscribes to the exact active Approval run");
-  assert.equal(submittedRequest?.skillId, "knowledge-review");
-  assert.equal(submittedRequest?.skillPath, "skills/knowledge-review/SKILL.md");
-  assert.equal(submittedRequest?.skillName, "knowledge-review");
+  assert.equal(submittedRequest?.skillId, undefined);
+  assert.equal(submittedRequest?.skillPath, undefined);
+  assert.equal(submittedRequest?.skillName, undefined);
   assert.equal(submittedRequest?.memoryMode, "normal");
   assert.equal(submittedRequest?.images?.length, 1);
   assert.equal(submittedRequest?.documents?.length, 1);

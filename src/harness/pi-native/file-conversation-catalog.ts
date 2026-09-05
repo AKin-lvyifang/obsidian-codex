@@ -873,12 +873,6 @@ function normalizeCatalogEntry(
         object.journalDirectory,
         "entry.journalDirectory"
       );
-  if (defaultSkillId === "daily-journal" && !journalDirectory) {
-    throw new PiNativeFileStoreError(
-      "invalid-input",
-      "daily-journal Conversation 必须冻结 journalDirectory"
-    );
-  }
   return {
     conversationId: requireNonEmptyString(
       object.conversationId,

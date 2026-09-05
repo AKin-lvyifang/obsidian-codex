@@ -50,7 +50,7 @@ export interface ResolveVaultTargetInput {
   relativePath: string;
   allowRoot?: boolean;
   /**
-   * Maintenance-only create/readback seam. When true, an unresolved suffix
+   * Safe create/readback seam. When true, an unresolved suffix
    * may consist entirely of absent path segments. Existing ancestors are
    * still canonicalized one by one and symbolic links remain fail-closed.
    */

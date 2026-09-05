@@ -479,6 +479,7 @@ async function resolveAuthorizationTarget(
     vaultId,
     relativePath,
     mustExist: !create,
+    allowMissingParentDirectories: create,
     expectedKind: "file"
   });
   if (create && target.exists) {

@@ -18,6 +18,7 @@ import type {
 } from "../harness/resources/skill-runtime";
 import { AGENT_AVATAR_PRESETS, resolveAgentAvatarUrl } from "../ui/agent-avatar-presets";
 import { normalizeJournalDirectory } from "../home/journal-directory";
+import { readNativeJournalSettings, saveNativeJournalFolder } from "../home/native-journal";
 import { AgentIdentityModal } from "../ui/agent-identity-modal";
 import { renderAnimateIcon } from "../ui/animate-icon";
 import {
@@ -677,22 +678,20 @@ export class CodexSettingTab extends PluginSettingTab {
     applySettingsRow(new Setting(journalGroup)
       .setName(zh ? "日记保存文件夹" : "Journal folder")
       .setDesc(zh
-        ? "填写当前 Vault 内的相对路径。首页日历、模板创建和日记会话都会使用这个文件夹。"
-        : "Enter a relative path inside this vault. The Home calendar, template creation, and journal conversations use this folder.")
+        ? "与 Obsidian 原生日记共用文件夹。日期格式和模板可在原生日记设置中调整；默认按月存放，每天一篇。"
+        : "Shared with Obsidian Daily notes. Set the date format and template there; the default is one note per day in monthly folders.")
       .addText((text) => {
         const label = zh ? "日记保存文件夹" : "Journal folder";
-        text.setPlaceholder("journal").setValue(this.plugin.settings.journalDirectory);
+        text.setPlaceholder("journal").setValue(readNativeJournalSettings(this.app, this.plugin.settings.journalDirectory).folder);
         text.inputEl.setAttr("aria-label", label);
         const saveDirectory = async (): Promise<void> => {
-          const previous = this.plugin.settings.journalDirectory;
+          const previous = readNativeJournalSettings(this.app, this.plugin.settings.journalDirectory).folder;
           const normalized = normalizeJournalDirectory(text.getValue());
           text.setValue(normalized);
           if (normalized === previous) return;
-          this.plugin.settings.journalDirectory = normalized;
           try {
-            await this.plugin.saveSettings(true);
+            await saveNativeJournalFolder(this.app, normalized);
           } catch {
-            this.plugin.settings.journalDirectory = previous;
             text.setValue(previous);
             new Notice(zh ? "日记保存文件夹未保存，请重试" : "Journal folder was not saved. Try again.");
           }

@@ -112,6 +112,8 @@ import {
   FileApprovalTicketStore
 } from "../harness/pi-native/tool-authorization";
 import { VaultDomainService } from "../harness/pi-native/vault-domain-service";
+import { createPiObsidianToolDefinitions, PiObsidianToolSecurity, PI_OBSIDIAN_TOOL_IDS } from "../harness/pi-native/pi-obsidian-tools";
+import { createObsidianNativePort } from "./obsidian-native-tools";
 import { EchoInkVaultToolEgressPolicy } from "../harness/pi-native/vault-tool-result-safety";
 import {
   secureVaultToolResult,
@@ -1798,6 +1800,7 @@ async function createProductionAgentSession(input: {
     }
   });
   const userQuestionSecurity = new PiUserQuestionToolSecurity();
+  const obsidianSecurity = new PiObsidianToolSecurity();
   const personalMemorySecurity = new PiPersonalMemoryToolSecurity({
     currentRuntime: () => {
       const execution = input.input.currentToolExecutionContext();
@@ -1854,7 +1857,8 @@ async function createProductionAgentSession(input: {
       taskPlanSecurity,
       userQuestionSecurity,
       personalMemorySecurity,
-      knowledgeReadSecurity
+      knowledgeReadSecurity,
+      obsidianSecurity
     ],
     resultCorrection: createSecurePiVaultToolResultCorrectionPort(
       new EchoInkVaultToolEgressPolicy()
@@ -1865,6 +1869,10 @@ async function createProductionAgentSession(input: {
     security,
     writeExecution: input.writeExecution
   });
+  const obsidianTools = createPiObsidianToolDefinitions(
+    createObsidianNativePort(input.plugin.app, input.vaultAdapter, () => input.plugin.settings.journalDirectory),
+    obsidianSecurity
+  );
   const maintenanceTool = createPiKnowledgeMaintenanceToolDefinition({
     port: input.knowledgeMaintenance,
     security: maintenanceSecurity
@@ -1996,6 +2004,7 @@ async function createProductionAgentSession(input: {
 
   const registeredTools = [
     ...vaultTools,
+    ...obsidianTools,
     maintenanceTool,
     taskPlanTool,
     userQuestionTool,
@@ -2054,6 +2063,7 @@ async function createProductionAgentSession(input: {
   });
   created.session.setActiveToolsByName([
     ...PI_VAULT_TOOL_IDS,
+    ...PI_OBSIDIAN_TOOL_IDS,
     maintenanceTool.name,
     taskPlanTool.name,
     userQuestionTool.name,
@@ -2064,6 +2074,7 @@ async function createProductionAgentSession(input: {
   const planToolNames = [
     "vault_search",
     "note_read",
+    ...PI_OBSIDIAN_TOOL_IDS,
     ...mcpSnapshot.toolSecurity
       .filter((descriptor) => descriptor.readOnly)
       .map((descriptor) => descriptor.name),

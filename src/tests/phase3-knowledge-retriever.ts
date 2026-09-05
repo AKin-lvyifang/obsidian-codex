@@ -43,7 +43,7 @@ export async function runPhase3KnowledgeRetrieverTests(): Promise<void> {
   await extension.factory({ on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler) } as never);
   const request = await handlers.get("before_agent_start")!({ systemPrompt: "EchoInk", prompt: "想把今天发生的事记下来。" });
   assert.match(request.systemPrompt, /workspace-write/);
-  assert.match(request.message.content, /此刻速记[^]*template: 此刻速记/);
+  assert.match(request.message.content, /obsidian_context[^]*templateContent/);
   assert.doesNotMatch(request.message.content, /当前轮是 \/ask|当前轮只允许/);
   assert.equal(shouldPreflightPersonalKnowledge("想把今天发生的事记下来。", "daily-journal"), false);
   assert.equal(shouldPreflightPersonalKnowledge("回看之前的笔记再补充", "daily-journal"), true);

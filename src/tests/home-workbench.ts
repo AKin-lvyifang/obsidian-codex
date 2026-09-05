@@ -121,7 +121,6 @@ async function assertHomeConversationLaunchFlow(): Promise<void> {
   }).openConversationAction("daily");
   assert.deepEqual(calls, [
     "skill:daily-journal",
-    "ensure-directory",
     "open-sidebar",
     "get-view",
     "start"
@@ -130,7 +129,7 @@ async function assertHomeConversationLaunchFlow(): Promise<void> {
   assert.match(String(dailyStart.title), /^写日记 · \d{4}-\d{2}-\d{2}$/u);
   assert.equal(dailyStart.message, HOME_DAILY_MESSAGE);
   assert.equal(dailyStart.defaultSkillId, "daily-journal");
-  assert.equal(dailyStart.journalDirectory, "notes/daily");
+  assert.equal(dailyStart.journalDirectory, undefined);
 
   calls.length = 0;
   starts.length = 0;
@@ -153,7 +152,6 @@ async function assertHomeConversationLaunchFlow(): Promise<void> {
   }).openConversationAction("daily");
   assert.deepEqual(calls, [
     "skill:daily-journal",
-    "ensure-directory",
     "open-sidebar",
     "get-view",
     "start"
@@ -162,7 +160,7 @@ async function assertHomeConversationLaunchFlow(): Promise<void> {
   assert.match(String(englishDailyStart.title), /^Journal · \d{4}-\d{2}-\d{2}$/u);
   assert.equal(englishDailyStart.message, HOME_DAILY_MESSAGE_EN);
   assert.equal(englishDailyStart.defaultSkillId, "daily-journal");
-  assert.equal(englishDailyStart.journalDirectory, "notes/daily");
+  assert.equal(englishDailyStart.journalDirectory, undefined);
 
   calls.length = 0;
   openTestNoticeMessages.length = 0;
@@ -531,8 +529,8 @@ function assertActivityAndJournalCalendar(): void {
     merged.find((day) => day.date === "2026-08-31"),
     { date: "2026-08-31", count: 4, fileCount: 2, checkCount: 2, level: "mid" }
   );
-  assert.equal(journalPathForDate(now), "journal/2026-08-31.md");
-  assert.equal(journalPathForDate(now, "Notes/Daily"), "Notes/Daily/2026-08-31.md");
+  assert.equal(journalPathForDate(now), "journal/2026-08/2026-08-31.md");
+  assert.equal(journalPathForDate(now, "Notes/Daily"), "Notes/Daily/2026-08/2026-08-31.md");
   assert.equal(journalDateFromPath("Notes/Daily/2026-08-31.md", "Notes/Daily"), "2026-08-31");
   assert.equal(journalDateFromPath("Notes/Daily/archive/2026-08-31.md", "Notes/Daily"), null);
 
@@ -591,7 +589,7 @@ async function assertCustomJournalDirectoryBehavior(): Promise<void> {
   const date = new Date(2026, 8, 4, 10, 0);
   const created = await service.createOrOpenJournal(defaultJournalTemplateChoice(), date);
   assert.equal(created.created, true);
-  assert.equal(created.file.path, "Notes/Daily/2026-09-04.md");
+  assert.equal(created.file.path, "Notes/Daily/2026-09/2026-09-04.md");
   assert.match(contents.get(created.file.path) ?? "", /2026-09-04/u);
   const reopened = await service.createOrOpenJournal(defaultJournalTemplateChoice(), date);
   assert.equal(reopened.created, false);
@@ -604,7 +602,7 @@ async function assertCustomJournalDirectoryBehavior(): Promise<void> {
 
   const fallback = new HomeWorkbenchDataService(app, () => "../outside");
   assert.equal(fallback.getJournalDirectory(), "journal");
-  assert.equal(fallback.journalPathForDate(date), "journal/2026-09-04.md");
+  assert.equal(fallback.journalPathForDate(date), "journal/2026-09/2026-09-04.md");
 }
 
 function assertImageExtraction(): void {

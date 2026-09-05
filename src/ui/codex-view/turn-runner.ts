@@ -921,7 +921,7 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
       memoryMode: piChatMemoryModeForGlobalSetting(
         view.plugin.settings?.memory?.useLongTermMemory !== false
       ),
-      ...(skillPath && skillName ? { skillId, skillPath, skillName } : {}),
+      ...(!defaultSkillId && skillPath && skillName ? { skillId, skillPath, skillName } : {}),
       ...(item.piDraftId ? { draftId: item.piDraftId } : {}),
       ...(maintenanceScope ? { maintenanceScope } : {}),
       ...(preparedImages.length ? { images: preparedImages } : {}),

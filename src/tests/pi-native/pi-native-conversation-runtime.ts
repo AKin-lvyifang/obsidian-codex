@@ -208,13 +208,8 @@ async function assertConversationDefaultSkillPriorityAndTurnContext(): Promise<v
     assert.deepEqual(fixture.currentSkillTurn(), {
       skillId: "daily-journal",
       content: [
-        "当前轮已绑定 daily-journal Skill，固定使用 Skill 内完整的 此刻速记 模板。",
-        "开场直接与用户交流，不要先搜索模板或全库资料；只有用户明确回看旧资料时才按需检索。",
-        "会话固定日记目录：notes/daily",
-        "当前日期：2026-09-04",
-        "当前时间：09:07",
-        "目标文件：notes/daily/2026-09-04.md",
-        "这些值来自会话创建时冻结的目录和本轮提交时间；不要改用会话 cwd 或设置页的新值。"
+        "当前使用 daily-journal Skill。直接交流，用户继续表达时继续聊；开场不检查文件、模板或目录。",
+        "用户明确要保存时，再调用 obsidian_context 获取当前原生日记设置、当天精确路径和已渲染模板，使用现有 note 工具保存。"
       ].join("\n")
     });
     assert.match(

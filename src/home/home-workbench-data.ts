@@ -1,9 +1,9 @@
 import { App, TFile, normalizePath } from "obsidian";
 import type { SettingsLanguage } from "../settings/settings";
 import { homeCopy } from "./home-i18n";
+import { nativeJournalPathForDate, readNativeJournalContext, readNativeJournalSettings } from "./native-journal";
 import {
   DEFAULT_JOURNAL_DIRECTORY,
-  normalizeJournalDirectory
 } from "./journal-directory";
 import {
   BUILT_IN_JOURNAL_TEMPLATES,
@@ -16,7 +16,6 @@ import {
   importedTemplatePath,
   isKnowledgeBaseReviewPath,
   journalDateFromPath,
-  journalPathForDate,
   mostRecentRecordInFolder,
   nextAvailableImportedTemplatePath,
   parseImportedJournalTemplate,
@@ -88,11 +87,19 @@ export class HomeWorkbenchDataService {
   ) {}
 
   getJournalDirectory(): string {
-    return normalizeJournalDirectory(this.journalDirectoryProvider());
+    return readNativeJournalSettings(this.app, this.journalDirectoryProvider()).folder;
   }
 
   journalPathForDate(date: Date): string {
-    return journalPathForDate(date, this.getJournalDirectory());
+    return nativeJournalPathForDate(this.app, date, this.journalDirectoryProvider());
+  }
+
+  existingJournalForDate(date: Date): TFile | null {
+    const preferred = this.app.vault.getAbstractFileByPath(this.journalPathForDate(date));
+    if (preferred instanceof TFile) return preferred;
+    const settings = readNativeJournalSettings(this.app, this.journalDirectoryProvider());
+    const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+    return this.app.vault.getMarkdownFiles().find((file) => journalDateFromPath(file.path, settings.folder, settings.format) === key) ?? null;
   }
 
   async ensureJournalDirectory(language: SettingsLanguage = "zh-CN"): Promise<string> {
@@ -107,7 +114,8 @@ export class HomeWorkbenchDataService {
       this.recordForFile(file, journalDirectory)
     );
     const activity = buildHomeActivityDays(records, { now: new Date(), days: 371 });
-    const journalDays = buildHomeJournalDays(records, activity, visibleMonth, journalDirectory);
+    const journalDays = buildHomeJournalDays(records, activity, visibleMonth, journalDirectory,
+      readNativeJournalSettings(this.app, this.journalDirectoryProvider()).format);
     const customTemplates = this.listCustomTemplates();
     return {
       records,
@@ -131,11 +139,12 @@ export class HomeWorkbenchDataService {
     language: SettingsLanguage = "zh-CN"
   ): Promise<HomeJournalCreateResult> {
     const path = normalizePath(this.journalPathForDate(date));
-    const existing = this.app.vault.getAbstractFileByPath(path);
+    const existing = this.existingJournalForDate(date) ?? this.app.vault.getAbstractFileByPath(path);
     if (existing instanceof TFile) return { file: existing, created: false };
     if (existing) throw new Error(homeCopy(language).template.pathOccupiedByFolder(path));
-    const source = await this.readTemplate(choice, language);
-    const content = applyJournalTemplate(source, date);
+    const content = choice.kind === "built-in" && choice.template.id === "quick"
+      ? (await readNativeJournalContext(this.app, { now: date, legacyDirectory: this.journalDirectoryProvider() })).templateContent
+      : applyJournalTemplate(await this.readTemplate(choice, language), date);
     await this.ensureFolder(path.slice(0, path.lastIndexOf("/")), language);
     const file = await this.app.vault.create(path, content);
     return { file, created: true };
@@ -185,7 +194,8 @@ export class HomeWorkbenchDataService {
   }
 
   private recordForFile(file: TFile, journalDirectory: string): HomeVaultFileRecord {
-    const cache = journalDateFromPath(file.path, journalDirectory)
+    const cache = journalDateFromPath(file.path, journalDirectory,
+      readNativeJournalSettings(this.app, this.journalDirectoryProvider()).format)
       ? this.app.metadataCache.getFileCache(file)
       : null;
     const imageFile = (cache?.embeds ?? [])

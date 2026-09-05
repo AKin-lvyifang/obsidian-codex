@@ -418,7 +418,7 @@ async function assertBuiltinSkillManagementScenarios(): Promise<void> {
     assert.equal(upgradedState.records["daily-journal"]?.userModified, false);
 
     const customizedContent = canonicalContent.replace(
-      "## 交谈方式",
+      "## 交谈",
       "## 我的交谈方式"
     );
     const saved = await upgraded.saveBuiltinSkillContent(
