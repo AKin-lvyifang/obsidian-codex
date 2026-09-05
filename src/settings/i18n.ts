@@ -1177,7 +1177,7 @@ const ZH_CONVERSATION_COPY: ConversationCopy = {
   },
   sources: {
     usedDocuments: (count) => `使用了 ${count} 个文档`,
-    noEvidence: "没有命中文件，也没有引用片段；不会显示伪来源。",
+    noEvidence: "知识库没有找到可引用依据。",
     personalMemoryCount: (count) => count > 0 ? `${count} 条 Personal Memory` : "Personal Memory 来源",
     noPersonalMemory: "未记录可展示的 Personal Memory 来源。",
     noVaultPath: "Personal Memory 没有 Vault 路径，无法打开",
@@ -1567,7 +1567,7 @@ const EN_CONVERSATION_COPY: ConversationCopy = {
   },
   sources: {
     usedDocuments: (count) => `Used ${count} ${count === 1 ? "document" : "documents"}`,
-    noEvidence: "No files or quoted passages matched; no sources are fabricated.",
+    noEvidence: "No citable evidence was found in the knowledge base.",
     personalMemoryCount: (count) => count > 0 ? `${count} Personal Memory ${count === 1 ? "source" : "sources"}` : "Personal Memory sources",
     noPersonalMemory: "No displayable Personal Memory sources were recorded.",
     noVaultPath: "Personal Memory has no Vault path and cannot be opened",

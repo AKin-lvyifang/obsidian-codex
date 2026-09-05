@@ -83,6 +83,8 @@ export interface PiVaultToolResultCorrectionPort {
 }
 
 export interface CreatePiVaultToolSecurityAdapterOptions {
+  /** Same ProductRun policy used to publish the active tool list. Checked before dispatch. */
+  readonly isToolAllowed?: (toolName: string) => boolean;
   /** Required fail-closed port; there is no allow-all authorization default. */
   readonly authorization: PiVaultToolAuthorizationPort;
   /** Required fail-closed port; there is no unsanitized result default. */
@@ -198,6 +200,13 @@ implements PiVaultToolExecutionSecurityPort {
     event: ToolCallEvent,
     signal: AbortSignal | undefined
   ): Promise<Readonly<{ block: true; reason: PiVaultToolBlockReason }> | void> {
+    if (this.options.isToolAllowed) {
+      try {
+        if (!this.options.isToolAllowed(event.toolName)) return block("tool_policy_blocked");
+      } catch {
+        return block("authorization_failed");
+      }
+    }
     if (!isPiVaultToolId(event.toolName)) {
       const additionalSecurity = this.additionalToolSecurities.find((security) =>
         additionalToolSecurityHandles(security, event.toolName));

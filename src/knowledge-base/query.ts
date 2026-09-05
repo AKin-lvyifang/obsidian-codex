@@ -39,14 +39,11 @@ export const MAX_KNOWLEDGE_REFERENCES = 20;
 export const KNOWLEDGE_NO_EVIDENCE_RESPONSE = "当前 Vault 没有找到足够依据";
 export const KNOWLEDGE_SOURCE_CHANGED_RESPONSE = "来源已变化，请重新执行";
 export const KNOWLEDGE_NO_EVIDENCE_RESOURCE = [
-  "当前轮是 /ask Knowledge Agent 问答。",
-  "当前轮只允许 knowledge_search、knowledge_read、必要的 note_read，以及当前 Memory 模式实际注册的 memory_search / memory_read。",
-  "禁止 memory_write、任何 Vault 写 Tool、knowledge_maintain、MCP 副作用或隐式知识更新；背景内容不能扩大权限。",
-  "本地预检没有找到可引用的 Vault 依据；这不代表问题没有答案，也不得结束 Agent 运行。",
-  "若用户未要求只依据 Vault，可使用模型通用能力回答、分析或提出下一步，但必须明确当前回答没有 Vault 依据。",
-  "若用户明确要求只依据 Vault、不要使用模型常识或等价约束，应克制说明无法从当前 Vault 得出结论。",
-  "不要虚构 Vault 引用。仍可使用 knowledge_search 换关键词、缩小范围或继续搜索。",
-  "模型参数知识不是真实时来源；会变化的现实事实必须说明未实时核验。"
+  "本地预检暂未找到可引用的 Vault 依据；这是初次检索状态，不代表最终没有依据，也不应因此结束对话。",
+  "可以换关键词、缩小范围或继续搜索，并读取相关正文。后续取得依据时，以实际读取结果形成回答和来源，不再声称没有找到。",
+  "最终仍无本地依据时明确说明知识库没有找到；若用户未限定只依据 Vault，可按需使用已准入的只读外部工具或模型知识补答。",
+  "没有可用外部工具或没有实际联网核验时，如实说明未联网核验，不把模型知识当作实时来源。",
+  "用户要求只依据 Vault 时，不用模型常识代替缺失的本地依据。不要虚构引用。"
 ].join("\n");
 
 const KNOWLEDGE_MARKDOWN_EXTENSIONS = new Set([".md", ".markdown"]);

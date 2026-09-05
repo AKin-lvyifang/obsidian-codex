@@ -1,3 +1,4 @@
+import { resolvePiTurnToolNames as resolveWorkspaceTools } from "../../harness/pi-native/pi-native-conversation-runtime";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { appendFileSync } from "node:fs";
@@ -121,6 +122,7 @@ const QUERY_MAINTENANCE_SCOPE = Object.freeze({
 });
 
 export async function runPiNativeConversationRuntimeTests(): Promise<void> {
+  await assertWorkspacePermissionsAndLateSources();
   await assertConversationDefaultSkillPriorityAndTurnContext();
   await assertRuntimeAutoSkillSelectionAndReviewLifecycle();
   await assertFreshnessRoutesExternalReadToolsAcrossWorkflows();
@@ -206,7 +208,8 @@ async function assertConversationDefaultSkillPriorityAndTurnContext(): Promise<v
     assert.deepEqual(fixture.currentSkillTurn(), {
       skillId: "daily-journal",
       content: [
-        "当前轮已绑定 daily-journal Skill。",
+        "当前轮已绑定 daily-journal Skill，固定使用 Skill 内完整的 此刻速记 模板。",
+        "开场直接与用户交流，不要先搜索模板或全库资料；只有用户明确回看旧资料时才按需检索。",
         "会话固定日记目录：notes/daily",
         "当前日期：2026-09-04",
         "当前时间：09:07",
@@ -450,7 +453,7 @@ async function assertFreshnessRoutesExternalReadToolsAcrossWorkflows(): Promise<
         "knowledge_maintain",
         "external_read"
       ],
-      defaults: ["vault_search", "note_read", "external_read"],
+      defaults: ["vault_search", "note_read", "knowledge_search", "knowledge_read", "knowledge_maintain", "external_read"],
       planAllowed: [],
       externalReadAllowed: ["external_read"]
     });
@@ -481,8 +484,8 @@ async function assertFreshnessRoutesExternalReadToolsAcrossWorkflows(): Promise<
       submittedAt: 3
     });
     session = fixture.latestSession();
-    assert.equal(session.activeToolSelections.at(-1)?.includes("external_read"), false,
-      "stable normal Chat must not mechanically expose external freshness tools");
+    assert.equal(session.activeToolSelections.at(-1)?.includes("external_read"), true,
+      "already admitted external reads remain available in ordinary Chat");
     session.finishSuccessful("已总结");
     await stable.result;
 
@@ -505,8 +508,8 @@ async function assertFreshnessRoutesExternalReadToolsAcrossWorkflows(): Promise<
       submittedAt: 5
     });
     session = fixture.latestSession();
-    assert.equal(session.activeToolSelections.at(-1)?.includes("external_read"), false,
-      "an old stable Knowledge hit must not mechanically enable external verification");
+    assert.equal(session.activeToolSelections.at(-1)?.includes("external_read"), true,
+      "freshness does not control the external read allowlist");
     session.finishSuccessful("稳定知识仍可使用");
     await oldStable.result;
 
@@ -2122,7 +2125,7 @@ Promise<void> {
   await withFixture(["run-knowledge-maintain-snapshot"], async (fixture) => {
     fixture.configureFactoryTools({
       registered: ["vault_search", "note_read", "knowledge_maintain"],
-      defaults: [],
+      defaults: ["vault_search", "note_read", "knowledge_maintain"],
       planAllowed: []
     });
     const conversationId = "knowledge-maintain-preference-snapshot";
@@ -2738,6 +2741,7 @@ async function assertKnowledgeAskUsesAgentAndReadOnlyTools(): Promise<void> {
           "external_web_read"
         ],
         defaults: [
+          "knowledge_search", "knowledge_read", "external_web_read", "knowledge_maintain",
           "vault_search",
           "note_read",
           "note_create",
@@ -2767,6 +2771,7 @@ async function assertKnowledgeAskUsesAgentAndReadOnlyTools(): Promise<void> {
         conversationId,
         text: "/ask 空库也请解释这个概念",
         memoryMode: "normal",
+        permission: "read-only",
         submittedAt: 3
       });
       assert.equal(session.promptTexts.at(-1), "/ask 空库也请解释这个概念");
@@ -2775,6 +2780,7 @@ async function assertKnowledgeAskUsesAgentAndReadOnlyTools(): Promise<void> {
         new Set([
           "knowledge_search",
           "knowledge_read",
+          "vault_search", "external_web_read",
           "note_read",
           "memory_search",
           "memory_read"
@@ -2783,8 +2789,7 @@ async function assertKnowledgeAskUsesAgentAndReadOnlyTools(): Promise<void> {
       for (const forbidden of [
         "memory_write",
         "note_create",
-        "knowledge_maintain",
-        "vault_search"
+        "knowledge_maintain"
       ]) {
         assert.equal(session.activeToolSelections.at(-1)?.includes(forbidden), false);
       }
@@ -2795,11 +2800,12 @@ async function assertKnowledgeAskUsesAgentAndReadOnlyTools(): Promise<void> {
         conversationId,
         text: "/ask 不使用 Memory 回答",
         memoryMode: "no_memory",
+        permission: "read-only",
         submittedAt: 4
       });
       assert.deepEqual(
         new Set(session.activeToolSelections.at(-1)),
-        new Set(["knowledge_search", "knowledge_read", "note_read"])
+        new Set(["knowledge_search", "knowledge_read", "note_read", "vault_search", "external_web_read"])
       );
       assert.equal(
         session.activeToolSelections.at(-1)?.some((name) =>
@@ -5125,6 +5131,7 @@ interface RuntimeFixture {
   }>): void;
   currentMemoryTurn(): Readonly<PiNativeMemoryTurnContext> | null;
   currentKnowledgeTurn(): Readonly<PiNativeKnowledgeTurnContext> | null;
+  currentMaintenanceCommand: NonNullable<PiNativeAgentSessionFactoryInput["currentMaintenanceCommand"]>;
   currentSkillTurn(): Readonly<PiNativeSkillTurnContext> | null;
   currentDocumentTurn(): Readonly<PiNativeDocumentTurnContext> | null;
   currentToolExecution(): ReturnType<
@@ -5164,6 +5171,7 @@ async function withFixture(
     (() => Readonly<PiNativeMemoryTurnContext> | null) | null = null;
   let currentKnowledgeTurnReader:
     (() => Readonly<PiNativeKnowledgeTurnContext> | null) | null = null;
+  let currentMaintenanceCommandReader: PiNativeAgentSessionFactoryInput["currentMaintenanceCommand"];
   let currentSkillTurnReader:
     (() => Readonly<PiNativeSkillTurnContext> | null) | null = null;
   let currentDocumentTurnReader:
@@ -5205,6 +5213,7 @@ async function withFixture(
     createAgentSession: async (input) => {
       currentMemoryTurnReader = input.currentMemoryTurnContext ?? null;
       currentKnowledgeTurnReader = input.currentKnowledgeTurnContext ?? null;
+      currentMaintenanceCommandReader = input.currentMaintenanceCommand;
       currentSkillTurnReader = input.currentSkillTurnContext ?? null;
       currentDocumentTurnReader = input.currentDocumentTurnContext ?? null;
       currentToolExecutionReader = input.currentToolExecutionContext;
@@ -5261,6 +5270,7 @@ async function withFixture(
       productRuns,
       runtime,
       submit: (request) => runtime.submit({
+        permission: "workspace-write",
         ...request,
         runtimeProviderId: request.runtimeProviderId ?? "fixture-provider",
         modelId: request.modelId ?? "fixture-model",
@@ -5286,6 +5296,10 @@ async function withFixture(
       },
       currentMemoryTurn: () => currentMemoryTurnReader?.() ?? null,
       currentKnowledgeTurn: () => currentKnowledgeTurnReader?.() ?? null,
+      currentMaintenanceCommand: async () => {
+        assert.ok(currentMaintenanceCommandReader);
+        return await currentMaintenanceCommandReader();
+      },
       currentSkillTurn: () => currentSkillTurnReader?.() ?? null,
       currentDocumentTurn: () => currentDocumentTurnReader?.() ?? null,
       currentToolExecution: () => {
@@ -5838,4 +5852,57 @@ function preparedImage(
       mimeType
     })
   });
+}
+
+async function assertWorkspacePermissionsAndLateSources(): Promise<void> {
+  const reads = ["vault_search", "note_read", "knowledge_search", "knowledge_read", "memory_search", "memory_read", "external_read"];
+  const writes = ["note_create", "note_update", "memory_write", "knowledge_maintain", "external_write"];
+  const defaults = [...reads, ...writes];
+  for (const permission of ["read-only", "workspace-write", "danger-full-access"] as const) {
+    for (const commandKind of ["chat", "ask", "maintain"] as const) {
+      assert.deepEqual(new Set(resolveWorkspaceTools({ permission, commandKind, mode: "agent", memoryMode: "normal", defaultToolNames: defaults, memoryToolNames: ["memory_search", "memory_read", "memory_write"], planToolNames: ["note_read"], externalReadToolNames: ["external_read"] })), new Set(permission === "read-only" ? reads : defaults));
+    }
+  }
+  assert.equal(resolveWorkspaceTools({ permission: "workspace-write", commandKind: "ask", mode: "agent", memoryMode: "no_memory", defaultToolNames: ["note_read"], memoryToolNames: [], planToolNames: [], externalReadToolNames: [] }).includes("external_read"), false);
+  const reference = { referenceId: `knowledge-reference:${"b".repeat(64)}`, vaultRelativePath: "wiki/later.md", title: "Later source", excerpt: "real later read", contentRevision: `sha256:${"c".repeat(64)}`, lineStart: 1, lineEnd: 1 };
+  const usages: any[] = [];
+  const maintenanceRequests: string[] = [];
+  let finalized = 0;
+  const knowledge: PiKnowledgeRuntimePort = {
+    async retrieveAsk() { return { status: "no_evidence", references: [], providerResourceText: "initial empty", retrieval: { elapsedMs: 1, total: 0, returned: 0, remaining: 0, hasMore: false, exhausted: true } }; },
+    async verifyAskReferences(input) { return { status: "valid", references: input.references }; },
+    async recordUsage(input) { usages.push(input.event); },
+    async prepareMaintenancePreferences() { return { profileVersion: "echoink-knowledge-preference-profile-v1", state: "default", revision: `sha256:${"a".repeat(64)}`, providerResourceText: "preferences" }; },
+    async resolveMaintenanceScope(request) { maintenanceRequests.push(request); return QUERY_MAINTENANCE_SCOPE; },
+    async finalizeMaintenance() { finalized += 1; }
+  };
+  await withFixture([], async (fixture) => {
+    fixture.configureFactoryTools({ registered: defaults, defaults, planAllowed: ["note_read"], externalReadAllowed: ["external_read"] });
+    fixture.setMemoryToolNames(["memory_search", "memory_read", "memory_write"]);
+    for (const permission of ["read-only", "workspace-write", "danger-full-access"] as const) {
+      const request = { conversationId: "permission-snapshot", text: "/ask read then answer", submittedAt: 1, permission, runtimeProviderId: "fixture-provider", modelId: "fixture-model", reasoning: "medium" as const };
+      const submission = fixture.runtime.submit(request);
+      request.permission = permission === "read-only" ? "danger-full-access" : "read-only";
+      const run = await submission;
+      const session = fixture.latestSession();
+      assert.equal(session.getActiveToolNames().includes("note_create"), permission !== "read-only");
+      if (permission === "workspace-write") {
+        const command = await fixture.currentMaintenanceCommand();
+        assert.equal(command.request, "read then answer");
+        assert.deepEqual(command.scope, QUERY_MAINTENANCE_SCOPE);
+        assert.deepEqual(maintenanceRequests, ["read then answer"], "writable ask lazily resolves the existing maintenance scope");
+        session.finishTool("late-read", "knowledge_read", { details: { type: "echoink.knowledge-references.v1", schemaVersion: 1, references: [reference], status: "completed" } }, false);
+      }
+      session.finishSuccessful(permission === "workspace-write" ? "answer with later evidence" : "no local evidence");
+      assert.equal((await run.result).permission, permission);
+      assert.equal((await fixture.productRuns.read(run.productRunId))?.permission, permission);
+    }
+    assert.deepEqual(usages.map((event) => event.referenceIds), [[], [reference.referenceId], []]);
+    const readonlyMaintain = await fixture.submit({ conversationId: "permission-maintain", permission: "read-only", text: "/maintain 先分析", submittedAt: 4 });
+    assert.ok(fixture.currentMemoryTurn(), "maintain does not disable enabled Memory");
+    assert.equal(fixture.latestSession().getActiveToolNames().includes("knowledge_maintain"), false);
+    fixture.latestSession().finishSuccessful("只读下提供维护建议。");
+    assert.equal((await readonlyMaintain.result).terminalState, "completed");
+    assert.equal(finalized, 0, "read-only maintenance does not finalize any content writes");
+  }, { knowledge });
 }
