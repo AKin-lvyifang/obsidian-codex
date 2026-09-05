@@ -24,6 +24,8 @@
     "test:agent-self": "node src/tests/agent-self-tests.mjs",
     "test:dream-ledger": "node src/tests/dream-ledger-tests.mjs",
     "test:dream-growth": "node src/tests/dream-growth-tests.mjs",
+    "test:developer-mode": "node scripts/developer-mode-tests.mjs",
+    "developer-mode": "node scripts/echoink-developer-mode.mjs",
     "test:skill-runtime": "node src/tests/skill-runtime-tests.mjs",
     "test:knowledge": "node scripts/phase3-tests.mjs",
     "test:mcp-vault": "node scripts/mcp-vault-tests.mjs",

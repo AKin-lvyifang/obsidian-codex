@@ -413,6 +413,7 @@ export class PersonalMemoryRepository {
   }
 
   async initialize(): Promise<Readonly<PersonalMemoryLayout>> {
+    if (this.disposed) throw new PersonalMemoryAccessError("invalid_request", "Personal Memory Repository is disposed");
     if (!this.initialization) {
       this.initialization = this.initializeOnce().catch((error) => {
         this.initialization = null;
@@ -3969,7 +3970,7 @@ function serializeRecord(record: Readonly<PersonalMemoryRecord>): string {
   ].join("\n");
 }
 
-function parseRecord(text: string, file: string): PersonalMemoryRecord {
+export function parsePersonalMemoryRecord(text: string, file: string): PersonalMemoryRecord {
   const lines = text.split(/\r?\n/u);
   if (lines[0] !== "---") throw new PersonalMemoryAccessError("invalid_request", `Memory ${file} has no frontmatter`);
   const end = lines.indexOf("---", 1);
@@ -4020,6 +4021,8 @@ function parseRecord(text: string, file: string): PersonalMemoryRecord {
     file
   });
 }
+
+const parseRecord = parsePersonalMemoryRecord;
 
 function recordMetadata(record: Readonly<PersonalMemoryRecord>): ManifestRecord {
   const { content: _content, ...metadata } = record;

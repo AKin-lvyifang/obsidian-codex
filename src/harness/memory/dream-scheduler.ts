@@ -39,6 +39,7 @@ export class DreamScheduler {
   private timer: number | null = null;
   private checking = false;
   private disposed = false;
+  lastResult: DreamRunResult | null = null;
   /** Test/diagnostic hook, called after every completed run. */
   onRunFinished: ((result: DreamRunResult) => void) | null = null;
 
@@ -92,7 +93,11 @@ export class DreamScheduler {
       if (this.deps.isForegroundBusy()) return; // 延后，不打断前台请求
       if (this.deps.engine.isRunning) return;
       if (!(await this.isDue())) return;
+      // A reset may stop/dispose the scheduler while the due check reads disk.
+      if (this.disposed || !this.deps.getConfig().enabled
+        || this.deps.isForegroundBusy() || this.deps.engine.isRunning) return;
       const result = await this.deps.engine.runOnce();
+      this.lastResult = result;
       this.onRunFinished?.(result);
     } catch {
       // A failed round keeps pending state intact; the next heartbeat retries.
@@ -106,10 +111,13 @@ export class DreamScheduler {
    * heartbeat: dreaming off / long-term memory off / learning off / busy.
    */
   async forceRun(): Promise<DreamRunResult | null> {
-    if (this.disposed || this.deps.engine.isRunning) return null;
+    if (this.disposed || this.checking || this.deps.engine.isRunning) return null;
     if (!this.deps.getConfig().enabled) return null;
     if (this.deps.isForegroundBusy()) return null;
-    return await this.deps.engine.runOnce();
+    const result = await this.deps.engine.runOnce();
+    this.lastResult = result;
+    this.onRunFinished?.(result);
+    return result;
   }
 
   private now(): number {

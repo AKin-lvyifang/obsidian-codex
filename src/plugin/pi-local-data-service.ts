@@ -5,6 +5,7 @@ import {
   SessionManager
 } from "@earendil-works/pi-coding-agent";
 import { PersonalMemoryRepository } from "../harness/memory/personal-memory-repository";
+import { MemoryDeveloperBackups } from "./developer-mode/memory-backups";
 import {
   FileConversationCatalog
 } from "../harness/pi-native/file-conversation-catalog";
@@ -79,7 +80,8 @@ export class PiLocalDataService {
   ) {}
 
   static async create(
-    plugin: PiLocalDataPluginHost
+    plugin: PiLocalDataPluginHost,
+    options: { recoverDeveloperChange?: boolean } = {}
   ): Promise<PiLocalDataService> {
     const vaultRootPath = await fsp.realpath(plugin.getVaultPath());
     const rawPluginDataRootPath = pluginDataDir(
@@ -129,6 +131,9 @@ export class PiLocalDataService {
       vaultPath: piNativeStorageRootPath,
       vaultId: deviceScope.vaultIdDigest
     });
+    if (options.recoverDeveloperChange !== false) {
+      await new MemoryDeveloperBackups(personalMemory.layout.root).recoverInterruptedChange();
+    }
     const sessionApi = createPiSessionManagerApi();
 
     await catalog.initialize();

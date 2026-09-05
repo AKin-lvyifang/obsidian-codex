@@ -648,6 +648,7 @@ export class CognitiveSystem {
   async dispose(): Promise<void> {
     this.scheduler.dispose();
     await this.repository.dispose();
+    await this.settleDreamEnqueue();
   }
 
   private enqueueLane: Promise<void> = Promise.resolve();
@@ -656,7 +657,7 @@ export class CognitiveSystem {
     await this.enqueueLane;
   }
 
-  private async enqueueForDream(memoryIds: readonly string[]): Promise<void> {
+  async enqueueForDream(memoryIds: readonly string[]): Promise<void> {
     const run = async (): Promise<void> => {
       const state = await this.dreamStateStore.read();
       const next = enqueuePendingMemoryIds(state, memoryIds, this.now());

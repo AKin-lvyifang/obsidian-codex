@@ -1,6 +1,10 @@
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
-import { Notice, Plugin } from "obsidian";
+import { Notice, Platform, Plugin } from "obsidian";
+import { LocalDeveloperAccess } from "./plugin/developer-mode/access";
+import { DeveloperModeService } from "./plugin/developer-mode/service";
+import { DeveloperModeModal } from "./settings/developer-mode-modal";
+import { MemoryDeveloperBackups, type DeveloperMemoryChange } from "./plugin/developer-mode/memory-backups";
 import type { AuthInteraction } from "@earendil-works/pi-ai";
 import { closeMcpBrokerConnectionPool } from "./resources/mcp-broker";
 import {
@@ -187,6 +191,9 @@ export default class CodexForObsidianPlugin extends Plugin {
   private editorTranslation: EditorTranslationService | null = null;
   private personalMemoryCorrection: PersonalMemoryCorrectionService | null = null;
   private readonly productActivity = new ProductActivityGate();
+  private developerMemoryChanging = false;
+  private readonly developerAccess = new LocalDeveloperAccess({ isDesktop: () => Platform.isDesktopApp });
+  private developerService: DeveloperModeService | null = null;
   private onboardingRequested = false;
   private onboardingRibbonAnchor: HTMLElement | null = null;
   private onboardingWorkspaceCoachmark: EchoInkOnboardingCoachmarkHandle | null = null;
@@ -222,6 +229,7 @@ export default class CodexForObsidianPlugin extends Plugin {
   }
 
   private async performUnload(): Promise<void> {
+    this.developerAccess.lock();
     this.clearEchoInkOnboardingWorkspaceCoachmark(false);
     this.onboardingRibbonAnchor = null;
     const cognitive = this.cognitiveSystem
@@ -949,6 +957,75 @@ export default class CodexForObsidianPlugin extends Plugin {
     }
     return await this.productActivity.run(action);
   }
+
+  handleDeveloperVersionClick(altKey: boolean): void {
+    if (!this.developerAccess.click(altKey)) return;
+    if (!this.developerService) {
+      this.developerService = new DeveloperModeService(this.developerAccess, {
+        getSystem: () => this.getCognitiveSystem(),
+        vaultName: () => this.app.vault.getName(),
+        foregroundBusy: () => this.developerMemoryChanging || this.piRunConversations.size > 0
+          || this.piSubmittingConversations.size > 0 || this.productActivity.hasActivity,
+        writable: () => this.settings.defaultPermission !== "read-only",
+        withLocalActivity: (action) => this.withProductActivity(action),
+        changeMemory: (action) => this.changeDeveloperMemory(action),
+        latestBackup: async () => new MemoryDeveloperBackups(
+          (await this.ensurePiLocalData()).personalMemory.layout.root
+        ).latestResetPath()
+      });
+    }
+    new DeveloperModeModal(this.app, this.developerService, this.settings.settingsLanguage !== "en").open();
+  }
+
+  private async changeDeveloperMemory(action: "reset" | "restore"): Promise<DeveloperMemoryChange> {
+    this.developerAccess.require();
+    if (this.developerMemoryChanging || this.piRunConversations.size > 0
+      || this.piSubmittingConversations.size > 0 || this.cognitiveSystem?.engine.isRunning) {
+      throw new Error("developer_mode_busy");
+    }
+    this.productActivity.beginSwitch();
+    this.developerMemoryChanging = true;
+    let stopped = false;
+    try {
+      const localData = this.piLocalData ?? await this.piLocalDataFlight;
+      const cognitive = this.cognitiveSystem ?? await this.cognitiveSystemFlight;
+      if (!localData || !cognitive) throw new Error("developer_memory_not_ready");
+      if (cognitive.engine.isRunning) throw new Error("developer_mode_busy");
+      await this.suspendPiProductionRuntime();
+      await cognitive.dispose();
+      stopped = true;
+      this.cognitiveSystem = null;
+      this.cognitiveSystemFlight = null;
+      this.piLocalData = null;
+      this.piLocalDataFlight = null;
+      this.personalMemoryCorrection = null;
+      const backups = new MemoryDeveloperBackups(localData.personalMemory.layout.root);
+      this.developerAccess.require();
+      return await backups.change(action, async () => {
+        const next = await PiLocalDataService.create(this, { recoverDeveloperChange: false });
+        try {
+          const system = await this.createCognitiveSystem(next);
+          await system.dispose();
+        } finally { await next.dispose(); }
+      });
+    } finally {
+      // Failed backups/rolled-back changes still need fresh local references.
+      // No Provider Runtime is started here; the next Chat builds it lazily.
+      try {
+        if (stopped && !this.piLocalData) {
+          const next = await PiLocalDataService.create(this);
+          try {
+            this.cognitiveSystem = await this.createCognitiveSystem(next);
+            this.piLocalData = next;
+          } catch (error) { await next.dispose(); throw error; }
+        }
+      } finally {
+        this.developerMemoryChanging = false;
+        this.productActivity.endSwitch();
+        this.getCodexView()?.refreshPersonalizationUi();
+      }
+    }
+  }
   async suspendPiProductionRuntime(): Promise<void> {
     await this.cancelAllPiConversationActivations();
     if (this.piRuntimeFlight) {
@@ -1291,35 +1368,16 @@ export default class CodexForObsidianPlugin extends Plugin {
    * secondary facts. Created once per Vault against the Personal Memory repo.
    */
   async getCognitiveSystem(): Promise<CognitiveSystem> {
+    if (this.developerMemoryChanging) throw new Error("developer_memory_changing");
     if (this.cognitiveSystem) return this.cognitiveSystem;
     if (!this.cognitiveSystemFlight) {
       const flight = (async () => {
         const localData = await this.ensurePiLocalData();
-        const system = await CognitiveSystem.create({
-          repository: localData.personalMemory,
-          llm: () => this.createDreamLlmPort(),
-          // Scheduler 只读取做梦子功能、长期记忆总开关与每日次数。
-          // 关闭长期 Memory 后做梦
-          // 整体暂停：不调 Provider、不生成二级事实、不更新 USER/AGENT/trait，
-          // pending 队列保持不变；重新开启后继续未完成的 pending。
-          getDreamConfig: () => ({
-            enabled: this.settings.memory.dreamEnabled
-              && this.settings.memory.useLongTermMemory,
-            runsPerDay: this.settings.memory.dreamRunsPerDay
-          }),
-          isForegroundBusy: () =>
-            this.piRunConversations.size > 0 || this.productActivity.hasActivity,
-          registerInterval: (handle) => this.registerInterval(handle)
-        });
-        system.startDreamScheduler();
+        const system = await this.createCognitiveSystem(localData);
         this.cognitiveSystem = system;
-        // 插件重载时侧栏可能先于 CognitiveSystem 缓存就绪。身份读完后主动
-        // 刷新一次，避免已有自定义名称/头像一直停在默认 EchoInk + bot。
         this.getCodexView()?.refreshPersonalizationUi();
         return system;
       })();
-      // Round 6 修复三：失败 flight 不得永久缓存——迁移失败 / 人格文件损坏
-      // 等 fail-closed 错误必须在修复后可重试（设置页重试或下次进入）。
       let tracked: Promise<CognitiveSystem>;
       tracked = flight.catch((error) => {
         if (this.cognitiveSystemFlight === tracked) this.cognitiveSystemFlight = null;
@@ -1328,6 +1386,23 @@ export default class CodexForObsidianPlugin extends Plugin {
       this.cognitiveSystemFlight = tracked;
     }
     return await this.cognitiveSystemFlight;
+  }
+
+  private async createCognitiveSystem(localData: PiLocalDataService): Promise<CognitiveSystem> {
+    const system = await CognitiveSystem.create({
+      repository: localData.personalMemory,
+      llm: () => this.createDreamLlmPort(),
+      // The same Memory/Dream gates apply to scheduled and manual runs.
+      getDreamConfig: () => ({
+        enabled: this.settings.memory.dreamEnabled && this.settings.memory.useLongTermMemory,
+        runsPerDay: this.settings.memory.dreamRunsPerDay
+      }),
+      isForegroundBusy: () => this.developerMemoryChanging
+        || this.piRunConversations.size > 0 || this.productActivity.hasActivity,
+      registerInterval: (handle) => this.registerInterval(handle)
+    });
+    system.startDreamScheduler();
+    return system;
   }
 
   /** One-shot dream LLM port; null when no Provider is configured. */
@@ -1521,6 +1596,7 @@ export default class CodexForObsidianPlugin extends Plugin {
   }
 
   private async ensurePiLocalData(): Promise<PiLocalDataService> {
+    if (this.developerMemoryChanging) throw new Error("developer_memory_changing");
     if (this.piLocalData) return this.piLocalData;
     if (this.piLocalDataFlight) return await this.piLocalDataFlight;
     const flight = PiLocalDataService.create(this)
@@ -1550,6 +1626,7 @@ export default class CodexForObsidianPlugin extends Plugin {
   }
 
   private async ensurePiProductionRuntime(): Promise<PiProductionRuntimeBundle> {
+    if (this.developerMemoryChanging) throw new Error("developer_memory_changing");
     if (this.piRuntimeBundle) return this.piRuntimeBundle;
     if (this.piRuntimeFlight) return await this.piRuntimeFlight;
     const flight = this.ensurePiLocalData()

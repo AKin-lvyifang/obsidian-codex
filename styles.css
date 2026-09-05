@@ -19175,3 +19175,9 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
     transition-duration: 0.01ms !important;
   }
 }
+/* Hidden local developer tools reuse Obsidian settings controls. */
+.echoink-developer-mode .setting-item { align-items: flex-start; }
+.echoink-developer-mode .setting-item-control { flex-wrap: wrap; }
+.echoink-developer-mode .echoink-developer-error { color: var(--text-error); }
+.echoink-developer-mode .echoink-developer-path,
+.echoink-developer-mode .echoink-developer-result { overflow-wrap: anywhere; }
