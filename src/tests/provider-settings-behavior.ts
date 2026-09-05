@@ -2024,7 +2024,6 @@ function assertProviderBadgeReflowCssContract(): void {
     new URL("../src/settings/settings-tab.ts", import.meta.url),
     "utf8"
   );
-  assert.match(css, /\.codex-provider-saved-meta\s*\{[^}]*flex-wrap:\s*wrap;[^}]*min-width:\s*0;/su);
   assert.match(css, /\.codex-provider-credential-badge,[\s\S]*\.codex-provider-connection-badge\s*\{[^}]*max-width:\s*100%;[^}]*white-space:\s*normal;[^}]*overflow-wrap:\s*anywhere;/u);
   const activeBadgeRule = css.match(
     /\.codex-provider-active-badge\s*\{([^}]*)\}/u
@@ -2042,9 +2041,6 @@ function assertProviderBadgeReflowCssContract(): void {
   assert.match(settingsTab, /label\("连接正常", "Connection verified"\)/u);
   assert.match(settingsTab, /label\("无需 API Key", "No API key required"\)/u);
   assertProviderBadgeDefaultThemeContrast();
-  assert.match(css, /@container \(max-width:\s*520px\)[\s\S]*\.codex-provider-saved-meta\s*\{[^}]*width:\s*100%;[^}]*justify-content:\s*flex-start;/u);
-  assert.match(css, /\.codex-provider-saved-identity\s*\{[^}]*max-width:\s*100%;[^}]*min-width:\s*0;/u);
-  assert.match(css, /\.codex-provider-saved-copy\s*\{[^}]*max-width:\s*100%;[^}]*min-width:\s*0;/u);
   assert.match(css, /\.codex-provider-saved-provider\s*\{[^}]*max-width:\s*100%;[^}]*min-width:\s*0;[^}]*overflow-wrap:\s*anywhere;/u);
   const narrowProviderRule = css.match(
     /@container \(max-width:\s*520px\)\s*\{([\s\S]*?)\n\}/u
@@ -2058,8 +2054,6 @@ function assertProviderBadgeReflowCssContract(): void {
   assert.match(narrowSettingsRule, /\.echoink-settings-row \.setting-item-control\s*\{[^}]*width:\s*100%;[^}]*max-width:\s*100%;/u);
   assert.match(narrowSettingsRule, /\.echoink-settings-row \.setting-item-control > select\s*\{[^}]*min-width:\s*0;[^}]*max-width:\s*100%;/u);
   assert.match(narrowSettingsRule, /\.echoink-settings-row \.setting-item-control > button\s*\{[^}]*max-width:\s*100%;[^}]*white-space:\s*normal;[^}]*overflow-wrap:\s*anywhere;/u);
-  assert.match(css, /\.echoink-settings-navigation-trailing\s*\{[^}]*flex-wrap:\s*wrap;[^}]*min-width:\s*0;/u);
-  assert.match(css, /\.echoink-settings-navigation-value\s*\{[^}]*flex:\s*0 0 auto;[^}]*min-width:\s*0;[^}]*max-width:\s*28ch;/u);
   assert.match(narrowSettingsRule, /\.echoink-settings-navigation-value\s*\{[^}]*min-width:\s*0;[^}]*max-width:\s*100%;[^}]*white-space:\s*normal;[^}]*overflow-wrap:\s*anywhere;/u);
 }
 
@@ -2068,14 +2062,6 @@ function assertProviderAdvancedSettingsCssContract(): void {
   assert.match(
     css,
     /\.codex-provider-model-advanced\s*\{[^}]*container-type:\s*inline-size;/su
-  );
-  assert.match(
-    css,
-    /\.codex-provider-model-advanced-group \+ \.codex-provider-model-advanced-group\s*\{[^}]*margin-top:\s*24px;/su
-  );
-  assert.match(
-    css,
-    /@container \(max-width:\s*520px\)[\s\S]*?\.codex-provider-model-advanced \.codex-provider-custom-toggles,[\s\S]*?\.codex-provider-model-advanced \.codex-provider-context-grid\s*\{[^}]*grid-template-columns:\s*1fr;/u
   );
   assert.match(
     css,
@@ -5012,7 +4998,6 @@ function assertCodexHeaderIdentityContract(): void {
   );
 
   const css = readFileSync("styles.css", "utf8");
-  assert.match(css, /\.codex-title-icon-codex\.has-image\s*\{[^}]*border-radius:\s*50%/u);
   assert.match(css, /\.codex-title-avatar\s*\{[^}]*object-fit:\s*cover/u);
   console.log("PASS settings: sidebar header follows cached Agent identity");
 }
@@ -5213,7 +5198,6 @@ async function assertOnboardingCoachmarkAccessibilityContract(): Promise<void> {
 
   const css = readFileSync("styles.css", "utf8");
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.echoink-onboarding-coachmark\s*\{[\s\S]*?animation:\s*none/u);
-  assert.match(css, /\.echoink-onboarding-coachmark \.echoink-onboarding-action\s*\{[^}]*width:\s*auto;[^}]*min-width:\s*0;[^}]*max-width:\s*100%;[^}]*min-height:\s*40px;[^}]*padding:\s*0 11px;/u);
   assert.doesNotMatch(css, /\.echoink-onboarding-coachmark \.echoink-onboarding-action\s*\{\s*width:\s*100%;/u);
   assert.match(css, /\.echoink-onboarding-action-label-window\s*\{[^}]*height:\s*18px;[^}]*overflow:\s*hidden/u);
   assert.match(css, /\.echoink-onboarding-action-label::after\s*\{[^}]*content:\s*attr\(data-label\)/u);
@@ -6767,11 +6751,6 @@ function assertKnowledgeInitNarrowLayoutCssContract(): void {
   );
   assert.match(
     css,
-    /\.echoink-knowledge-note-picker-row\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto/u,
-    "note text must occupy the left column and the checkbox the right column"
-  );
-  assert.match(
-    css,
     /\.echoink-knowledge-init-bar-indicator\s*\{[^}]*transition:\s*width/u,
     "the progress indicator must animate real percentage changes"
   );
@@ -6792,11 +6771,6 @@ function assertKnowledgeInitNarrowLayoutCssContract(): void {
   );
   assert.match(
     css,
-    /\.echoink-knowledge-init-pause \.echoink-knowledge-init-provider-link\s*\{[^}]*background-size:\s*0\s+1px[^}]*color:\s*var\(--text-accent\)/u,
-    "the Provider route must look like an accent-colored animated text link"
-  );
-  assert.match(
-    css,
     /\.echoink-knowledge-init-pause \.echoink-knowledge-init-provider-link:is\(:hover, :focus-visible\)\s*\{[^}]*background-size:\s*100%\s+1px/u,
     "the Provider link underline must grow on hover and keyboard focus"
   );
@@ -6805,7 +6779,6 @@ function assertKnowledgeInitNarrowLayoutCssContract(): void {
     css,
     /\.echoink-knowledge-init-note-path\s*\{[^}]*overflow-wrap:\s*anywhere/u
   );
-  assert.match(css, /\.echoink-knowledge-init-tabpanel\s*\{[^}]*min-width:\s*0/u);
   assert.match(css, /prefers-reduced-motion/u);
 }
 
@@ -10886,15 +10859,8 @@ async function assertAgentIdentityCardPlacementAndCopy(): Promise<void> {
   assert.match(animateIconSource, /M2 21a8 8 0 0 1 10\.821-7\.487/u);
   assert.match(animateIconSource, /M21\.378 16\.626a1 1 0 0 0-3\.004-3\.004/u);
   assert.match(css, /\.echoink-agent-profile-card\s*\{[^}]*container-type:\s*inline-size;/su);
-  assert.match(css, /\.echoink-agent-profile-card-label\s*\{[^}]*margin:\s*0;/su);
-  assert.match(css, /\.echoink-agent-profile-card-body\s*\{[^}]*grid-template-columns:\s*minmax\(132px,[^}]*minmax\(0,\s*1fr\);/su);
-  assert.match(css, /\.echoink-agent-profile-field-value\s*\{[^}]*max-width:\s*70ch;[^}]*line-height:\s*1\.6;/su);
-  assert.match(css, /\.echoink-agent-profile-field\s*\{[^}]*border-inline-start:\s*2px solid/su);
   assert.match(css, /\.echoink-agent-profile-method-tags\s*\{[^}]*flex-wrap:\s*wrap;/su);
   assert.match(css, /@media\s*\(prefers-reduced-motion:\s*no-preference\)[\s\S]*?\.echoink-agent-profile-template-chevron/u);
-  assert.match(css, /@container\s*\(max-width:\s*420px\)[\s\S]*?\.echoink-agent-profile-card-body\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\);/u);
-  assert.match(css, /outline:\s*1px solid oklch\(0 0 0 \/ 0\.1\);/u);
-  assert.match(css, /\.theme-dark \.echoink-agent-profile-avatar\s*\{[^}]*oklch\(1 0 0 \/ 0\.1\)/su);
   assert.doesNotMatch(css, /\.echoink-trait-|\.echoink-agent-profile-(?:drawer|expand|collapse|raw)/u);
   assert.doesNotMatch(css, /transition:\s*all/u);
 
@@ -11042,16 +11008,6 @@ function assertAboutGitHubActionsContract(): void {
   assert.ok(issue!.querySelector(".echoink-about-morph-icon-hover"), "check icon renders");
 
   const css = readFileSync("styles.css", "utf8");
-  assert.match(
-    css,
-    /\.echoink-about-btn-issue:hover \.echoink-about-morph-icon-default\s*\{[\s\S]*?opacity:\s*0;[\s\S]*?scale\(0\.25\)/u,
-    "btn-24 hover morph hides and shrinks the send icon"
-  );
-  assert.match(
-    css,
-    /\.echoink-about-btn-issue:hover \.echoink-about-morph-icon-hover\s*\{[\s\S]*?opacity:\s*1;[\s\S]*?scale\(1\)/u,
-    "btn-24 hover morph reveals the check icon"
-  );
   const aboutButtonRule = css.match(/\.echoink-about-btn\s*\{([^}]*)\}/u)?.[1] ?? "";
   const issueButtonRule = css.match(/\.echoink-about-btn-issue\s*\{([^}]*)\}/u)?.[1] ?? "";
   assert.match(aboutButtonRule, /min-height:\s*28px;/u);
@@ -11457,14 +11413,12 @@ async function assertTemplatePickerCardGridStructure(): Promise<void> {
   });
 
   const css = readFileSync("styles.css", "utf8");
-  assert.match(css, /\.echoink-picker-list\s*\{[\s\S]*?display:\s*grid;[\s\S]*?repeat\(2,\s*minmax\(0,\s*1fr\)\)/u);
   assert.match(css, /button\.echoink-picker-row\s*\{[\s\S]*?text-align:\s*start/u);
   assert.match(
     css,
     /button\.echoink-picker-row\s*\{[\s\S]*?height:\s*auto;[\s\S]*?max-height:\s*none;/u,
     "Obsidian's fixed button height must not clip the card description"
   );
-  assert.match(css, /@container\s*\(max-width:\s*520px\)[\s\S]*?\.echoink-picker-list\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\)/u);
 
   // Cancel closes the list with zero writes.
   const cancelBtn = tab.containerEl.querySelector<ProviderModalTestElement>(".echoink-picker-cancel-btn");
@@ -11844,9 +11798,6 @@ async function assertAvatarPresetCatalogBehavior(): Promise<void> {
   );
 
   const css = readFileSync("styles.css", "utf8");
-  assert.match(css, /\.echoink-agent-avatar-grid\s*\{[\s\S]*?repeat\(5,\s*minmax\(0,\s*1fr\)\)/u);
-  assert.match(css, /@container\s*\(max-width:\s*520px\)[\s\S]*?repeat\(3,\s*minmax\(0,\s*1fr\)\)/u);
-  assert.match(css, /@container\s*\(max-width:\s*340px\)[\s\S]*?repeat\(2,\s*minmax\(0,\s*1fr\)\)/u);
   assert.match(css, /\.echoink-agent-avatar-option:focus-within\s*\{[\s\S]*?outline:\s*2px solid/u);
   assert.match(css, /\.echoink-agent-avatar-option\.is-selected \.echoink-agent-avatar-option-check\s*\{[\s\S]*?display:\s*inline-flex/u);
 

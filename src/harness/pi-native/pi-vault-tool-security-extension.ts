@@ -7,7 +7,6 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { PiKnowledgeReference } from "./contracts";
 import {
-  canonicalJsonStringify,
   isWriteToolAuthorizationContext,
   normalizeToolAuthorizationContext,
   type ToolAuthorizationContext
@@ -168,8 +167,7 @@ implements PiVaultToolExecutionSecurityPort {
       || record.authorization.toolId !== input.toolId
       || record.policy.toolId !== input.toolId
       || !isDeepStrictEqual(record.policy, input.policy)
-      || canonicalJsonStringify(record.arguments)
-        !== canonicalJsonStringify(input.arguments)
+      || !isDeepStrictEqual(record.arguments, input.arguments)
     ) {
       throw new PiVaultToolAuthorizationError("authorization_failed");
     }
@@ -361,8 +359,7 @@ function assertAuthorizationMatches(
     || authorization.toolVersion !== PI_VAULT_TOOL_VERSION
     || authorization.policyVersion !== PI_VAULT_TOOL_POLICY_VERSION
     || authorization.effectType !== policy.effectType
-    || canonicalJsonStringify(authorization.normalizedArguments)
-      !== canonicalJsonStringify(args)
+    || !isDeepStrictEqual(authorization.normalizedArguments, args)
     || (policy.effectType === "user_write")
       !== isWriteToolAuthorizationContext(authorization)
   ) {

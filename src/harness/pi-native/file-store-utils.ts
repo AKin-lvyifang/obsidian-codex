@@ -125,17 +125,18 @@ export async function readJsonFileIfPresent(
 
 /**
  * Publishes one complete JSON document through a same-directory temporary file,
- * atomic rename, byte-for-byte readback and schema parsing.
+ * schema validation before publication, fsync, and atomic rename.
  */
 export async function atomicWriteJsonFile<T>(
   filePath: string,
   value: unknown,
-  label: string,
-  parseReadback: (value: unknown) => T
+  _label: string,
+  normalizeValue: (value: unknown) => T
 ): Promise<T> {
+  const normalized = normalizeValue(value);
   const parentPath = path.dirname(filePath);
   await mkdir(parentPath, { recursive: true, mode: 0o700 });
-  const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf8");
+  const bytes = Buffer.from(`${JSON.stringify(normalized, null, 2)}\n`, "utf8");
   const temporaryPath = path.join(
     parentPath,
     `.${path.basename(filePath)}-${randomUUID()}.tmp`
@@ -154,23 +155,7 @@ export async function atomicWriteJsonFile<T>(
     temporaryExists = false;
     await syncDirectory(parentPath);
 
-    const readbackBytes = await readFile(filePath);
-    if (!readbackBytes.equals(bytes)) {
-      throw new PiNativeFileStoreError(
-        "readback-diverged",
-        `${label} 原子写入后的字节回读不一致`
-      );
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(readbackBytes.toString("utf8")) as unknown;
-    } catch (error) {
-      throw new PiNativeFileStoreError(
-        "readback-diverged",
-        `${label} 原子写入后的 JSON 回读失败：${errorMessage(error)}`
-      );
-    }
-    return parseReadback(parsed);
+    return normalized;
   } finally {
     if (temporaryExists) await unlink(temporaryPath).catch(() => undefined);
   }

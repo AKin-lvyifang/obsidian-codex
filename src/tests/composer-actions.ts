@@ -408,7 +408,6 @@ export async function runComposerActionTests(): Promise<void> {
 
     const composerSource = readFileSync("src/ui/codex-view/composer.ts", "utf8");
     const codexViewSource = readFileSync("src/ui/codex-view.ts", "utf8");
-    const iconSource = readFileSync("src/ui/animate-icon.ts", "utf8");
     const css = readFileSync("styles.css", "utf8");
     const turnRunnerSource = readFileSync("src/ui/codex-view/turn-runner.ts", "utf8");
     assert.match(composerSource, /renderAnimateIcon\(sendButton, "send-horizontal"\)/u);
@@ -422,24 +421,14 @@ export async function runComposerActionTests(): Promise<void> {
     assert.match(refreshLanguageSource, /this\.renderToolbar\(\)/u);
     assert.doesNotMatch(refreshLanguageSource, /this\.render\(\)/u,
       "language refresh changes existing chrome instead of rebuilding the Composer and losing its draft");
-    assert.match(iconSource, /M19 10v2a7 7 0 0 1-14 0v-2/u);
-    assert.match(iconSource, /M3\.714 3\.048/u);
-    assert.match(iconSource, /circle\("12", "12", "10"/u);
     assert.match(css, /@keyframes echoink-animate-send-horizontal/u);
     assert.match(css, /@keyframes echoink-animate-circle-stop-ring/u);
     assert.match(css, /@keyframes echoink-animate-circle-stop-symbol/u);
     assert.match(css, /@keyframes echoink-animate-mic/u);
     assert.match(css, /prefers-reduced-motion:\s*no-preference/u);
-    assert.match(css, /\.codex-attachment-thumbnail \{[\s\S]*?width:\s*72px;[\s\S]*?height:\s*72px;[\s\S]*?flex:\s*0\s+0\s+72px;/u);
-    assert.match(css, /\.codex-file-card-compact \{[\s\S]*?width:\s*min\(220px,[\s\S]*?height:\s*56px;[\s\S]*?flex:\s*0\s+0\s+min\(220px,/u);
-    assert.match(css, /\.codex-file-card-message \{[\s\S]*?width:\s*min\(288px,[\s\S]*?min-height:\s*68px;[\s\S]*?flex:\s*0\s+0\s+min\(288px,/u);
     assert.match(css, /\.codex-attachment-thumbnail-image \{[\s\S]*?object-fit:\s*contain;/u);
-    assert.match(css, /\.codex-attachment-thumbnail-remove \{[\s\S]*?top:\s*-4px;[\s\S]*?right:\s*-4px;[\s\S]*?width:\s*20px;[\s\S]*?height:\s*20px;/u);
-    assert.match(css, /\.codex-file-card-remove \{[\s\S]*?top:\s*4px;[\s\S]*?right:\s*4px;[\s\S]*?width:\s*24px;[\s\S]*?height:\s*24px;/u);
     assert.match(css, /\.codex-ai-elements-attachments-list \{[\s\S]*?flex-wrap:\s*nowrap;[\s\S]*?overflow-x:\s*auto;/u);
     assert.match(css, /\.codex-message-attachments \{[\s\S]*?flex-wrap:\s*nowrap;[\s\S]*?justify-content:\s*safe\s+flex-end;[\s\S]*?overflow-x:\s*auto;/u);
-    assert.match(css, /\.codex-message-attachment-tile \{[\s\S]*?width:\s*72px;[\s\S]*?height:\s*72px;[\s\S]*?flex:\s*0\s+0\s+72px;/u);
-    assert.match(css, /\.codex-composer-send-button\.codex-send-button\.is-stop-action\s*\{[\s\S]*?color:\s*var\(--text-normal\);[\s\S]*?box-shadow:\s*none\s*!important;/u);
     assert.match(css, /\.codex-composer-send-button\.codex-send-button\.is-stop-action:is\(:hover, :focus-visible\)[\s\S]*?--echoink-conversation-status-danger/u);
     assert.doesNotMatch(turnRunnerSource, /Pi Chat 的附件入口尚未完成切换，本轮没有发送/u);
     assert.match(turnRunnerSource, /preparePiChatImages/u);

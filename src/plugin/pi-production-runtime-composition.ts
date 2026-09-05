@@ -356,6 +356,24 @@ function createPiProductionModelDefinitionFromResolved(
   return model;
 }
 
+export function bindKnowledgeIndexToVault(
+  app: PiProductionPluginHost["app"],
+  index: KnowledgeAgentIndex
+): () => void {
+  const onChange = (file: { path: string }) => index.invalidate(file.path);
+  const events = [
+    app.vault.on("create", onChange),
+    app.vault.on("modify", onChange),
+    app.vault.on("delete", onChange),
+    app.vault.on("rename", (file, oldPath) => {
+      onChange(file);
+      index.invalidate(oldPath);
+    })
+  ];
+  index.invalidate();
+  return () => events.forEach((event) => app.vault.offref(event));
+}
+
 export async function createPiProductionRuntimeBundle(
   plugin: PiProductionPluginHost,
   localDataInput?: PiLocalDataService
@@ -445,6 +463,7 @@ export async function createPiProductionRuntimeBundle(
     });
   await skillRuntime.inspectBuiltinSkills();
   await skillRuntime.advanceLifecycle();
+  const releaseKnowledgeIndexEvents = bindKnowledgeIndexToVault(plugin.app, knowledgeAgentIndex);
   let runtime: PiNativeConversationRuntime | null = null;
   try {
     const initializedRuntime = new PiNativeConversationRuntime({
@@ -540,6 +559,7 @@ export async function createPiProductionRuntimeBundle(
           productRunId: state.productRunId
         }),
       disposeRuntimeResources: () => {
+        releaseKnowledgeIndexEvents();
         interactionBroker.dispose();
         approvalBroker.dispose();
       }
@@ -571,6 +591,7 @@ export async function createPiProductionRuntimeBundle(
     );
     if (runtime) await runtime.shutdown().catch(() => undefined);
     else {
+      releaseKnowledgeIndexEvents();
       interactionBroker.dispose();
       approvalBroker.dispose();
     }

@@ -707,6 +707,9 @@ export function normalizeApprovalOperationContract(
 export function normalizeToolAuthorizationContext(
   value: unknown
 ): Readonly<ToolAuthorizationContext> {
+  if (trustedReadAuthorizations.has(value as Readonly<ReadToolAuthorizationContext>)) {
+    return value as Readonly<ReadToolAuthorizationContext>;
+  }
   const object = requireInputObject(value, "Tool authorization context");
   if (object.authorizationKind === "policy_allow") {
     return normalizeReadToolAuthorizationContext(object);
@@ -749,6 +752,8 @@ export function normalizeToolAuthorizationContext(
   });
 }
 
+const trustedReadAuthorizations = new WeakSet<Readonly<ReadToolAuthorizationContext>>();
+
 export function createReadToolAuthorizationContext(
   input: Readonly<ReadToolAuthorizationInput>
 ): Readonly<ReadToolAuthorizationContext> {
@@ -757,12 +762,14 @@ export function createReadToolAuthorizationContext(
     kind: "echoink-read-authorization-v1",
     context: normalized
   });
-  return cloneAndFreeze({
+  const context = cloneAndFreeze({
     ...normalized,
-    authorizationKind: "policy_allow",
-    effectType: "read",
+    authorizationKind: "policy_allow" as const,
+    effectType: "read" as const,
     authorizationId
   });
+  trustedReadAuthorizations.add(context);
+  return context;
 }
 
 export function isWriteToolAuthorizationContext(
@@ -842,9 +849,7 @@ function normalizeReadToolAuthorizationContext(
     );
   }
   const expected = createReadToolAuthorizationContext(
-    normalizeReadToolAuthorizationInput(
-      pickKeys(object, READ_AUTHORIZATION_INPUT_KEYS)
-    )
+    pickKeys(object, READ_AUTHORIZATION_INPUT_KEYS) as unknown as ReadToolAuthorizationInput
   );
   if (object.authorizationId !== expected.authorizationId) {
     throw new PiNativeFileStoreError(

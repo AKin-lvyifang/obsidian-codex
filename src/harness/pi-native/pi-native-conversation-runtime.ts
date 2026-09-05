@@ -35,7 +35,7 @@ import {
 } from "./pi-chat-ui-projector";
 import {
   PiSessionDurabilityError,
-  assertPiSessionPreAssistantDurable,
+  assertPiSessionAppendsDurable,
   createDurablePiSession,
   createDurablePiSessionFromPrefix,
   discardCreatedDurablePiSession,
@@ -1661,15 +1661,14 @@ export class PiNativeConversationRuntime {
         active.sessionManager,
         execution.reasoningSummary
       );
-      const reasoningStartReadback = assertPiSessionPreAssistantDurable({
+      assertPiSessionAppendsDurable({
         sessionRoot: this.catalog.sessionRootPath,
         sessionManager: active.sessionManager,
         expectedEntryIds: [execution.reasoningStartEntryId]
       });
       persistPiActiveLeaf({
         sessionRoot: this.catalog.sessionRootPath,
-        sessionManager: active.sessionManager,
-        verifiedReadback: reasoningStartReadback
+        sessionManager: active.sessionManager
       });
     } catch (reasoningStartError) {
       const closeErrors: unknown[] = [];
@@ -1717,7 +1716,7 @@ export class PiNativeConversationRuntime {
         execution.baselineEntryIds,
         USER_ENTRY_WAIT_TIMEOUT_MS
       );
-      assertPiSessionPreAssistantDurable({
+      assertPiSessionAppendsDurable({
         sessionRoot: this.catalog.sessionRootPath,
         sessionManager: active.sessionManager,
         expectedEntryIds: [userEntry.id]
@@ -2903,15 +2902,14 @@ export class PiNativeConversationRuntime {
       runEntries = entries.filter(
         (entry) => !execution.baselineEntryIds.has(entry.id)
       );
-      const verifiedReadback = assertPiSessionPreAssistantDurable({
+      assertPiSessionAppendsDurable({
         sessionRoot: this.catalog.sessionRootPath,
         sessionManager: active.sessionManager,
         expectedEntryIds: runEntries.map((entry) => entry.id)
       });
       persistPiActiveLeaf({
         sessionRoot: this.catalog.sessionRootPath,
-        sessionManager: active.sessionManager,
-        verifiedReadback
+        sessionManager: active.sessionManager
       });
       if (
         execution.mode === "plan"
@@ -2971,15 +2969,14 @@ export class PiNativeConversationRuntime {
           );
           active.session.state.messages =
             active.sessionManager.buildSessionContext().messages;
-          const verifiedReadback = assertPiSessionPreAssistantDurable({
+          assertPiSessionAppendsDurable({
             sessionRoot: this.catalog.sessionRootPath,
             sessionManager: active.sessionManager,
             expectedEntryIds: [assistantEntryId]
           });
           persistPiActiveLeaf({
             sessionRoot: this.catalog.sessionRootPath,
-            sessionManager: active.sessionManager,
-            verifiedReadback
+            sessionManager: active.sessionManager
           });
           entries = active.sessionManager.getEntries();
           runEntries = entries.filter(
@@ -4106,15 +4103,14 @@ export class PiNativeConversationRuntime {
       active.sessionManager,
       execution.reasoningSummary
     );
-    const verifiedReadback = assertPiSessionPreAssistantDurable({
+    assertPiSessionAppendsDurable({
       sessionRoot: this.catalog.sessionRootPath,
       sessionManager: active.sessionManager,
       expectedEntryIds: [execution.reasoningTerminalEntryId]
     });
     persistPiActiveLeaf({
       sessionRoot: this.catalog.sessionRootPath,
-      sessionManager: active.sessionManager,
-      verifiedReadback
+      sessionManager: active.sessionManager
     });
     await this.emitRuntimeEvent(active, execution, {
       type: "reasoning_summary",
