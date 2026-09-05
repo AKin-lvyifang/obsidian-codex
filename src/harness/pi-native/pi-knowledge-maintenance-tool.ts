@@ -62,7 +62,7 @@ interface AuthorizedMaintenanceExecution {
 
 export interface CreatePiKnowledgeMaintenanceSecurityOptions {
   currentRunIdentity(): Readonly<PiKnowledgeRunIdentity>;
-  currentCommand(): Readonly<PiKnowledgeMaintenanceCommandContext>;
+  currentCommand(): Readonly<PiKnowledgeMaintenanceCommandContext> | Promise<Readonly<PiKnowledgeMaintenanceCommandContext>>;
   /** True only after a successful external-read Tool result in this ProductRun. */
   hasSuccessfulExternalRead?(): boolean;
   readonly egress: VaultToolResultEgressPort;
@@ -100,7 +100,7 @@ implements PiVaultAdditionalToolSecurityPort {
     let externalReadVerified: boolean;
     try {
       identity = freezeIdentity(this.options.currentRunIdentity());
-      command = freezeCommand(this.options.currentCommand());
+      command = freezeCommand(await this.options.currentCommand());
       if (this.seenProductRunIds.has(identity.productRunId)) {
         return block("authorization_failed");
       }

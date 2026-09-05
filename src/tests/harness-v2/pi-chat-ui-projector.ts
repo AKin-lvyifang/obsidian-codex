@@ -1,3 +1,5 @@
+import { stableHashedIdentity } from "../../core/mapping";
+import { buildActionTimeline } from "../../ui/codex-view/action-timeline";
 import * as assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { convertToLlm } from "@earendil-works/pi-coding-agent";
@@ -36,6 +38,7 @@ import { buildPiNoteMentionContextMessage } from "../../harness/pi-native/pi-not
 import { buildPiDocumentContextMessage } from "../../harness/pi-native/pi-document-context";
 
 export async function runPiChatUiProjectorTests(): Promise<void> {
+  assertToolExecutionTimesExcludeModelWaiting();
   assertReasoningSummariesProjectStableAndPrivate();
   assertTaskPlansProjectOneStableDurableMessage();
   assertLiveTaskUpdateResultsProjectOneStableHistoricalTask();
@@ -2546,4 +2549,47 @@ function messageEntry(
 
 function isoTime(timestamp: number): string {
   return new Date(timestamp).toISOString();
+}
+
+function assertToolExecutionTimesExcludeModelWaiting(): void {
+  const piSessionId = "session-live";
+  const productRunId = "run-live";
+  const toolCallId = "short-tool";
+  const duration = (view: PiChatUiViewModel) => buildActionTimeline(view.messages).groups.flatMap((group) => group.items)[0]?.durationMs;
+  const projector = new PiChatUiProjector();
+  let live = projector.createEmpty({ piSessionId });
+  live = project(projector, live, runtimeEvent("tool_execution_start", 26_000, { toolCallId, toolName: "note_read", args: { relativePath: "note.md" } }));
+  live = project(projector, live, runtimeEvent("tool_execution_end", 26_044, { toolCallId, toolName: "note_read", result: { content: [] }, isError: false }));
+  assert.equal(duration(live), 44);
+  const callEntry = messageEntry("call", null, 1_000, { role: "assistant", timestamp: 1_000, content: [{ type: "toolCall", id: toolCallId, name: "note_read", arguments: {} }] });
+  const resultEntry = messageEntry("result", "call", 26_050, { role: "toolResult", toolCallId, toolName: "note_read", content: [], isError: false });
+  const summary = (status: "active" | "completed" | "failed" | "cancelled") => ({
+    type: "custom", id: "summary", parentId: "call", timestamp: isoTime(27_000), customType: ECHOINK_REASONING_SUMMARY_ENTRY_TYPE,
+    data: reasoningSummaryEntryData({ conversationId: "conversation-fixture", piSessionId, summary: {
+      schemaVersion: 1, conversationId: "conversation-fixture", piSessionId, productRunId, status: "running", startedAt: 1_000, updatedAt: 26_044,
+      activities: [{ id: stableHashedIdentity("reasoning-tool", toolCallId), kind: "tool", name: "note_read", status, startedAt: 26_000, updatedAt: status === "active" ? 26_000 : 26_044 }]
+    } })
+  });
+  const input = { piSessionId, productRunId, activeLeafId: "result", runIdentities: [{ productRunId, userEntryId: "user", toolCallIds: [toolCallId] }] };
+  for (const status of ["completed", "failed", "cancelled"] as const) {
+    const rebuilt = new PiChatUiProjector().projectSessionBranch({ ...input, entries: [callEntry, resultEntry, summary(status)] });
+    assert.equal(duration(rebuilt), 44);
+  }
+  const running = new PiChatUiProjector().projectSessionBranch({ ...input, entries: [callEntry, summary("active")], runState: "running" });
+  assert.equal(onlyTool(running).createdAt, 26_000);
+  assert.equal(duration(running), undefined);
+  for (const status of ["completed", "failed", "cancelled"] as const) {
+    const entry = summary("active");
+    const closedEntry = { ...entry, data: reasoningSummaryEntryData({
+      conversationId: "conversation-fixture", piSessionId,
+      summary: closeReasoningSummary({ summary: entry.data.summary, status, terminalAt: 27_000 })
+    }) };
+    const closed = new PiChatUiProjector().projectSessionBranch({ ...input, entries: [callEntry, closedEntry], runState: status });
+    assert.equal(duration(closed), undefined, "run settlement cannot manufacture a tool end time");
+  }
+  const unknown = new PiChatUiProjector().projectSessionBranch({ ...input, entries: [callEntry, resultEntry] });
+  assert.equal(duration(unknown), undefined);
+  const noStartProjector = new PiChatUiProjector();
+  const noStart = project(noStartProjector, noStartProjector.createEmpty({ piSessionId }), runtimeEvent("tool_execution_end", 26_044, { toolCallId, toolName: "note_read", result: {}, isError: false }));
+  assert.equal(duration(noStart), undefined);
 }

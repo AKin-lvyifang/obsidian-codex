@@ -1650,8 +1650,8 @@ export class CodexSettingTab extends PluginSettingTab {
     const page = createSettingsPage(container, {
       title: copy.knowledge.title,
       description: zh
-        ? "在普通 EchoInk 会话中用 /ask 提问、用 /maintain 提炼。/ask 始终只读；显式 /maintain 会在一轮内安全写入并回读验证。"
-        : "Use /ask and /maintain in a normal EchoInk conversation. /ask is always read-only; an explicit /maintain safely writes and verifies readback in one turn."
+        ? "/ask 先查知识库，有依据时展示 Sources；最终没有找到时会说明，并按需使用已有外部资料或模型知识补答。/maintain 用于整理资料。是否写入由会话底部的工作区选项和你的要求决定：只读可分析，可写时按现有流程执行并核对结果。"
+        : "Use /ask to search your knowledge base first and show Sources when evidence is found. If none is found, EchoInk says so and may use available external sources or model knowledge. Use /maintain to organize material. Writing follows the workspace option below the conversation and your request: read-only allows analysis; writable modes use the existing workflow and verify results."
     });
     page.addClass("codex-knowledge-settings");
     this.renderSettingsActionError(page, "knowledge");

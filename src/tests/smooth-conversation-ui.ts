@@ -3470,6 +3470,15 @@ export async function runSmoothConversationUiTests(): Promise<void> {
     } as never);
     await Promise.resolve();
 
+    const citationOnlyMessage = renderMessage(renderer, {
+      ...localSourceMessage,
+      id: "answer-with-citations-only",
+      knowledgeReferences: [],
+      personalMemorySources: []
+    }, { showAgentFooter: false, showAgentHeader: false });
+    assert.equal(citationOnlyMessage.findAllByClass("codex-kb-no-evidence").length, 0,
+      "existing structured citations also count as local evidence");
+
     const emptyAttributionMessage = renderMessage(renderer, {
       id: "answer-with-empty-attribution",
       role: "assistant",
@@ -3485,7 +3494,8 @@ export async function runSmoothConversationUiTests(): Promise<void> {
       createdAt: 1_700_000_003_500
     }, { showAgentFooter: false, showAgentHeader: false });
     assert.equal(emptyAttributionMessage.findAllByClass("codex-ai-elements-sources").length, 0);
-    assert.match(renderedText(emptyAttributionMessage), /不会显示伪来源/u);
+    assert.match(renderedText(emptyAttributionMessage), /知识库没有找到可引用依据/u);
+    assert.doesNotMatch(renderedText(emptyAttributionMessage), /Personal Memory|个人记忆|不会显示伪来源/u);
     assert.doesNotMatch(renderedText(emptyAttributionMessage), /使用了 0 个文档/u);
 
     const diffMessage = renderMessage(renderer, {

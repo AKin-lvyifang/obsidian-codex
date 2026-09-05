@@ -1784,6 +1784,9 @@ export class CodexMessageListRenderer {
     const env = this.requireEnv();
     const copy = this.copy();
     const documents = localDocumentSources(citations, usage);
+    if (usage.askSourceAttribution && !documents.some((document) => document.kind === "vault")) {
+      container.createDiv({ cls: "codex-kb-no-evidence codex-ai-elements-sources-empty", text: copy.sources.noEvidence });
+    }
     if (documents.length) {
       const stateKey = `knowledge-documents:${messageId}`;
       const sources = createAIElementsDocumentSources(
@@ -1800,12 +1803,10 @@ export class CodexMessageListRenderer {
       for (const document of documents) {
         this.renderLocalDocumentSource(sources.body, document, citations?.status);
       }
-    } else if (citations || usage.askSourceAttribution) {
+    } else if (citations && !usage.askSourceAttribution) {
       container.createDiv({
         cls: "codex-kb-no-evidence codex-ai-elements-sources-empty",
-        text: citations
-          ? copy.sources.noEvidence
-          : personalMemorySourceEmptyStateLabel(env.settingsLanguage)
+        text: copy.sources.noEvidence
       });
     }
     if (usage.producedPaths.length) {
