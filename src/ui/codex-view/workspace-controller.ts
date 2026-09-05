@@ -20,6 +20,7 @@ export interface CodexWorkspaceHost {
   readonly app: App;
   readonly plugin: CodexForObsidianPlugin;
   running: boolean;
+  readonly runningSessionIds: ReadonlySet<string>;
   selectedProviderSettingsId: string;
   selectedModel: string;
   selectedPermission: PermissionMode;
@@ -41,9 +42,9 @@ export function openWorkspaceMenu(host: CodexWorkspaceHost, event: MouseEvent, s
   });
 }
 
-export async function chooseChatWorkspace(host: CodexWorkspaceHost, session: StoredSession): Promise<boolean> {
+export async function chooseChatWorkspace(host: CodexWorkspaceHost, session: StoredSession, preparingTurn = false): Promise<boolean> {
   const language = host.plugin.settings.settingsLanguage;
-  if (host.running) {
+  if (!preparingTurn && host.runningSessionIds.has(session.id)) {
     new Notice(conversationUiText(language, "当前会话运行中，结束后再切换工作区", "This conversation is running. Switch workspaces after it finishes."));
     return false;
   }
@@ -57,7 +58,7 @@ export async function chooseChatWorkspace(host: CodexWorkspaceHost, session: Sto
     )
     : pickedPath;
   if (!selectedPath) return false;
-  if (host.running) {
+  if (!preparingTurn && host.runningSessionIds.has(session.id)) {
     new Notice(conversationUiText(language, "当前会话运行中，结束后再切换工作区", "This conversation is running. Switch workspaces after it finishes."));
     return false;
   }
@@ -86,7 +87,7 @@ export async function chooseChatWorkspace(host: CodexWorkspaceHost, session: Sto
 
 export async function clearChatWorkspace(host: CodexWorkspaceHost, session: StoredSession): Promise<void> {
   const language = host.plugin.settings.settingsLanguage;
-  if (host.running) {
+  if (host.runningSessionIds.has(session.id)) {
     new Notice(conversationUiText(language, "当前会话运行中，结束后再清除工作区", "This conversation is running. Clear the workspace after it finishes."));
     return;
   }
@@ -109,10 +110,10 @@ export async function commitChatWorkspaceSelection(
   await host.plugin.saveSettings(true);
 }
 
-export async function ensureChatWorkspaceSelected(host: CodexWorkspaceHost, session: StoredSession): Promise<boolean> {
+export async function ensureChatWorkspaceSelected(host: CodexWorkspaceHost, session: StoredSession, preparingTurn = false): Promise<boolean> {
   const workspacePath = normalizeWorkspacePath(session.cwd);
   if (workspacePath && workspaceDirectoryExists(workspacePath)) return true;
-  const picked = await chooseChatWorkspace(host, session);
+  const picked = await chooseChatWorkspace(host, session, preparingTurn);
   if (!picked) new Notice(conversationUiText(
     host.plugin.settings.settingsLanguage,
     "普通会话需要先选择一个文件夹作为工作区",

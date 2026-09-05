@@ -12,7 +12,10 @@ import {
   createSession,
   deleteArchivedConversation,
   deleteSessions,
+  derivePiConversationFromMessage,
+  discardUnacceptedSession,
   ensureInitialConversation,
+  resetSessionNativeCache,
   restoreArchivedConversation
 } from "../../ui/codex-view/session-controller";
 
@@ -20,7 +23,8 @@ export async function runPiConversationStartupTests(): Promise<void> {
   await createsOneCurrentConversationForAnEmptyProductGeneration();
   await reusesTheCurrentConversationWhenOneExists();
   await releasesHistoricalBodiesAndReloadsThemOnSelection();
-  await keepsAnInFlightConversationBodyWhileAnotherSessionIsActive();
+  await keepsAllInFlightConversationBodiesWhileAnotherSessionIsActive();
+  await protectsEveryRunningConversationWhileAnIdleSessionIsActive();
   await unreadAnswersClearOnlyAfterSuccessfulOpen();
   unreadAnswerAtNormalizationAcceptsOnlyPositiveFiniteNumbers();
   await rendersLocalHistoryBeforeSettingsPersistenceCompletes();
@@ -110,6 +114,7 @@ async function createsOneCurrentConversationForAnEmptyProductGeneration(): Promi
     drafts: []
   };
   const host = {
+    runningSessionIds: new Set<string>(),
     plugin: {
       settings,
       createPiConversation: async (request: Record<string, unknown>) => {
@@ -154,6 +159,7 @@ async function reusesTheCurrentConversationWhenOneExists(): Promise<void> {
   };
   let creates = 0;
   const host = {
+    runningSessionIds: new Set<string>(),
     plugin: {
       settings: { sessions: [existing], activeSessionId: existing.id },
       createPiConversation: async () => { creates += 1; }
@@ -196,12 +202,14 @@ async function releasesHistoricalBodiesAndReloadsThemOnSelection(): Promise<void
   );
 }
 
-async function keepsAnInFlightConversationBodyWhileAnotherSessionIsActive(): Promise<void> {
+async function keepsAllInFlightConversationBodiesWhileAnotherSessionIsActive(): Promise<void> {
   const running = storedSession("conversation-residency-running");
+  const secondRunning = storedSession("conversation-residency-second-running");
   const active = storedSession("conversation-residency-active");
   running.messages = [{ id: "running-body" } as StoredSession["messages"][number]];
+  secondRunning.messages = [{ id: "second-running-body" } as StoredSession["messages"][number]];
   const host = conversationHost({
-    sessions: [running, active],
+    sessions: [running, secondRunning, active],
     activeSessionId: running.id,
     switchPiConversation: async (_previous, next) => conversationProjection(
       next === running.id ? running : active,
@@ -210,8 +218,8 @@ async function keepsAnInFlightConversationBodyWhileAnotherSessionIsActive(): Pro
     saveSettings: async () => undefined,
     rendered: []
   });
-  host.running = true;
-  host.activeRunSessionId = running.id;
+  host.runningSessionIds.add(running.id);
+  host.runningSessionIds.add(secondRunning.id);
 
   await activateSession(host, active);
   assert.equal(
@@ -219,12 +227,81 @@ async function keepsAnInFlightConversationBodyWhileAnotherSessionIsActive(): Pro
     "running-body",
     "a running session must retain its body after the active tab changes"
   );
+  assert.equal(secondRunning.messages[0]?.id, "second-running-body");
   assert.equal(active.messages[0]?.id, `durable-${active.id}`);
 
-  host.running = false;
-  host.activeRunSessionId = "";
+  host.runningSessionIds.delete(running.id);
+  await activateSession(host, active);
+  assert.equal(running.messages.length, 0);
+  assert.equal(secondRunning.messages[0]?.id, "second-running-body",
+    "completing one background conversation must not release another running body");
+
+  host.runningSessionIds.delete(secondRunning.id);
   await activateSession(host, running);
   assert.equal(active.messages.length, 0);
+  assert.equal(secondRunning.messages.length, 0);
+}
+
+async function protectsEveryRunningConversationWhileAnIdleSessionIsActive(): Promise<void> {
+  const first = storedSession("conversation-protected-first");
+  const second = storedSession("conversation-protected-second");
+  const idle = storedSession("conversation-protected-idle");
+  const statusChanges: string[] = [];
+  const released: string[] = [];
+  const derivedSources: string[] = [];
+  const host = conversationHost({
+    sessions: [first, second, idle],
+    activeSessionId: idle.id,
+    switchPiConversation: async () => conversationProjection(idle, "idle-body"),
+    saveSettings: async () => undefined,
+    rendered: []
+  });
+  host.running = false;
+  host.activeRunSessionId = "";
+  host.runningSessionIds.add(first.id);
+  host.runningSessionIds.add(second.id);
+  host.plugin.setPiConversationStatus = async (conversationId: string) => {
+    statusChanges.push(conversationId);
+  };
+  host.plugin.releasePiConversation = async (conversationId: string) => {
+    released.push(conversationId);
+  };
+  host.plugin.derivePiConversation = async ({ sourceConversationId }: { sourceConversationId: string }) => {
+    derivedSources.push(sourceConversationId);
+    const derived = storedSession("conversation-independent-derived");
+    return {
+      sourceConversationId,
+      anchorEntryId: "anchor",
+      anchorRole: "assistant",
+      editorText: "",
+      activation: { status: "activated" },
+      projection: conversationProjection(derived, "derived-body")
+    };
+  };
+  let confirmations = 0;
+  for (const session of [first, second]) {
+    await archiveSession(host, session.id);
+    await resetSessionNativeCache(host, session);
+    await derivePiConversationFromMessage(host, session, "anchor");
+    assert.equal(await discardUnacceptedSession(host, session.id), false);
+  }
+  await deleteSessions(host, [first.id, second.id], {
+    confirm: async () => { confirmations += 1; return true; }
+  });
+  assert.deepEqual(statusChanges, []);
+  assert.deepEqual(released, []);
+  assert.deepEqual(derivedSources, []);
+  assert.equal(confirmations, 0);
+
+  await resetSessionNativeCache(host, idle);
+  assert.deepEqual(released, [idle.id], "background runs must not block an idle session's cache reset");
+
+  host.inputEl = { value: "", focus: () => undefined, setSelectionRange: () => undefined };
+  host.closeComposerMenus = () => undefined;
+  host.plugin.getVaultPath = () => "/disposable-vault";
+  await derivePiConversationFromMessage(host, idle, "anchor");
+  assert.deepEqual(derivedSources, [idle.id], "only the source conversation's run may block derivation");
+  assert.equal(host.plugin.settings.activeSessionId, "conversation-independent-derived");
 }
 
 async function unreadAnswersClearOnlyAfterSuccessfulOpen(): Promise<void> {
@@ -663,8 +740,7 @@ async function archivesWithoutConfirmationAndKeepsRunningConversation(): Promise
     saveSettings: async () => undefined,
     rendered: []
   });
-  runningHost.running = true;
-  runningHost.activeRunSessionId = running.id;
+  runningHost.runningSessionIds.add(running.id);
   runningHost.plugin.setPiConversationStatus = async (conversationId: string, status: string) => {
     runningStatusChanges.push([conversationId, status]);
     return { ...conversationProjection(running, "history-running").catalog, status };
@@ -931,6 +1007,7 @@ function conversationHost(input: Readonly<{
     activeSessionId: input.activeSessionId
   };
   const host: any = {
+    runningSessionIds: new Set<string>(),
     plugin: {
       settings,
       switchPiConversation: input.switchPiConversation,

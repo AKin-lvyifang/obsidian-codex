@@ -182,6 +182,7 @@ export default class CodexForObsidianPlugin extends Plugin {
   private cognitiveSystem: CognitiveSystem | null = null;
   private cognitiveSystemFlight: Promise<CognitiveSystem> | null = null;
   private readonly piRunConversations = new Map<string, string>();
+  private readonly piSubmittingConversations = new Set<string>();
   private readonly apiProviderActivation = new ApiProviderActivationService();
   private editorTranslation: EditorTranslationService | null = null;
   private personalMemoryCorrection: PersonalMemoryCorrectionService | null = null;
@@ -565,17 +566,30 @@ export default class CodexForObsidianPlugin extends Plugin {
   async submitPiChat(
     request: PiChatSubmitRequest
   ): Promise<PiChatRunHandle> {
-    return await this.withProductActivity(async () => {
-      await this.waitForPiConversationActivation(request.conversationId);
-      const bundle = await this.ensurePiProductionRuntime();
-      const handle = await bundle.runtime.submit(request);
-      this.piRunConversations.set(
-        handle.productRunId,
-        handle.conversationId
-      );
-      return handle;
-    });
+    const conversationId = request.conversationId;
+    if (
+      this.piSubmittingConversations.has(conversationId)
+      || [...this.piRunConversations.values()].includes(conversationId)
+    ) {
+      throw new Error("当前会话正在处理请求，请等待本轮完成。");
+    }
+    this.piSubmittingConversations.add(conversationId);
+    try {
+      return await this.productActivity.run(async () => {
+        await this.waitForPiConversationActivation(conversationId);
+        const bundle = await this.ensurePiProductionRuntime();
+        const handle = await bundle.runtime.submit(request);
+        this.piRunConversations.set(
+          handle.productRunId,
+          handle.conversationId
+        );
+        return handle;
+      }, { concurrent: true });
+    } finally {
+      this.piSubmittingConversations.delete(conversationId);
+    }
   }
+
   subscribePiRun(
     productRunId: string,
     listener: PiChatRuntimeEventListener
@@ -1481,25 +1495,10 @@ export default class CodexForObsidianPlugin extends Plugin {
   private async waitForPiConversationActivation(
     conversationId: string
   ): Promise<void> {
-    if (this.piActivatedConversationId === conversationId) return;
+    // Selection activation is an optimization, not permission to send. A
+    // background queue may submit after the user has opened another conversation.
     const pending = this.piConversationActivationTasks.get(conversationId);
-    if (!this.piProviderCanActivateAgentSession()) {
-      if (pending) await pending.promise;
-      return;
-    }
-
-    const task = pending ?? this.queuePiConversationActivation(
-      this.piActivatedConversationId,
-      conversationId
-    );
-    await task.promise;
-    if (
-      this.piActivatedConversationId === conversationId
-      || !this.piProviderCanActivateAgentSession()
-    ) return;
-    throw new Error(
-      "会话已切换或关闭，本轮消息未发送；请在当前会话重试。"
-    );
+    if (pending) await pending.promise.catch(() => undefined);
   }
 
   private async cancelPiConversationActivation(

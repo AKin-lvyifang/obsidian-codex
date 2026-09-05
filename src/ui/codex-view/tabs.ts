@@ -21,7 +21,7 @@ export interface CodexSessionNavigatorModel {
   /** Most-recent-first order for the full session picker. */
   chatSessions: StoredSession[];
   chatCount: number;
-  runningSessionId: string;
+  runningSessionIds: ReadonlySet<string>;
 }
 
 interface CodexSessionNavigatorState {
@@ -91,7 +91,7 @@ export function retainSessionTabUiStateIds(
   sessions: readonly Pick<StoredSession, "id" | "createdAt" | "updatedAt">[],
   previousIds: readonly string[],
   activeSessionId: string,
-  runningSessionId = "",
+  runningSessionIds: ReadonlySet<string> = new Set(),
   maximum = MAX_SESSION_TAB_UI_STATES
 ): string[] {
   const liveIds = new Set(sessions.map((session) => session.id));
@@ -103,13 +103,13 @@ export function retainSessionTabUiStateIds(
       .slice(-limit)
       .map((session) => session.id);
   }
-  for (const sessionId of [runningSessionId, activeSessionId]) {
+  for (const sessionId of [...runningSessionIds, activeSessionId]) {
     if (!sessionId || !liveIds.has(sessionId)) continue;
     retained = retained.filter((id) => id !== sessionId);
     retained.push(sessionId);
   }
   const protectedIds = new Set(
-    [activeSessionId, runningSessionId].filter((id) => liveIds.has(id))
+    [activeSessionId, ...runningSessionIds].filter((id) => liveIds.has(id))
   );
   while (retained.length > limit) {
     const evictedIndex = retained.findIndex((id) => !protectedIds.has(id));
@@ -148,7 +148,7 @@ export function nextSessionPickerVisibleCount(
 export function buildCodexSessionNavigatorModel(
   sessions: StoredSession[],
   activeSessionId: string,
-  runningSessionId = "",
+  runningSessionIds: ReadonlySet<string> = new Set(),
   query = "",
   language: SettingsLanguage = "zh-CN"
 ): CodexSessionNavigatorModel {
@@ -168,7 +168,7 @@ export function buildCodexSessionNavigatorModel(
     tabSessions,
     chatSessions,
     chatCount: sessions.length,
-    runningSessionId
+    runningSessionIds
   };
 }
 
@@ -339,7 +339,7 @@ export function renderCodexTabs(
   sessions: StoredSession[],
   activeSessionId: string,
   callbacks: CodexTabsCallbacks,
-  runningSessionId = "",
+  runningSessionIds: ReadonlySet<string> = new Set(),
   language: SettingsLanguage = "zh-CN"
 ): void {
   const state = navigatorStateFor(container);
@@ -355,7 +355,7 @@ export function renderCodexTabs(
   const allModel = buildCodexSessionNavigatorModel(
     sessions,
     activeSessionId,
-    runningSessionId,
+    runningSessionIds,
     "",
     language
   );
@@ -363,7 +363,7 @@ export function renderCodexTabs(
     sessions,
     state.tabUiStateIds,
     activeSessionId,
-    runningSessionId
+    runningSessionIds
   );
   const retainedTabIds = new Set(state.tabUiStateIds);
   allModel.tabSessions = allModel.tabSessions.filter((session) =>
@@ -372,7 +372,7 @@ export function renderCodexTabs(
   const validSessionIds = new Set(sessions.map((session) => session.id));
   const validTabIds = new Set(allModel.tabSessions.map((session) => session.id));
   state.selectedIds = new Set([...state.selectedIds].filter((sessionId) =>
-    validSessionIds.has(sessionId) && sessionId !== runningSessionId
+    validSessionIds.has(sessionId) && !runningSessionIds.has(sessionId)
   ));
   const activeChanged = state.lastActiveSessionId !== activeSessionId;
   state.lastActiveSessionId = activeSessionId;
@@ -393,7 +393,7 @@ export function renderCodexTabs(
     sessions,
     activeSessionId,
     callbacks,
-    runningSessionId,
+    runningSessionIds,
     language
   );
   const activate = (session: StoredSession) => {
@@ -448,7 +448,7 @@ export function renderCodexTabs(
   for (const [index, session] of allModel.tabSessions.entries()) {
     const active = session.id === activeSessionId;
     const tabStop = session.id === state.trackRovingSessionId;
-    const running = session.id === runningSessionId;
+    const running = runningSessionIds.has(session.id);
     const unread = session.unreadAnswerAt !== undefined;
     const summary = sessionSummaryTooltip(session, Date.now(), language);
     const tab = track.createEl("button", {
@@ -807,7 +807,7 @@ export function renderCodexTabs(
       container,
       sessions,
       activeSessionId,
-      runningSessionId,
+      runningSessionIds,
       callbacks,
       state,
       activate,
@@ -821,7 +821,7 @@ function renderSessionPicker(
   container: HTMLElement,
   sessions: StoredSession[],
   activeSessionId: string,
-  runningSessionId: string,
+  runningSessionIds: ReadonlySet<string>,
   callbacks: CodexTabsCallbacks,
   state: CodexSessionNavigatorState,
   activate: (session: StoredSession) => void,
@@ -909,11 +909,11 @@ function renderSessionPicker(
     const model = buildCodexSessionNavigatorModel(
       sessions,
       activeSessionId,
-      runningSessionId,
+      runningSessionIds,
       state.query,
       language
     );
-    const selectableIds = model.chatSessions.filter((session) => session.id !== runningSessionId).map((session) => session.id);
+    const selectableIds = model.chatSessions.filter((session) => !runningSessionIds.has(session.id)).map((session) => session.id);
     const selectableSet = new Set(selectableIds);
     state.selectedIds = new Set([...state.selectedIds].filter((sessionId) => selectableSet.has(sessionId)));
     const visibleSessions = visibleSessionPickerRows(
@@ -954,7 +954,7 @@ function renderSessionPicker(
       }
     });
     for (const [index, session] of visibleSessions.entries()) {
-      const running = session.id === runningSessionId;
+      const running = runningSessionIds.has(session.id);
       const unread = session.unreadAnswerAt !== undefined;
       const active = session.id === activeSessionId;
       const selected = state.selectedIds.has(session.id);
@@ -1171,7 +1171,7 @@ function renderSessionPicker(
     const model = buildCodexSessionNavigatorModel(
       sessions,
       activeSessionId,
-      runningSessionId,
+      runningSessionIds,
       state.query,
       language
     );
@@ -1227,7 +1227,7 @@ function renderSessionPicker(
       if (!session) return;
       event.preventDefault();
       if (state.managing) {
-        if (session.id !== runningSessionId) toggleSelectedSession(state, session.id, renderBody);
+        if (!runningSessionIds.has(session.id)) toggleSelectedSession(state, session.id, renderBody);
       } else {
         activate(session);
       }

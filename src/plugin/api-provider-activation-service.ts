@@ -35,6 +35,7 @@ export interface ApiProviderActivationPort<TSnapshot, TPersisted, TRuntime> {
 
 export class ProductActivityGate {
   private active = 0;
+  private exclusive = 0;
   private switching = false;
 
   get hasActivity(): boolean { return this.active > 0; }
@@ -51,15 +52,23 @@ export class ProductActivityGate {
 
   endSwitch(): void { this.switching = false; }
 
-  async run<T>(action: () => Promise<T>): Promise<T> {
+  async run<T>(
+    action: () => Promise<T>,
+    options: { concurrent?: boolean } = {}
+  ): Promise<T> {
     if (this.switching) {
       throw new Error("EchoInk 正在切换模型，请稍后再试。");
     }
+    if (this.exclusive > 0 || (!options.concurrent && this.active > 0)) {
+      throw new Error("EchoInk 正在处理其他请求，请稍后再试。");
+    }
     this.active += 1;
+    if (!options.concurrent) this.exclusive += 1;
     try {
       return await action();
     } finally {
       this.active -= 1;
+      if (!options.concurrent) this.exclusive -= 1;
     }
   }
 }

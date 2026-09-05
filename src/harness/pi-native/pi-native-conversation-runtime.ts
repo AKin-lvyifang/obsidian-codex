@@ -185,6 +185,9 @@ type PiChatRuntimeEventPayload = DistributiveOmit<
 >;
 
 export interface PiNativeAgentSessionFactoryInput {
+  providerSettingsId?: string;
+  runtimeProviderId?: string;
+  modelId?: string;
   catalog: Readonly<PiConversationCatalogEntry>;
   cwd: string;
   sessionManager: SessionManager;
@@ -363,6 +366,8 @@ export type PiNativeKnowledgeTurnContext =
     }>;
 
 export interface PiNativeAgentSessionFactoryResult {
+  /** Exact saved Provider used when activation selected the global default. */
+  providerSettingsId?: string;
   session: AgentSession;
   /** Command-safe alias exposed by the controlled Pi ResourceLoader. */
   skillCommandName?: string;
@@ -546,6 +551,9 @@ export interface DerivePiNativeConversationInput {
 }
 
 export interface ActivatePiNativeConversationOptions {
+  providerSettingsId?: string;
+  runtimeProviderId?: string;
+  modelId?: string;
   skillPath?: string;
   skillName?: string;
   skillPaths?: readonly string[];
@@ -648,6 +656,7 @@ ReadonlySet<string> = new Set<PiNativeFileStoreErrorCode>([
 ]);
 
 interface ActiveConversation {
+  providerSettingsId?: string;
   catalog: Readonly<PiConversationCatalogEntry>;
   cwd: string;
   resourceKey: string;
@@ -829,6 +838,8 @@ export class PiNativeConversationRuntime {
   private readonly idFactory: () => string;
   private readonly now: () => number;
   private readonly active = new Map<string, ActiveConversation>();
+  private readonly submitting = new Set<string>();
+  private readonly activating = new Map<string, Promise<ActiveConversation>>();
   private readonly runChannels = new Map<string, PiRuntimeEventChannel>();
   private readonly recoveringConversations = new Set<string>();
   private initialized = false;
@@ -1313,6 +1324,23 @@ export class PiNativeConversationRuntime {
     request: Readonly<PiChatSubmitRequest>
   ): Promise<PiChatRunHandle> {
     this.assertReady();
+    if (this.submitting.has(request.conversationId)) {
+      throw new PiNativeConversationRuntimeError(
+        "conversation_busy",
+        `Conversation ${request.conversationId} 正在启动 ProductRun`
+      );
+    }
+    this.submitting.add(request.conversationId);
+    try {
+      return await this.submitPrepared(request);
+    } finally {
+      this.submitting.delete(request.conversationId);
+    }
+  }
+
+  private async submitPrepared(
+    request: Readonly<PiChatSubmitRequest>
+  ): Promise<PiChatRunHandle> {
     this.assertConversationNotRecovering(request.conversationId);
     assertValidSkillBinding(request);
     const promptImages = normalizePiChatPreparedImages(request.images);
@@ -1374,15 +1402,20 @@ export class PiNativeConversationRuntime {
 
     const active = await this.requireActiveConversation(
       request.conversationId,
-      request.skillPath
-        ? { skillPath: request.skillPath, skillName: request.skillName }
-        : selectedRuntimeSkill
-          ? {
-              skillPaths: selectedRuntimeSkills.map((skill) => skill.skillPath),
-              skillNames: selectedRuntimeSkills.map((skill) => skill.skillName),
-              skillRevision: selectedRuntimeSkill.revision
-            }
-          : {}
+      {
+        providerSettingsId: request.providerSettingsId,
+        runtimeProviderId: request.runtimeProviderId,
+        modelId: request.modelId,
+        ...(request.skillPath
+          ? { skillPath: request.skillPath, skillName: request.skillName }
+          : selectedRuntimeSkill
+            ? {
+                skillPaths: selectedRuntimeSkills.map((skill) => skill.skillPath),
+                skillNames: selectedRuntimeSkills.map((skill) => skill.skillName),
+                skillRevision: selectedRuntimeSkill.revision
+              }
+            : {})
+      }
     );
     if (active.currentRun || active.session.isStreaming) {
       throw new PiNativeConversationRuntimeError(
@@ -2380,6 +2413,8 @@ export class PiNativeConversationRuntime {
     const active = this.active.get(conversationId);
     if (
       !active
+      || this.submitting.has(conversationId)
+      || this.activating.has(conversationId)
       || active.currentRun
       || active.pendingSettlement
       || active.session.isStreaming
@@ -2408,17 +2443,44 @@ export class PiNativeConversationRuntime {
     conversationId: string,
     options: ActivatePiNativeConversationOptions = {}
   ): Promise<ActiveConversation> {
+    const pending = this.activating.get(conversationId);
+    if (pending) {
+      await pending.catch(() => undefined);
+      return await this.requireActiveConversation(conversationId, options);
+    }
+    const activation = this.createActiveConversation(conversationId, options);
+    this.activating.set(conversationId, activation);
+    try {
+      return await activation;
+    } finally {
+      if (this.activating.get(conversationId) === activation) {
+        this.activating.delete(conversationId);
+      }
+    }
+  }
+
+  private async createActiveConversation(
+    conversationId: string,
+    options: ActivatePiNativeConversationOptions
+  ): Promise<ActiveConversation> {
     this.assertReady();
     this.assertConversationNotRecovering(conversationId);
     assertValidSkillBinding(options);
     const resourceKey = resourceKeyFor(options);
     const existing = this.active.get(conversationId);
-    if (existing && existing.resourceKey === resourceKey) return existing;
+    const selectedModelMatches = !options.runtimeProviderId
+      || (existing?.session.model?.provider === options.runtimeProviderId
+        && existing.session.model.id === options.modelId
+        && (!options.providerSettingsId
+          || existing.providerSettingsId === options.providerSettingsId));
+    if (existing && existing.resourceKey === resourceKey && selectedModelMatches) {
+      return existing;
+    }
     if (existing) {
       if (existing.currentRun || existing.session.isStreaming) {
         throw new PiNativeConversationRuntimeError(
           "conversation_busy",
-          "运行期间不能替换 Skill/Resource 绑定"
+          "运行期间不能替换模型或 Skill/Resource 绑定"
         );
       }
       await this.releaseConversation(conversationId);
@@ -2437,6 +2499,9 @@ export class PiNativeConversationRuntime {
     const created = await this.options.createAgentSession({
       catalog,
       cwd,
+      providerSettingsId: options.providerSettingsId,
+      runtimeProviderId: options.runtimeProviderId,
+      modelId: options.modelId,
       sessionManager: opened.sessionManager,
       skillPath: options.skillPath,
       skillName: options.skillName,
@@ -2687,6 +2752,7 @@ export class PiNativeConversationRuntime {
       await this.loadKnowledgeDecorations(catalog, branchEntries)
     ));
     const active: ActiveConversation = {
+      providerSettingsId: created.providerSettingsId ?? options.providerSettingsId,
       catalog,
       cwd,
       resourceKey,

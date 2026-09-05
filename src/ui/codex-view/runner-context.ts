@@ -32,6 +32,7 @@ export interface CodexViewLifecycleContext {
 }
 
 export interface CodexViewRunnerBaseContext {
+  readonly lifecycleSignal?: AbortSignal;
   readonly app: App;
   readonly plugin: CodexForObsidianPlugin;
   running: boolean;

@@ -28,7 +28,6 @@ import type {
   StoredSession
 } from "../../settings/settings";
 import {
-  activateApiProviderModel,
   apiProviderModelSupportsImage,
   apiProviderHasUsableCredential,
   getApiProviderModel,
@@ -110,6 +109,7 @@ function showNotice(
 }
 
 export async function sendMessage(view: CodexViewTurnContext): Promise<void> {
+  if (view.lifecycleSignal?.aborted || (view.queueStartInProgress && !view.activeRunId)) return;
   const session = view.ensureSession();
   const action = composerPrimaryActionForState(view.composerStateForSession(session));
   if (
@@ -156,10 +156,18 @@ export async function sendMessage(view: CodexViewTurnContext): Promise<void> {
     );
     return;
   }
-  const item = await view.createQueuedTurnFromComposer({ allowLocalKnowledgeCommands: true });
-  if (!item) return;
-  const outcome = await view.startQueuedTurnItemSafely(item, "composer");
-  if (outcome !== "running") {
+  view.queueStartInProgress = true;
+  let item: QueuedTurnItem | null = null;
+  let outcome: QueuedTurnOutcome = "cancelled";
+  try {
+    item = await view.createQueuedTurnFromComposer({ allowLocalKnowledgeCommands: true });
+    if (!item || view.lifecycleSignal?.aborted) return;
+    outcome = await view.startQueuedTurnItemSafely(item, "composer");
+  } finally {
+    view.queueStartInProgress = false;
+    view.renderToolbar();
+  }
+  if (item && outcome !== "running") {
     await view.afterTurnSettled(item.sessionId, outcome === "completed");
   }
 }
@@ -171,6 +179,7 @@ export function piChatMemoryModeForGlobalSetting(
 }
 
 export async function enqueueComposerDraft(view: CodexViewTurnContext): Promise<void> {
+  if (view.lifecycleSignal?.aborted || (view.queueStartInProgress && !view.activeRunId)) return;
   const item = await view.createQueuedTurnFromComposer({ allowLocalKnowledgeCommands: false });
   if (!item) return;
   const session = view.sessionById(item.sessionId);
@@ -312,7 +321,7 @@ export async function handlePiTaskPlanAction(
     showNotice(view, "任务计划只属于当前 Pi Conversation。", "Task plans belong only to the current Pi Conversation.");
     return;
   }
-  if (view.running && action !== "pause") {
+  if ((view.running || view.queueStartInProgress) && action !== "pause") {
     showNotice(view, "当前计划正在执行，请先暂停。", "The current plan is running. Pause it first.");
     return;
   }
@@ -422,6 +431,7 @@ export function selectFirstNonBlankText(...candidates: Array<string | null | und
 }
 
 export async function startNextQueuedTurn(view: CodexViewTurnContext, sessionId: string): Promise<void> {
+  if (view.lifecycleSignal?.aborted) return;
   if (!canStartQueuedTurn({
     queueStartInProgress: view.queueStartInProgress,
     viewRunning: view.running,
@@ -483,26 +493,26 @@ export async function startNextQueuedTurn(view: CodexViewTurnContext, sessionId:
 }
 
 export async function createQueuedTurnFromComposer(view: CodexViewTurnContext, options: { allowLocalKnowledgeCommands: boolean }): Promise<QueuedTurnItem | null> {
-  let session = view.ensureSession();
+  const session = view.ensureSession();
+  const turnOptions = view.currentTurnOptions(session);
   const text = view.inputEl.value.trim();
   const attachments = view.attachments.map((attachment) => ({ ...attachment }));
   const skill = view.selectedSkill ? { ...view.selectedSkill } : null;
   const selectedNoteMentions = composerNoteMentionSelections(view.inputEl);
   if (!text && !attachments.length && !selectedNoteMentions.length && !skill) return null;
   const workspaceReady = await view.ensureChatWorkspaceSelected(session);
-  if (!workspaceReady) return null;
-  session = view.ensureSession();
+  if (!workspaceReady || view.lifecycleSignal?.aborted) return null;
   let noteMentions: Awaited<ReturnType<typeof snapshotComposerNoteMentions>>;
   try {
-    noteMentions = await snapshotComposerNoteMentions(view.app, view.inputEl);
+    noteMentions = await snapshotComposerNoteMentions(view.app, view.inputEl, selectedNoteMentions);
   } catch (error) {
     new Notice(localizedPiChatErrorMessage(view, error));
     return null;
   }
+  if (session.cwd) turnOptions.cwd = session.cwd;
   const piDraftId = session.bodyAuthority === "pi_session_only"
     ? selectedPiConversationDraftId(view.plugin, session.id)
     : undefined;
-  const turnOptions = view.currentTurnOptions(session);
   if (!frozenTurnReasoningSelectionIsValid(
     view.plugin.settings,
     turnOptions
@@ -571,8 +581,14 @@ export async function createQueuedTurnFromComposer(view: CodexViewTurnContext, o
 }
 
 export async function startQueuedTurnItem(view: CodexViewTurnContext, item: QueuedTurnItem, source: QueuedTurnSource): Promise<QueuedTurnOutcome> {
-  if (!await prepareTurnProviderModel(view, item, false)) return "failed";
-  return await startPreparedQueuedTurnItem(view, item, source);
+  const ownsStart = !view.queueStartInProgress;
+  if (ownsStart) view.queueStartInProgress = true;
+  try {
+    if (!await prepareTurnProviderModel(view, item, false)) return "failed";
+    return await startPreparedQueuedTurnItem(view, item, source);
+  } finally {
+    if (ownsStart) view.queueStartInProgress = false;
+  }
 }
 
 async function startPreparedQueuedTurnItem(
@@ -667,50 +683,7 @@ async function prepareTurnProviderModel(
     ));
     return false;
   }
-  if (
-    settings.providerMode === "custom-api"
-    && settings.activeApiProviderId === selection.providerSettingsId
-    && settings.defaultModel === selection.model
-  ) {
-    view.selectedProviderSettingsId = selection.providerSettingsId;
-    view.selectedModel = selection.model;
-    return true;
-  }
-  try {
-    await view.plugin.activateApiProviderSettings((candidateSettings) => {
-      const candidate = candidateSettings.apiProviders.find(
-        (provider) => provider.id === selection.providerSettingsId
-      );
-      if (
-        !candidate
-        || !apiProviderHasUsableCredential(
-          candidate,
-          candidateSettings.openAICodexCredential
-        )
-      ) {
-        throw new Error("Provider authentication unavailable");
-      }
-      activateApiProviderModel(candidateSettings, candidate, selection.model);
-    });
-  } catch (error) {
-    const detail = localizedPiChatErrorMessage(view, error);
-    new Notice(retainQueueHead
-      ? uiText(
-        view,
-        `切换队列 Provider/模型失败；队首已保留并暂停：${detail}`,
-        `Could not switch the queued Provider/model. The queue head was kept and paused: ${detail}`
-      )
-      : uiText(
-        view,
-        `切换 Provider/模型失败：${detail}`,
-        `Could not switch Provider/model: ${detail}`
-      ));
-    return false;
-  }
-  view.selectedProviderSettingsId = selection.providerSettingsId;
-  view.selectedModel = selection.model;
-  view.renderToolbar();
-  return true;
+  return !view.lifecycleSignal?.aborted;
 }
 
 export async function startChatTurn(view: CodexViewTurnContext, session: StoredSession, item: QueuedTurnItem, source: QueuedTurnSource): Promise<QueuedTurnOutcome> {
@@ -879,6 +852,7 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
     && !preparedImages.length
     && !preparedDocumentSet.documents.length
   ) return "failed";
+  if (view.lifecycleSignal?.aborted) return "cancelled";
   const projector = new PiChatUiProjector();
   let handle: Awaited<
     ReturnType<CodexViewTurnContext["plugin"]["submitPiChat"]>
@@ -911,6 +885,7 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
       text: submittedText,
       submittedAt,
       mode: item.turnOptions.mode === "plan" ? "plan" : "agent",
+      providerSettingsId: item.turnOptions.providerSettingsId,
       runtimeProviderId: item.turnOptions.runtimeProviderId,
       modelId: item.turnOptions.model,
       reasoning: item.turnOptions.reasoning,
@@ -953,6 +928,12 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
     if (source === "queue") {
       view.turnQueue.acceptPiUserEntry(session.id, item.id);
       view.renderQueue();
+    }
+    if (view.lifecycleSignal?.aborted) {
+      clearComposerAfterPiAcceptance(view, item, source);
+      await view.plugin.abortPiConversation(session.id);
+      await handle.result;
+      return "cancelled";
     }
     view.activeRunId = handle.productRunId;
     view.activeRunKind = "chat";
@@ -1205,7 +1186,9 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
       view.clearActiveRun();
     }
     view.renderTabs();
-    view.renderMessages(messageRenderOptionsForRunUpdate(view));
+    if (view.plugin.settings.activeSessionId === session.id) {
+      view.renderMessages(messageRenderOptionsForRunUpdate(view));
+    }
     view.renderToolbar();
     view.applyStatus();
   }

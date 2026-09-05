@@ -154,6 +154,7 @@ import type {
 import {
   apiProviderModelSupportsImage,
   getActiveApiProviderModel,
+  getApiProviderModel,
   selectActiveConversationSession,
   type ApiProviderConfig,
   type CodexForObsidianSettings,
@@ -308,9 +309,13 @@ export async function resolvePiProductionSkillById(
 /** Builds the same configured Pi model shape used by AgentSession before a
  * Provider transaction is allowed to persist or replace the active Runtime. */
 export function createPiProductionModelDefinition(
-  settings: CodexForObsidianSettings
+  settings: CodexForObsidianSettings,
+  selection?: Pick<
+    PiNativeAgentSessionFactoryInput,
+    "providerSettingsId" | "runtimeProviderId" | "modelId"
+  >
 ): Model<Api> {
-  const configured = resolveProvider(settings);
+  const configured = resolveProvider(settings, selection);
   return createPiProductionModelDefinitionFromResolved(configured);
 }
 
@@ -1612,7 +1617,10 @@ async function createProductionAgentSession(input: {
   approvalBroker: PiAgentApprovalBroker;
   interactionBroker: PiTurnInteractionBroker;
 }): Promise<PiNativeAgentSessionFactoryResult> {
-  const preparedProvider = await preparePiProductionProvider(input);
+  const preparedProvider = await preparePiProductionProvider({
+    ...input,
+    modelSelection: input.input
+  });
   const { configured, binding, controlledConfig, provider } = preparedProvider;
   const productProviderId = normalizeApiProviderId(
     configured.provider.providerId,
@@ -2023,6 +2031,7 @@ async function createProductionAgentSession(input: {
     .filter((warning): warning is string => Boolean(warning))
     .map((warning) => redactEchoInkLocalSecretsV1(warning));
   return {
+    providerSettingsId: configured.provider.id,
     session: created.session,
     memoryToolNames: configured.toolCalling
       ? PI_PERSONAL_MEMORY_TOOL_IDS
@@ -2039,6 +2048,10 @@ async function createProductionAgentSession(input: {
 
 async function preparePiProductionProvider(input: {
   plugin: PiProductionPluginHost;
+  modelSelection?: Pick<
+    PiNativeAgentSessionFactoryInput,
+    "providerSettingsId" | "runtimeProviderId" | "modelId"
+  >;
   roots: DevicePiCanonicalStoreRoots;
   storeBindingAuthority: PiRuntimeBindingAuthorityPort;
 }): Promise<{
@@ -2048,12 +2061,16 @@ async function preparePiProductionProvider(input: {
   resolveAuthToken: () => Promise<string>;
   provider: NonNullable<Awaited<ReturnType<PiProviderRuntimeConfigPort["read"]>>>;
 }> {
-  const configured = resolveProvider(input.plugin.settings);
+  const configured = resolveProvider(input.plugin.settings, input.modelSelection);
   const binding = await input.storeBindingAuthority.verify({
     pluginDataRootPath: input.roots.pluginDataRootPath
   });
   const readCurrent = (): ReturnType<typeof resolveProvider> => {
-    const current = resolveProvider(input.plugin.settings);
+    const current = resolveProvider(input.plugin.settings, {
+      providerSettingsId: configured.provider.id,
+      runtimeProviderId: configured.providerId,
+      modelId: configured.modelRef
+    });
     if (!sameResolvedProvider(current, configured)) {
       throw new PiProductionConfigurationError(
         "provider_unsupported",
@@ -2353,7 +2370,11 @@ function bindingDigest(namespace: string, ...parts: string[]): string {
 }
 
 function resolveProvider(
-  settings: CodexForObsidianSettings
+  settings: CodexForObsidianSettings,
+  selection?: Pick<
+    PiNativeAgentSessionFactoryInput,
+    "providerSettingsId" | "runtimeProviderId" | "modelId"
+  >
 ): {
   provider: ApiProviderConfig;
   providerId: string;
@@ -2370,7 +2391,21 @@ function resolveProvider(
   maxOutputTokens: number;
   requestMaxOutputTokens?: number;
 } {
-  const active = getActiveApiProviderModel(settings);
+  const selectedProvider = selection?.runtimeProviderId
+    ? settings.apiProviders.find((provider) =>
+        provider.runtimeProviderId === selection.runtimeProviderId
+        && (selection.providerSettingsId
+          ? provider.id === selection.providerSettingsId
+          : provider.id === settings.activeApiProviderId))
+    : undefined;
+  const selectedModel = selectedProvider && selection?.modelId
+    ? getApiProviderModel(selectedProvider, selection.modelId)
+    : undefined;
+  const active = selection?.runtimeProviderId || selection?.modelId
+    ? selectedProvider && selectedModel
+      ? { provider: selectedProvider, model: selectedModel }
+      : null
+    : getActiveApiProviderModel(settings);
   if (!active || settings.providerMode !== "custom-api") {
     throw new PiProductionConfigurationError(
       "provider_not_configured",

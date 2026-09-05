@@ -11,6 +11,7 @@ export interface CodexTurnLifecycleHost {
   activeRunSessionId: string;
   activeTurnId: string;
   turnWatchdog: number | null;
+  cancelPendingTurn?(): void;
   clearTurnWatchdog(): void;
   clearActiveRun(): void;
   applyStatus(): void;
@@ -25,9 +26,10 @@ export interface CodexTurnLifecycleHost {
 export async function stopTurn(host: CodexTurnLifecycleHost): Promise<void> {
   const session = host.activeRunSession();
   const runId = host.activeRunId;
+  host.cancelPendingTurn?.();
+  host.pauseQueueForSession(session.id);
   if (!runId) return;
   if (!host.plugin.isPiProductionRun(runId)) return;
-  host.pauseQueueForSession(session.id);
   host.clearTurnWatchdog();
   await host.plugin.cancelHarnessRun(runId);
   host.applyStatus();

@@ -43,13 +43,15 @@ function tabUiStateUsesBoundedLeastRecentlyUsedEviction(): void {
     sessions,
     first,
     "tab-5",
-    "tab-4"
+    new Set(["tab-4", "tab-3"])
   );
   assert.equal(next.length, 40);
   assert.ok(next.includes("tab-5"));
   assert.ok(next.includes("tab-4"));
+  assert.ok(next.includes("tab-3"));
   assert.equal(next.includes("tab-6"), false);
   assert.equal(next.includes("tab-7"), false);
+  assert.equal(next.includes("tab-8"), false);
 }
 
 function sessionPickerLoadsTheFullCatalogInBatches(): void {
@@ -76,7 +78,7 @@ function sessionPickerLoadsTheFullCatalogInBatches(): void {
   const searched = buildCodexSessionNavigatorModel(
     sessions,
     "",
-    "",
+    new Set(),
     "会话 119"
   );
   assert.deepEqual(searched.chatSessions.map((session) => session.id), [

@@ -26,9 +26,14 @@ import { devicePiCanonicalStoreRoots } from "../../harness/pi/pi-store-layout";
 import { FileKnowledgeUsageStore } from "../../knowledge-base/usage";
 import {
   createPiProductionRuntimeBundle,
+  createPiProductionModelDefinition,
   PiProductionConfigurationError
 } from "../../plugin/pi-production-runtime-composition";
-import { DEFAULT_SETTINGS, type StoredSession } from "../../settings/settings";
+import {
+  DEFAULT_SETTINGS, activateApiProvider, createApiProviderConfig,
+  createApiProviderModelConfig, type StoredSession
+} from "../../settings/settings";
+import { ProductActivityGate } from "../../plugin/api-provider-activation-service";
 
 const pluginPrototype = CodexForObsidianPlugin.prototype as any;
 
@@ -38,11 +43,13 @@ export async function runPiPluginConversationBoundaryTests(): Promise<void> {
   await localHistoryDoesNotWaitForProductionRuntimeInitialization();
   await openingReturnsHistoryBeforeActivationCompletes();
   await sendingWaitsForTheExistingActivationTask();
-  await supersededSendDoesNotReactivateTheEarlierConversation();
+  await backgroundSendSurvivesASelectionChange();
   await latestRapidSwitchWinsAndReleasesTheStaleSession();
   await inactiveReleaseIsSkippedWhenConversationBecomesActiveAgain();
   await inactiveSettledConversationIsReleased();
   await activeRunStillRejectsASecondProductActivity();
+  await differentConversationsStartTogetherAndKeepOtherActivityExclusive();
+  configuredModelSelectionDoesNotChangeTheGlobalDefault();
   await staleConcurrentSelectionDoesNotCreateAnObsoleteAgentSession();
   await archivingPendingSelectionDoesNotWaitForRuntimeInitialization();
   await switchingWithoutAKeyKeepsTargetHistoryReadable();
@@ -474,7 +481,7 @@ async function sendingWaitsForTheExistingActivationTask(): Promise<void> {
   assert.equal(submissions, 1);
 }
 
-async function supersededSendDoesNotReactivateTheEarlierConversation():
+async function backgroundSendSurvivesASelectionChange():
 Promise<void> {
   const first = conversationProjection("history-send-first");
   const second = conversationProjection("history-send-second");
@@ -506,7 +513,10 @@ Promise<void> {
       },
       submit: async () => {
         events.push("submit");
-        throw new Error("a superseded send must not reach submit");
+        return {
+          productRunId: "background-send-run",
+          conversationId: first.catalog.conversationId
+        };
       }
     }
   });
@@ -532,14 +542,11 @@ Promise<void> {
     first.catalog.conversationId,
     "activated-too-late"
   ));
-  await assert.rejects(
-    sending,
-    /会话已切换或关闭.*当前会话重试/u
-  );
+  assert.equal((await sending).conversationId, first.catalog.conversationId);
   await host.piConversationActivationLane;
 
   assert.equal(firstActivationCalls, 1);
-  assert.equal(events.includes("submit"), false);
+  assert.equal(events.includes("submit"), true);
   assert.equal(
     host.piActivatedConversationId,
     second.catalog.conversationId
@@ -682,6 +689,86 @@ async function activeRunStillRejectsASecondProductActivity(): Promise<void> {
     /正在处理其他请求/u
   );
   assert.equal(actionCalls, 0);
+}
+
+async function differentConversationsStartTogetherAndKeepOtherActivityExclusive():
+Promise<void> {
+  const firstReady = deferred<void>();
+  const submitted: string[] = [];
+  const aborted: string[] = [];
+  const runtime = {
+    submit: async (request: { conversationId: string }) => {
+      submitted.push(request.conversationId);
+      return {
+        productRunId: `run-${request.conversationId}`,
+        conversationId: request.conversationId
+      };
+    },
+    abort: async (conversationId: string) => { aborted.push(conversationId); },
+    releaseProductRun: () => undefined
+  };
+  const host = pluginHost({
+    piRuntimeBundle: { runtime },
+    ensurePiProductionRuntime: async () => ({ runtime }),
+    waitForPiConversationActivation: async (conversationId: string) => {
+      if (conversationId === "a") await firstReady.promise;
+    }
+  });
+  const sendingA = host.submitPiChat({ conversationId: "a" });
+  assert.equal(host.productActivity.hasActivity, true);
+  await assert.rejects(host.submitPiChat({ conversationId: "a" }), /当前会话/u);
+  const second = await host.submitPiChat({ conversationId: "b" });
+  assert.deepEqual(submitted, ["b"], "B starts while A is still preparing");
+  assert.equal(host.productActivity.hasActivity, true,
+    "B finishing preparation must not clear A's shared activity count");
+  await assert.rejects(host.withProductActivity(async () => undefined), /其他请求/u);
+  await assert.rejects(host.activateApiProviderSettings(() => undefined), /不能切换/u);
+  firstReady.resolve();
+  const first = await sendingA;
+  assert.deepEqual(submitted, ["b", "a"]);
+  assert.equal(host.productActivity.hasActivity, false);
+  await assert.rejects(host.submitPiChat({ conversationId: "b" }), /当前会话/u);
+  await host.cancelHarnessRun(first.productRunId);
+  assert.deepEqual(aborted, ["a"]);
+  host.releasePiProductionRun(first.productRunId);
+  assert.equal(host.isPiProductionRun(second.productRunId), true);
+  await assert.rejects(host.withProductActivity(async () => undefined), /其他请求/u);
+  host.releasePiProductionRun(second.productRunId);
+  const exclusiveReady = deferred<void>();
+  const exclusive = host.withProductActivity(() => exclusiveReady.promise);
+  await assert.rejects(host.submitPiChat({ conversationId: "c" }), /其他请求/u);
+  assert.equal(host.piSubmittingConversations.size, 0);
+  exclusiveReady.resolve();
+  await exclusive;
+  host.productActivity.beginSwitch();
+  await assert.rejects(host.submitPiChat({ conversationId: "c" }), /切换模型/u);
+  host.productActivity.endSwitch();
+  assert.equal(host.piSubmittingConversations.size, 0);
+}
+
+function configuredModelSelectionDoesNotChangeTheGlobalDefault(): void {
+  const first = createApiProviderConfig("deepseek", "concurrent-provider-a");
+  const second = createApiProviderConfig("deepseek", "concurrent-provider-b");
+  first.apiKey = second.apiKey = "offline-fixture-key";
+  second.baseUrl = "https://second-provider.invalid/v1";
+  second.models.push(createApiProviderModelConfig("deepseek", "deepseek-reasoner"));
+  const settings = structuredClone(DEFAULT_SETTINGS);
+  settings.apiProviders = [first, second];
+  activateApiProvider(settings, first);
+  const snapshot = structuredClone(settings);
+  const selected = createPiProductionModelDefinition(settings, {
+    providerSettingsId: second.id,
+    runtimeProviderId: second.runtimeProviderId,
+    modelId: "deepseek-reasoner"
+  });
+  assert.equal(selected.provider, second.runtimeProviderId);
+  assert.equal(selected.id, "deepseek-reasoner");
+  assert.equal(selected.baseUrl, second.baseUrl);
+  assert.deepEqual(settings, snapshot);
+  assert.throws(() => createPiProductionModelDefinition(settings, {
+    runtimeProviderId: "missing-provider",
+    modelId: "deepseek-reasoner"
+  }), PiProductionConfigurationError);
 }
 
 async function staleConcurrentSelectionDoesNotCreateAnObsoleteAgentSession():
@@ -1078,7 +1165,8 @@ function pluginHost(overrides: Record<string, unknown>): any {
     piConversationActivationTasks: new Map(),
     piActivatedConversationId: null,
     piRunConversations: new Map<string, string>(),
-    withProductActivity: async (action: () => Promise<unknown>) => await action()
+    piSubmittingConversations: new Set<string>(),
+    productActivity: new ProductActivityGate()
   }, overrides);
 }
 

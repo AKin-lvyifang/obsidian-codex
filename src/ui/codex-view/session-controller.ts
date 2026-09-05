@@ -26,6 +26,7 @@ export interface CodexSessionHost {
   readonly turnQueue: RuntimeTurnQueue;
   tabBarEl: HTMLElement;
   running: boolean;
+  readonly runningSessionIds: ReadonlySet<string>;
   activeRunSessionId: string;
   inputEl: HTMLTextAreaElement;
   attachments: StoredAttachment[];
@@ -99,7 +100,7 @@ export function renderTabsView(host: CodexSessionHost): void {
         }
       })()
     },
-    host.running ? host.activeRunSessionId : "",
+    host.runningSessionIds,
     host.plugin.settings.settingsLanguage
   );
 }
@@ -118,7 +119,7 @@ export function openSessionMenuView(host: CodexSessionHost, event: MouseEvent, s
 }
 
 export async function resetSessionNativeCache(host: CodexSessionHost, session: StoredSession): Promise<void> {
-  if (host.running && host.activeRunSessionId === session.id) {
+  if (host.runningSessionIds.has(session.id)) {
     new Notice(conversationUiText(
       host.plugin.settings.settingsLanguage,
       "当前会话正在运行，结束后再重置 Agent 缓存",
@@ -340,7 +341,7 @@ async function derivePiConversationInTransitionLane(
   targetEntryId: string
 ): Promise<void> {
   if (session.bodyAuthority !== "pi_session_only") return;
-  if (host.running) {
+  if (host.runningSessionIds.has(session.id)) {
     new Notice(conversationUiText(
       host.plugin.settings.settingsLanguage,
       "当前任务运行中，结束后再新建会话",
@@ -490,7 +491,7 @@ export async function archiveSession(
     (candidate) => candidate.id === sessionId
   );
   if (!session) return;
-  if (host.running && host.activeRunSessionId === session.id) {
+  if (host.runningSessionIds.has(session.id)) {
     new Notice(conversationUiText(
       host.plugin.settings.settingsLanguage,
       "当前会话正在运行，结束后再归档",
@@ -533,7 +534,7 @@ export async function discardUnacceptedSession(
   if (
     !session
     || session.messages.length > 0
-    || (host.running && host.activeRunSessionId === sessionId)
+    || host.runningSessionIds.has(sessionId)
   ) return false;
   const fallbackGeneration = host.plugin.settings.activeSessionId === sessionId
     || isConversationSelectionTarget(host, sessionId)
@@ -634,10 +635,7 @@ export async function deleteSessions(
         conversationUiText(host.plugin.settings.settingsLanguage, "取消", "Cancel")
       );
       if (!accepted) continue;
-      if (
-        host.running
-        && host.activeRunSessionId === session.id
-      ) {
+      if (host.runningSessionIds.has(session.id)) {
         new Notice(conversationUiText(
           host.plugin.settings.settingsLanguage,
           `“${session.title}”正在运行，已跳过删除`,
@@ -714,7 +712,7 @@ function renderConversationShellChange(
 
 /**
  * Pi Session JSONL is the durable authority for every conversation body.
- * Keep only the currently open shell and an in-flight run resident so a long
+ * Keep only the currently open shell and in-flight runs resident so a long
  * history cannot retain every projected message array in the UI process.
  */
 function releaseInactiveConversationBodies(host: CodexSessionHost): void {
@@ -722,8 +720,8 @@ function releaseInactiveConversationBodies(host: CodexSessionHost): void {
   if (host.plugin.settings.activeSessionId) {
     retainedSessionIds.add(host.plugin.settings.activeSessionId);
   }
-  if (host.running && host.activeRunSessionId) {
-    retainedSessionIds.add(host.activeRunSessionId);
+  for (const sessionId of host.runningSessionIds) {
+    retainedSessionIds.add(sessionId);
   }
   for (const session of host.plugin.settings.sessions) {
     if (!retainedSessionIds.has(session.id) && session.messages.length > 0) {
@@ -736,7 +734,7 @@ function deletableSessions(host: CodexSessionHost, sessionIds: string[]): Stored
   const requested = new Set(sessionIds);
   return host.plugin.settings.sessions.filter((session) => {
     if (!requested.has(session.id)) return false;
-    return !(host.running && host.activeRunSessionId === session.id);
+    return !host.runningSessionIds.has(session.id);
   });
 }
 

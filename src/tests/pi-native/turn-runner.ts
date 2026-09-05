@@ -1,4 +1,5 @@
 import * as assert from "node:assert/strict";
+import { CodexView } from "../../ui/codex-view";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -106,6 +107,201 @@ export async function runPiNativeTurnRunnerTests(): Promise<void> {
   await disabledOrStaleSkillCannotStartTurn();
   await maintainScopeIsResolvedBeforeProviderSubmit();
   await queuedTurnsKeepExactProviderModelAndRetainUnavailableHead();
+  await concurrentViewRunsRemainIndependent();
+}
+
+async function concurrentViewRunsRemainIndependent(): Promise<void> {
+  const dom = installTurnRunnerMessageDom();
+  const timers = new Map<number, () => void>();
+  let timerId = 0;
+  window.setTimeout = ((callback: () => void) => {
+    timers.set(++timerId, callback);
+    return timerId;
+  }) as typeof window.setTimeout;
+  window.clearTimeout = (id) => { timers.delete(id); };
+  const settings = structuredClone(DEFAULT_SETTINGS);
+  const sessions = ["A", "B", "C"].map(piSessionShell);
+  settings.sessions = sessions;
+  settings.activeSessionId = "A";
+  const provider = createApiProviderConfig("custom", "concurrent-ui");
+  provider.baseUrl = "https://offline.example/v1";
+  provider.apiKey = "offline-fixture";
+  provider.models = [createApiProviderModelConfig("custom", "concurrent-model")];
+  provider.models[0]!.reasoning = false;
+  provider.models[0]!.reasoningEnabled = false;
+  provider.defaultModelId = "concurrent-model";
+  settings.apiProviders = [provider];
+  activateApiProviderModel(settings, provider, "concurrent-model");
+  const requests: PiChatSubmitRequest[] = [];
+  const runs = new Map<string, {
+    request: PiChatSubmitRequest;
+    result: ReturnType<typeof deferred<Readonly<PiProductRunRecord>>>;
+    listener?: PiChatRuntimeEventListener;
+    terminal?: "completed" | "cancelled";
+  }>();
+  const cancellations: string[] = [];
+  const latestId = (sessionId: string) => [...runs].filter(([, run]) => run.request.conversationId === sessionId).at(-1)?.[0] ?? "";
+  async function settle(runId: string, terminalState: "completed" | "cancelled") {
+    const run = runs.get(runId)!;
+    if (run.terminal) return;
+    run.terminal = terminalState;
+    const session = sessions.find((candidate) => candidate.id === run.request.conversationId)!;
+    const identity = { productRunId: runId, conversationId: session.id, piSessionId: session.piSessionId! };
+    if (run.listener) {
+      await emit(run.listener, { ...runtimeEvent({ type: "agent_settled" }), ...identity });
+      await emit(run.listener, {
+        ...runtimeEvent({ type: "product_run_settled", terminalState, assistantEntryId: "entry-assistant" }), ...identity
+      });
+    }
+    run.result.resolve({
+      ...identity, userEntryId: "entry-user", assistantEntryId: "entry-assistant", toolCallIds: [],
+      memoryMode: "normal", state: "product_run_settled", terminalState,
+      activeLeafId: "entry-assistant", agentSettledAt: 7, settledAt: 9, createdAt: 2, updatedAt: 9
+    });
+  }
+  const plugin: any = {
+    settings,
+    getVaultPath: () => "/vault",
+    getKnowledgeSurfaceService: () => null,
+    persistPiNativeSettings: async () => undefined,
+    submitPiChat: async (request: PiChatSubmitRequest) => {
+      const productRunId = `${request.conversationId}-${requests.length + 1}`;
+      requests.push(request);
+      const result = deferred<Readonly<PiProductRunRecord>>();
+      runs.set(productRunId, { request, result });
+      return { productRunId, conversationId: request.conversationId,
+        piSessionId: `pi-${request.conversationId}`, userEntryId: "entry-user", result: result.promise };
+    },
+    subscribePiRun: (id: string, listener: PiChatRuntimeEventListener) => {
+      runs.get(id)!.listener = listener;
+      return { unsubscribe: () => { runs.get(id)!.listener = undefined; } };
+    },
+    subscribePiAgentApproval: () => ({ unsubscribe() {} }),
+    isPiProductionRun: (id: string) => runs.has(id),
+    cancelHarnessRun: async (id: string) => { cancellations.push(id); await settle(id, "cancelled"); },
+    abortPiConversation: async (id: string) => {
+      cancellations.push(latestId(id));
+      await settle(latestId(id), "cancelled");
+    },
+    releasePiProductionRun: () => undefined,
+    releasePiConversationIfInactive: async () => undefined,
+    releasePiConversation: async () => undefined,
+    readPiConversationProjection: async (id: string) => {
+      const session = sessions.find((candidate) => candidate.id === id)!;
+      const runId = latestId(id);
+      const projection = durableProjection(session, "completed");
+      projection.messages = projection.messages.map((message) => ({
+        ...message, runId, turnId: runId,
+        text: message.role === "user" ? runs.get(runId)!.request.text : `answer-${id}`
+      }));
+      return projection;
+    }
+  };
+  const view: any = new CodexView({} as any, plugin);
+  view.inputEl = { value: "A1" };
+  view.promptEnhanceReviewEl = new FakeElement("div");
+  const firstPreparation = deferred<boolean>();
+  view.ensureChatWorkspaceSelected = async (session: StoredSession) => session.id === "A" && !requests.some((request) => request.conversationId === "A")
+    ? await firstPreparation.promise : true;
+  view.currentTurnOptions = () => ({
+    providerSettingsId: provider.id, runtimeProviderId: provider.runtimeProviderId,
+    model: "concurrent-model", reasoning: "none", permission: "read-only", mode: "agent", mcpEnabled: false
+  });
+  for (const method of ["renderTabs", "renderToolbar", "renderMessages", "renderMessagesIfActive", "renderQueue", "renderInteractionDock", "renderTaskPlanDock", "applyStatus", "clearKnowledgeBaseRunProgressTimer", "flushSessionSave", "clearHomeAttentionFrame"]) {
+    view[method] = () => undefined;
+  }
+  view.clearComposerDraft = () => { view.inputEl.value = ""; };
+  try {
+    const firstA = view.sendMessage();
+    await view.sendMessage(); // Keyboard submission.
+    await view.enqueueComposerDraft(); // The busy Composer button uses the enqueue callback.
+    settings.activeSessionId = "B";
+    view.inputEl.value = "B1";
+    const firstB = view.sendMessage();
+    await waitFor(() => Boolean(runs.get(latestId("B"))?.listener)).catch(() => {
+      assert.fail(`B did not start: ${openTestNoticeMessages.at(-1)}`);
+    });
+    assert.deepEqual(requests.map((request) => request.text), ["B1"], "B starts while A is still preparing");
+    firstPreparation.resolve(true);
+    await waitFor(() => requests.length === 2 && Boolean(runs.get(latestId("A"))?.listener));
+    assert.deepEqual(requests.map((request) => request.text), ["B1", "A1"]);
+    assert.deepEqual([...view.runningSessionIds].sort(), ["A", "B"]);
+    assert.notEqual(view.conversationRuns.get("A").turnWatchdog, view.conversationRuns.get("B").turnWatchdog);
+    const bRunId = latestId("B");
+    const bWatchdog = view.conversationRuns.get("B").turnWatchdog;
+    for (const text of ["A2", "A3"]) {
+      view.turnQueue.enqueue({ id: text, sessionId: "A", text, attachments: [], skill: null,
+        turnOptions: view.currentTurnOptions(), kind: "chat", createdAt: 2 });
+    }
+    await view.startNextQueuedTurn("A");
+    assert.equal(requests.length, 2, "A's queue cannot start while A1 is running");
+    await settle(latestId("A"), "completed");
+    await waitFor(() => requests.length === 3 && Boolean(runs.get(latestId("A"))?.listener));
+    assert.equal(requests[2]!.text, "A2");
+    assert.equal(view.activeRunId, bRunId, "A settlement cannot overwrite B's foreground run");
+    assert.equal(view.conversationRuns.get("B").turnWatchdog, bWatchdog);
+    await settle(latestId("A"), "completed");
+    await waitFor(() => requests.length === 4 && Boolean(runs.get(latestId("A"))?.listener));
+    assert.equal(requests[3]!.text, "A3");
+    const aWatchdog = view.conversationRuns.get("A").turnWatchdog;
+    const timeout = timers.get(aWatchdog)!;
+    timers.delete(aWatchdog);
+    timeout();
+    await firstA;
+    assert.deepEqual(cancellations, [latestId("A")], "A's timeout must cancel only A");
+    assert.equal(view.activeRunId, bRunId);
+    assert.ok(timers.has(bWatchdog));
+    assert.equal(sessions[0]!.messages.at(-1)?.text, "answer-A");
+    assert.ok(sessions[1]!.messages.every((message) => message.text !== "answer-A"));
+    settings.activeSessionId = "C";
+    view.inputEl.value = "C1";
+    const firstC = view.sendMessage();
+    await waitFor(() => requests.length === 5 && Boolean(runs.get(latestId("C"))?.listener));
+    assert.deepEqual([...view.runningSessionIds].sort(), ["B", "C"]);
+    settings.activeSessionId = "B";
+    await view.stopTurn();
+    await firstB;
+    assert.ok(view.runningSessionIds.has("C"), "stopping B leaves C running");
+    settings.activeSessionId = "B";
+    view.inputEl.value = "B2";
+    const secondB = view.sendMessage();
+    await waitFor(() => requests.length === 6 && Boolean(runs.get(latestId("B"))?.listener));
+    view.turnQueue.enqueue({ id: "C2", sessionId: "C", text: "C2", attachments: [], skill: null,
+      turnOptions: view.currentTurnOptions(), kind: "chat", createdAt: 3 });
+    await view.onClose();
+    await Promise.all([firstC, secondB]);
+    assert.deepEqual([...view.runningSessionIds], []);
+    assert.equal(requests.length, 6, "closing the View must not start C's remaining queue");
+    assert.equal(timers.size, 0);
+    assert.deepEqual(new Set(cancellations.slice(-2)), new Set([latestId("C"), latestId("B")]));
+
+    // A closing View must also cancel a request whose Pi acceptance arrives late.
+    view.viewLifecycleAbortController = new AbortController();
+    const accepted = deferred<void>();
+    const submit = plugin.submitPiChat;
+    plugin.submitPiChat = async (request: PiChatSubmitRequest) => {
+      const handle = await submit(request);
+      await accepted.promise;
+      return handle;
+    };
+    settings.activeSessionId = "C";
+    view.turnQueue.clearSessionQueue("C");
+    view.turnQueue.enqueue({ id: "late-C", sessionId: "C", text: "late-C", attachments: [], skill: null,
+      turnOptions: view.currentTurnOptions(), kind: "chat", createdAt: 4 });
+    const lateC = view.startNextQueuedTurn("C");
+    await waitFor(() => requests.length === 7).catch(() => {
+      assert.fail(`Late submit did not start: ${openTestNoticeMessages.at(-1)}; run=${view.conversationRuns.get("C")?.running}; starting=${view.conversationRuns.get("C")?.queueStartInProgress}; aborted=${view.conversationRuns.get("C")?.controller.signal.aborted}`);
+    });
+    await view.onClose();
+    accepted.resolve();
+    await lateC;
+    assert.equal(runs.get(latestId("C"))?.terminal, "cancelled");
+    assert.equal(view.turnQueue.hasQueuedItems("C"), false,
+      "an accepted then cancelled request must not remain queued for duplicate submission");
+    assert.equal(timers.size, 0);
+  } finally {
+    dom.restore();
+  }
 }
 
 async function queuedNativeDocumentCapabilityLossUsesFrozenTextOnly(): Promise<void> {
@@ -307,6 +503,7 @@ async function queuedTurnsKeepExactProviderModelAndRetainUnavailableHead(): Prom
     turnQueue: queue,
     queueStartInProgress: false,
     running: false,
+    runningSessionIds: new Set<string>(),
     selectedProviderSettingsId: first.id,
     selectedModel: "model-a",
     renderQueue: () => undefined,
@@ -329,7 +526,7 @@ async function queuedTurnsKeepExactProviderModelAndRetainUnavailableHead(): Prom
     `${first.id}:model-a`,
     `${second.id}:model-b`
   ]);
-  assert.deepEqual(activations, [`${second.id}:model-b`]);
+  assert.deepEqual(activations, [], "queued requests must not switch global Provider defaults");
   assert.equal(queue.hasQueuedItems(session.id), false);
 
   queue.enqueue(queued("turn-retained", first.id, "model-a"));
@@ -341,8 +538,8 @@ async function queuedTurnsKeepExactProviderModelAndRetainUnavailableHead(): Prom
     ["turn-retained"]
   );
   assert.equal(sends.length, 2, "an unavailable selection must not send or fall back");
-  assert.equal(settings.activeApiProviderId, second.id);
-  assert.equal(settings.defaultModel, "model-b");
+  assert.equal(settings.activeApiProviderId, first.id);
+  assert.equal(settings.defaultModel, "model-a");
 
   first.apiKey = "fixture-first-key";
   queue.resumeSessionQueue(session.id);
@@ -437,7 +634,7 @@ async function queuedTurnsKeepExactProviderModelAndRetainUnavailableHead(): Prom
   );
   assert.equal(sends.length, 6, "invalid queue snapshots never reach Pi");
   queue.clearSessionQueue(session.id);
-  console.log("PASS conversation-ui: Queue switches exact combinations and retains an unavailable head");
+  console.log("PASS conversation-ui: Queue preserves exact combinations without changing global defaults");
 }
 
 function localAttachmentClassificationUsesMimeOrExtension(): void {
@@ -758,6 +955,7 @@ Promise<void> {
       turnQueue: queue,
       queueStartInProgress: false,
       running: false,
+    runningSessionIds: new Set<string>(),
       renderQueue: () => undefined,
       renderToolbar: () => undefined,
       sessionById: () => session,
@@ -1115,6 +1313,7 @@ async function maintainScopeIsResolvedBeforeProviderSubmit(): Promise<void> {
   const view: any = {
     plugin,
     running: false,
+    runningSessionIds: new Set<string>(),
     activeRunId: "",
     activeRunKind: "",
     activeRunSessionId: "",
@@ -1290,6 +1489,7 @@ Promise<void> {
     turnQueue: new RuntimeTurnQueue(),
     tabBarEl: {},
     running: false,
+    runningSessionIds: new Set<string>(),
     activeRunSessionId: "",
     inputEl,
     attachments: [],
@@ -1449,6 +1649,7 @@ async function disabledOrStaleSkillCannotStartTurn(): Promise<void> {
       }
     },
     running: false,
+    runningSessionIds: new Set<string>(),
     activeRunId: "",
     activeRunKind: "",
     activeRunSessionId: "",
@@ -2288,6 +2489,7 @@ Promise<void> {
     plugin,
     get running() { return view.running; },
     get activeRunSessionId() { return view.activeRunSessionId; },
+    get runningSessionIds() { return new Set(view.running && view.activeRunSessionId ? [view.activeRunSessionId] : []); },
     updateInputPlaceholder: () => undefined,
     resetVirtualWindow: () => undefined,
     renderTabs: () => undefined,

@@ -14,11 +14,17 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import {
   CURRENT_SESSION_VERSION,
+  createAgentSession,
+  ModelRuntime,
+  SettingsManager,
   SessionManager,
   VERSION,
   type AgentSession,
   type AgentSessionEvent
 } from "@earendil-works/pi-coding-agent";
+import { InMemoryCredentialStore, InMemoryModelsStore } from "@earendil-works/pi-ai";
+import { fauxProvider, fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
+import { createControlledVaultResourceLoader } from "../../harness/pi-native/controlled-resources";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type {
   Api,
@@ -130,6 +136,7 @@ export async function runPiNativeConversationRuntimeTests(): Promise<void> {
   assertKnowledgeMaintenanceRequiresExplicitCommand();
   await assertProjectionAndCatalogManagementStayAgentSessionFree();
   await assertSwitchPreservesRunningConversationUntilSettlement();
+  await runPiNativeConcurrentSessionTests();
   await assertConversationCreateRollsBackAfterCatalogReadbackFailure();
   await assertFailedAssistantHistoryIsDurableButExcludedFromMemory();
   await assertKnowledgeAskUsesAgentAndReadOnlyTools();
@@ -1076,7 +1083,7 @@ async function assertReasoningSelectionFailsClosedBeforePiPrompt(): Promise<void
       createdAt: 1
     });
     await fixture.runtime.activateConversation(conversationId);
-    const session = fixture.latestSession();
+    let session = fixture.latestSession();
     const baselineEntries = session.sessionManager.getEntries().length;
 
     await assert.rejects(
@@ -1128,6 +1135,9 @@ async function assertReasoningSelectionFailsClosedBeforePiPrompt(): Promise<void
     assert.deepEqual(session.thinkingLevelChanges, []);
     assert.deepEqual(session.promptTexts, []);
 
+    // A model change can replace the idle instance; this fixture intentionally
+    // returns its fixed model so the request still fails identity validation.
+    session = fixture.latestSession();
     const accepted = ["low", "medium", "high", "xhigh", "max"] as const;
     for (const [index, reasoning] of accepted.entries()) {
       const valid = await fixture.submit({
@@ -1741,6 +1751,141 @@ Promise<void> {
     assert.equal(runningSession.disposed, true);
     assert.equal(runningSession.lifecycleCalls.includes("abort"), false);
   });
+}
+
+/** Real Pi 0.82.1 AgentSessions and their native faux transport; no network. */
+export async function runPiNativeConcurrentSessionTests(): Promise<void> {
+  const root = await realpath(await mkdtemp(path.join(tmpdir(), "echoink-pi-concurrent-")));
+  const catalog = new FileConversationCatalog({
+    storageRootPath: path.join(root, "pi-native"), vaultId: "offline-concurrent-vault"
+  });
+  const productRuns = new FileProductRunStore({
+    storageRootPath: path.join(root, "pi-native"), vaultId: catalog.vaultId, catalog
+  });
+  const sessions = new Map<string, AgentSession>();
+  const responses = new Map<string, ReturnType<typeof deferred>>();
+  const starts = new Map<string, ReturnType<typeof deferred>>();
+  const contexts = new Map<string, string>();
+  const executionContexts = new Map<string, string>();
+  let id = 0;
+  const runtime = new PiNativeConversationRuntime({
+    catalog, productRuns, sessionApi: API,
+    resolveConversationCwd: () => root,
+    idFactory: () => `concurrent-run-${++id}`,
+    createAgentSession: async (input) => {
+      const key = `${input.catalog.conversationId}:${input.modelId}`;
+      const ready = deferred();
+      const started = deferred();
+      responses.set(key, ready);
+      starts.set(key, started);
+      const provider = fauxProvider({
+        provider: input.runtimeProviderId,
+        api: "openai-completions",
+        models: [{ id: input.modelId!, reasoning: true,
+          contextWindow: 32_000, maxTokens: 1_024 }]
+      });
+      provider.setResponses([async (context, options) => {
+        contexts.set(key, JSON.stringify(context.messages));
+        executionContexts.set(key, input.currentExecutionContext().conversationId);
+        started.resolve();
+        const aborted = deferred();
+        const onAbort = () => aborted.resolve();
+        options?.signal?.addEventListener("abort", onAbort, { once: true });
+        if (options?.signal?.aborted) aborted.resolve();
+        try { await Promise.race([ready.promise, aborted.promise]); }
+        finally { options?.signal?.removeEventListener("abort", onAbort); }
+        return fauxAssistantMessage(`reply:${key}`);
+      }]);
+      const modelRuntime = await ModelRuntime.create({
+        credentials: new InMemoryCredentialStore(), modelsStore: new InMemoryModelsStore(),
+        modelsPath: null, allowModelNetwork: false
+      });
+      modelRuntime.registerNativeProvider(provider.provider);
+      const model = provider.getModel();
+      const { session } = await createAgentSession({
+        cwd: root, agentDir: root, modelRuntime, model, noTools: "all",
+        sessionManager: input.sessionManager,
+        settingsManager: SettingsManager.inMemory({
+          defaultProvider: model.provider, defaultModel: model.id,
+          defaultThinkingLevel: "off", compaction: { enabled: false },
+          retry: { enabled: false }, packages: [], extensions: [],
+          skills: [], prompts: [], themes: [], enableAnalytics: false
+        }),
+        resourceLoader: await createControlledVaultResourceLoader({
+          vaultRoot: root, systemPrompt: "Offline concurrency acceptance."
+        })
+      });
+      sessions.set(key, session);
+      return { session };
+    }
+  });
+  await runtime.initialize();
+  try {
+    for (const conversationId of ["a", "b"]) {
+      await runtime.createConversation({ conversationId, title: conversationId, cwd: root });
+    }
+    const request = (conversationId: string, modelId: string, reasoning: "low" | "high") => ({
+      conversationId, modelId, runtimeProviderId: `provider-${conversationId}`,
+      text: `prompt:${conversationId}:${modelId}`, submittedAt: Date.now(), reasoning
+    });
+    const sendingA = runtime.submit(request("a", "model-a", "low"));
+    await assert.rejects(runtime.submit(request("a", "model-a", "low")),
+      (error: unknown) => error instanceof PiNativeConversationRuntimeError
+        && error.code === "conversation_busy",
+      "same-conversation startup is reserved before the first async read");
+    const [a, b] = await withTimeout(Promise.all([
+      sendingA, runtime.submit(request("b", "model-b", "high"))
+    ]), "two native AgentSession starts");
+    await withTimeout(Promise.all([...starts.values()].map((start) => start.promise)), "both providers started");
+    const sessionA = sessions.get("a:model-a")!;
+    const sessionB = sessions.get("b:model-b")!;
+    assert.notEqual(sessionA, sessionB);
+    assert.notEqual(sessionA.agent, sessionB.agent);
+    assert.equal(sessionA.isStreaming, true);
+    assert.equal(sessionB.isStreaming, true, "B must stream before A completes");
+    assert.equal(sessionA.thinkingLevel, "low");
+    assert.equal(sessionB.thinkingLevel, "high");
+    assert.deepEqual([...executionContexts.entries()].sort(), [
+      ["a:model-a", "a"], ["b:model-b", "b"]
+    ]);
+    assert.match(contexts.get("a:model-a")!, /prompt:a:model-a/u);
+    assert.doesNotMatch(contexts.get("a:model-a")!, /prompt:b/u);
+    assert.match(contexts.get("b:model-b")!, /prompt:b:model-b/u);
+    assert.doesNotMatch(contexts.get("b:model-b")!, /prompt:a/u);
+    await assert.rejects(runtime.submit(request("b", "model-b", "high")),
+      (error: unknown) => error instanceof PiNativeConversationRuntimeError
+        && error.code === "conversation_busy");
+    const eventsB: PiChatRuntimeEvent[] = [];
+    const subscription = runtime.subscribeProductRun(b.productRunId, (event) => eventsB.push(event));
+    await withTimeout(runtime.abort("a"), "abort A independently");
+    assert.equal((await a.result).terminalState, "cancelled");
+    assert.equal(sessionB.isStreaming, true);
+    const nextA = await runtime.submit(request("a", "model-a-next", "high"));
+    const replacementA = sessions.get("a:model-a-next")!;
+    assert.notEqual(replacementA, sessionA, "a new model only replaces A's idle session");
+    assert.equal(replacementA.model?.id, "model-a-next");
+    assert.equal(sessionB.isStreaming, true);
+    responses.get("a:model-a-next")!.resolve();
+    assert.equal((await nextA.result).terminalState, "completed");
+    assert.equal(sessionB.isStreaming, true, "A's completion keeps B running");
+    assert.equal(await runtime.releaseConversationIfIdle("a"), true);
+    assert.equal(sessionB.isStreaming, true, "A's release keeps B running");
+    responses.get("b:model-b")!.resolve();
+    assert.equal((await b.result).terminalState, "completed");
+    subscription.unsubscribe();
+    assert.ok(eventsB.some((event) => event.type === "product_run_settled"));
+    assert.ok(eventsB.every((event) => event.productRunId === b.productRunId
+      && event.conversationId === "b" && event.piSessionId === b.piSessionId));
+    const projectionA = await runtime.readProjection("a");
+    const projectionB = await runtime.readProjection("b");
+    assert.ok(projectionA.messages.some((message) => message.text === "reply:a:model-a-next"));
+    assert.ok(projectionB.messages.some((message) => message.text === "reply:b:model-b"));
+    assert.ok(projectionB.messages.every((message) => !message.text.includes("prompt:a")));
+  } finally {
+    for (const response of responses.values()) response.resolve();
+    await runtime.shutdown();
+    await rm(root, { recursive: true, force: true });
+  }
 }
 
 async function assertConversationCreateRollsBackAfterCatalogReadbackFailure():

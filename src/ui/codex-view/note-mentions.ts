@@ -172,10 +172,11 @@ export function composerNoteMentionSelections(
 
 export async function snapshotComposerNoteMentions(
   app: Pick<App, "vault">,
-  input: HTMLTextAreaElement
+  input: HTMLTextAreaElement,
+  selections: readonly Readonly<NoteMentionSelection>[] = composerNoteMentionSelections(input)
 ): Promise<readonly Readonly<NoteMentionSnapshot>[]> {
   const snapshots: Readonly<NoteMentionSnapshot>[] = [];
-  for (const selection of composerNoteMentionSelections(input)) {
+  for (const selection of selections) {
     const file = app.vault.getAbstractFileByPath(selection.vaultRelativePath);
     if (!(file instanceof TFile) || !/\.md$/iu.test(file.path)) {
       throw new Error(`找不到提及的笔记：${selection.fileName}`);

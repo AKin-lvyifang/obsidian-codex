@@ -355,6 +355,8 @@ export interface PiChatSubmitRequest {
   noteMentions?: readonly Readonly<PiChatNoteMention>[];
   /** The composer mode captured for this exact queued turn. */
   mode?: PiChatMode;
+  /** Saved Provider configuration identity captured with this exact turn. */
+  providerSettingsId?: string;
   /** Runtime Provider identity captured with this exact Composer turn. */
   runtimeProviderId: string;
   /** Model identity captured with this exact Composer turn. */
