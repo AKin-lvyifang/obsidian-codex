@@ -199,6 +199,7 @@ export class CodexSettingTab extends PluginSettingTab {
   private readonly knowledgeDashboardTooltipState: KnowledgeDashboardTooltipState =
     createKnowledgeDashboardTooltipState();
   private displayFrame: number | null = null;
+  private displayFrameWindow: Window | null = null;
   private settingsTitleEl: HTMLElement | null = null;
   private settingsTabsEl: HTMLElement | null = null;
   private settingsBodyEl: HTMLElement | null = null;
@@ -244,10 +245,7 @@ export class CodexSettingTab extends PluginSettingTab {
     this.settingsVisible = true;
     this.lastRenderedSettingsTab = null;
     this.settingsTabIconAnimation = null;
-    if (this.displayFrame !== null) {
-      window.cancelAnimationFrame(this.displayFrame);
-      this.displayFrame = null;
-    }
+    this.cancelScheduledDisplay();
     this.renderSettingsShell();
     const pendingResourceId = this.plugin.consumeEchoInkSettingsResourceDetail?.() ?? "";
     if (pendingResourceId) {
@@ -276,10 +274,7 @@ export class CodexSettingTab extends PluginSettingTab {
     this.knowledgeDashboardError = "";
     disposeKnowledgeDashboardTooltipState(this.knowledgeDashboardTooltipState);
     this.disconnectSettingsTabsResizeObserver();
-    if (this.displayFrame !== null) {
-      window.cancelAnimationFrame(this.displayFrame);
-      this.displayFrame = null;
-    }
+    this.cancelScheduledDisplay();
     super.hide();
     if (shouldConfirmKnowledgePreference) {
       this.knowledgePreferenceClosePromptRunning = true;
@@ -380,10 +375,21 @@ export class CodexSettingTab extends PluginSettingTab {
   private scheduleDisplay(): void {
     if (!this.settingsVisible) return;
     if (this.displayFrame !== null) return;
-    this.displayFrame = window.requestAnimationFrame(() => {
+    const settingsWindow = this.containerEl.ownerDocument.defaultView ?? window;
+    this.displayFrameWindow = settingsWindow;
+    this.displayFrame = settingsWindow.requestAnimationFrame(() => {
       this.displayFrame = null;
+      this.displayFrameWindow = null;
       this.renderSettingsContent();
     });
+  }
+
+  private cancelScheduledDisplay(): void {
+    if (this.displayFrame !== null) {
+      this.displayFrameWindow?.cancelAnimationFrame(this.displayFrame);
+    }
+    this.displayFrame = null;
+    this.displayFrameWindow = null;
   }
 
   private captureTabFocusIntent(): void {

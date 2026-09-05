@@ -248,6 +248,7 @@ import {
 import { resolvePiProductionSkillById } from "../plugin/pi-production-runtime-composition";
 
 export async function runProviderSettingsBehaviorTests(): Promise<void> {
+  await runSettingsWindowRefreshTest();
   assertSettingsV53MigrationContract();
   await assertJournalDirectorySettingsUi();
   assertPiReasoningCapabilityContract();
@@ -11923,6 +11924,89 @@ async function settleMicrotasks(): Promise<void> {
 }
 
 
+async function runSettingsWindowRefreshTest(): Promise<void> {
+  installProviderModalDomFixture();
+  const scope = globalThis as unknown as Record<string, unknown>;
+  const previousWindow = scope.window;
+  const frames = (visibilityState: "visible" | "hidden") => {
+    const pending = new Map<number, FrameRequestCallback>();
+    const cancelled: number[] = [];
+    let nextId = 0;
+    return {
+      document: { visibilityState }, pending, cancelled,
+      requestAnimationFrame(callback: FrameRequestCallback) {
+        pending.set(++nextId, callback);
+        return nextId;
+      },
+      cancelAnimationFrame(id: number) { cancelled.push(id); pending.delete(id); },
+      flushVisible() {
+        if (visibilityState === "hidden") return;
+        const callbacks = [...pending.values()];
+        pending.clear();
+        callbacks.forEach((callback) => callback(0));
+      }
+    };
+  };
+  const mainWindow = frames("hidden");
+  const settingsWindow = frames("visible");
+  const nextWindow = frames("visible");
+  scope.window = mainWindow;
+  const settings = structuredClone(DEFAULT_SETTINGS);
+  settings.settingsTab = "general";
+  let saves = 0;
+  const tab = new CodexSettingTab(withSettingsTabDefaults({
+    app: new App(), settings,
+    saveSettings: async () => { saves += 1; }
+  }) as never);
+  const rendered: string[] = [];
+  const mutable = tab as unknown as {
+    renderSettingsShell(): void;
+    renderSettingsContent(): void;
+    scheduleDisplay(): void;
+    activateSettingsTab(id: "knowledgeBase", focus: boolean): Promise<void>;
+  };
+  // Keep the real activation/display/hide lifecycle; replace only content
+  // rendering so the regression depends on frame ownership, not other pages.
+  mutable.renderSettingsShell = () => {};
+  mutable.renderSettingsContent = () => { rendered.push(settings.settingsTab); };
+  const setOwner = (owner: typeof settingsWindow) => Object.defineProperty(
+    tab.containerEl, "ownerDocument", { configurable: true, value: { defaultView: owner, visibilityState: "visible" } }
+  );
+  setOwner(settingsWindow);
+  try {
+    tab.display();
+    await mutable.activateSettingsTab("knowledgeBase", false);
+    mutable.scheduleDisplay();
+    assert.equal(saves, 1);
+    settingsWindow.flushVisible();
+    assert.deepEqual(rendered, ["general", "knowledgeBase"],
+      "visible detached settings must refresh while the main window stays hidden");
+    assert.equal(mainWindow.pending.size, 0);
+
+    mutable.scheduleDisplay();
+    const hiddenFrame = [...settingsWindow.pending.keys()][0]!;
+    setOwner(nextWindow);
+    tab.hide();
+    assert.deepEqual(settingsWindow.cancelled, [hiddenFrame], "hide cancels on the window that scheduled the frame");
+    assert.deepEqual(nextWindow.cancelled, []);
+    settingsWindow.flushVisible();
+    assert.equal(rendered.length, 2, "a cancelled frame must not render after hide");
+
+    tab.display();
+    mutable.scheduleDisplay();
+    const replacedFrame = [...nextWindow.pending.keys()][0]!;
+    setOwner(settingsWindow);
+    tab.display();
+    assert.deepEqual(nextWindow.cancelled, [replacedFrame], "display cancels the previous window's pending frame");
+    nextWindow.flushVisible();
+    assert.equal(rendered.length, 4);
+    assert.deepEqual(mainWindow.cancelled, []);
+  } finally {
+    tab.hide();
+    scope.window = previousWindow;
+  }
+}
+
 function installProviderModalDomFixture(): void {
   if (providerModalTestDocument) return;
   providerModalTestDocument = new ProviderModalTestDocument();
@@ -11979,6 +12063,7 @@ class ProviderModalTestDocument {
       callback(0);
       return 1;
     },
+    cancelAnimationFrame: () => undefined,
     addEventListener: () => undefined,
     removeEventListener: () => undefined
   };
@@ -12465,7 +12550,10 @@ function withSettingsTabDefaults<T extends object>(plugin: T) {
   };
 }
 
-if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "builtin-skill") {
+if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "settings-window") {
+  await runSettingsWindowRefreshTest();
+  console.log("PASS detached settings refresh and cancellation with hidden main window");
+} else if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "builtin-skill") {
   await runBuiltinSkillSettingsBehaviorTests();
 } else {
   await runProviderSettingsBehaviorTests();
