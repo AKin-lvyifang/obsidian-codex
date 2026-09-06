@@ -57,12 +57,20 @@ const generated = [
 ].join("\n");
 const styles = await readFile(stylesPath, "utf8");
 const current = extractGeneratedBlock(styles);
+const settingsStart = "/* ECHOINK_WORKSPACE_SETTINGS_START */";
+const settingsEnd = "/* ECHOINK_WORKSPACE_SETTINGS_END */";
+const settingsSource = await readFile(path.join(rootDir, "src/styles/workspace-settings.css"), "utf8");
+const settingsGenerated = [settingsStart, settingsSource.trim(), settingsEnd].join("\n");
+const settingsIndex = styles.indexOf(settingsStart);
+const settingsCurrent = settingsIndex < 0 ? "" : styles.slice(settingsIndex, styles.indexOf(settingsEnd, settingsIndex) + settingsEnd.length);
 
 if (checkOnly) {
   if (current !== generated) throw new Error("Generated Magic UI CSS is stale. Run node scripts/build-home-magic-ui-css.mjs");
-  console.log("Home Magic UI CSS: PASS");
+  if (settingsCurrent !== settingsGenerated) throw new Error("Generated workspace settings CSS is stale");
+  console.log("Home Magic UI and workspace settings CSS: PASS");
 } else {
-  const next = styles.replace(current, generated);
+  let next = styles.replace(current, generated);
+  next = settingsCurrent ? next.replace(settingsCurrent, settingsGenerated) : `${next.trimEnd()}\n\n${settingsGenerated}\n`;
   if (next !== styles) await writeFile(stylesPath, next, "utf8");
   console.log("Home Magic UI CSS: updated");
 }

@@ -16,7 +16,10 @@ export const ANIMATED_SETTINGS_TAB_ICON_NAMES = [
   "key-round",
   "layout-list",
   "book-open-check",
-  "clipboard-check"
+  "clipboard-check",
+  "package",
+  "blocks",
+  "sparkles"
 ] as const;
 
 export type AnimatedSettingsTabIconName =
@@ -39,22 +42,25 @@ export function renderAnimatedSettingsTabIcon(
     );
   }
 
-  container.appendChild(ICON_RENDERERS[iconName]());
+  container.appendChild(ICON_RENDERERS[iconName](container.ownerDocument));
 }
 
 const ICON_RENDERERS: Record<
   AnimatedSettingsTabIconName,
-  () => SVGSVGElement
+  (doc: Document) => SVGSVGElement
 > = {
   settings: renderSettingsIcon,
   "key-round": renderKeyRoundIcon,
   "layout-list": renderLayoutListIcon,
   "book-open-check": renderBookOpenCheckIcon,
-  "clipboard-check": renderClipboardCheckIcon
+  "clipboard-check": renderClipboardCheckIcon,
+  package: renderPackageIcon,
+  blocks: renderBlocksIcon,
+  sparkles: renderSparklesIcon
 };
 
-function renderSettingsIcon(): SVGSVGElement {
-  const svg = createIconSvg("settings");
+function renderSettingsIcon(doc: Document): SVGSVGElement {
+  const svg = createIconSvg("settings", doc);
   const motion = appendSvg(svg, "g", {}, "settings-motion");
   const base = appendSvg(motion, "g", {}, "settings-base");
   appendSvg(base, "path", { d: SETTINGS_GEAR_PATH });
@@ -87,8 +93,8 @@ function renderSettingsIcon(): SVGSVGElement {
   return svg;
 }
 
-function renderKeyRoundIcon(): SVGSVGElement {
-  const svg = createIconSvg("key-round");
+function renderKeyRoundIcon(doc: Document): SVGSVGElement {
+  const svg = createIconSvg("key-round", doc);
   const motion = appendSvg(svg, "g", {}, "key-motion");
   appendSvg(motion, "path", {
     d: KEY_ROUND_PATH,
@@ -106,8 +112,8 @@ function renderKeyRoundIcon(): SVGSVGElement {
   return svg;
 }
 
-function renderLayoutListIcon(): SVGSVGElement {
-  const svg = createIconSvg("layout-list");
+function renderLayoutListIcon(doc: Document): SVGSVGElement {
+  const svg = createIconSvg("layout-list", doc);
   [3, 14].forEach((y, index) => {
     appendSvg(svg, "rect", {
       width: 7,
@@ -123,8 +129,8 @@ function renderLayoutListIcon(): SVGSVGElement {
   return svg;
 }
 
-function renderBookOpenCheckIcon(): SVGSVGElement {
-  const svg = createIconSvg("book-open-check");
+function renderBookOpenCheckIcon(doc: Document): SVGSVGElement {
+  const svg = createIconSvg("book-open-check", doc);
   appendSvg(svg, "path", {
     d: "M12 21V7",
     pathLength: 1
@@ -139,8 +145,8 @@ function renderBookOpenCheckIcon(): SVGSVGElement {
   return svg;
 }
 
-function renderClipboardCheckIcon(): SVGSVGElement {
-  const svg = createIconSvg("clipboard-check");
+function renderClipboardCheckIcon(doc: Document): SVGSVGElement {
+  const svg = createIconSvg("clipboard-check", doc);
   appendSvg(svg, "rect", {
     width: 8,
     height: 4,
@@ -163,8 +169,34 @@ function renderClipboardCheckIcon(): SVGSVGElement {
   return svg;
 }
 
-function createIconSvg(iconName: AnimatedSettingsTabIconName): SVGSVGElement {
-  const svg = document.createElementNS(SVG_NS, "svg");
+
+function renderPackageIcon(doc: Document): SVGSVGElement {
+  const svg = createIconSvg("package", doc);
+  appendSvg(svg, "path", { d: "M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73z", pathLength: 1 }, "package-line", 0);
+  appendSvg(svg, "polyline", { points: "3.29 7 12 12 20.71 7", pathLength: 1 }, "package-line", 1);
+  appendSvg(svg, "path", { d: "M12 22V12", pathLength: 1 }, "package-line", 2);
+  appendSvg(svg, "path", { d: "m7.5 4.27 9 5.15", pathLength: 1 }, "package-line", 2);
+  return svg;
+}
+
+function renderBlocksIcon(doc: Document): SVGSVGElement {
+  const svg = createIconSvg("blocks", doc);
+  appendSvg(svg, "path", { d: "M10 22V7a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5a1 1 0 0 0-1-1H2", pathLength: 1 }, "blocks-body");
+  appendSvg(svg, "rect", { x: 14, y: 2, width: 8, height: 8, rx: 1 }, "blocks-square");
+  return svg;
+}
+
+function renderSparklesIcon(doc: Document): SVGSVGElement {
+  const svg = createIconSvg("sparkles", doc);
+  appendSvg(svg, "path", { d: "M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z" }, "sparkles-star");
+  const cross = appendSvg(svg, "g", {}, "sparkles-cross");
+  appendSvg(cross, "path", { d: "M20 2v4" }); appendSvg(cross, "path", { d: "M22 4h-4" });
+  appendSvg(svg, "circle", { cx: 4, cy: 20, r: 2 }, "sparkles-dot");
+  return svg;
+}
+
+function createIconSvg(iconName: AnimatedSettingsTabIconName, doc: Document): SVGSVGElement {
+  const svg = doc.createElementNS(SVG_NS, "svg");
   setSvgAttributes(svg, {
     viewBox: "0 0 24 24",
     fill: "none",
@@ -187,7 +219,7 @@ function appendSvg<K extends keyof SVGElementTagNameMap>(
   part?: string,
   index?: number
 ): SVGElementTagNameMap[K] {
-  const element = document.createElementNS(SVG_NS, tagName);
+  const element = parent.ownerDocument.createElementNS(SVG_NS, tagName);
   setSvgAttributes(element, attributes);
   if (part) element.setAttribute("data-part", part);
   if (index !== undefined) element.setAttribute("data-index", String(index));

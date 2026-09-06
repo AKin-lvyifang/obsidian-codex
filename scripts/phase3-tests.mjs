@@ -9,6 +9,8 @@ const outputDir = path.join(rootDir, ".tmp");
 const outputFile = path.join(outputDir, "knowledge-tests.mjs");
 const obsidianShimPath = path.join(rootDir, "src", "tests", "obsidian-shim.ts");
 const homeWorkbenchOnly = process.argv.includes("--home-workbench");
+const workspaceDataOnly = process.argv.includes("--workspace-data");
+const maintenanceOnly = process.argv.includes("--production-maintenance");
 const nativeJournalOnly = process.argv.includes("--native-journal");
 
 const fullSuiteImports = [
@@ -33,7 +35,13 @@ const fullSuiteRuns = [
 await mkdir(outputDir, { recursive: true });
 await esbuild.build({
   stdin: {
-    contents: (nativeJournalOnly ? [
+    contents: (workspaceDataOnly ? [
+      'import { runHomeWorkspaceDataTests } from "./src/tests/home-workspace-data";',
+      'await runHomeWorkspaceDataTests();'
+    ] : maintenanceOnly ? [
+      'import { runPhase3KnowledgeMaintenanceServiceTests } from "./src/tests/pi-native/phase3-maintenance-service";',
+      'await runPhase3KnowledgeMaintenanceServiceTests();'
+    ] : nativeJournalOnly ? [
       'import { runNativeJournalTests } from "./src/tests/native-journal";',
       "await runNativeJournalTests();"
     ] : [

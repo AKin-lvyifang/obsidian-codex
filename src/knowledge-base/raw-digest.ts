@@ -1,7 +1,7 @@
 import * as fsp from "fs/promises";
 import * as path from "path";
 import { contentFingerprint } from "./raw-integrity";
-import { writeFileAtomic } from "./utils";
+import { writeFileAtomic, isMissingPathError } from "./utils";
 
 export const RAW_DIGEST_REGISTRY_PATH = "outputs/.raw-digest-registry.json";
 export const RAW_DIGEST_SCHEMA_VERSION = 1;
@@ -156,15 +156,17 @@ export function rawDigestUserFrontmatterProjectionBytes(
   ]);
 }
 
-export async function readRawDigestRegistry(vaultPath: string): Promise<RawDigestRegistry> {
+export async function readRawDigestRegistry(vaultPath: string, strict = false): Promise<RawDigestRegistry> {
   const absolute = path.join(vaultPath, RAW_DIGEST_REGISTRY_PATH);
-  const stat = await fsp.lstat(absolute).catch(() => null);
+  const stat = await fsp.lstat(absolute).catch((error) => { if (strict && !isMissingPathError(error)) throw error; return null; });
+  if (strict && stat && (!stat.isFile() || stat.nlink > 1)) throw new Error("Raw registry is not a readable regular file");
   if (!stat?.isFile() || stat.nlink > 1) return emptyRawDigestRegistry();
-  const text = await fsp.readFile(absolute, "utf8").catch(() => "");
+  const text = await fsp.readFile(absolute, "utf8").catch((error) => { if (strict) throw error; return ""; });
   if (!text.trim()) return emptyRawDigestRegistry();
   try {
     return normalizeRawDigestRegistry(JSON.parse(text));
-  } catch {
+  } catch (error) {
+    if (strict) throw error;
     return emptyRawDigestRegistry();
   }
 }

@@ -1,0 +1,31 @@
+import { type Modal, setIcon } from "obsidian";
+
+/** Mount an existing form lifecycle inside Settings without opening another window. */
+export function mountSettingsEditor(modal: Modal, host: HTMLElement, backLabel: string, onBack: () => void): () => void {
+  host.addClass("echoink-settings-inline-editor");
+  const back = host.createEl("button", { cls: "settings-back text-button", text: backLabel, attr: { type: "button" } });
+  setIcon(back.createSpan(), "chevron-left");
+  const surface = host.createDiv({ cls: "echoink-settings-inline-surface" });
+  modal.containerEl = surface;
+  modal.modalEl = surface;
+  modal.titleEl = surface.createEl("h2", { cls: "echoink-settings-inline-title" });
+  modal.contentEl = surface.createDiv({ cls: "echoink-settings-inline-content" });
+  let disposed = false;
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    modal.onClose();
+    host.remove();
+  };
+  const close = () => { if (disposed) return; dispose(); onBack(); };
+  const inlineAware = modal as Modal & { setInlineCloseHandler?: (handler: () => void) => void };
+  if (inlineAware.setInlineCloseHandler) inlineAware.setInlineCloseHandler(close);
+  else modal.close = close;
+  back.onclick = () => modal.close();
+  host.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || event.defaultPrevented || host.querySelector(".codex-provider-combobox.is-open")) return;
+    event.preventDefault(); event.stopPropagation(); modal.close();
+  });
+  void modal.onOpen();
+  return dispose;
+}

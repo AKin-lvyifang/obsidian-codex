@@ -1,3 +1,4 @@
+import { HomeActivityService } from "./home/home-activity-service";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { Notice, Plugin } from "obsidian";
@@ -158,6 +159,7 @@ extends ActivatePiNativeConversationOptions {
 
 export default class CodexForObsidianPlugin extends Plugin {
   settings!: CodexForObsidianSettings;
+  homeActivity: HomeActivityService | null = null;
   private knowledgeBase: EchoInkKnowledgeSurfaceService | null = null;
   private review: ReviewManager | null = null;
   private settingsStore: EchoInkSettingsStore | null = null;
@@ -165,6 +167,7 @@ export default class CodexForObsidianPlugin extends Plugin {
   private resourceCatalogService: EchoInkResourceCatalogService | null = null;
   private skillRuntimeCoordinator: SkillRuntimeCoordinator | null = null;
   private pendingSettingsResourceDetailId = "";
+  private pendingKnowledgeDashboardFocus = false;
   private mcpBrokerService: EchoInkMcpBrokerService | null = null;
   private mcpSettingsService: EchoInkMcpSettingsService | null = null;
   private piProviderConfigurationService:
@@ -211,6 +214,18 @@ export default class CodexForObsidianPlugin extends Plugin {
     )) {
       await this.saveSettings(true);
     }
+    this.homeActivity = new HomeActivityService(path.join(pluginDataDir(this.getVaultPath(), this.manifest.dir ?? this.manifest.id), "home-activity.json"));
+    await this.homeActivity.initialize();
+    this.app.workspace.onLayoutReady(() => {
+      const activity = this.homeActivity;
+      if (!activity) return;
+      this.registerEvent(this.app.vault.on("create", (file) => activity.record(file.path, "created")));
+      this.registerEvent(this.app.vault.on("modify", (file) => activity.record(file.path, "modified")));
+      this.registerEvent(this.app.vault.on("rename", (file, oldPath) => activity.rename(oldPath, file.path)));
+      this.registerEvent(this.app.vault.on("delete", (file) => activity.delete(file.path)));
+      this.registerEvent(this.app.workspace.on("file-open", (file) => activity.open(file?.path ?? null)));
+      activity.restoreOpen(this.app.workspace.getActiveFile()?.path ?? null);
+    });
     await this.initializePiLocalData();
     // Cognitive main-chain (personality / dreaming / secondary facts): start the
     // scheduler as soon as local data is ready; failures never block the plugin.
@@ -228,6 +243,9 @@ export default class CodexForObsidianPlugin extends Plugin {
   }
 
   private async performUnload(): Promise<void> {
+    const activity = this.homeActivity;
+    this.homeActivity = null;
+    await activity?.dispose();
     this.developerMode.reset();
     this.clearEchoInkOnboardingWorkspaceCoachmark(false);
     this.onboardingRibbonAnchor = null;
@@ -425,6 +443,16 @@ export default class CodexForObsidianPlugin extends Plugin {
   getCodexView(): CodexView | null { return this.getViewService().getCodexView(); }
   refreshKnowledgeBaseSurfaces(): void { this.getViewService().refreshKnowledgeBaseSurfaces(); }
   async refreshLanguageSurfaces(): Promise<void> { await this.getViewService().refreshLanguageSurfaces(); }
+  async openEchoInkGeneralSettings(): Promise<void> { await this.getViewService().openEchoInkSettings("general"); }
+  async openEchoInkKnowledgeSettings(): Promise<void> {
+    this.pendingKnowledgeDashboardFocus = true;
+    await this.getViewService().openEchoInkSettings("knowledgeBase");
+  }
+  consumeKnowledgeDashboardFocus(): boolean {
+    const focus = this.pendingKnowledgeDashboardFocus;
+    this.pendingKnowledgeDashboardFocus = false;
+    return focus;
+  }
   async openWorkspaceResourceSettings(tab: ResourceManagementTab = "plugins"): Promise<void> { return this.getViewService().openWorkspaceResourceSettings(tab); }
   async openReviewHtmlPreview(relativePath: string): Promise<void> { return this.getViewService().openReviewHtmlPreview(relativePath); }
   async listEchoInkMcpTools(resourceId: string, timeoutMs = 30000, signal?: AbortSignal): Promise<unknown[]> {

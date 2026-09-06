@@ -1,5 +1,6 @@
 import { App, TFile, normalizePath } from "obsidian";
 import type { SettingsLanguage } from "../settings/settings";
+import type { HomeActivityService } from "./home-activity-service";
 import { homeCopy } from "./home-i18n";
 import { nativeJournalPathForDate, readNativeJournalContext, readNativeJournalSettings } from "./native-journal";
 import {
@@ -10,7 +11,6 @@ import {
   HOME_ENTRY_IDS,
   JOURNAL_TEMPLATE_DIRECTORY,
   applyJournalTemplate,
-  buildHomeActivityDays,
   buildHomeJournalDays,
   countRecordsInFolder,
   importedTemplatePath,
@@ -83,7 +83,8 @@ export interface HomeTemplateSaveResult {
 export class HomeWorkbenchDataService {
   constructor(
     private readonly app: App,
-    private readonly journalDirectoryProvider: () => string = () => DEFAULT_JOURNAL_DIRECTORY
+    private readonly journalDirectoryProvider: () => string = () => DEFAULT_JOURNAL_DIRECTORY,
+    private readonly activityService?: HomeActivityService | null
   ) {}
 
   getJournalDirectory(): string {
@@ -113,7 +114,13 @@ export class HomeWorkbenchDataService {
     const records = this.app.vault.getMarkdownFiles().map((file) =>
       this.recordForFile(file, journalDirectory)
     );
-    const activity = buildHomeActivityDays(records, { now: new Date(), days: 371 });
+    const byDate = new Map<string, HomeActivityDay>();
+    for (const event of this.activityService?.snapshot().events ?? []) {
+      const day = byDate.get(event.date) ?? { date: event.date, count: 0, fileCount: 0, checkCount: 0, level: "low" as const };
+      day.count++; day.fileCount++;
+      byDate.set(event.date, day);
+    }
+    const activity = [...byDate.values()];
     const journalDays = buildHomeJournalDays(records, activity, visibleMonth, journalDirectory,
       readNativeJournalSettings(this.app, this.journalDirectoryProvider()).format);
     const customTemplates = this.listCustomTemplates();
@@ -124,6 +131,16 @@ export class HomeWorkbenchDataService {
       entries: buildEntrySummaries(records, journalDirectory),
       customTemplates
     };
+  }
+
+  async createBlankInboxNote(language: SettingsLanguage = "zh-CN"): Promise<TFile> {
+    await this.ensureFolder("inbox", language);
+    for (let suffix = 0; ; suffix++) {
+      const path = `inbox/未命名${suffix ? ` ${suffix}` : ""}.md`;
+      if (this.app.vault.getAbstractFileByPath(path)) continue;
+      try { return await this.app.vault.create(path, ""); }
+      catch (error) { if (!this.app.vault.getAbstractFileByPath(path)) throw error; }
+    }
   }
 
   async readTemplate(choice: HomeJournalTemplateChoice, language: SettingsLanguage = "zh-CN"): Promise<string> {
@@ -207,6 +224,7 @@ export class HomeWorkbenchDataService {
       title: file.basename,
       folder: file.parent?.path || "根目录",
       mtime: file.stat.mtime,
+      ctime: file.stat.ctime,
       ...(imageFile instanceof TFile
         ? {
           firstImagePath: imageFile.path,
@@ -224,7 +242,11 @@ export class HomeWorkbenchDataService {
       const existing = this.app.vault.getAbstractFileByPath(current);
       if (existing instanceof TFile) throw new Error(homeCopy(language).template.folderOccupiedByFile(current));
       if (existing) continue;
-      await this.app.vault.createFolder(current);
+      try { await this.app.vault.createFolder(current); }
+      catch (error) {
+        const created = this.app.vault.getAbstractFileByPath(current);
+        if (!created || created instanceof TFile) throw error;
+      }
     }
   }
 }

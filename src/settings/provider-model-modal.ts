@@ -108,10 +108,10 @@ export class ProviderModelModal extends Modal {
     const openPicker = this.modalEl.querySelector<HTMLElement>(
       ".codex-provider-combobox.is-open"
     );
-    const activeElement = document.activeElement;
+    const activeElement = this.modalEl.ownerDocument.activeElement;
     if (
       !openPicker
-      || !(activeElement instanceof HTMLElement)
+      || !(activeElement instanceof (this.modalEl.ownerDocument.defaultView?.HTMLElement ?? HTMLElement))
       || !openPicker.contains(activeElement)
     ) return;
     const trigger = openPicker.querySelector<HTMLButtonElement>(
@@ -121,7 +121,7 @@ export class ProviderModelModal extends Modal {
     event.stopPropagation();
     event.stopImmediatePropagation();
     this.closeOpenPickers();
-    window.requestAnimationFrame(() => {
+    (this.modalEl.ownerDocument.defaultView ?? window).requestAnimationFrame(() => {
       if (trigger?.isConnected) trigger.focus();
     });
   };
@@ -154,11 +154,17 @@ export class ProviderModelModal extends Modal {
         "aria-atomic": "true"
       }
     });
-    window.addEventListener("keydown", this.handleEscapeCapture, true);
+    (this.modalEl.ownerDocument.defaultView ?? window).addEventListener("keydown", this.handleEscapeCapture, true);
     this.render();
     if (this.providerId === "openai-codex") {
       void this.loadCodexAuthStatus();
     }
+  }
+
+  private inlineCloseHandler?: () => void;
+
+  setInlineCloseHandler(handler: () => void): void {
+    this.inlineCloseHandler = handler;
   }
 
   close(): void {
@@ -169,29 +175,30 @@ export class ProviderModelModal extends Modal {
     const openPicker = this.modalEl.querySelector<HTMLElement>(
       ".codex-provider-combobox.is-open"
     );
-    const activeElement = document.activeElement;
+    const activeElement = this.modalEl.ownerDocument.activeElement;
     if (
       openPicker
-      && activeElement instanceof HTMLElement
+      && activeElement instanceof (this.modalEl.ownerDocument.defaultView?.HTMLElement ?? HTMLElement)
       && openPicker.contains(activeElement)
     ) {
       const trigger = openPicker.querySelector<HTMLButtonElement>(
         ".codex-provider-combobox-trigger"
       );
       this.closeOpenPickers();
-      window.requestAnimationFrame(() => {
+      (this.modalEl.ownerDocument.defaultView ?? window).requestAnimationFrame(() => {
         if (trigger?.isConnected) trigger.focus();
       });
       return;
     }
-    super.close();
+    if (this.inlineCloseHandler) this.inlineCloseHandler();
+    else super.close();
   }
 
   onClose(): void {
     this.closed = true;
     this.cancelCodexLogin();
     this.dismissProviderUrlTooltips();
-    window.removeEventListener("keydown", this.handleEscapeCapture, true);
+    (this.modalEl.ownerDocument.defaultView ?? window).removeEventListener("keydown", this.handleEscapeCapture, true);
     this.preflight.reset();
     this.modalEl.onclick = null;
     this.liveRegionEl = null;
@@ -248,17 +255,20 @@ export class ProviderModelModal extends Modal {
     form.setAttr("aria-busy", String(
       this.saving || this.preflight.state.status === "loading"
     ));
-    this.renderProviderPicker(form, providerId);
-    this.renderProviderNameField(form);
+    const connection = form.createDiv({ cls: "settings-card provider-connection-card" });
+    connection.createDiv({ cls: "settings-card-header" }).createEl("h3", { text: this.label("连接设置", "Connection") });
+    const connectionFields = connection.createDiv({ cls: "provider-connection-grid" });
+    this.renderProviderPicker(connectionFields, providerId);
+    this.renderProviderNameField(connectionFields);
 
     if (providerId === "custom") {
-      this.renderCustomForm(form);
+      this.renderCustomForm(connection);
     } else {
       if (providerId === "openai-codex") {
-        this.renderCodexOAuth(form);
+        this.renderCodexOAuth(connection);
       }
       if (apiProviderApiKeyRequired(providerId)) {
-        this.renderApiKeyField(form);
+        this.renderApiKeyField(connection);
       }
       this.renderModelSelectionField(form);
     }
@@ -337,7 +347,7 @@ export class ProviderModelModal extends Modal {
 
     this.modalEl.onclick = (event) => {
       const target = event.target;
-      if (!(target instanceof HTMLElement)) return;
+      if (!(target instanceof (this.modalEl.ownerDocument.defaultView?.HTMLElement ?? HTMLElement))) return;
       if (target.closest(".codex-provider-combobox")) return;
       this.closeOpenPickers();
     };
@@ -369,7 +379,7 @@ export class ProviderModelModal extends Modal {
       });
     }
 
-    const picker = row.createDiv({ cls: "codex-provider-combobox" });
+    const picker = row.createDiv({ cls: "codex-provider-combobox provider-picker" });
     const listboxId = `${this.accessibilityId}-provider-listbox`;
     const trigger = picker.createEl("button", {
       cls: "codex-provider-combobox-trigger",
@@ -394,7 +404,7 @@ export class ProviderModelModal extends Modal {
     setIcon(chevron, "chevron-down");
 
     const menu = picker.createDiv({
-      cls: "codex-provider-combobox-menu"
+      cls: "codex-provider-combobox-menu provider-picker-menu"
     });
     const searchWrap = menu.createDiv({ cls: "codex-provider-combobox-search" });
     const searchIcon = searchWrap.createSpan();
@@ -407,51 +417,49 @@ export class ProviderModelModal extends Modal {
         "aria-label": this.label("搜索 Provider", "Search providers")
       }
     });
-    const options = menu.createDiv({
-      cls: "codex-provider-combobox-options",
-      attr: {
-        role: "listbox",
-        "aria-label": this.label("选择 Provider", "Choose a provider")
-      }
-    });
+    const levels = menu.createDiv({ cls: "provider-picker-levels" });
+    const groups = levels.createDiv({ cls: "provider-picker-groups", attr: { role: "group", "aria-label": this.label("提供商分类", "Provider categories") } });
+    const results = levels.createDiv({ cls: "provider-picker-results" });
+    const resultsTitle = results.createDiv({ cls: "provider-results-title", attr: { role: "status" } });
+    const options = results.createDiv({ cls: "codex-provider-combobox-options provider-picker-options", attr: { role: "listbox", "aria-label": this.label("选择 Provider", "Choose a provider") } });
     options.id = listboxId;
-    const optionRows: Array<{ element: HTMLElement; text: string }> = [];
-    const renderedGroups: Array<{
-      heading: HTMLElement;
-      rows: Array<{ element: HTMLElement; text: string }>;
-    }> = [];
-    for (const group of PROVIDER_PICKER_GROUPS) {
-      const presets = API_PROVIDER_PRESETS.filter(
-        (preset) => providerPickerGroupKey(preset) === group.key
-      );
-      if (!presets.length) continue;
-      const heading = options.createDiv({
-        cls: "codex-provider-combobox-group",
-        text: this.label(group.zh, group.en)
-      });
-      const rows = presets.map((item) => ({
-        element: this.renderProviderOption(
-          options,
-          item.id,
-          apiProviderPresetDisplayName(item.id, this.options.language)
-        ),
-        text: `${item.id} ${item.name}`.toLowerCase()
-      }));
-      optionRows.push(...rows);
-      renderedGroups.push({ heading, rows });
-    }
-
+    let activeGroup = providerPickerGroupKey(selected);
+    const groupButtons = new Map<ProviderPickerGroupKey, HTMLButtonElement>();
+    const optionRows = API_PROVIDER_PRESETS.map((item) => ({
+      element: this.renderProviderOption(options, item.id, apiProviderPresetDisplayName(item.id, this.options.language)),
+      group: providerPickerGroupKey(item),
+      text: `${item.id} ${item.name} ${apiProviderPresetDisplayName(item.id, this.options.language)}`.toLowerCase()
+    }));
+    const empty = results.createDiv({ cls: "provider-picker-empty", text: this.label("没有匹配的提供商", "No matching providers"), attr: { role: "status" } });
     const applyProviderFilter = (query: string) => {
+      menu.toggleClass("is-searching", Boolean(query));
+      let count = 0;
       for (const row of optionRows) {
-        row.element.toggleClass("is-hidden", Boolean(query) && !row.text.includes(query));
+        const visible = query ? row.text.includes(query) : row.group === activeGroup;
+        row.element.toggleClass("is-hidden", !visible);
+        if (visible) count += 1;
       }
-      for (const group of renderedGroups) {
-        group.heading.toggleClass(
-          "is-hidden",
-          group.rows.every((row) => row.element.hasClass("is-hidden"))
-        );
-      }
+      for (const [key, button] of groupButtons) button.setAttr("aria-pressed", String(key === activeGroup));
+      const group = PROVIDER_PICKER_GROUPS.find((item) => item.key === activeGroup)!;
+      resultsTitle.setText(query ? this.label(`全部分类 · ${count} 个结果`, `All categories · ${count} results`) : this.label(group.zh, group.en));
+      empty.hidden = count > 0;
     };
+    for (const group of PROVIDER_PICKER_GROUPS) {
+      const button = groups.createEl("button", { cls: "provider-group-button", attr: { type: "button", "aria-pressed": String(group.key === activeGroup) } });
+      button.createSpan({ text: this.label(group.zh, group.en) });
+      setIcon(button.createSpan(), "chevron-right");
+      groupButtons.set(group.key, button);
+      button.onclick = (event) => { event.stopPropagation(); activeGroup = group.key; applyProviderFilter(""); };
+      button.onkeydown = (event) => {
+        const buttons = Array.from(groupButtons.values());
+        const index = buttons.indexOf(button);
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          event.preventDefault(); buttons[(index + (event.key === "ArrowDown" ? 1 : buttons.length - 1)) % buttons.length]?.focus();
+        } else if (event.key === "ArrowRight") {
+          event.preventDefault(); visibleComboboxOptions(options)[0]?.focus();
+        }
+      };
+    }
 
     const resetProviderFilter = () => {
       search.value = "";
@@ -891,8 +899,9 @@ export class ProviderModelModal extends Modal {
   }
 
   private renderModelSelectionField(container: HTMLElement): void {
+    const modelCard = container.createDiv({ cls: "settings-card provider-model-card" });
     const field = this.createField(
-      container,
+      modelCard,
       this.label("已启用模型", "Enabled models"),
       this.modelTriggerId
     );
@@ -1711,7 +1720,7 @@ export class ProviderModelModal extends Modal {
 
   private captureFocusIntent(): void {
     const activeElement = this.modalEl.ownerDocument.activeElement;
-    if (!(activeElement instanceof HTMLElement) || !this.modalEl.contains(activeElement)) return;
+    if (!(activeElement instanceof (this.modalEl.ownerDocument.defaultView?.HTMLElement ?? HTMLElement)) || !this.modalEl.contains(activeElement)) return;
     const focusable = activeElement.closest<HTMLElement>("[data-modal-focus-key]");
     if (focusable?.dataset.modalFocusKey) this.focusIntent = focusable.dataset.modalFocusKey;
   }
@@ -1731,20 +1740,20 @@ export class ProviderModelModal extends Modal {
       if (target?.isConnected) target.focus({ preventScroll: true });
     };
     focusTarget();
-    window.queueMicrotask(focusTarget);
-    window.requestAnimationFrame(focusTarget);
+    (this.modalEl.ownerDocument.defaultView ?? window).queueMicrotask(focusTarget);
+    (this.modalEl.ownerDocument.defaultView ?? window).requestAnimationFrame(focusTarget);
     // Obsidian can restore the modal container's focus in the first paint
     // after a synchronous control change. Correct it in the next paint so a
     // render does not strand keyboard users on the page root.
-    window.requestAnimationFrame(() => window.requestAnimationFrame(focusTarget));
+    (this.modalEl.ownerDocument.defaultView ?? window).requestAnimationFrame(() => (this.modalEl.ownerDocument.defaultView ?? window).requestAnimationFrame(focusTarget));
   }
 
   private focusField(field: ProviderFormField): void {
     const target = this.modalEl.querySelector<HTMLElement>(`#${this.controlId(field)}`);
     const focusTarget = () => target?.focus({ preventScroll: true });
     focusTarget();
-    window.requestAnimationFrame(focusTarget);
-    window.requestAnimationFrame(() => window.requestAnimationFrame(focusTarget));
+    (this.modalEl.ownerDocument.defaultView ?? window).requestAnimationFrame(focusTarget);
+    (this.modalEl.ownerDocument.defaultView ?? window).requestAnimationFrame(() => (this.modalEl.ownerDocument.defaultView ?? window).requestAnimationFrame(focusTarget));
   }
 
   private announce(message: string): void {
@@ -1812,7 +1821,7 @@ export class ProviderModelModal extends Modal {
   private positionCombobox(picker: HTMLElement, trigger: HTMLElement): void {
     const rect = trigger.getBoundingClientRect();
     const viewportPadding = 12;
-    const below = Math.max(0, window.innerHeight - rect.bottom - viewportPadding);
+    const below = Math.max(0, (this.modalEl.ownerDocument.defaultView ?? window).innerHeight - rect.bottom - viewportPadding);
     const above = Math.max(0, rect.top - viewportPadding);
     const opensUpward = below < 220 && above > below;
     const available = opensUpward ? above : below;
@@ -1837,22 +1846,22 @@ export class ProviderModelModal extends Modal {
         ?.focus({ preventScroll: true });
     };
     focusTrigger();
-    window.requestAnimationFrame(() => {
+    (this.modalEl.ownerDocument.defaultView ?? window).requestAnimationFrame(() => {
       focusTrigger();
-      window.requestAnimationFrame(focusTrigger);
+      (this.modalEl.ownerDocument.defaultView ?? window).requestAnimationFrame(focusTrigger);
     });
   }
 
   private suppressModalCloseForCurrentEvent(): void {
     this.suppressModalClose = true;
-    window.requestAnimationFrame(() => {
+    (this.modalEl.ownerDocument.defaultView ?? window).requestAnimationFrame(() => {
       this.suppressModalClose = false;
     });
   }
 
   private focusedComboboxTriggerId(): string | null {
     const activeElement = this.modalEl.ownerDocument.activeElement;
-    if (!(activeElement instanceof HTMLElement) || !this.modalEl.contains(activeElement)) return null;
+    if (!(activeElement instanceof (this.modalEl.ownerDocument.defaultView?.HTMLElement ?? HTMLElement)) || !this.modalEl.contains(activeElement)) return null;
     const picker = activeElement.closest<HTMLElement>(".codex-provider-combobox");
     if (!picker || !this.modalEl.contains(picker)) return null;
     const trigger = picker.querySelector<HTMLButtonElement>(
@@ -1973,7 +1982,8 @@ function focusOpenCombobox(
   options: HTMLElement,
   focusTarget: ComboboxFocusTarget
 ): void {
-  window.requestAnimationFrame(() => {
+  (search.ownerDocument.defaultView ?? window).requestAnimationFrame(() => {
+    if (!search.isConnected) return;
     if (focusTarget === "search") {
       search.focus();
       return;

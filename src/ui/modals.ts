@@ -77,7 +77,8 @@ export function memoryCorrectionModal(
   app: App,
   record: Readonly<MemoryCorrectionModalRecord>,
   language: "zh-CN" | "en",
-  actions: Readonly<MemoryCorrectionModalActions>
+  actions: Readonly<MemoryCorrectionModalActions>,
+  mount?: (modal: MemoryCorrectionModal) => void
 ): Promise<MemoryCorrectionModalResult> {
   return new Promise((resolve) => {
     const modal = new MemoryCorrectionModal(
@@ -87,7 +88,8 @@ export function memoryCorrectionModal(
       actions,
       resolve
     );
-    modal.open();
+    if (mount) mount(modal);
+    else modal.open();
   });
 }
 

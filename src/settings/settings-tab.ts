@@ -1,4 +1,7 @@
-import { Notice, PluginSettingTab, Setting, TFile, normalizePath, setIcon, setTooltip } from "obsidian";
+import { renderSettingsKnowledgeDashboard } from "./knowledge-dashboard";
+import { BUILTIN_SKILLS } from "../harness/resources/builtin-skills";
+import { mountSettingsEditor } from "./inline-editor";
+import { Modal, Notice, PluginSettingTab, Setting, TFile, normalizePath, setIcon, setTooltip } from "obsidian";
 import type CodexForObsidianPlugin from "../main";
 import { DeveloperModePanel } from "./developer-mode-panel";
 import type { PiConversationCatalogEntry } from "../harness/pi-native/contracts";
@@ -87,7 +90,6 @@ import {
 import {
   confirmModal,
   memoryCorrectionModal,
-  selectInputModal,
   textInputModal
 } from "../ui/modals";
 import { SETTINGS_LANGUAGE_OPTIONS, settingsCopy, type SettingsCopy } from "./i18n";
@@ -104,6 +106,7 @@ import {
 import { McpServerModal } from "./mcp-server-modal";
 import {
   applySettingsRow,
+  addSettingsHelp,
   createSettingsCompactList,
   createSettingsFeatureCard,
   createSettingsGroup,
@@ -133,7 +136,6 @@ import {
   clearKnowledgeDashboardHealthTooltips,
   createKnowledgeDashboardTooltipState,
   disposeKnowledgeDashboardTooltipState,
-  renderKnowledgeDashboardView,
   type KnowledgeDashboardTooltipState
 } from "../ui/codex-view/knowledge-dashboard";
 
@@ -231,6 +233,7 @@ export class CodexSettingTab extends PluginSettingTab {
   private onboardingRestoreFocusEl: HTMLElement | null = null;
   private onboardingRefreshGeneration = 0;
   private developerPanel: DeveloperModePanel | null = null;
+  private inlineEditor: { tab: VisibleSettingsTab; host: HTMLElement; dispose: () => void } | null = null;
 
   constructor(private readonly plugin: CodexForObsidianPlugin) {
     super(plugin.app, plugin);
@@ -260,6 +263,8 @@ export class CodexSettingTab extends PluginSettingTab {
   }
 
   hide(): void {
+    this.inlineEditor?.dispose();
+    this.inlineEditor = null;
     this.developerPanel?.dispose();
     this.developerPanel = null;
     const shouldConfirmKnowledgePreference =
@@ -302,6 +307,7 @@ export class CodexSettingTab extends PluginSettingTab {
   private renderSettingsShell(): void {
     this.disconnectSettingsTabsResizeObserver();
     const { containerEl } = this;
+    containerEl.addClass("echoink-settings-demo");
     containerEl.empty();
     this.settingsTitleEl = containerEl.createDiv({ cls: "codex-settings-title" });
     this.settingsTabsEl = containerEl.createDiv({ cls: "codex-settings-tabs-slot" });
@@ -339,6 +345,9 @@ export class CodexSettingTab extends PluginSettingTab {
       this.knowledgeDashboardEl = null;
       titleEl.empty();
       tabsEl.empty();
+      const activeInline = this.inlineEditor;
+      if (activeInline && activeInline.tab === visibleSettingsTab(this.plugin.settings.settingsTab)) activeInline.host.remove();
+      else if (activeInline) { activeInline.dispose(); this.inlineEditor = null; }
       bodyEl.empty();
       const pageTitle = new Setting(titleEl)
         .setName(copy.title)
@@ -360,7 +369,9 @@ export class CodexSettingTab extends PluginSettingTab {
         || this.memoryActionRunning
       ));
 
-      if (activeTab === "providers") {
+      if (this.inlineEditor) {
+        bodyEl.appendChild(this.inlineEditor.host);
+      } else if (activeTab === "providers") {
         this.renderProviderModelManager(bodyEl);
       } else if (activeTab === "resources") {
         this.renderWorkspaceResourceManager(bodyEl);
@@ -374,6 +385,11 @@ export class CodexSettingTab extends PluginSettingTab {
     } finally {
       restoreSettingsScrollSnapshot(settingsScrollSnapshot);
       this.restoreSettingsFocusIntent();
+      if (this.plugin.consumeKnowledgeDashboardFocus?.()) {
+        this.knowledgeDashboardEl?.setAttribute("tabindex", "-1");
+        this.knowledgeDashboardEl?.focus({ preventScroll: true });
+        this.knowledgeDashboardEl?.scrollIntoView({ block: "start" });
+      }
       void this.refreshOnboardingCoachmark();
     }
   }
@@ -399,8 +415,8 @@ export class CodexSettingTab extends PluginSettingTab {
   }
 
   private captureTabFocusIntent(): void {
-    const activeElement = document.activeElement;
-    if (!(activeElement instanceof HTMLElement) || !this.containerEl.contains(activeElement)) return;
+    const activeElement = this.containerEl.ownerDocument.activeElement;
+    if (!(activeElement instanceof (this.containerEl.ownerDocument.defaultView?.HTMLElement ?? HTMLElement)) || !this.containerEl.contains(activeElement)) return;
 
     const settingsButton = activeElement.closest<HTMLButtonElement>(
       "button.codex-settings-tab[data-settings-tab]"
@@ -429,8 +445,8 @@ export class CodexSettingTab extends PluginSettingTab {
 
   private captureSettingsFocusIntent(): void {
     if (this.settingsFocusIntent) return;
-    const activeElement = document.activeElement;
-    if (!(activeElement instanceof HTMLElement) || !this.containerEl.contains(activeElement)) return;
+    const activeElement = this.containerEl.ownerDocument.activeElement;
+    if (!(activeElement instanceof (this.containerEl.ownerDocument.defaultView?.HTMLElement ?? HTMLElement)) || !this.containerEl.contains(activeElement)) return;
     const focusable = activeElement.closest<HTMLElement>("button, input, select, textarea, a[href]");
     if (!focusable) return;
     if (focusable.getAttribute("role") === "tab") return;
@@ -442,13 +458,13 @@ export class CodexSettingTab extends PluginSettingTab {
     const key = sharedKey ?? this.settingsFocusIntent;
     if (!key) return;
     if (sharedKey) {
-      window.requestAnimationFrame(() => {
+      (this.containerEl.ownerDocument.defaultView ?? window).requestAnimationFrame(() => {
         const focusable = Array.from(this.containerEl.querySelectorAll<HTMLElement>(
           "button, input, select, textarea, a[href]"
         )).find((element) => this.settingsFocusKey(element) === sharedKey);
         if (!focusable?.isConnected) return;
         focusable.focus({ preventScroll: true });
-        if (document.activeElement !== focusable) return;
+        if (this.containerEl.ownerDocument.activeElement !== focusable) return;
         settingsContainerFocusIntents.delete(this.containerEl);
         this.settingsFocusIntent = null;
       });
@@ -462,7 +478,7 @@ export class CodexSettingTab extends PluginSettingTab {
       if (focusable.isConnected) focusable.focus({ preventScroll: true });
     };
     focusTarget();
-    window.requestAnimationFrame(focusTarget);
+    (this.containerEl.ownerDocument.defaultView ?? window).requestAnimationFrame(focusTarget);
     this.settingsFocusIntent = null;
   }
 
@@ -504,8 +520,8 @@ export class CodexSettingTab extends PluginSettingTab {
 
   private reportSettingsActionError(context: SettingsActionContext): void {
     const message = this.plugin.settings.settingsLanguage === "en"
-      ? `${context === "review" ? "Review" : context === "resources" ? "Resource" : "Knowledge"} action did not finish. Check the current configuration and try again.`
-      : `${context === "review" ? "复盘" : context === "resources" ? "资源" : "知识库"}操作未完成。请检查当前配置后重试。`;
+      ? `${context === "review" ? "Review" : context === "resources" ? "Resource" : context === "providers" ? "Model" : "Knowledge"} action did not finish. Check the current configuration and try again.`
+      : `${context === "review" ? "复盘" : context === "resources" ? "资源" : context === "providers" ? "模型" : "知识库"}操作未完成。请检查当前配置后重试。`;
     this.settingsActionErrors[context] = message;
     this.announceSettingsStatus(message);
   }
@@ -559,7 +575,7 @@ export class CodexSettingTab extends PluginSettingTab {
     const settingsDocument = anchor.ownerDocument;
     if (!this.onboardingRestoreFocusEl) {
       const active = settingsDocument.activeElement;
-      this.onboardingRestoreFocusEl = active instanceof HTMLElement ? active : null;
+      this.onboardingRestoreFocusEl = active instanceof (this.containerEl.ownerDocument.defaultView?.HTMLElement ?? HTMLElement) ? active : null;
     }
     this.clearOnboardingCoachmark(false);
     const zh = this.plugin.settings.settingsLanguage !== "en";
@@ -721,7 +737,7 @@ export class CodexSettingTab extends PluginSettingTab {
       surface: "group"
     });
     const memoryGroup = createSettingsGroup(memorySection);
-    applySettingsRow(new Setting(memoryGroup)
+    const memoryToggle = applySettingsRow(new Setting(memoryGroup)
       .setName(zh ? "使用长期记忆" : "Use long-term memory")
       .setDesc(zh
         ? "开启后，Agent 可在所有新旧对话中自主记住、更新、忘掉和整理长期记忆。关闭后仍保留 Agent 名称、头像与基础人格，但不会读取或写入记忆、不会做梦，也不会加载从长期协作中形成的用户画像或 Agent 学习内容。"
@@ -737,8 +753,10 @@ export class CodexSettingTab extends PluginSettingTab {
         });
       }));
 
+    addSettingsHelp(memoryToggle, zh ? "Agent 可在新旧对话中记住、更新、忘掉和整理记忆。" : "The Agent can remember, update, forget, and consolidate memory across conversations.", memoryToggle.descEl.textContent ?? "");
+
     // --- Dream scheduler settings ---
-    applySettingsRow(new Setting(memoryGroup)
+    const dreamToggle = applySettingsRow(new Setting(memoryGroup)
       .setName(zh ? "离线记忆整理（做梦）" : "Offline memory consolidation (dreaming)")
       .setDesc(zh
         ? "默认开启。开启后，Obsidian 打开期间定时处理一级 Memory，生成只帮助召回、不代表用户确认的二级联想，并更新用户画像与 Agent 长期形成的处事方式。关闭后，一级 Memory 仍在对话当轮正常写入和召回；派生状态与积压会保留，重新开启后继续处理。"
@@ -750,6 +768,8 @@ export class CodexSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         });
       }));
+
+    addSettingsHelp(dreamToggle, zh ? "Obsidian 打开期间，定时整理 Memory，更新用户画像与 Agent 长期形成的处事方式。" : "While Obsidian is open, consolidate Memory and update the user profile and the Agent’s learned ways of working.", dreamToggle.descEl.textContent ?? "");
 
     applySettingsRow(new Setting(memoryGroup)
       .setName(zh ? "每日整理次数" : "Runs per day")
@@ -1110,15 +1130,15 @@ export class CodexSettingTab extends PluginSettingTab {
       cls: "echoink-agent-profile-name",
       text: identity.displayName
     });
-    if (ready && readyProfile.preferredSkillNames.length > 0) {
+    if (ready && selectedTemplate?.preferredSkillIds.length) {
       const methods = identitySide.createDiv({ cls: "echoink-agent-profile-methods" });
       methods.createDiv({
         cls: "echoink-agent-profile-methods-label",
-        text: zh ? "更常采用的方法" : "Methods I often consider"
+        text: zh ? "风格默认携带的 Skills" : "Skills included with this style"
       });
       const methodTags = methods.createDiv({ cls: "echoink-agent-profile-method-tags" });
-      for (const skillName of readyProfile.preferredSkillNames) {
-        methodTags.createSpan({ cls: "echoink-agent-profile-method-tag", text: skillName });
+      for (const skillId of selectedTemplate?.preferredSkillIds ?? []) {
+        methodTags.createSpan({ cls: "echoink-agent-profile-method-tag", text: zh ? (BUILTIN_SKILLS.find((skill) => skill.id === skillId)?.title ?? skillId) : skillId.replace(/-/g, " "), attr: { title: skillId } });
       }
     }
 
@@ -1134,6 +1154,9 @@ export class CodexSettingTab extends PluginSettingTab {
     profileContentHeading.nameEl.setAttr("id", profileContentTitleId);
     profileContentHeading.nameEl.setAttr("role", "heading");
     profileContentHeading.nameEl.setAttr("aria-level", "5");
+    contentSide.createEl("p", { cls: "general-growth-description", text: zh
+      ? "伴随聊天和记忆整理，Agent 会持续更新这份画像，逐步调整自己的处事方式。"
+      : "Through conversations and memory consolidation, the Agent updates this profile and gradually adjusts how it works with you." });
     if (ready) {
       const currentSection = contentSide.createEl("section", {
         cls: "echoink-agent-profile-section is-current",
@@ -1247,7 +1270,7 @@ export class CodexSettingTab extends PluginSettingTab {
           new Notice(zh ? "Agent 身份已更新" : "Agent identity updated");
         }
       });
-      modal.open();
+      this.openInlineEditor(modal, "general");
     };
   }
 
@@ -1392,6 +1415,7 @@ export class CodexSettingTab extends PluginSettingTab {
     zh: boolean;
   }>): void {
     const { templateId, templateLabel, panel, refs, zh } = context;
+    let confirmed = false;
     const modal = new AgentIdentityModal(this.plugin.app, {
       initialName: "",
       initialAvatar: Object.freeze({ kind: "default" }),
@@ -1403,6 +1427,7 @@ export class CodexSettingTab extends PluginSettingTab {
         await system.selectPersonalityTemplate(templateId, {
           initialIdentity: { displayName: draft.displayName, avatar: draft.avatar }
         });
+        confirmed = true;
         this.requestPersonalityTemplateFocusRestore();
         await this.refreshIdentityAfterChange();
         new Notice(zh
@@ -1411,7 +1436,9 @@ export class CodexSettingTab extends PluginSettingTab {
         this.closeTemplatePicker(refs);
       }
     });
-    modal.open();
+    this.openInlineEditor(modal, "general", () => {
+      if (!confirmed) this.startInitialIdentitySetup();
+    });
   }
 
   private async refreshIdentityAfterChange(): Promise<void> {
@@ -1444,13 +1471,13 @@ export class CodexSettingTab extends PluginSettingTab {
     titleArea.createDiv({ cls: "echoink-agent-profile-card-label", text: zh ? "用户画像" : "User profile" });
     titleArea.createSpan({
       cls: "echoink-agent-profile-card-badge",
-      text: zh ? "只读" : "Read-only"
+      text: zh ? "持续了解你" : "Keeps learning about you"
     });
     header.createDiv({
       cls: "echoink-agent-profile-card-desc",
       text: zh
-        ? "用户画像由做梦与记忆修正自动维护，不提供手动编辑。"
-        : "The user profile is maintained by dreaming and memory corrections; manual editing is not available."
+        ? "EchoInk 会从聊天和记忆整理中持续了解你，自动更新这份画像。"
+        : "EchoInk keeps learning about you through conversations and memory consolidation, and updates this profile automatically."
     });
     const pre = card.createEl("pre", {
       cls: "echoink-user-profile-text",
@@ -1473,14 +1500,10 @@ export class CodexSettingTab extends PluginSettingTab {
 
   private mountKnowledgeDashboard(page: HTMLElement, zh: boolean): void {
     const section = createSettingsSection(page, {
-      title: zh ? "知识库 Dashboard" : "Knowledge Dashboard",
-      description: zh
-        ? "集中查看知识库状态、统计、健康度、体检新鲜度与热力图。"
-        : "See Knowledge status, statistics, health, check freshness, and the heatmap in one place.",
       surface: "flat"
     });
     this.knowledgeDashboardEl = section.createDiv({
-      cls: "codex-kb-dashboard codex-kb-settings-dashboard"
+      cls: "settings-knowledge-dashboard"
     });
     this.renderKnowledgeSettingsDashboard();
     if (!this.knowledgeDashboardSnapshot && !this.knowledgeDashboardLoading) {
@@ -1496,7 +1519,7 @@ export class CodexSettingTab extends PluginSettingTab {
       state: "ready" as const,
       message: ""
     };
-    renderKnowledgeDashboardView(
+    renderSettingsKnowledgeDashboard(
       container,
       {
         language: this.plugin.settings.settingsLanguage,
@@ -1509,12 +1532,12 @@ export class CodexSettingTab extends PluginSettingTab {
       },
       {
         onRefresh: () => void this.refreshKnowledgeSettingsDashboard(true),
+        onOpenHistory: () => this.openSettingsDetail("knowledge-maintenance-history"),
         onToggleExpanded: () => {
           this.knowledgeDashboardExpanded = !this.knowledgeDashboardExpanded;
           this.renderKnowledgeSettingsDashboard();
         }
-      },
-      this.knowledgeDashboardTooltipState
+      }
     );
   }
 
@@ -1868,17 +1891,25 @@ export class CodexSettingTab extends PluginSettingTab {
     const protocolList = protocolGroup.createEl("ol", {
       cls: "echoink-knowledge-protocol-list"
     });
-    for (const step of ECHOINK_KNOWLEDGE_MAINTENANCE_PROTOCOL_STEPS) {
+    const protocolEnglish = [
+      ["Lock sources", "Use the named Raw sources, or changed sources in Tracker. Bind paths, original content, attachments, and source versions."],
+      ["Understand and break down", "Identify themes, conclusions, evidence, conditions, counterexamples, open questions, and reusable insights."],
+      ["Check quality", "Check freshness, conflicts, credibility, and missing information. Keep unsupported judgments separate from source content."],
+      ["Compare existing knowledge", "Search Wiki and Projects to decide what to create, extend, deduplicate, or merge."],
+      ["Draft candidates", "Draft Markdown in wiki or projects, with clickable source links and exact source-version markers."],
+      ["Review, save, and read back", "Check sources, destinations, unchanged Raw files, and candidate completeness before authorized writes and readback."]
+    ];
+    for (const [index, step] of ECHOINK_KNOWLEDGE_MAINTENANCE_PROTOCOL_STEPS.entries()) {
       const item = protocolList.createEl("li", {
         cls: "echoink-knowledge-protocol-item"
       });
       item.createDiv({
         cls: "echoink-knowledge-protocol-title",
-        text: step.title
+        text: zh ? step.title : protocolEnglish[index][0]
       });
       item.createDiv({
         cls: "echoink-knowledge-protocol-description",
-        text: step.instruction
+        text: zh ? step.instruction : protocolEnglish[index][1]
       });
     }
 
@@ -2117,15 +2148,22 @@ export class CodexSettingTab extends PluginSettingTab {
     const folders = this.app.vault.getAllFolders(true)
       .map((folder) => folder.path || ".")
       .sort((left, right) => left.localeCompare(right, "zh-CN"));
-    const selected = await selectInputModal(
-      this.app,
-      zh ? "选择周报保存文件夹" : "Choose report folder",
-      zh ? "Vault 文件夹" : "Vault folder",
-      folders.map((folder) => ({
-        value: folder,
-        label: folder === "." ? (zh ? "Vault 根目录" : "Vault root") : folder
-      }))
-    );
+    const selected = await new Promise<string | null>((resolve) => {
+      const picker = new Modal(this.app);
+      picker.onOpen = () => {
+        picker.titleEl.setText(zh ? "选择周报保存文件夹" : "Choose report folder");
+        const list = picker.contentEl.createDiv({ cls: "settings-card settings-stack" });
+        for (const folder of [...new Set([".", ...folders])]) {
+          createSettingsNavigationRow(list, {
+            title: folder === "." ? (zh ? "Vault 根目录" : "Vault root") : folder,
+            actionLabel: folder === this.plugin.settings.review.outputDir ? (zh ? "当前文件夹" : "Current folder") : (zh ? "选择" : "Choose"),
+            onActivate: () => { resolve(folder); picker.close(); }
+          });
+        }
+      };
+      picker.onClose = () => { resolve(null); picker.contentEl.empty(); };
+      this.openInlineEditor(picker, "review");
+    });
     if (!selected) return;
     this.plugin.settings.review.outputDir = normalizeReviewOutputDir(
       selected,
@@ -2492,7 +2530,8 @@ export class CodexSettingTab extends PluginSettingTab {
               throw error;
             }
           }
-        }
+        },
+        (modal) => this.openInlineEditor(modal, "review")
       );
       if (result === "saved") {
         new Notice(zh ? "Memory 已保存为新版本" : "Memory saved as a new version");
@@ -2709,7 +2748,7 @@ export class CodexSettingTab extends PluginSettingTab {
           tabindex: isActive ? "0" : "-1"
         }
       });
-      const icon = button.createSpan({ cls: "codex-settings-tab-icon" });
+      const icon = button.createSpan({ cls: "codex-settings-tab-icon settings-motion-icon" });
       renderAnimatedSettingsTabIcon(
         icon,
         tab.icon,
@@ -2739,7 +2778,7 @@ export class CodexSettingTab extends PluginSettingTab {
       };
     });
     this.lastRenderedSettingsTab = activeTab;
-    window.requestAnimationFrame(updateOverflowHint);
+    (this.containerEl.ownerDocument.defaultView ?? window).requestAnimationFrame(updateOverflowHint);
 
     if (!activeButton) {
       this.suppressSettingsTabFocusRestore = false;
@@ -2750,15 +2789,15 @@ export class CodexSettingTab extends PluginSettingTab {
       return;
     }
     const tabButton = activeButton as HTMLButtonElement;
-    window.requestAnimationFrame(() => {
+    (this.containerEl.ownerDocument.defaultView ?? window).requestAnimationFrame(() => {
       if (!tabButton.isConnected) return;
       tabButton.scrollIntoView({ block: "nearest", inline: "nearest" });
       if (this.settingsTabFocusId !== activeTab) return;
       tabButton.focus();
-      window.requestAnimationFrame(() => {
+      (this.containerEl.ownerDocument.defaultView ?? window).requestAnimationFrame(() => {
         if (
           tabButton.isConnected
-          && document.activeElement === tabButton
+          && this.containerEl.ownerDocument.activeElement === tabButton
           && this.settingsTabFocusId === activeTab
         ) {
           this.settingsTabFocusId = null;
@@ -2930,14 +2969,16 @@ export class CodexSettingTab extends PluginSettingTab {
       )
     });
     wrapper.addClass("codex-provider-model-manager");
+    this.renderSettingsActionError(wrapper, "providers");
 
-    const addSection = wrapper.createDiv({
+    const savedSection = wrapper.createDiv({ cls: "codex-provider-saved-section settings-card provider-list-card" });
+    const addSection = savedSection.createDiv({
       cls: "codex-provider-add-section"
     });
     const addCopy = addSection.createDiv({ cls: "codex-provider-add-copy" });
     addCopy.createDiv({
       cls: "codex-provider-add-title",
-      text: label("新增模型", "Add model")
+      text: label("已保存模型", "Saved models")
     });
     addCopy.createDiv({
       cls: "codex-provider-add-description",
@@ -2956,14 +2997,6 @@ export class CodexSettingTab extends PluginSettingTab {
       this.openProviderModelModal(createApiProviderConfig(), false);
     };
 
-    const savedSection = wrapper.createDiv({
-      cls: "codex-provider-saved-section"
-    });
-    const savedHeading = new Setting(savedSection)
-      .setName(label("已保存模型", "Saved models"))
-      .setHeading();
-    savedHeading.settingEl.addClass("echoink-provider-saved-heading-row");
-    savedHeading.nameEl.addClass("codex-provider-saved-heading");
     const savedList = savedSection.createDiv({
       cls: "codex-provider-saved-list"
     });
@@ -3075,6 +3108,13 @@ export class CodexSettingTab extends PluginSettingTab {
           text: label("连接正常", "Connection verified")
         });
       }
+      if (saved.id !== active?.id) {
+        const use = rowMeta.createEl("button", { text: label("设为当前", "Set as current"), attr: { type: "button", "data-echoink-focus-key": `provider:${saved.id}:activate` } });
+        use.onclick = () => void this.runSettingsButtonAction(use, "providers", async () => {
+          const result = await this.saveAndActivateProviderModel(saved, "", this.verifiedProviderConnections.get(saved.id) === providerConfigurationFingerprint(saved), saved);
+          if (!result.saved) throw new Error(result.message ?? this.copy.providers.saveFailed);
+        });
+      }
       const edit = rowMeta.createEl("button", {
         cls: "codex-provider-row-action",
         attr: {
@@ -3122,11 +3162,26 @@ export class CodexSettingTab extends PluginSettingTab {
     }
   }
 
+  private openInlineEditor(editor: Modal, tab: VisibleSettingsTab, onBack?: () => void): void {
+    this.inlineEditor?.dispose();
+    const host = this.containerEl.ownerDocument.createElement("div");
+    const backLabel = this.plugin.settings.settingsLanguage === "en" ? "Back to settings" : "返回设置";
+    const dispose = mountSettingsEditor(editor, host, backLabel, () => {
+      if (!this.settingsVisible || this.inlineEditor?.host !== host) return;
+      this.inlineEditor = null;
+      this.renderSettingsContent();
+      onBack?.();
+    });
+    this.inlineEditor = { tab, host, dispose };
+    this.renderSettingsContent();
+    host.querySelector<HTMLElement>("input, button")?.focus();
+  }
+
   private openProviderModelModal(
     source: ApiProviderConfig,
     editing: boolean
   ): void {
-    new ProviderModelModal({
+    const editor = new ProviderModelModal({
       app: this.app,
       draft: structuredClone(source),
       editing,
@@ -3155,7 +3210,8 @@ export class CodexSettingTab extends PluginSettingTab {
           connectionVerified,
           editing ? source : null
         )
-    }).open();
+    });
+    this.openInlineEditor(editor, "providers");
   }
 
   private async saveAndActivateProviderModel(
@@ -3535,6 +3591,11 @@ export class CodexSettingTab extends PluginSettingTab {
           tabindex: isActive ? "0" : "-1"
         }
       });
+      const icon = button.createSpan({ cls: "settings-motion-icon" });
+      const iconName = tab.id === "plugins" ? "package" : tab.id === "mcp" ? "blocks" : "sparkles";
+      renderAnimatedSettingsTabIcon(icon, iconName, null);
+      button.onmouseenter = () => renderAnimatedSettingsTabIcon(icon, iconName, 0);
+      button.onfocus = () => renderAnimatedSettingsTabIcon(icon, iconName, 0);
       button.createSpan({ text: label });
       if (isActive) activeButton = button;
       button.onpointerdown = () => {
@@ -3615,15 +3676,15 @@ export class CodexSettingTab extends PluginSettingTab {
       this.suppressResourceTabFocusRestore = false;
     } else if (activeButton) {
       const tabButton = activeButton as HTMLButtonElement;
-      window.requestAnimationFrame(() => {
+      (this.containerEl.ownerDocument.defaultView ?? window).requestAnimationFrame(() => {
         if (!tabButton.isConnected) return;
         tabButton.scrollIntoView({ block: "nearest", inline: "nearest" });
         if (this.resourceTabFocusId !== activeTab) return;
         tabButton.focus();
-        window.requestAnimationFrame(() => {
+        (this.containerEl.ownerDocument.defaultView ?? window).requestAnimationFrame(() => {
           if (
             tabButton.isConnected
-            && document.activeElement === tabButton
+            && this.containerEl.ownerDocument.activeElement === tabButton
             && this.resourceTabFocusId === activeTab
           ) {
             this.resourceTabFocusId = null;
@@ -4132,7 +4193,7 @@ export class CodexSettingTab extends PluginSettingTab {
 
   private scheduleResourceSearchFilter(tab: ResourceManagementTab): void {
     this.clearResourceSearchDebounceTimer();
-    this.resourceSearchDebounceTimer = window.setTimeout(() => {
+    this.resourceSearchDebounceTimer = (this.containerEl.ownerDocument.defaultView ?? window).setTimeout(() => {
       this.resourceSearchDebounceTimer = null;
       this.applyResourceSearchFilter(tab);
     }, 120);
@@ -4140,7 +4201,7 @@ export class CodexSettingTab extends PluginSettingTab {
 
   private clearResourceSearchDebounceTimer(): void {
     if (this.resourceSearchDebounceTimer === null) return;
-    window.clearTimeout(this.resourceSearchDebounceTimer);
+    (this.containerEl.ownerDocument.defaultView ?? window).clearTimeout(this.resourceSearchDebounceTimer);
     this.resourceSearchDebounceTimer = null;
   }
 
@@ -4449,7 +4510,7 @@ export class CodexSettingTab extends PluginSettingTab {
     const connection = resource
       ? resolveMcpConnectionRecord(resource, this.plugin.settings.resources) ?? undefined
       : undefined;
-    new McpServerModal({
+    const editor = new McpServerModal({
       app: this.app,
       language: this.plugin.settings.settingsLanguage,
       ...(resource ? { resource } : {}),
@@ -4464,7 +4525,8 @@ export class CodexSettingTab extends PluginSettingTab {
         new Notice(message);
         this.announceSettingsStatus(message);
       }
-    }).open();
+    });
+    this.openInlineEditor(editor, "resources");
   }
 
   private async deleteMcpServer(resource: EchoInkResource, button: HTMLButtonElement): Promise<void> {
@@ -4611,7 +4673,7 @@ const RESOURCE_TABS: Array<{ id: ResourceManagementTab; icon: string }> = [
 
 type VisibleSettingsTab = SettingsTab;
 
-type SettingsActionContext = "knowledge" | "review" | "resources";
+type SettingsActionContext = "knowledge" | "review" | "resources" | "providers";
 
 type SettingsDetail =
   | "knowledge-preferences"

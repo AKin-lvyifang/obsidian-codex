@@ -61,7 +61,14 @@ import type {
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 const CONTROL_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u;
 
+export interface KnowledgeMaintenanceTerminalEvent {
+  readonly input: Readonly<PiKnowledgeMaintenanceToolInput>;
+  readonly result: Readonly<PiKnowledgeMaintenanceToolResult>;
+  readonly at: number;
+}
+
 export interface CreateProductionPiKnowledgeMaintenanceOptions {
+  readonly onTerminal?: (event: KnowledgeMaintenanceTerminalEvent) => void | Promise<void>;
   readonly vaultRootPath: string;
   readonly privateKnowledgeRootPath: string;
   readonly vaultId: string;
@@ -95,6 +102,7 @@ export class ProductionPiKnowledgeMaintenanceToolPort
 implements PiKnowledgeMaintenanceToolPort {
   readonly state: FilePhase3MaintenanceStateStore;
 
+  private readonly onTerminal?: CreateProductionPiKnowledgeMaintenanceOptions["onTerminal"];
   private readonly vaultRootPath: string;
   private readonly privateKnowledgeRootPath: string;
   private readonly vaultId: string;
@@ -134,6 +142,7 @@ implements PiKnowledgeMaintenanceToolPort {
     this.dateKey = options.dateKey ?? localDateKey;
     this.faultInjector = options.faultInjector;
     this.onCommitted = options.onCommitted;
+    this.onTerminal = options.onTerminal;
     this.state = new FilePhase3MaintenanceStateStore({
       storageRootPath: this.privateKnowledgeRootPath,
       vaultId: this.vaultId,
@@ -158,6 +167,18 @@ implements PiKnowledgeMaintenanceToolPort {
   }
 
   async execute(
+    input: Readonly<PiKnowledgeMaintenanceToolInput>
+  ): Promise<Readonly<PiKnowledgeMaintenanceToolResult>> {
+    const result = await this.executeMaintenance(input);
+    try {
+      await this.onTerminal?.({ input, result, at: this.now() });
+    } catch (error) {
+      console.error("EchoInk maintenance history could not be saved", error);
+    }
+    return result;
+  }
+
+  private async executeMaintenance(
     input: Readonly<PiKnowledgeMaintenanceToolInput>
   ): Promise<Readonly<PiKnowledgeMaintenanceToolResult>> {
     try {

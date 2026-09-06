@@ -15,6 +15,7 @@ export interface HomeVaultFileRecord {
   title: string;
   folder: string;
   mtime: number;
+  ctime?: number;
   firstImagePath?: string;
   firstImageUrl?: string;
 }

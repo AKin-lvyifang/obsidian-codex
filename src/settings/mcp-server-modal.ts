@@ -529,7 +529,7 @@ export class McpServerModal extends Modal {
   }
 
   private focus(key: string): void {
-    window.requestAnimationFrame(() => {
+    (this.modalEl.ownerDocument.defaultView ?? window).requestAnimationFrame(() => {
       this.modalEl.querySelector<HTMLElement>(`[data-mcp-modal-focus-key="${key}"]`)?.focus();
     });
   }

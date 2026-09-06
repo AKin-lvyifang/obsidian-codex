@@ -34,10 +34,10 @@ export function createSettingsPage(
   const page = container.createDiv({
     cls: `echoink-settings-page${options.detail ? " is-detail" : ""}`
   });
-  const header = page.createDiv({ cls: "echoink-settings-page-header" });
+  const header = page.createDiv({ cls: "echoink-settings-page-header page-intro" });
   if (options.onBack) {
     const back = header.createEl("button", {
-      cls: "echoink-settings-back",
+      cls: "echoink-settings-back settings-back text-button",
       attr: {
         type: "button",
         "aria-label": options.backLabel ?? "Back",
@@ -67,10 +67,10 @@ export function createSettingsSection(
   options: SettingsSectionOptions = {}
 ): HTMLElement {
   const section = page.createEl("section", {
-    cls: `echoink-settings-section is-${options.surface ?? "flat"}`
+    cls: `echoink-settings-section is-${options.surface ?? "flat"}${options.surface === "group" ? " settings-card" : ""}`
   });
   if (options.title || options.description) {
-    const header = section.createDiv({ cls: "echoink-settings-section-header" });
+    const header = section.createDiv({ cls: "echoink-settings-section-header settings-card-header" });
     if (options.title) header.createEl("h3", { text: options.title });
     if (options.description) {
       header.createDiv({
@@ -83,13 +83,40 @@ export function createSettingsSection(
 }
 
 export function createSettingsGroup(section: HTMLElement): HTMLElement {
-  return section.createDiv({ cls: "echoink-settings-group" });
+  return section.createDiv({ cls: "echoink-settings-group settings-stack" });
 }
 
 export function applySettingsRow(setting: Setting): Setting {
   const settingEl = (setting as unknown as { settingEl?: HTMLElement }).settingEl;
-  settingEl?.addClass("echoink-settings-row");
+  settingEl?.addClass("echoink-settings-row", "setting-row");
+  setting.infoEl?.addClass("setting-copy");
+  setting.controlEl?.addClass("setting-controls");
   return setting;
+}
+
+let settingsHelpSequence = 0;
+
+export function addSettingsHelp(setting: Setting, summary: string, explanation: string): void {
+  setting.setDesc(summary);
+  const name = setting.nameEl.textContent ?? "";
+  const helpLabel = /[\u4e00-\u9fff]/u.test(name) ? `${name}说明` : `${name} information`;
+  const wrapper = setting.nameEl.createSpan({ cls: "echoink-settings-help" });
+  const id = `echoink-settings-help-${++settingsHelpSequence}`;
+  const button = wrapper.createEl("button", {
+    cls: "echoink-settings-help-trigger", text: "?",
+    attr: { type: "button", "aria-label": helpLabel, "aria-describedby": id }
+  });
+  const panel = wrapper.createDiv({ cls: "echoink-settings-help-panel", text: explanation, attr: { id, role: "tooltip" } });
+  panel.hidden = true;
+  wrapper.onmouseenter = () => { panel.hidden = false; };
+  wrapper.onmouseleave = () => { panel.hidden = true; };
+  button.onfocus = () => { panel.hidden = false; };
+  button.onblur = () => { panel.hidden = true; };
+  button.onclick = () => { panel.hidden = !panel.hidden; };
+  wrapper.onkeydown = (event) => {
+    if (event.key !== "Escape") return;
+    panel.hidden = true; event.preventDefault(); event.stopPropagation();
+  };
 }
 
 export function createSettingsFeatureCard(
@@ -97,7 +124,7 @@ export function createSettingsFeatureCard(
   title: string,
   description?: string
 ): HTMLElement {
-  const card = section.createDiv({ cls: "echoink-settings-feature-card" });
+  const card = section.createDiv({ cls: "echoink-settings-feature-card settings-card" });
   const copy = card.createDiv({ cls: "echoink-settings-feature-copy" });
   copy.createDiv({ cls: "echoink-settings-feature-title", text: title });
   if (description) {
@@ -111,14 +138,14 @@ export function createSettingsNavigationRow(
   options: SettingsNavigationRowOptions
 ): HTMLButtonElement {
   const row = section.createEl("button", {
-    cls: "echoink-settings-navigation-row",
+    cls: "echoink-settings-navigation-row setting-row",
     attr: {
       type: "button",
       "aria-label": `${options.title}，${options.actionLabel}`,
       "data-echoink-focus-key": options.focusKey ?? `navigation:${options.title}`
     }
   });
-  const copy = row.createDiv({ cls: "echoink-settings-navigation-copy" });
+  const copy = row.createDiv({ cls: "echoink-settings-navigation-copy setting-copy" });
   copy.createDiv({ cls: "echoink-settings-navigation-title", text: options.title });
   if (options.description) {
     copy.createDiv({
@@ -126,7 +153,7 @@ export function createSettingsNavigationRow(
       text: options.description
     });
   }
-  const trailing = row.createDiv({ cls: "echoink-settings-navigation-trailing" });
+  const trailing = row.createDiv({ cls: "echoink-settings-navigation-trailing setting-controls" });
   if (options.value) {
     trailing.createSpan({ cls: "echoink-settings-navigation-value", text: options.value });
   }

@@ -8,7 +8,7 @@ import { createKnowledgeBaseIoBudget, shouldReadKnowledgeBaseFileContent, type K
 import { isRawMarkdownPath, rawDigestFingerprint, rawDigestRecordFromMarkdown, rawDigestRecordIsTrusted, readRawDigestRegistry, type RawDigestFrontmatterRecord, type RawDigestRegistryEntry } from "./raw-digest";
 import { readKnowledgeBaseTrackerHints } from "./tracker";
 import type { KnowledgeBaseRawDigestState, KnowledgeBaseRawDigestStatus, KnowledgeBaseRunCompletion } from "./types";
-import { exists, normalizeSlashes, walkFiles } from "./utils";
+import { isMissingPathError, exists, normalizeSlashes, walkFiles } from "./utils";
 
 export interface KnowledgeBaseDashboardFile {
   path: string;
@@ -27,7 +27,7 @@ export interface KnowledgeBaseDashboardDirectory {
   recentFiles: KnowledgeBaseDashboardFile[];
 }
 
-export type KnowledgeBaseDashboardHealthStatus = "healthy" | "risk" | "bad";
+export type KnowledgeBaseDashboardHealthStatus = "healthy" | "risk" | "bad" | "unknown";
 export type KnowledgeBaseDashboardCheckStatus = "success" | "failed" | "none";
 export type KnowledgeBaseDashboardCheckFreshnessStatus = "fresh" | "stale" | "bad" | "missing";
 
@@ -39,6 +39,9 @@ export interface KnowledgeBaseDashboardHealthScoreReason {
 }
 
 export interface KnowledgeBaseDashboardHealth {
+  assessment: "local-structure" | "limited" | "uninitialized" | "unavailable";
+  coverage: string;
+  unchecked: readonly string[];
   status: KnowledgeBaseDashboardHealthStatus;
   label: string;
   score: number;
@@ -84,6 +87,7 @@ export interface KnowledgeBaseDashboardActivityDay {
   inbox: number;
   outputs: number;
   checks: number;
+  maintenance?: number;
   failures: number;
   total: number;
   status: KnowledgeBaseDashboardCheckStatus;
@@ -187,13 +191,23 @@ const MAX_DASHBOARD_FILES = 3000;
 const RECENT_FILE_LIMIT = 18;
 const RECOMMENDATION_PREVIEW_LIMIT = 96;
 const RAW_PROCESSING_EXTENSIONS = new Set([".md", ".markdown", ".txt", ".pdf", ".docx", ".png", ".jpg", ".jpeg", ".webp", ".gif"]);
-const HEALTH_SCORE_THRESHOLD_TEXT = "85+ 健康，60-84 风险，低于 60 异常。";
-const HEALTH_SCORE_CHECK_NOTE = "体检成功只代表检查完成；健康分反映检查发现的结构问题。";
+const HEALTH_SCORE_THRESHOLD_TEXT = "85+ 健康，60-84 风险，低于 60 异常；raw、wiki、入口页或 Tracker 缺失各扣 24 分且覆盖分数阈值，直接显示异常。";
+const HEALTH_SCORE_CHECK_NOTE = "总分 = max(0, min(100, 100 − 各项扣分之和))。维护成功不代表完成全库体检，整理队列和运行失败不扣结构分。";
 const CRITICAL_HEALTH_PENALTY = 24;
 const RISK_HEALTH_PENALTY = 2;
 
 export async function buildKnowledgeBaseDashboardSnapshot(vaultPath: string, settings: KnowledgeBaseSettings, options: KnowledgeBaseDashboardOptions = {}): Promise<KnowledgeBaseDashboardSnapshot> {
   const generatedAt = Date.now();
+  const readErrors: string[] = [];
+  const structureExists = async (relative: string, directory = false): Promise<boolean> => {
+    try {
+      const stat = await fsp.stat(path.join(vaultPath, relative));
+      return directory ? stat.isDirectory() : stat.isFile();
+    } catch (error) {
+      if (!isMissingPathError(error)) readErrors.push(relative);
+      return false;
+    }
+  };
   const processedSources = settings.processedSources ?? {};
   const raw = await scanDashboardDirectory(vaultPath, "raw", { skipHidden: true });
   const wiki = await scanDashboardDirectory(vaultPath, "wiki", { skipHidden: true });
@@ -201,11 +215,15 @@ export async function buildKnowledgeBaseDashboardSnapshot(vaultPath: string, set
   const inbox = await scanDashboardDirectory(vaultPath, "inbox", { skipHidden: true });
   const reportPath = await resolveLatestReportPath(vaultPath, settings.lastReportPath, outputs.files);
   const trackerPath = "outputs/.ingest-tracker.md";
-  const trackerExists = await exists(path.join(vaultPath, trackerPath));
+  const trackerExists = await structureExists(trackerPath);
   const reportExists = reportPath ? await exists(path.join(vaultPath, reportPath)) : false;
-  const wikiIndexExists = await exists(path.join(vaultPath, "wiki/index.md"));
+  const wikiIndexExists = await structureExists("wiki/index.md");
   const rawSourceFiles = raw.files.filter(isRawProcessingSource);
-  const registry = await readRawDigestRegistry(vaultPath);
+  const registry = await readRawDigestRegistry(vaultPath, true).catch(() => {
+    readErrors.push("outputs/.raw-digest-registry.json");
+    return { schemaVersion: 1, updatedAt: "", entries: {} };
+  });
+  const fingerprintCoverage = { limited: 0, failed: 0 };
   const rawContentFiles = await attachRawFingerprints(
     vaultPath,
     rawSourceFiles,
@@ -214,9 +232,12 @@ export async function buildKnowledgeBaseDashboardSnapshot(vaultPath: string, set
     createKnowledgeBaseIoBudget({
       maxFileBytes: options.maxRawFingerprintBytes,
       maxTotalBytes: options.maxTotalRawFingerprintBytes
-    })
+    }), fingerprintCoverage
   );
-  const trackerHints = await readKnowledgeBaseTrackerHints(vaultPath, trackerPath, rawContentFiles);
+  const trackerHints = await readKnowledgeBaseTrackerHints(vaultPath, trackerPath, rawContentFiles, true).catch(() => {
+    readErrors.push(trackerPath);
+    return { paths: new Set<string>(), updatedAt: 0 };
+  });
   const rawDigestStatus = buildRawDigestStatus(rawContentFiles, processedSources, registry.entries, trackerHints.paths);
   const mergedProcessedSources = authoritativeProcessedSources(rawContentFiles, processedSources, registry.entries);
   const reportFindings = await readReportFindings(vaultPath, reportPath);
@@ -257,6 +278,8 @@ export async function buildKnowledgeBaseDashboardSnapshot(vaultPath: string, set
   const health = buildHealth({
     settings,
     generatedAt,
+    readFailed: readErrors.length > 0 || fingerprintCoverage.failed > 0 || [raw, wiki, outputs, inbox].some((scan) => scan.failed),
+    limited: fingerprintCoverage.limited > 0 || [raw, wiki, outputs, inbox].some((scan) => scan.limited),
     latestExternalCheckAt: 0,
     maintenanceHistory,
     latestReportFindings: reportFindings,
@@ -351,15 +374,18 @@ interface DashboardScanOptions {
 interface DashboardScanResult extends KnowledgeBaseDashboardDirectory {
   files: KnowledgeBaseDashboardFile[];
   limited: boolean;
+  failed: boolean;
 }
 
 async function scanDashboardDirectory(vaultPath: string, relativeDir: string, options: DashboardScanOptions): Promise<DashboardScanResult> {
   const root = path.join(vaultPath, relativeDir);
   const files: KnowledgeBaseDashboardFile[] = [];
   const folderPaths = new Set<string>();
-  const rootExists = await exists(root);
+  let failed = false;
+  const rootStat = await fsp.stat(root).catch((error) => { if (!isMissingPathError(error)) failed = true; return null; });
+  const rootExists = rootStat?.isDirectory() ?? false;
   let limited = false;
-  if (!rootExists) return { path: relativeDir, exists: false, fileCount: 0, folderCount: 0, totalSize: 0, recentFiles: [], files, limited };
+  if (!rootExists) return { path: relativeDir, exists: false, fileCount: 0, folderCount: 0, totalSize: 0, recentFiles: [], files, limited, failed };
 
   const filePaths = await walkFiles(root, {
     maxFiles: MAX_DASHBOARD_FILES,
@@ -368,12 +394,13 @@ async function scanDashboardDirectory(vaultPath: string, relativeDir: string, op
       folderPaths.add(normalizeSlashes(path.relative(vaultPath, full)));
     },
     onReadDirError: (error, current) => {
+      failed = true;
       emptyArrayOnMissingPathOrWarn(`read dashboard directory ${path.relative(vaultPath, current) || "."}`)(error);
     }
   });
   limited = filePaths.length >= MAX_DASHBOARD_FILES;
   for (const full of filePaths) {
-    const stat = await fsp.stat(full).catch(() => null);
+    const stat = await fsp.stat(full).catch(() => { failed = true; return null; });
     if (!stat) continue;
     files.push({
       path: normalizeSlashes(path.relative(vaultPath, full)),
@@ -390,7 +417,8 @@ async function scanDashboardDirectory(vaultPath: string, relativeDir: string, op
     totalSize: files.reduce((sum, file) => sum + file.size, 0),
     recentFiles,
     files,
-    limited
+    limited,
+    failed
   };
 }
 
@@ -413,7 +441,8 @@ async function attachRawFingerprints(
   files: KnowledgeBaseDashboardFile[],
   processed: Record<string, { size: number; mtime: number; fingerprint?: string }>,
   registryEntries: Record<string, RawDigestRegistryEntry>,
-  budget: KnowledgeBaseIoBudget
+  budget: KnowledgeBaseIoBudget,
+  coverage: { limited: number; failed: number }
 ): Promise<KnowledgeBaseDashboardFile[]> {
   const result: KnowledgeBaseDashboardFile[] = [];
   for (const file of files) {
@@ -425,10 +454,11 @@ async function attachRawFingerprints(
     if (!shouldReadKnowledgeBaseFileContent(file, budget, {
       allowChunkedText: isDashboardRawTextPath(file.path)
     }).ok) {
+      coverage.limited += 1;
       result.push(file);
       continue;
     }
-    const content = await fsp.readFile(path.join(vaultPath, file.path)).catch(() => null);
+    const content = await fsp.readFile(path.join(vaultPath, file.path)).catch(() => { coverage.failed += 1; return null; });
     result.push({
       ...file,
       ...(content !== null ? {
@@ -542,8 +572,12 @@ function buildActivityDays(input: ActivityDaysInput): KnowledgeBaseDashboardActi
     day.status = status;
   }
 
+  for (const entry of input.maintenanceHistory) {
+    const day = byDate.get(entry.date);
+    if (day && entry.status !== "canceled") day.maintenance = (day.maintenance ?? 0) + 1;
+  }
   for (const day of byDate.values()) {
-    day.total = day.raw + day.wiki + day.inbox + day.outputs + day.checks;
+    day.total = day.raw + day.wiki + day.inbox + day.outputs + day.checks + (day.maintenance ?? 0);
   }
   return Array.from(byDate.values());
 }
@@ -553,7 +587,7 @@ function buildActivityHeatmapRows(days: KnowledgeBaseDashboardActivityDay[]): Kn
     { id: "health", label: "知识健康度", cells: buildWeeklyCells(days, (day) => day.checks, true) },
     { id: "wiki", label: "Wiki 变更", cells: buildWeeklyCells(days, (day) => day.wiki, false) },
     { id: "raw", label: "Raw 变更", cells: buildWeeklyCells(days, (day) => day.raw, false) },
-    { id: "maintenance", label: "维护完成", cells: buildWeeklyCells(days, (day) => day.checks, true) }
+    { id: "maintenance", label: "维护记录", cells: buildWeeklyCells(days, (day) => day.maintenance ?? 0, false) }
   ];
 }
 
@@ -887,53 +921,17 @@ interface ReportFindings {
   checkedAt: number;
   title: string;
   summary: string;
-  brokenLinks: number;
-  orphanPages: number;
-  staleItems: number;
-  indexInvalid: boolean;
 }
 
+// A report is display content, never host-verified structural evidence.
 async function readReportFindings(vaultPath: string, reportPath: string): Promise<ReportFindings> {
-  const empty: ReportFindings = { checkedAt: 0, title: "", summary: "", brokenLinks: 0, orphanPages: 0, staleItems: 0, indexInvalid: false };
+  const empty = { checkedAt: 0, title: "", summary: "" };
   const normalized = normalizeRelativePath(reportPath, "");
   if (!normalized) return empty;
   const absolute = path.join(vaultPath, normalized);
-  const [text, stat] = await Promise.all([
-    fsp.readFile(absolute, "utf8").catch(() => ""),
-    fsp.stat(absolute).catch(() => null)
-  ]);
+  const [text, stat] = await Promise.all([fsp.readFile(absolute, "utf8").catch(() => ""), fsp.stat(absolute).catch(() => null)]);
   if (!text.trim() || !stat) return empty;
-  return {
-    checkedAt: stat.mtimeMs,
-    title: markdownTitle(text, titleFromDashboardPath(normalized)),
-    summary: markdownSummary(text, "最近维护报告已生成，可打开查看完整结果。"),
-    brokenLinks: firstNumber(text, [
-      /\|\s*全\s*wiki\s*(?:实质性断链|硬断链|断链)出现次数\s*\|\s*(\d+)\s*\|/i,
-      /(?:实质性断链|硬断链|断链)出现次数[^\d\n]*(\d+)/i,
-      /(?:实质性断链|硬断链|断链)[：:]\s*(\d+)/i,
-      /(?:实质性断链|硬断链|断链)[^\d\n]*(\d+)\s*处/i
-    ]),
-    orphanPages: firstNumber(text, [
-      /\|\s*孤儿页面\s*\|\s*(\d+)\s*\|/i,
-      /孤儿页面[：:]\s*(\d+)/i,
-      /孤儿页面[^\d\n]*(\d+)\s*个/i
-    ]),
-    staleItems: firstNumber(text, [
-      /\|\s*draft\s*\/\s*TODO\s*\/\s*待补等命中文件\s*\|\s*(\d+)\s*\|/i,
-      /draft\s*\/\s*TODO\s*\/\s*待补等命中文件[^\d\n]*(\d+)/i,
-      /(?:过时\/草稿内容|过时内容|过时或草稿内容)[：:]\s*(\d+)/i,
-      /(?:过时|draft|草稿)[^\d\n]*(\d+)\s*处/i
-    ]),
-    indexInvalid: /索引链接[：:](?!\s*全部有效)/.test(text) || /wiki\/index\.md[^\n]*(缺失|无效|不存在)/i.test(text)
-  };
-}
-
-function firstNumber(text: string, patterns: RegExp[]): number {
-  for (const pattern of patterns) {
-    const match = text.match(pattern);
-    if (match?.[1]) return Number(match[1]) || 0;
-  }
-  return 0;
+  return { checkedAt: stat.mtimeMs, title: markdownTitle(text, titleFromDashboardPath(normalized)), summary: markdownSummary(text, "最近维护报告已生成，可打开查看完整结果。") };
 }
 
 async function resolveLatestReportPath(vaultPath: string, configuredPath: string, outputFiles: KnowledgeBaseDashboardFile[]): Promise<string> {
@@ -951,6 +949,8 @@ async function countImmediateDirectories(root: string): Promise<number> {
 }
 
 interface HealthInput {
+  readFailed: boolean;
+  limited: boolean;
   settings: KnowledgeBaseSettings;
   generatedAt: number;
   latestExternalCheckAt: number;
@@ -994,78 +994,30 @@ function buildHealth(input: HealthInput): KnowledgeBaseDashboardHealth {
   if (!input.trackerExists) addReason("critical", "tracker 缺失", "tracker 缺失", 1, "说明来源消化登记无法确认。");
 
   const history = normalizeHealthHistory(input.settings.healthHistory ?? []);
-  const latestHistory = latestHealthEntry(history);
-  const latestMaintenance = latestCompletedMaintenanceEntry(input.maintenanceHistory);
-  const latestRecordedAt = Math.max(latestHistory?.at ?? 0, latestMaintenance?.at ?? 0);
-  const latestRecordedStatus = latestMaintenance && latestMaintenance.at >= (latestHistory?.at ?? 0) ? latestMaintenance.status : latestHistory?.status;
-  const latestCheckAt = Math.max(latestRecordedAt, input.latestExternalCheckAt);
-  const latestCheckFailed = Boolean(latestRecordedStatus === "failed" && latestRecordedAt >= input.latestExternalCheckAt);
-  if (latestCheckFailed) addReason("critical", "最近体检失败", "最近体检失败", 1, "说明最近一次维护或体检没有成功完成。");
-
-  const rawPenalty = input.rawChangedCount > 20 ? 20 : input.rawChangedCount > 5 ? 10 : 0;
-  if (input.rawChangedCount > 20) {
-    addReason("critical", `Raw 待提炼 ${input.rawChangedCount} 个`, "Raw 待提炼", input.rawChangedCount, "来源还没有进入 Wiki / Projects 的结构化知识，或缺少可信来源证据。", rawPenalty);
-  } else if (input.rawChangedCount > 5) {
-    addReason("risk", `Raw 待提炼 ${input.rawChangedCount} 个`, "Raw 待提炼", input.rawChangedCount, "来源还没有进入 Wiki / Projects 的结构化知识，或缺少可信来源证据。", rawPenalty);
-  }
+  const latestCheckAt = latestHealthEntry(history.filter((entry) => entry.status === "success"))?.at ?? 0;
   if (input.rawDigestStatus.calibration > 0) {
-    addReason("risk", `Raw 状态待校准 ${input.rawDigestStatus.calibration} 个`, "Raw 状态待校准", input.rawDigestStatus.calibration, "说明历史记录显示可能已提炼，但还缺少可信机器标记。", input.rawDigestStatus.calibration > 20 ? 8 : 2);
+    addReason("risk", `Raw 状态待校准 ${input.rawDigestStatus.calibration} 个`, "Raw 状态待校准", input.rawDigestStatus.calibration,
+      "1–20 项合计扣 4 分，超过 20 项合计扣 10 分；历史记录显示可能已提炼，但缺少可信机器标记。", input.rawDigestStatus.calibration > 20 ? 8 : 2);
   }
-
-  const inboxPenalty = input.inboxCount > 30 ? 20 : input.inboxCount > 10 ? 10 : 0;
-  if (input.inboxCount > 30) {
-    addReason("critical", `Inbox 积压 ${input.inboxCount} 个`, "Inbox 积压", input.inboxCount, "说明临时输入区积压较多，尚未整理归位。", inboxPenalty);
-  } else if (input.inboxCount > 10) {
-    addReason("risk", `Inbox 积压 ${input.inboxCount} 个`, "Inbox 积压", input.inboxCount, "说明临时输入区积压较多，尚未整理归位。", inboxPenalty);
-  }
-
-  if (input.latestReportFindings.indexInvalid) addReason("critical", "索引链接异常", "索引链接异常", 1, "说明核心索引中存在不可用链接。");
-  if (input.latestReportFindings.brokenLinks > 0) {
-    addReason(
-      "risk",
-      `断链 ${input.latestReportFindings.brokenLinks} 处`,
-      "断链",
-      input.latestReportFindings.brokenLinks,
-      "说明 wiki 中有链接目标不存在。",
-      Math.min(24, input.latestReportFindings.brokenLinks * 6)
-    );
-  }
-  if (input.latestReportFindings.orphanPages > 0) {
-    addReason(
-      "risk",
-      `孤儿页面 ${input.latestReportFindings.orphanPages} 个`,
-      "孤儿页面",
-      input.latestReportFindings.orphanPages,
-      "说明页面缺少有效入口或引用。",
-      Math.min(12, input.latestReportFindings.orphanPages * 4)
-    );
-  }
-  if (input.latestReportFindings.staleItems > 0) {
-    addReason(
-      "risk",
-      `过时/草稿 ${input.latestReportFindings.staleItems} 处`,
-      "过时/草稿",
-      input.latestReportFindings.staleItems,
-      "说明存在待补、TODO、draft 等内容。",
-      Math.min(8, input.latestReportFindings.staleItems * 2)
-    );
-  }
-
-  const nonCriticalWarnings = input.warnings.filter((warning) => !critical.includes(warning));
-  if (nonCriticalWarnings.length) addReason("risk", `存在警告：${nonCriticalWarnings.join("，")}`, "警告", nonCriticalWarnings.length, "说明存在需要人工确认的结构风险。");
-
+  const initialized = input.settings.initialization.status === "initialized" || input.settings.initialization.initializedAt > 0;
+  const assessment = !initialized ? "uninitialized" : input.readFailed ? "unavailable" : input.limited ? "limited" : "local-structure";
+  const available = assessment === "local-structure" || assessment === "limited";
+  if (!available) scoreReasons.length = 0;
   const score = healthScore(scoreReasons);
   const scoreStatus = healthStatusForScore(score, critical.length > 0);
-  const status = scoreStatus;
-  const label = status === "healthy" ? "健康" : status === "risk" ? "风险" : "异常";
+  const status = available ? scoreStatus : "unknown";
+  const label = !available ? initialized ? "无法评估" : "未初始化" : status === "healthy" ? "健康" : status === "risk" ? "风险" : "异常";
   const reasonTexts = [...critical, ...risk];
-  const reasons = reasonTexts.length ? reasonTexts : ["知识库结构正常，待处理数量在安全范围"];
+  const reasons = reasonTexts.length ? reasonTexts : ["已检查的本地结构未发现扣分项"];
   return {
+    assessment,
+    coverage: assessment === "limited" ? `本地结构与已读取的来源状态；每个目录最多扫描 ${MAX_DASHBOARD_FILES} 个文件，部分来源因读取预算尚未检查。` : "仅检查 raw、wiki、wiki/index.md、Tracker 及 Raw 来源状态；不是全库体检。",
+    unchecked: ["断链", "孤儿页面", "过时内容", "索引链接有效性"],
     status,
     label,
-    score,
-    reasons,
-    scoreSummary: healthScoreSummary(score, status, critical.length > 0),
+    score: available ? score : 0,
+    reasons: available ? reasons : [initialized ? "必要文件读取或扫描失败，暂时无法评估" : "初始化完成后显示本地结构评分"],
+    scoreSummary: available ? healthScoreSummary(score, status, critical.length > 0) : label,
     scoreReasons,
     scoreCheckNote: HEALTH_SCORE_CHECK_NOTE,
     scoreThresholdText: HEALTH_SCORE_THRESHOLD_TEXT,
@@ -1076,9 +1028,8 @@ function buildHealth(input: HealthInput): KnowledgeBaseDashboardHealth {
 
 function buildCheckFreshness(history: KnowledgeBaseHealthHistoryEntry[], generatedAt: number, externalCheckAt = 0, maintenanceHistory: KnowledgeBaseMaintenanceHistoryEntry[] = []): KnowledgeBaseDashboardCheckFreshness {
   const normalized = normalizeHealthHistory(history);
-  const latestHistory = latestHealthEntry(normalized);
-  const latestMaintenance = latestCompletedMaintenanceEntry(maintenanceHistory);
-  const latestCheckAt = Math.max(latestHistory?.at ?? 0, latestMaintenance?.at ?? 0, externalCheckAt);
+  const latestHistory = latestHealthEntry(normalized.filter((entry) => entry.status === "success"));
+  const latestCheckAt = Math.max(latestHistory?.at ?? 0, externalCheckAt);
   if (!latestCheckAt) {
     return {
       status: "missing",
@@ -1150,43 +1101,17 @@ function isSameLocalDay(leftMs: number, rightMs: number): boolean {
   return formatLocalDateKey(leftMs) === formatLocalDateKey(rightMs);
 }
 
-function normalizeMaintenanceHistory(history: KnowledgeBaseMaintenanceHistoryEntry[], legacyHistory: KnowledgeBaseHealthHistoryEntry[]): KnowledgeBaseMaintenanceHistoryEntry[] {
-  const byDateAndKind = new Map<string, KnowledgeBaseMaintenanceHistoryEntry>();
-  const add = (entry: KnowledgeBaseMaintenanceHistoryEntry) => {
-    if (!isKnowledgeBaseHeatmapMode(entry.mode)) return;
-    const key = `${entry.date}:${entry.status === "canceled" ? "canceled" : "check"}`;
-    const current = byDateAndKind.get(key);
-    if (current && current.at > entry.at) return;
-    byDateAndKind.set(key, entry);
-  };
-  for (const entry of normalizeHealthHistory(legacyHistory)) {
-    add({ ...entry, mode: "lint", reportPath: "" });
-  }
+function normalizeMaintenanceHistory(history: KnowledgeBaseMaintenanceHistoryEntry[], _legacyHistory: KnowledgeBaseHealthHistoryEntry[]): KnowledgeBaseMaintenanceHistoryEntry[] {
+  const byRun = new Map<string, KnowledgeBaseMaintenanceHistoryEntry>();
   for (const entry of history) {
-    if (
-      !/^\d{4}-\d{2}-\d{2}$/.test(entry.date)
-      || (
-        entry.status !== "success"
-        && entry.status !== "failed"
-        && entry.status !== "canceled"
-      )
-    ) continue;
-    add(entry);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(entry.date) || !["success", "failed", "canceled"].includes(entry.status)) continue;
+    byRun.set(entry.runId || `${entry.at}:${entry.mode}:${entry.status}`, entry);
   }
-  return Array.from(byDateAndKind.values()).sort((left, right) =>
-    left.date.localeCompare(right.date) || left.at - right.at);
-}
-
-function isKnowledgeBaseHeatmapMode(mode: string): boolean {
-  return mode === "lint" || mode === "maintain" || mode === "reingest";
+  return [...byRun.values()].sort((a, b) => a.at - b.at);
 }
 
 function statusByCheckDate(history: KnowledgeBaseHealthHistoryEntry[], maintenanceHistory: KnowledgeBaseMaintenanceHistoryEntry[]): Map<string, KnowledgeBaseDashboardCheckStatus> {
   const byDate = new Map<string, KnowledgeBaseDashboardCheckStatus>();
-  for (const entry of normalizeMaintenanceHistory(maintenanceHistory, [])) {
-    if (entry.status === "canceled") continue;
-    byDate.set(entry.date, entry.status);
-  }
   for (const entry of normalizeHealthHistory(history)) {
     byDate.set(entry.date, entry.status);
   }
@@ -1224,12 +1149,6 @@ function countHealthStreakDays(history: KnowledgeBaseHealthHistoryEntry[], maint
 
 function latestMaintenanceEntry(history: KnowledgeBaseMaintenanceHistoryEntry[]): KnowledgeBaseMaintenanceHistoryEntry | null {
   const normalized = normalizeMaintenanceHistory(history, []);
-  return normalized.length ? normalized[normalized.length - 1] : null;
-}
-
-function latestCompletedMaintenanceEntry(history: KnowledgeBaseMaintenanceHistoryEntry[]): KnowledgeBaseMaintenanceHistoryEntry | null {
-  const normalized = normalizeMaintenanceHistory(history, [])
-    .filter((entry) => entry.status !== "canceled");
   return normalized.length ? normalized[normalized.length - 1] : null;
 }
 

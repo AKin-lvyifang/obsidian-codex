@@ -1,5 +1,7 @@
+import { buildKnowledgeBaseDashboardSnapshot } from "../knowledge-base/dashboard";
+import { mountSettingsEditor } from "../settings/inline-editor";
 import * as assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -249,6 +251,8 @@ import { resolvePiProductionSkillById } from "../plugin/pi-production-runtime-co
 
 export async function runProviderSettingsBehaviorTests(): Promise<void> {
   await runSettingsWindowRefreshTest();
+  await assertInlineEditorAsyncRetirement();
+  await assertReviewFolderInlineLifecycle();
   assertSettingsV53MigrationContract();
   await assertJournalDirectorySettingsUi();
   assertPiReasoningCapabilityContract();
@@ -1311,7 +1315,7 @@ async function assertBuiltinSkillEditorLifecycle(): Promise<void> {
   assert.match(tab.containerEl.textContent, /EchoInk 默认 · 已保存/u);
   assert.equal(save.disabled, true);
 
-  textarea.value = canonicalContent.replace("## 交谈方式", "## 我的交谈方式");
+  textarea.value = `${canonicalContent}\n## 我的补充\n\n只记录本次对话确认的内容。\n`;
   textarea.oninput?.(new Event("input"));
   assert.equal(save.disabled, false);
   save.click();
@@ -2366,6 +2370,7 @@ async function assertSettingsAccessibleNamesAndOverflow(): Promise<void> {
       todayCount: 1
     },
     health: {
+      assessment: "local-structure", coverage: "本地结构", unchecked: [],
       status: "healthy",
       label: "健康",
       score: 92,
@@ -2808,16 +2813,16 @@ async function assertSettingsAccessibleNamesAndOverflow(): Promise<void> {
     /^DeepSeek · /u
   );
   const dashboard = tab.containerEl.querySelector<ProviderModalTestElement>(
-    ".codex-kb-settings-dashboard"
+    ".settings-knowledge-dashboard"
   );
   assert.ok(dashboard, "Knowledge settings mounts the shared Dashboard renderer");
   for (const label of [
-    "知识库状态",
-    "健康概览",
+    "知识库 Dashboard",
+    "结构健康度",
     "体检新鲜度",
-    "Wiki 状态",
+    "Wiki 结构",
     "Raw / Inbox 状态",
-    "体检热力图"
+    "全年体检记录"
   ]) {
     assert.match(dashboard!.textContent, new RegExp(label, "u"));
   }
@@ -2982,7 +2987,7 @@ function assertSettingsToggleAccessibleName(
   label: string
 ): void {
   const row = Array.from(container.querySelectorAll(".setting-item"))
-    .find((candidate) => candidate.querySelector(".setting-item-name")?.textContent === label);
+    .find((candidate) => candidate.querySelector(".checkbox-container")?.getAttribute("aria-label") === label);
   assert.ok(row, `Expected toggle setting row: ${label}`);
   const toggle = row.querySelector<HTMLElement>(".checkbox-container");
   const input = toggle?.querySelector<HTMLInputElement>('input[type="checkbox"]');
@@ -4295,9 +4300,12 @@ async function assertJournalDirectorySettingsUi(): Promise<void> {
   installProviderModalDomFixture();
   const fixtureState = createIdentityFixtureState();
   const { plugin } = createIdentityTestPlugin(fixtureState);
-  const saved: Array<typeof DEFAULT_SETTINGS> = [];
+  const saved: Array<Record<string, unknown>> = [];
+  let nativeOptions: Record<string, unknown> = { folder: "journal", format: "YYYY-MM/YYYY-MM-DD" };
+  const daily = { instance: { options: nativeOptions }, loadData: async () => nativeOptions, saveData: async (value: Record<string, unknown>) => { nativeOptions = value; saved.push(structuredClone(value)); } };
+  (plugin.app as unknown as { internalPlugins: unknown }).internalPlugins = { plugins: { "daily-notes": daily } };
   plugin.saveSettings = async () => {
-    saved.push(structuredClone(plugin.settings));
+    throw new Error("journal folder must persist through native Daily notes");
   };
   const tab = new CodexSettingTab(withSettingsTabDefaults(plugin) as never);
   (tab as unknown as { personalMemoryState: Record<string, any> | null })
@@ -4313,15 +4321,15 @@ async function assertJournalDirectorySettingsUi(): Promise<void> {
   input.value = " Notes\\Daily// ";
   input.fireEvent("blur");
   await settleMicrotasks();
-  assert.equal(plugin.settings.journalDirectory, "Notes/Daily");
+  assert.equal(daily.instance.options.folder, "Notes/Daily");
   assert.equal(input.value, "Notes/Daily");
   assert.equal(saved.length, 1);
-  assert.equal(normalizeSettingsData(saved[0]).settings.journalDirectory, "Notes/Daily");
+  assert.equal(saved[0].folder, "Notes/Daily");
 
   input.value = "../outside";
   input.fireEvent("blur");
   await settleMicrotasks();
-  assert.equal(plugin.settings.journalDirectory, "journal");
+  assert.equal(daily.instance.options.folder, "journal");
   assert.equal(input.value, "journal");
   assert.equal(saved.length, 2);
   tab.hide();
@@ -5473,8 +5481,8 @@ async function assertKnowledgeSettingsDetailRetiresLegacyControls(): Promise<voi
   tab.display();
   assert.match(tab.containerEl.textContent, /知识库管理/u);
   assert.match(tab.containerEl.textContent, /初始化知识库/u);
-  assert.match(tab.containerEl.textContent, /\/ask 始终只读/u);
-  assert.match(tab.containerEl.textContent, /显式 \/maintain 会在一轮内安全写入并回读验证/u);
+  assert.match(tab.containerEl.textContent, /\/ask 先查知识库/u);
+  assert.match(tab.containerEl.textContent, /是否写入由会话底部的工作区选项和你的要求决定/u);
   assert.match(tab.containerEl.textContent, /知识提炼偏好/u);
   assert.doesNotMatch(tab.containerEl.textContent, /等待确认|维护预览/u);
   assertLegacyKnowledgeControlsAbsent(tab.containerEl.textContent);
@@ -6099,7 +6107,7 @@ async function assertKnowledgeInitProgressAndCompletion(): Promise<void> {
   assert.ok(donePanel.querySelector(".echoink-knowledge-init-status-heading.is-init-ready"));
   assert.deepEqual(
     knowledgeInitButtons(donePanel).map((button) => button.textContent),
-    ["打开 Wiki 首页", "整理新增笔记"]
+    ["打开 Wiki 首页", "整理新增笔记", "补齐日记与模板设置"]
   );
   assert.doesNotMatch(donePanel.textContent, /Digest|provider-ready|移动 4/u);
 }
@@ -6148,7 +6156,7 @@ async function assertKnowledgeInitStructureTruthAndRepair(): Promise<void> {
   assert.match(partialPanel.textContent, /知识库文件夹结构不完整/u);
   assert.match(partialPanel.textContent, /缺少目录：projects、assets/u);
   assert.match(partialPanel.textContent, /可能无法正常工作/u);
-  assert.match(partialPanel.textContent, /不会移动、删除或改写任何笔记/u);
+  assert.match(partialPanel.textContent, /保留已有笔记、用户模板和自定义配置/u);
   assert.ok(partialPanel.querySelector(".echoink-knowledge-init-status-heading.is-init-warning"));
   assert.equal(
     knowledgeInitButtons(partialPanel).find((button) => button.textContent === "恢复文件夹体系")
@@ -9684,8 +9692,8 @@ async function assertProviderPickerGroupingAndFiltering(): Promise<void> {
   );
   assert.ok(configuredNameField && apiKeyField && modalForm);
   assert.equal(
-    modalForm.children.indexOf(configuredNameField)
-      < modalForm.children.indexOf(apiKeyField),
+    modalForm.querySelectorAll(".codex-provider-modal-field").indexOf(configuredNameField)
+      < modalForm.querySelectorAll(".codex-provider-modal-field").indexOf(apiKeyField),
     true,
     "the optional Provider name stays between Provider selection and API Key"
   );
@@ -9695,27 +9703,6 @@ async function assertProviderPickerGroupingAndFiltering(): Promise<void> {
     (modal as unknown as { draft: ApiProviderConfig }).draft.name,
     "工作账号"
   );
-  assert.deepEqual(
-    options.children.map((child) => child.hasClass("codex-provider-combobox-group")
-      ? `group:${child.textContent}`
-      : `option:${child.getAttribute("data-provider-id")}`),
-    [
-      "group:登录账户",
-      "option:openai-codex",
-      "group:供应商",
-      "option:anthropic",
-      "option:glm",
-      "option:kimi",
-      "option:minimax",
-      "option:deepseek",
-      "option:qwen",
-      "option:ollama",
-      "group:Token Plan",
-      "option:qwen-token-plan",
-      "group:其他",
-      "option:custom"
-    ]
-  );
   const optionIds = options.querySelectorAll<ProviderModalTestElement>(
     ".codex-provider-combobox-option"
   ).map((option) => option.getAttribute("data-provider-id"));
@@ -9724,18 +9711,7 @@ async function assertProviderPickerGroupingAndFiltering(): Promise<void> {
   )
     .filter((option) => !option.hasClass("is-hidden"))
     .map((option) => option.getAttribute("data-provider-id"));
-  assert.deepEqual(optionIds, [
-    "openai-codex",
-    "anthropic",
-    "glm",
-    "kimi",
-    "minimax",
-    "deepseek",
-    "qwen",
-    "ollama",
-    "qwen-token-plan",
-    "custom"
-  ]);
+  assert.deepEqual(optionIds, API_PROVIDER_PRESETS.map((preset) => preset.id));
   assert.equal(optionIds.includes("grok"), false);
   assert.doesNotMatch(options.textContent, /Grok/iu);
   const providerOptionName = (
@@ -9780,8 +9756,8 @@ async function assertProviderPickerGroupingAndFiltering(): Promise<void> {
   assert.equal(providerModalTestDocument.activeElement, qwen,
     "keyboard navigation skips headings and follows visible Provider order");
 
-  const headings = options.querySelectorAll<ProviderModalTestElement>(
-    ".codex-provider-combobox-group"
+  const headings = modal.contentEl.querySelectorAll<ProviderModalTestElement>(
+    ".provider-group-button"
   );
   assert.deepEqual(headings.map((heading) => heading.textContent), [
     "登录账户",
@@ -9791,12 +9767,6 @@ async function assertProviderPickerGroupingAndFiltering(): Promise<void> {
   ]);
   search.value = "codex";
   search.fireEvent("input");
-  assert.deepEqual(headings.map((heading) => heading.hasClass("is-hidden")), [
-    false,
-    true,
-    true,
-    true
-  ]);
   assert.deepEqual(visibleOptionIds(), ["openai-codex"]);
   search.fireEvent("keydown", { key: "ArrowDown" });
   assert.equal(
@@ -9805,40 +9775,21 @@ async function assertProviderPickerGroupingAndFiltering(): Promise<void> {
   );
   search.value = "deepseek";
   search.fireEvent("input");
-  assert.deepEqual(headings.map((heading) => heading.hasClass("is-hidden")), [
-    true,
-    false,
-    true,
-    true
-  ]);
   assert.deepEqual(visibleOptionIds(), ["deepseek"]);
   search.value = "custom";
   search.fireEvent("input");
-  assert.deepEqual(headings.map((heading) => heading.hasClass("is-hidden")), [
-    true,
-    true,
-    true,
-    false
-  ]);
   assert.deepEqual(visibleOptionIds(), ["custom"]);
   search.value = "no matching provider";
   search.fireEvent("input");
-  assert.deepEqual(headings.map((heading) => heading.hasClass("is-hidden")), [
-    true,
-    true,
-    true,
-    true
-  ]);
   assert.deepEqual(visibleOptionIds(), []);
   search.value = "";
   search.fireEvent("input");
-  assert.deepEqual(headings.map((heading) => heading.hasClass("is-hidden")), [
-    false,
-    false,
-    false,
-    false
-  ]);
-  assert.deepEqual(visibleOptionIds(), optionIds);
+  assert.deepEqual(visibleOptionIds(), API_PROVIDER_PRESETS.filter((preset) => preset.group === "provider").map((preset) => preset.id));
+  headings[0].click();
+  assert.deepEqual(visibleOptionIds(), ["openai-codex"]);
+  headings[2].click();
+  assert.deepEqual(visibleOptionIds(), API_PROVIDER_PRESETS.filter((preset) => preset.group === "token-plan").map((preset) => preset.id));
+  headings[1].click();
   assert.equal(selected.getAttribute("aria-selected"), "true",
     "filtering never changes the selected Provider");
 
@@ -9890,7 +9841,7 @@ async function assertProviderPickerGroupingAndFiltering(): Promise<void> {
   }
   assert.deepEqual(
     englishModal.contentEl.querySelectorAll<ProviderModalTestElement>(
-      ".codex-provider-combobox-group"
+      ".provider-group-button"
     ).map((heading) => heading.textContent),
     ["Account sign-in", "Providers", "Token plans", "Other"]
   );
@@ -11057,13 +11008,13 @@ async function assertIdentityEditSaveRefreshesSettingsAndPersonalization(): Prom
   editButton.click();
 
   // The shared modal opens prefilled with the current identity.
-  const nameInput = findLatestModalElement<ProviderModalTestElement>("name-input");
+  const nameInput = findLatestModalElement<ProviderModalTestElement>("name-input", tab);
   assert.ok(nameInput, "identity modal must open with a name input");
   assert.equal((nameInput as unknown as { value: string }).value, "小墨");
 
   (nameInput as unknown as { value: string }).value = "阿澈";
   nameInput.fireEvent("input");
-  const confirm = findLatestModalElement<ProviderModalTestElement>(".echoink-agent-identity-confirm");
+  const confirm = findLatestModalElement<ProviderModalTestElement>(".echoink-agent-identity-confirm", tab);
   assert.ok(confirm);
   assert.equal((confirm as unknown as { disabled: boolean }).disabled, false);
   confirm.click();
@@ -11130,11 +11081,11 @@ async function assertFirstNamingModalZeroWriteOnCancel(): Promise<void> {
 
   // First-time: the naming modal opened instead of writing anything.
   assert.equal(templateCalls, 0, "clicking a template must not write before naming");
-  const nameInput = findLatestModalElement<ProviderModalTestElement>("name-input");
+  const nameInput = findLatestModalElement<ProviderModalTestElement>("name-input", tab);
   assert.ok(nameInput, "naming modal must open after template click");
 
   // Cancel = zero writes.
-  const cancel = findLatestModalElement<ProviderModalTestElement>(".echoink-agent-identity-cancel");
+  const cancel = findLatestModalElement<ProviderModalTestElement>(".echoink-agent-identity-cancel", tab);
   assert.ok(cancel);
   cancel.click();
   await settleMicrotasks();
@@ -11146,10 +11097,10 @@ async function assertFirstNamingModalZeroWriteOnCancel(): Promise<void> {
   const rowAgain = tab.containerEl.querySelector<ProviderModalTestElement>(".echoink-picker-row");
   rowAgain!.click();
   await settleMicrotasks();
-  const nameInput2 = findLatestModalElement<ProviderModalTestElement>("name-input");
+  const nameInput2 = findLatestModalElement<ProviderModalTestElement>("name-input", tab);
   (nameInput2 as unknown as { value: string }).value = "小墨";
   nameInput2!.fireEvent("input");
-  const confirm2 = findLatestModalElement<ProviderModalTestElement>(".echoink-agent-identity-confirm");
+  const confirm2 = findLatestModalElement<ProviderModalTestElement>(".echoink-agent-identity-confirm", tab);
   assert.equal((confirm2 as unknown as { disabled: boolean }).disabled, false);
   confirm2!.click();
   await settleMicrotasks();
@@ -11264,11 +11215,11 @@ async function assertIdentityEntryFirstRunKeepsSingleTransaction(): Promise<void
 
   // First-time: naming modal opened, nothing written yet.
   assert.equal(templateCalls, 0, "selecting a template must not write before naming");
-  const nameInput = findLatestModalElement<ProviderModalTestElement>("name-input");
+  const nameInput = findLatestModalElement<ProviderModalTestElement>("name-input", tab);
   assert.ok(nameInput, "first-run naming modal opens from the identity entry");
 
   // Cancel = zero writes.
-  const cancel = findLatestModalElement<ProviderModalTestElement>(".echoink-agent-identity-cancel");
+  const cancel = findLatestModalElement<ProviderModalTestElement>(".echoink-agent-identity-cancel", tab);
   assert.ok(cancel);
   cancel.click();
   await settleMicrotasks();
@@ -11281,11 +11232,11 @@ async function assertIdentityEntryFirstRunKeepsSingleTransaction(): Promise<void
   assert.ok(rowAgain, "picker stays open after cancelling the naming modal");
   rowAgain!.click();
   await settleMicrotasks();
-  const nameInput2 = findLatestModalElement<ProviderModalTestElement>("name-input");
+  const nameInput2 = findLatestModalElement<ProviderModalTestElement>("name-input", tab);
   assert.ok(nameInput2);
   (nameInput2 as unknown as { value: string }).value = "小墨";
   nameInput2!.fireEvent("input");
-  const confirm2 = findLatestModalElement<ProviderModalTestElement>(".echoink-agent-identity-confirm");
+  const confirm2 = findLatestModalElement<ProviderModalTestElement>(".echoink-agent-identity-confirm", tab);
   assert.ok(confirm2);
   assert.equal((confirm2 as unknown as { disabled: boolean }).disabled, false);
   confirm2!.click();
@@ -11328,7 +11279,7 @@ async function assertIdentityEntryWithTemplateOpensEditModal(): Promise<void> {
 
   editButton.click();
   // Edit-mode modal opens prefilled; the template picker must NOT open.
-  const nameInput = findLatestModalElement<ProviderModalTestElement>("name-input");
+  const nameInput = findLatestModalElement<ProviderModalTestElement>("name-input", tab);
   assert.ok(nameInput, "edit identity modal opens");
   assert.equal((nameInput as unknown as { value: string }).value, "小墨");
   assert.equal(
@@ -11339,7 +11290,7 @@ async function assertIdentityEntryWithTemplateOpensEditModal(): Promise<void> {
 
   (nameInput as unknown as { value: string }).value = "阿澈";
   nameInput.fireEvent("input");
-  const confirm = findLatestModalElement<ProviderModalTestElement>(".echoink-agent-identity-confirm");
+  const confirm = findLatestModalElement<ProviderModalTestElement>(".echoink-agent-identity-confirm", tab);
   assert.ok(confirm);
   confirm.click();
   await settleMicrotasks();
@@ -11659,7 +11610,7 @@ async function assertIdentityEntryRespectsFailClosedRetry(): Promise<void> {
     "fail-closed: recovery action must not open the picker"
   );
   assert.equal(
-    findLatestModalElement<ProviderModalTestElement>("name-input"),
+    findLatestModalElement<ProviderModalTestElement>("name-input", tab),
     null,
     "fail-closed: recovery action must not open an identity modal"
   );
@@ -11908,7 +11859,12 @@ async function assertAvatarProcessorContract(): Promise<void> {
   console.log("PASS settings: safe square-SVG validation and 256px raster output contract");
 }
 
-function findLatestModalElement<T extends ProviderModalTestElement>(selector: string): T | null {
+function findLatestModalElement<T extends ProviderModalTestElement>(selector: string, tab?: CodexSettingTab): T | null {
+  if (tab) {
+    const inline = tab.containerEl.querySelector(".echoink-settings-inline-content") as unknown as ProviderModalTestElement | null;
+    if (!inline) return null;
+    return selector === "name-input" ? inline.querySelectorAll<T>("input").find((input) => !input.hasClass("echoink-agent-identity-file")) ?? null : inline.querySelector<T>(selector);
+  }
   const modal = openTestModals[openTestModals.length - 1];
   if (!modal) return null;
   const root = modal.contentEl as unknown as ProviderModalTestElement;
@@ -11923,6 +11879,64 @@ async function settleMicrotasks(): Promise<void> {
   for (let i = 0; i < 4; i += 1) await Promise.resolve();
 }
 
+
+async function assertReviewFolderInlineLifecycle(): Promise<void> {
+  installProviderModalDomFixture();
+  const settings = structuredClone(DEFAULT_SETTINGS);
+  settings.settingsTab = "review";
+  let saves = 0;
+  const plugin = withSettingsTabDefaults({
+    app: { vault: { getAllFolders: () => [{ path: "" }, { path: "outputs" }, { path: "reports/weekly" }] } },
+    settings,
+    manifest: { id: "codex-echoink" },
+    saveSettings: async () => { saves++; }
+  });
+  const tab = new CodexSettingTab(plugin as never);
+  const mutable = tab as any;
+  tab.display();
+  const cancelled = mutable.chooseReviewOutputFolder();
+  tab.containerEl.querySelector<HTMLButtonElement>(".settings-back")!.click();
+  await cancelled;
+  assert.equal(saves, 0);
+  assert.equal(settings.review.outputDir, "outputs");
+  const selected = mutable.chooseReviewOutputFolder();
+  tab.containerEl.querySelector<HTMLButtonElement>('[data-echoink-focus-key="navigation:reports/weekly"]')!.click();
+  await selected;
+  assert.equal(saves, 1);
+  assert.equal(settings.review.outputDir, "reports/weekly");
+  assert.equal(tab.containerEl.querySelector(".echoink-settings-inline-editor"), null);
+  tab.hide();
+  console.log("PASS settings: inline report folder cancellation is inert and selection persists once");
+}
+
+async function assertInlineEditorAsyncRetirement(): Promise<void> {
+  installProviderModalDomFixture();
+  const draft = createApiProviderConfig("deepseek", "inline-retirement");
+  draft.apiKey = "test-placeholder-key";
+  let finish!: (value: { saved: true }) => void;
+  let saves = 0;
+  const pending = new Promise<{ saved: true }>((resolve) => { finish = resolve; });
+  const first = new ProviderModelModal({ app: new App(), draft, editing: true, language: "en", copy: settingsCopy("en"), preflight: { listModels: async () => ({ status: "available", models: draft.models }), testConnection: async () => ({ status: "available" }) }, save: async () => { saves++; return await pending; } });
+  const firstHost = document.createElement("div");
+  let backCalls = 0;
+  const disposeFirst = mountSettingsEditor(first, firstHost, "Back", () => { backCalls++; });
+  const save = first.contentEl.querySelector<HTMLButtonElement>(".mod-cta")!;
+  assert.equal(save.disabled, false);
+  save.click(); await settleMicrotasks(); assert.equal(saves, 1);
+  disposeFirst();
+  const second = new ProviderModelModal({ app: new App(), draft, editing: true, language: "en", copy: settingsCopy("en"), preflight: { listModels: async () => ({ status: "available", models: draft.models }), testConnection: async () => ({ status: "available" }) }, save: async () => ({ saved: true }) });
+  const secondHost = document.createElement("div");
+  const disposeSecond = mountSettingsEditor(second, secondHost, "Back", () => { backCalls++; });
+  const input = second.contentEl.querySelector<HTMLInputElement>('[data-modal-focus-key="name"]')!;
+  input.value = "Uncommitted second form";
+  finish({ saved: true }); await flushProviderModalTasks();
+  assert.equal(backCalls, 0, "a retired form completing must not navigate back");
+  assert.equal(input.value, "Uncommitted second form");
+  assert.ok(second.contentEl.contains(input), "the newer form remains mounted");
+  disposeSecond(); second.close(); second.close();
+  assert.equal(backCalls, 0, "hidden/disposed forms never navigate or re-render");
+  console.log("PASS settings: pending old save cannot close a newer inline editor");
+}
 
 async function runSettingsWindowRefreshTest(): Promise<void> {
   installProviderModalDomFixture();
@@ -12057,6 +12071,10 @@ class ProviderModalTestDocument {
   readonly defaultView = {
     MouseEvent: ProviderModalTestMouseEvent,
     ResizeObserver: ProviderModalTestResizeObserver,
+    HTMLElement: ProviderModalTestElement,
+    setTimeout: globalThis.setTimeout,
+    clearTimeout: globalThis.clearTimeout,
+    queueMicrotask: globalThis.queueMicrotask,
     innerWidth: 1200,
     innerHeight: 900,
     requestAnimationFrame: (callback: FrameRequestCallback) => {
@@ -12550,7 +12568,60 @@ function withSettingsTabDefaults<T extends object>(plugin: T) {
   };
 }
 
-if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "settings-window") {
+async function writeSettingsVisualFixtures(): Promise<void> {
+  installProviderModalDomFixture();
+  const directory = path.resolve(".tmp/settings-visual"); mkdirSync(directory, { recursive: true });
+  const root = await mkdtemp(path.join(tmpdir(), "echoink-settings-visual-"));
+  try {
+    for (const folder of ["raw", "wiki/concepts", "outputs", "inbox"]) mkdirSync(path.join(root, folder), { recursive: true });
+    writeFileSync(path.join(root, "wiki/index.md"), "# Index"); writeFileSync(path.join(root, "wiki/concepts/Topic.md"), "# A topic");
+    writeFileSync(path.join(root, "outputs/.ingest-tracker.md"), "# Tracker");
+    const state = createIdentityFixtureState();
+    const { plugin } = createIdentityTestPlugin(state);
+    plugin.settings.apiProviders = [createApiProviderConfig("deepseek", "fixture-deepseek")];
+    plugin.settings.apiProviders[0].apiKey = "fixture-placeholder";
+    plugin.settings.knowledgeBase.initialization.status = "initialized";
+    plugin.settings.activeApiProviderId = "fixture-deepseek";
+    plugin.saveSettings = async () => undefined;
+    plugin.buildRuntimeEchoInkResourceCatalog = async () => [];
+    const snapshot = await buildKnowledgeBaseDashboardSnapshot(root, plugin.settings.knowledgeBase);
+    plugin.getKnowledgeSurfaceService = () => ({ maintenanceRecoveryStatus: { state: "ready", message: "" }, getDashboardSnapshot: async () => snapshot });
+    const tab = new CodexSettingTab(withSettingsTabDefaults(plugin) as never);
+    const mutable = tab as any; mutable.personalMemoryState = state; mutable.knowledgeDashboardSnapshot = snapshot;
+    const esc = (text: string) => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    const serialize = (el: any): string => {
+      const attrs = new Map<string, string>(el.attributes.map((item: any) => [item.name, item.value]));
+      if (el.className) attrs.set("class", el.className);
+      for (const [key, value] of Object.entries(el.dataset)) attrs.set("data-" + key.replace(/[A-Z]/g, (v) => "-" + v.toLowerCase()), String(value));
+      if (el.hidden) attrs.set("hidden", ""); if (el.disabled) attrs.set("disabled", ""); if (el.checked) attrs.set("checked", "");
+      if (el.type) attrs.set("type", el.type); if (el.value && el.localName !== "textarea") attrs.set("value", el.value);
+      const styles: Array<[string,string]> = [...el.style.values, ...Object.entries(el.style).filter(([name]) => name !== "values").map(([name,value]) => [name.replace(/[A-Z]/g, (v) => "-"+v.toLowerCase()), String(value)])];
+      if (styles.length) attrs.set("style", styles.map(([k,v]) => `${k}:${v}`).join(";"));
+      return `<${el.localName} ${[...attrs].map(([k,v]) => `${k}="${esc(v)}"`).join(" ")}>${esc(el.localName === "textarea" ? el.value : el.ownTextContent)}${el.children.map(serialize).join("")}</${el.localName}>`;
+    };
+    const save = (name: string) => writeFileSync(path.join(directory, name + ".html"), `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="../../styles.css"><style>:root{--font-interface:-apple-system,BlinkMacSystemFont,sans-serif;--font-monospace:monospace;--font-text-size:16px;--text-normal:#303238;--text-muted:#73767e;--background-primary:#fff;--background-secondary:#f7f7f9;--background-modifier-border:#e6e7eb;--interactive-accent:#7860b3}body{margin:0;background:#fff}.setting-item{display:flex}.setting-item-control{display:flex;align-items:center}.setting-item-info{flex:1}.checkbox-container{position:relative}.checkbox-container:after{content:"";position:absolute;background:white;border-radius:50%}.checkbox-container input{opacity:0}button{cursor:pointer}button:not(.text-button){background:#fff;color:inherit;border:1px solid #e6e7eb;border-radius:6px;padding:7px 10px}svg{width:16px;height:16px}</style></head><body>${serialize(tab.containerEl)}</body></html>`);
+    for (const section of ["general", "providers", "resources", "knowledgeBase", "review"]) {
+      plugin.settings.settingsTab = section; tab.display(); await flushProviderModalTasks(); tab.display(); save(section);
+    }
+    plugin.settings.settingsTab = "providers"; tab.display(); mutable.openProviderModelModal(plugin.settings.apiProviders[0], true); save("provider-editor");
+    const trigger = tab.containerEl.querySelector<ProviderModalTestElement>(".codex-provider-combobox-trigger"); trigger?.click(); save("provider-picker");
+    tab.hide(); plugin.settings.settingsTab = "general"; tab.display();
+    tab.containerEl.querySelector<ProviderModalTestElement>(".echoink-agent-identity-edit")?.click(); await flushProviderModalTasks(); save("identity-editor"); tab.hide();
+    plugin.settings.settingsLanguage = "en";
+    for (const section of ["general", "providers", "resources", "knowledgeBase", "review"]) {
+      plugin.settings.settingsTab = section; tab.display(); await flushProviderModalTasks(); tab.display(); save(`en-${section}`);
+    }
+    tab.hide();
+    console.log(`Settings visual fixtures: ${directory}`);
+  } finally { await rm(root, { recursive: true, force: true }); }
+}
+
+if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "visual") {
+  await writeSettingsVisualFixtures();
+} else if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "inline") {
+  await assertInlineEditorAsyncRetirement();
+  await assertReviewFolderInlineLifecycle();
+} else if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "settings-window") {
   await runSettingsWindowRefreshTest();
   console.log("PASS detached settings refresh and cancellation with hidden main window");
 } else if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "builtin-skill") {

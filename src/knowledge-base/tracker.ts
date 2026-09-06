@@ -1,3 +1,4 @@
+import { isMissingPathError } from "./utils";
 import * as fsp from "fs/promises";
 import * as path from "path";
 
@@ -81,11 +82,12 @@ export async function readKnowledgeBaseTrackerSnapshot(vaultPath: string, tracke
   return { processedSources, updatedAt: stat.mtimeMs };
 }
 
-export async function readKnowledgeBaseTrackerHints(vaultPath: string, trackerPath: string, files: KnowledgeBaseTrackableFile[]): Promise<KnowledgeBaseTrackerHints> {
+export async function readKnowledgeBaseTrackerHints(vaultPath: string, trackerPath: string, files: KnowledgeBaseTrackableFile[], strict = false): Promise<KnowledgeBaseTrackerHints> {
   const absolute = resolveKnowledgeBaseTrackerPath(vaultPath, trackerPath);
-  const stat = await fsp.lstat(absolute).catch(() => null);
+  const stat = await fsp.lstat(absolute).catch((error) => { if (strict && !isMissingPathError(error)) throw error; return null; });
+  if (strict && stat && !stat.isFile()) throw new Error("Tracker is not a readable regular file");
   if (!stat?.isFile()) return { paths: new Set(), updatedAt: 0 };
-  const text = await fsp.readFile(absolute, "utf8").catch(() => "");
+  const text = await fsp.readFile(absolute, "utf8").catch((error) => { if (strict) throw error; return ""; });
   if (!text.trim()) return { paths: new Set(), updatedAt: 0 };
   const paths = new Set<string>();
   const byPath = new Map(files.map((file) => [file.path, file]));

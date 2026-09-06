@@ -225,7 +225,7 @@ function renderKnowledgeDashboardHealth(
   addKnowledgeDashboardEnergyMeter(
     overview,
     conversationUiText(language, "知识库健康", "Knowledge health"),
-    snapshot.health.score,
+    snapshot.health.status === "unknown" ? null : snapshot.health.score,
     `codex-kb-health-${snapshot.health.status}`,
     knowledgeHealthStatusLabel(snapshot.health.status, snapshot.health.label, language),
     tooltipState,
@@ -235,7 +235,7 @@ function renderKnowledgeDashboardHealth(
   addKnowledgeDashboardEnergyMeter(
     overview,
     conversationUiText(language, "体检新鲜度", "Check freshness"),
-    snapshot.checkFreshness.score,
+    snapshot.checkFreshness.status === "missing" ? null : snapshot.checkFreshness.score,
     `codex-kb-freshness-${snapshot.checkFreshness.status}`,
     checkFreshnessStatusLabel(snapshot.checkFreshness.status, snapshot.checkFreshness.label, language),
     tooltipState,
@@ -280,23 +280,24 @@ function renderKnowledgeDashboardHealth(
 function addKnowledgeDashboardEnergyMeter(
   container: HTMLElement,
   label: string,
-  scoreValue: number,
+  scoreValue: number | null,
   statusClass: string,
   statusLabel: string,
   tooltipState: KnowledgeDashboardTooltipState,
   healthTooltip?: KnowledgeBaseDashboardSnapshot["health"],
   language: SettingsLanguage = "zh-CN"
 ): void {
-  const safeScore = Math.max(0, Math.min(100, Math.round(scoreValue)));
+  const safeScore = Math.max(0, Math.min(100, Math.round(scoreValue ?? 0)));
   const activeCellCount = Math.round((safeScore / 100) * KNOWLEDGE_DASHBOARD_ENERGY_CELL_COUNT);
   const row = container.createDiv({
     cls: `codex-kb-dashboard-energy-row ${statusClass}`,
-    attr: { "aria-label": `${label} ${safeScore}% ${statusLabel}` }
+    attr: { "aria-label": `${label} ${scoreValue === null ? "—" : `${safeScore}%`} ${statusLabel}` }
   });
   row.createDiv({ cls: "codex-kb-dashboard-meter-label", text: label });
   const percent = row.createDiv({ cls: "codex-kb-dashboard-energy-percent" });
-  const percentValue = percent.createSpan({ cls: "codex-kb-dashboard-energy-percent-value", text: `${safeScore}%` });
+  const percentValue = percent.createSpan({ cls: "codex-kb-dashboard-energy-percent-value", text: scoreValue === null ? "—" : `${safeScore}%` });
   if (healthTooltip) addKnowledgeDashboardHealthTooltip(percentValue, healthTooltip, "meter", tooltipState, language);
+  if (scoreValue === null) { row.createDiv({ cls: "codex-kb-dashboard-health-badge", text: statusLabel }); return; }
   const track = row.createDiv({ cls: "codex-kb-dashboard-energy-track", attr: { "aria-hidden": "true" } });
   for (let index = 0; index < KNOWLEDGE_DASHBOARD_ENERGY_CELL_COUNT; index++) {
     const cellClass = index < activeCellCount
@@ -339,7 +340,7 @@ function addKnowledgeDashboardHealthTooltip(
   panel.createDiv({ cls: "codex-kb-health-tooltip-title", text: conversationUiText(language, "健康分解释", "Health score explanation") });
   panel.createDiv({
     cls: "codex-kb-health-tooltip-summary",
-    text: conversationUiText(language, `当前 ${health.score} 分，状态：${health.label}。`, `Current score: ${health.score}. Status: ${knowledgeHealthStatusLabel(health.status, health.label, language)}.`)
+    text: health.status === "unknown" ? knowledgeHealthStatusLabel(health.status, health.label, language) : conversationUiText(language, `当前 ${health.score} 分，状态：${health.label}。`, `Current score: ${health.score}. Status: ${knowledgeHealthStatusLabel(health.status, health.label, language)}.`)
   });
   const reasons = panel.createDiv({ cls: "codex-kb-health-tooltip-reasons" });
   const scoreReasons = health.scoreReasons ?? [];
@@ -351,9 +352,10 @@ function addKnowledgeDashboardHealthTooltip(
     reasons.createDiv({ cls: "codex-kb-health-tooltip-reason codex-kb-health-tooltip-reason-muted", text: conversationUiText(language, "暂无扣分项", "No score deductions") });
   }
   const note = panel.createDiv({ cls: "codex-kb-health-tooltip-note" });
-  note.createDiv({ text: language === "en" ? "A completed check only confirms that checking finished; the score reflects the structural issues it found." : health.scoreCheckNote || "体检成功只代表检查完成；健康分反映检查发现的结构问题。" });
-  note.createDiv({ text: language === "en" ? "85+ healthy, 60–84 at risk, below 60 unhealthy." : health.scoreThresholdText || "85+ 健康，60-84 风险，低于 60 异常。" });
+  note.createDiv({ text: language === "en" ? "Score = max(0, min(100, 100 − deductions)). Based on checked local structure and source status only. Maintenance is not a full knowledge check." : health.scoreCheckNote || "体检成功只代表检查完成；健康分反映检查发现的结构问题。" });
+  note.createDiv({ text: language === "en" ? "85+ healthy, 60–84 at risk, below 60 unhealthy. Each missing core structure deducts 24 points and always shows unhealthy." : health.scoreThresholdText || "85+ 健康，60-84 风险，低于 60 异常。" });
 
+  note.createDiv({ text: language === "en" ? "Unchecked: broken links, orphan pages, stale content and index link validity." : `未检查：${(health.unchecked ?? []).join("、")}` });
   let tooltip: KnowledgeDashboardHealthTooltipEntry;
   const rememberTooltipPointer = (event: MouseEvent) => {
     tooltip.lastPointer = { x: event.clientX, y: event.clientY };
@@ -671,7 +673,7 @@ function addKnowledgeDashboardTable(container: HTMLElement, title: string, colum
   }
 }
 
-function knowledgeRunStatusLabel(
+export function knowledgeRunStatusLabel(
   status: string,
   at: number,
   completion = "",
@@ -689,10 +691,10 @@ function knowledgeRunStatusLabel(
     const completionLabels: Record<string, string> = {
       partial: pendingSourceCount ? `Partially complete (${pendingSourceCount} pending)` : "Partially complete",
       recovered: "Recovered",
-      noop: "Checked (no new sources)",
+      noop: "No changes needed",
       full: "Successful"
     };
-    const label = status === "success" && completion
+    const label = (status === "success" || (status !== "canceled" && completion === "partial")) && completion
       ? completionLabels[completion] ?? labels[status]
       : labels[status] ?? status;
     return at ? `${label} · ${formatRelativeTime(at, language)}` : label;
@@ -707,16 +709,16 @@ function knowledgeRunStatusLabel(
   const completionLabels: Record<string, string> = {
     partial: pendingSourceCount ? `部分完成（${pendingSourceCount} 项待处理）` : "部分完成",
     recovered: "恢复后完成",
-    noop: "已检查（无新来源）",
+    noop: "无需更新",
     full: "成功"
   };
-  const label = status === "success" && completion
+  const label = (status === "success" || (status !== "canceled" && completion === "partial")) && completion
     ? completionLabels[completion] ?? labels[status]
     : labels[status] ?? status;
   return at ? `${label} · ${formatRelativeTime(at, language)}` : label;
 }
 
-function knowledgeDashboardHealthReasonText(
+export function knowledgeDashboardHealthReasonText(
   reason: KnowledgeBaseDashboardSnapshot["health"]["scoreReasons"][number],
   language: SettingsLanguage = "zh-CN"
 ): string {
@@ -789,6 +791,7 @@ function knowledgeHealthStatusLabel(
   language: SettingsLanguage
 ): string {
   if (language !== "en") return fallback;
+  if (status === "unknown") return fallback === "未初始化" ? "Not initialized" : "Unavailable";
   return status === "healthy" ? "Healthy" : status === "risk" ? "At risk" : "Unhealthy";
 }
 
@@ -824,6 +827,7 @@ function knowledgeDashboardHealthReasonLabel(value: string): string {
 
 function knowledgeDashboardHealthReasonExplanation(value: string): string {
   return ({
+    "1–20 项合计扣 4 分，超过 20 项合计扣 10 分；历史记录显示可能已提炼，但缺少可信机器标记。": "1–20 items deduct 4 points total; over 20 deduct 10 total. History suggests refinement, but trusted markers are missing.",
     "说明原始来源区不可用。": "The source area is unavailable.",
     "说明沉淀后的知识区不可用。": "The refined knowledge area is unavailable.",
     "说明知识库入口页不存在。": "The knowledge base entry page is missing.",

@@ -1,3 +1,4 @@
+import { recordProductionMaintenanceTerminal } from "./knowledge-maintenance-history";
 import { isRawMarkdownPath } from "../knowledge-base/raw-digest";
 import { piWorkspaceAllowsTool, piWorkspaceAccessPrompt, type PiWorkspaceAccess } from "../harness/pi-native/pi-workspace-access";
 import { createHash } from "node:crypto";
@@ -441,6 +442,9 @@ export async function createPiProductionRuntimeBundle(
     knowledgeAgentIndex,
     onCommitted: async () => {
       await knowledgeAgentIndex.refresh();
+    },
+    onTerminal: async (event) => {
+      if (recordProductionMaintenanceTerminal(plugin.settings.knowledgeBase, event)) await plugin.persistPiNativeSettings();
     }
   });
   await knowledgeMaintenance.initialize();

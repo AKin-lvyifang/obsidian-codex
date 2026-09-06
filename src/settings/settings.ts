@@ -292,6 +292,7 @@ export interface KnowledgeBaseHealthHistoryEntry {
 }
 
 export interface KnowledgeBaseMaintenanceHistoryEntry {
+  resultStatus?: "completed" | "partial" | "noop" | "failed" | "write_uncertain" | "cancelled";
   date: string;
   status: KnowledgeBaseMaintenanceTerminalStatus;
   at: number;
@@ -2097,6 +2098,8 @@ export function canonicalizeKnowledgeBaseMaintenanceHistoryEntry(
     ...(runId ? { runId } : {}),
     mode,
     reportPath,
+    ...(["completed", "partial", "noop", "failed", "write_uncertain", "cancelled"].includes(String(record.resultStatus))
+      ? { resultStatus: record.resultStatus as KnowledgeBaseMaintenanceHistoryEntry["resultStatus"] } : {}),
     ...(completion ? { completion } : {}),
     ...(pendingSources.length ? { pendingSources } : {}),
     ...(phase ? { phase } : {}),
@@ -2199,6 +2202,7 @@ export function recordKnowledgeBaseMaintenanceRun(
   settings: KnowledgeBaseSettings,
   input: {
     status: KnowledgeBaseMaintenanceTerminalStatus;
+    resultStatus?: KnowledgeBaseMaintenanceHistoryEntry["resultStatus"];
     mode: KnowledgeBaseMaintenanceMode;
     at?: number;
     runId?: string;
@@ -2208,6 +2212,7 @@ export function recordKnowledgeBaseMaintenanceRun(
     phase?: string;
     errorCode?: string;
     warnings?: KnowledgeBaseRunWarning[];
+    verifiedHealthCheck?: boolean;
   }
 ): void {
   const at = input.at ?? Date.now();
@@ -2221,6 +2226,11 @@ export function recordKnowledgeBaseMaintenanceRun(
   if (!entry) {
     throw new Error("知识库维护历史终态无法规范化");
   }
+  if (entry.runId && settings.maintenanceHistory?.some((previous) => previous.runId === entry.runId)) return;
+  settings.lastRunAt = at;
+  settings.lastRunStatus = entry.status;
+  settings.lastReportPath = entry.reportPath;
+  settings.lastError = entry.errorCode ?? "";
   settings.lastCompletion = entry.completion ?? "";
   settings.lastPendingSources = entry.pendingSources ?? [];
   settings.lastWarnings = entry.warnings ?? [];
@@ -2228,7 +2238,7 @@ export function recordKnowledgeBaseMaintenanceRun(
     ...(settings.maintenanceHistory ?? []),
     entry
   ], settings.healthHistory);
-  if (input.mode === "lint" && input.status !== "canceled") {
+  if (input.verifiedHealthCheck === true && input.mode === "lint" && input.status !== "canceled") {
     recordKnowledgeBaseHealthCheck(settings, input.status, at);
   }
 }

@@ -303,3 +303,5 @@ export function setTooltip(
 export async function requestUrl(): Promise<{ text: string }> {
   throw new Error("requestUrl is not available in unit tests");
 }
+
+export function sanitizeHTMLToDom(html: string): DocumentFragment { return document.createRange().createContextualFragment(html); }

@@ -60,8 +60,11 @@ export class EchoInkViewService {
 
   refreshKnowledgeBaseSurfaces(): void {
     this.getCodexView()?.refreshKnowledgeBaseDashboard();
-    const home = this.getHomeView();
-    if (home) void home.refresh().catch((error) => console.warn("EchoInk 首页刷新失败", error));
+    for (const leaf of this.plugin.app.workspace.getLeavesOfType(VIEW_TYPE_ECHOINK_HOME)) {
+      if (leaf.view instanceof EchoInkHomeView) {
+        void leaf.view.refresh().catch((error) => console.warn("EchoInk 首页刷新失败", error));
+      }
+    }
   }
 
   async refreshLanguageSurfaces(): Promise<void> {
