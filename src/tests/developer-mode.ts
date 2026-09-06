@@ -61,6 +61,8 @@ async function settingsDomLifecycle(): Promise<void> {
   let statusWait: Promise<void> | null = null;
   let actionWait: Promise<void> | null = null;
   let backup: string | null = null;
+  const vaultName = `Disposable DOM fixture ${"long-vault-name-".repeat(8)}`;
+  let failStatus = false;
   let reads = 0;
   let saves = 0;
   const actions: string[] = [];
@@ -70,6 +72,7 @@ async function settingsDomLifecycle(): Promise<void> {
       const pending = statusWait;
       statusWait = null;
       await pending;
+      if (failStatus) throw new Error("developer_memory_changing");
       return { records: Array.from({ length: 7 }, () => ({ status: "current" })) };
     } },
     dreamStateStore: { read: async () => ({ pendingMemoryIds: ["sample"], lastRunAt: 0, lastSuccessAt: 0 }) },
@@ -80,13 +83,13 @@ async function settingsDomLifecycle(): Promise<void> {
     }
   };
   const service = new DeveloperModeService(access, {
-    getSystem: async () => system as never, vaultName: () => "Disposable DOM fixture",
+    getSystem: async () => system as never, vaultName: () => vaultName,
     foregroundBusy: () => false, writable: () => true, withLocalActivity: (action) => action(),
     latestBackup: async () => backup,
     changeMemory: async (action) => {
       actions.push(action);
       await actionWait;
-      backup = "fixture/developer-backups/reset.json";
+      backup = `fixture/developer-backups/${"long-backup-name-".repeat(12)}.json`;
       return { backup, preservedLearningConflicts: 0 } as never;
     }
   });
@@ -111,6 +114,8 @@ async function settingsDomLifecycle(): Promise<void> {
   const buttons = (parent = root) => parent.querySelectorAll("[data-developer-action]");
   const action = (name: string) => find(`[data-developer-action="${name}"]`);
   const panel = () => find(".echoink-developer-panel");
+  const facts = () => Object.fromEntries(find(".echoink-developer-facts").querySelectorAll(".echoink-developer-fact")
+    .map((item) => [find("dt", item).textContent, find("dd", item).textContent]));
   const toggle = () => find("input", find("[data-developer-toggle]"));
   const setEnabled = (enabled: boolean) => { toggle().checked = enabled; toggle().fireEvent("change"); };
   const clickLogo = (altKey: boolean) => find(".echoink-about-logo").fireEvent("click", { altKey });
@@ -156,19 +161,35 @@ async function settingsDomLifecycle(): Promise<void> {
     clickLogo(true);
     assert.equal(access.revealed, true);
     assert.equal(toggle().checked, false);
+    assert.equal(find(".setting-item-name", find(".echoink-developer-settings")).textContent, "显示测试工具");
+    assert.equal(find(".echoink-developer-settings").querySelectorAll("h3").filter((item) => item.textContent === "开发者模式").length, 1);
     assert.equal(buttons().length, 0);
     assert.equal(reads, 0);
     assert.deepEqual(actions, []);
     await assert.rejects(service.execute("dream"), /locked/u);
     setEnabled(true);
+    assert.equal(find(".echoink-developer-message").getAttribute("role"), "status");
+    assert.match(find(".echoink-developer-message").textContent, /正在读取状态/u);
     await flush();
     assert.deepEqual(buttons().map((item) => item.dataset.developerAction), ["seed", "dream", "reset", "restore"]);
-    assert.match(panel().textContent, /记忆 7 条 · Dream 待处理 1 条/u);
+    assert.deepEqual(buttons().map((item) => item.textContent), ["生成", "执行", "重置", "恢复"]);
+    assert.equal(facts()["记忆"], "7");
+    assert.equal(facts()["Dream 待处理"], "1");
+    assert.equal(facts()["当前 Vault"], vaultName, "Long Vault names remain complete in the wrapping value field");
+    assert.equal(panel().querySelector(".echoink-developer-message"), null, "Empty results must not reserve a message row");
+    const refresh = find("button", find(".echoink-developer-status-heading"));
+    assert.equal(refresh.textContent, "刷新");
+    const previousReads = reads;
+    refresh.fireEvent("click");
+    await flush();
+    assert.equal(reads, previousReads + 1);
     assert.equal(action("restore").disabled, true);
     const staleSeed = action("seed");
     action("reset").fireEvent("click");
     assert.deepEqual(actions, [], "The first reset click only opens confirmation");
     const staleConfirm = confirm();
+    assert.ok(find(".echoink-developer-confirm").querySelector("h4"));
+    assert.match(find(".echoink-developer-confirm").textContent, /Agent 名称、头像、模板选择及手工修改保留/u);
     setEnabled(false);
     staleSeed.fireEvent("click");
     staleConfirm.fireEvent("click");
@@ -184,6 +205,17 @@ async function settingsDomLifecycle(): Promise<void> {
     await flush();
     assert.deepEqual(actions, ["dream"]);
     assert.match(panel().textContent, /Dream 已处理/u);
+    assert.equal(find(".echoink-developer-message.is-result").getAttribute("role"), "status");
+
+    failStatus = true;
+    tab.display();
+    await flush();
+    assert.equal(find(".echoink-developer-message.is-error").getAttribute("role"), "status");
+    assert.match(find(".echoink-developer-message.is-error").textContent, /记忆正在重置或恢复/u);
+    assert.equal(buttons().length, 0);
+    failStatus = false;
+    tab.display();
+    await flush();
 
     // Invalidate a real pending status read through each settings lifecycle transition.
     for (const transition of ["disable", "navigate", "language", "hide"] as const) {
@@ -205,8 +237,10 @@ async function settingsDomLifecycle(): Promise<void> {
       if (transition === "navigate") await navigate("general");
       if (transition === "language") {
         assert.equal(find(".echoink-about-name").textContent, "EchoInk Agent");
-        assert.match(panel().textContent, /7 memories · 1 pending for Dream/u);
-        assert.equal(action("reset").textContent, "Back up and reset memory and Dream");
+        assert.equal(facts().Memories, "7");
+        assert.equal(facts()["Pending for Dream"], "1");
+        assert.deepEqual(buttons().map((item) => item.textContent), ["Generate", "Run", "Reset", "Restore"]);
+        assert.equal(action("reset").getAttribute("aria-label"), "Back up and reset memory and Dream");
         assert.doesNotMatch(find(".echoink-developer-settings").textContent, /[\u4e00-\u9fff]/u);
         await changeLanguage("zh-CN");
       }
@@ -228,6 +262,8 @@ async function settingsDomLifecycle(): Promise<void> {
       assert.equal(actions.at(-1), operation);
       assert.equal(service.busy, true);
       const oldPanel = panel();
+      assert.equal(find(".echoink-developer-message.is-busy").getAttribute("role"), "status");
+      assert.ok(oldPanel.style.getPropertyValue("min-height"), "Running content retains the previous panel height");
       if (operation === "reset") setEnabled(false);
       else {
         await navigate("review");
@@ -245,6 +281,8 @@ async function settingsDomLifecycle(): Promise<void> {
         await flush();
       }
       assert.ok(buttons().every((button) => !button.disabled), "Current panel must reflect transaction completion");
+      assert.equal(panel().style.getPropertyValue("min-height"), "");
+      assert.equal(facts()["最近重置备份"], backup, "Long backup paths are retained without truncation");
     }
     assert.deepEqual(actions, ["dream", "reset", "restore"]);
     tab.hide();
@@ -260,7 +298,7 @@ async function settingsDomLifecycle(): Promise<void> {
     assert.equal(reloaded.revealed, false);
     assert.equal(reloaded.enabled, false);
     await assert.rejects(service.execute("dream"), /locked/u);
-    console.log("PASS settings DOM: feather-button gesture/time window, inert version number, EchoInk Agent branding, default-off inline switch, four actions, confirmation, disable rejection, async status/transaction lifecycle, navigation, language, reopen, reload");
+    console.log("PASS settings DOM: feather gesture, single title and short actions, complete status values and refresh, loading/error/result/confirmation/busy layouts, async lifecycle, navigation, language, reopen, reload");
   } finally {
     tab.hide();
     root.remove();

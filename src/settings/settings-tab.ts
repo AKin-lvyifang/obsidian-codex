@@ -783,7 +783,7 @@ export class CodexSettingTab extends PluginSettingTab {
     });
     section.addClass("echoink-developer-settings");
     const group = createSettingsGroup(section);
-    const label = zh ? "开发者模式" : "Developer mode";
+    const label = zh ? "显示测试工具" : "Show testing tools";
     applySettingsRow(new Setting(group).setName(label).setDesc(zh
       ? "显示记忆与做梦的测试操作。仅在当前插件会话中生效。"
       : "Show memory and Dream testing actions for this plugin session.")

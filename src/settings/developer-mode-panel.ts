@@ -1,5 +1,6 @@
 import { Setting } from "obsidian";
 import type { DeveloperAction, DeveloperModeService, DeveloperResult, DeveloperStatus } from "../plugin/developer-mode/service";
+import { applySettingsRow } from "./settings-v2";
 
 export class DeveloperModePanel {
   private running = false;
@@ -17,11 +18,25 @@ export class DeveloperModePanel {
     private readonly onActionSettled: () => void
   ) {}
 
-  dispose(): void { this.disposed = true; this.renderVersion++; this.contentEl.empty(); }
+  dispose(): void {
+    this.disposed = true;
+    this.renderVersion++;
+    this.contentEl.empty();
+    this.contentEl.style.removeProperty("min-height");
+  }
   private active(): boolean {
     return !this.disposed && this.service.access.enabled && this.contentEl.isConnected && this.isCurrent();
   }
   private t(zh: string, en: string): string { return this.zh ? zh : en; }
+
+  private renderMessage(text: string, state: "loading" | "busy" | "error" | "result"): void {
+    if (!text) return;
+    this.contentEl.createEl("p", {
+      cls: `echoink-developer-message is-${state}`,
+      text,
+      attr: { role: "status" }
+    });
+  }
 
   async render(): Promise<void> {
     if (!this.active()) return;
@@ -30,97 +45,116 @@ export class DeveloperModePanel {
     const el = this.contentEl;
     el.empty();
     el.addClass("echoink-developer-mode");
+    this.renderMessage(this.t("正在读取状态…", "Loading status…"), "loading");
     let status: DeveloperStatus;
     try { status = await this.service.status(); }
     catch (error) {
-      if (current()) el.createEl("p", { cls: "echoink-developer-error", text: this.errorText(error) });
+      if (current()) {
+        el.empty();
+        el.style.removeProperty("min-height");
+        this.renderMessage(this.errorText(error), "error");
+      }
       return;
     }
     if (!current()) return;
+    el.empty();
+    el.style.removeProperty("min-height");
     this.vault = status.vault;
-    el.createEl("p", { text: `${this.t("当前 Vault", "Current Vault")}: ${status.vault}` });
-    el.createEl("p", { text: this.t(
-      `记忆 ${status.memoryCount} 条 · Dream 待处理 ${status.pending} 条`,
-      `${status.memoryCount} memories · ${status.pending} pending for Dream`
-    ) });
+    const summary = el.createDiv({ cls: "echoink-developer-status" });
+    const heading = summary.createDiv({ cls: "echoink-developer-status-heading" });
+    heading.createEl("h4", { text: this.t("当前状态", "Current status") });
+    const refresh = heading.createEl("button", {
+      text: this.t("刷新", "Refresh"), attr: { type: "button" }
+    });
+    refresh.disabled = this.running;
+    refresh.addEventListener("click", () => void this.render());
+    const facts = summary.createEl("dl", { cls: "echoink-developer-facts" });
+    const fact = (label: string, value: string, wide = false): void => {
+      const item = facts.createDiv({ cls: `echoink-developer-fact${wide ? " is-wide" : ""}` });
+      item.createEl("dt", { text: label });
+      item.createEl("dd", { text: value });
+    };
+    fact(this.t("当前 Vault", "Current Vault"), status.vault, true);
+    fact(this.t("记忆", "Memories"), String(status.memoryCount));
+    fact(this.t("Dream 待处理", "Pending for Dream"), String(status.pending));
     const date = (at: number): string => at > 0
       ? new Date(at).toLocaleString(this.zh ? "zh-CN" : "en-US")
       : this.t("尚无记录", "No recorded run");
-    el.createEl("p", { text: `${this.t("最近尝试", "Last attempt")}: ${date(status.lastRunAt)} · ${this.t("最近成功", "Last success")}: ${date(status.lastSuccessAt)}` });
-    if (status.lastResult) el.createEl("p", { text: this.dreamText(status.lastResult) });
-    if (status.backup) el.createEl("p", { cls: "echoink-developer-path", text: `${this.t("最近重置备份", "Latest reset backup")}: ${status.backup}` });
-    const output = el.createEl("p", {
-      cls: this.failed ? "echoink-developer-error" : "echoink-developer-result",
-      text: this.message || (status.busy ? this.t("正在执行，请稍候。", "An operation is running. Please wait.") : "")
-    });
-    output.setAttribute("role", "status");
-    const add = (action: DeveloperAction, title: string, desc: string, disabled = false): void => {
-      new Setting(el).setName(title).setDesc(desc).addButton((button) => {
+    fact(this.t("最近尝试", "Last attempt"), date(status.lastRunAt));
+    fact(this.t("最近成功", "Last success"), date(status.lastSuccessAt));
+    if (status.backup) fact(this.t("最近重置备份", "Latest reset backup"), status.backup, true);
+    if (status.lastResult) this.renderMessage(this.dreamText(status.lastResult), "result");
+    if (this.message) this.renderMessage(this.message, this.failed ? "error" : "result");
+    else if (status.busy) this.renderMessage(this.t("正在执行，请稍候。", "An operation is running. Please wait."), "busy");
+    const actions = el.createDiv({ cls: "echoink-developer-actions" });
+    const add = (action: DeveloperAction, title: string, verb: string, desc: string, disabled = false): void => {
+      applySettingsRow(new Setting(actions).setName(title).setDesc(desc).addButton((button) => {
         button.buttonEl.setAttribute("data-developer-action", action);
-        button.setButtonText(title).setDisabled(this.running || status.busy || disabled)
+        button.buttonEl.setAttribute("aria-label", title);
+        button.setButtonText(verb).setDisabled(this.running || status.busy || disabled)
           .onClick(() => {
             if (!this.active()) return;
             if (action === "reset" || action === "restore") this.confirm(action);
             else void this.run(action);
           });
-      });
+      }));
     };
-    add("seed", this.t("生成示例记忆", "Generate sample memories"), this.t(
+    add("seed", this.t("生成示例记忆", "Generate sample memories"), this.t("生成", "Generate"), this.t(
       "写入七类合成测试材料，不代表真实用户经历。重复生成自动去重，不调用模型。",
       "Write seven kinds of clearly marked synthetic test data. Repeated samples are deduplicated. No model call."
     ));
-    add("dream", this.t("立即做梦一次", "Run Dream once"), this.t(
+    add("dream", this.t("立即做梦一次", "Run Dream once"), this.t("执行", "Run"), this.t(
       "将调用当前模型，可能更新衍生记忆、用户画像与 Agent 学习内容。需要开启长期记忆与做梦。",
       "Calls the current model and may update derived memories, your profile, and learned Agent behavior. Memory and Dream must be enabled."
     ));
-    add("reset", this.t("备份并重置记忆与做梦", "Back up and reset memory and Dream"), this.t(
+    add("reset", this.t("备份并重置记忆与做梦", "Back up and reset memory and Dream"), this.t("重置", "Reset"), this.t(
       "先确认范围，再自动备份。保留笔记、会话、知识库、Skills 和配置。",
       "Review the scope, then back up automatically. Notes, conversations, Knowledge, Skills, and settings are preserved."
     ));
-    add("restore", this.t("恢复最近一次重置备份", "Restore latest reset backup"), this.t(
+    add("restore", this.t("恢复最近一次重置备份", "Restore latest reset backup"), this.t("恢复", "Restore"), this.t(
       "恢复前先备份当前记忆状态，原备份不会被覆盖。",
       "Protect the current memory state before restoring. The original backup is kept."
     ), !status.backup);
-    new Setting(el).addButton((button) => button
-      .setButtonText(this.t("刷新状态", "Refresh status"))
-      .setDisabled(this.running).onClick(() => void this.render()));
   }
 
   private confirm(action: "reset" | "restore"): void {
     if (!this.active()) return;
     this.renderVersion++;
     this.contentEl.empty();
-    this.contentEl.createEl("h2", { text: action === "reset"
+    const confirmation = this.contentEl.createDiv({ cls: "echoink-developer-confirm" });
+    confirmation.createEl("h4", { text: action === "reset"
       ? this.t("确认重置当前 Vault 的记忆", "Confirm memory reset for this Vault")
       : this.t("确认恢复记忆备份", "Confirm memory restore") });
-    this.contentEl.createEl("p", { text: `${this.t("当前 Vault", "Current Vault")}: ${this.vault}` });
-    this.contentEl.createEl("p", { text: action === "reset" ? this.t(
+    confirmation.createEl("p", { text: `${this.t("当前 Vault", "Current Vault")}: ${this.vault}` });
+    confirmation.createEl("p", { text: action === "reset" ? this.t(
       "范围包含一级与二级记忆、USER 画像、Dream 队列及历史、Agent 学习衍生内容。Agent 名称、头像、模板选择及手工修改保留；从记忆学到的行为会清空。",
       "Includes primary and secondary memories, USER profile, Dream queue and history, and learned Agent content. Agent name, avatar, template selection, and manual edits are preserved; behavior learned from memory is cleared."
     ) : this.t(
       "恢复备份中的一级与二级记忆、USER 画像、Dream 队列及历史。当前 Agent 名称、头像、模板及手工修改优先保留；仅恢复不冲突且有来源的学习内容。",
       "Restore primary and secondary memories, USER profile, and Dream queue and history. Keep the current Agent name, avatar, template, and manual edits; restore only sourced learning that does not conflict."
     ) });
-    this.contentEl.createEl("p", { text: this.t(
+    confirmation.createEl("p", { text: this.t(
       "笔记、会话、知识库、Skills、模型配置和 API Key 不变。备份在当前 Vault 的 developer-backups 中。备份失败时不执行，部分失败自动尝试回滚。",
       "Notes, conversations, Knowledge, Skills, model settings, and API keys are unchanged. Backups stay in developer-backups in this Vault. A failed backup stops the operation; partial failures trigger rollback."
     ) });
-    if (action === "restore") this.contentEl.createEl("p", { text: this.t(
+    if (action === "restore") confirmation.createEl("p", { text: this.t(
       "将先保护当前状态，再恢复最近一次重置前的记忆。",
       "The current state will be protected before restoring the memories from the latest reset."
     ) });
-    new Setting(this.contentEl)
+    const controls = new Setting(confirmation)
       .addButton((button) => button.setButtonText(this.t("取消", "Cancel")).onClick(() => void this.render()))
       .addButton((button) => button.setButtonText(this.t("确认并执行", "Confirm and continue"))
         .setWarning().onClick(() => void this.run(action)));
+    controls.settingEl.addClass("echoink-developer-confirm-actions");
   }
 
   private async run(action: DeveloperAction): Promise<void> {
     if (this.running || !this.active()) return;
     this.renderVersion++;
     this.running = true;
+    this.contentEl.style.setProperty("min-height", `${this.contentEl.getBoundingClientRect().height}px`);
     this.contentEl.empty();
-    this.contentEl.createEl("p", { text: this.t("正在执行，请稍候…", "Working, please wait…"), attr: { role: "status" } });
+    this.renderMessage(this.t("正在执行，请稍候…", "Working, please wait…"), "busy");
     try {
       const result = await this.service.execute(action);
       this.failed = result.action === "dream" && (result.result.providerUnavailable || Boolean(result.result.error));
