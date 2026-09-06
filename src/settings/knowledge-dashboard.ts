@@ -18,7 +18,7 @@ export function renderSettingsKnowledgeDashboard(
     month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit"
   }) : t("暂无记录", "No record");
   container.empty();
-  container.addClass("settings-knowledge-dashboard dashboard-section");
+  container.addClass("settings-knowledge-dashboard", "dashboard-section");
   container.setAttr("aria-busy", String(state.loading));
   const heading = container.createDiv({ cls: "section-heading" });
   heading.createEl("h3", { text: t("知识库 Dashboard", "Knowledge Dashboard") });

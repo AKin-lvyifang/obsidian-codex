@@ -999,7 +999,10 @@ function buildHealth(input: HealthInput): KnowledgeBaseDashboardHealth {
     addReason("risk", `Raw 状态待校准 ${input.rawDigestStatus.calibration} 个`, "Raw 状态待校准", input.rawDigestStatus.calibration,
       "1–20 项合计扣 4 分，超过 20 项合计扣 10 分；历史记录显示可能已提炼，但缺少可信机器标记。", input.rawDigestStatus.calibration > 20 ? 8 : 2);
   }
-  const initialized = input.settings.initialization.status === "initialized" || input.settings.initialization.initializedAt > 0;
+  // Existing knowledge structures remain assessable even when legacy settings
+  // have no initialization receipt. Missing core pieces still deduct points.
+  const initialized = input.rawExists || input.wikiExists || input.wikiIndexExists || input.trackerExists
+    || input.settings.initialization.status === "initialized" || input.settings.initialization.initializedAt > 0;
   const assessment = !initialized ? "uninitialized" : input.readFailed ? "unavailable" : input.limited ? "limited" : "local-structure";
   const available = assessment === "local-structure" || assessment === "limited";
   if (!available) scoreReasons.length = 0;

@@ -1,5 +1,6 @@
 import { TFile, WorkspaceLeaf } from "obsidian";
 import { EchoInkHomeView } from "../home/home-view";
+import { homeWorkspaceMarkup } from "../home/home-workspace-template";
 import { HomeSearchService } from "../home/home-search";
 import { HomeWorkbenchDataService } from "../home/home-workbench-data";
 import assert from "node:assert/strict";
@@ -14,6 +15,9 @@ import { ProductionPiKnowledgeMaintenanceToolPort, type KnowledgeMaintenanceTerm
 import { createKnowledgeMaintenanceResultEnvelope } from "../knowledge-base/knowledge-maintenance-result";
 
 export async function runHomeWorkspaceDataTests(): Promise<void> {
+  assert.match(homeWorkspaceMarkup("en"), /What stayed with you this week/);
+  assert.match(homeWorkspaceMarkup("en"), /About activity/);
+  assert.doesNotMatch(homeWorkspaceMarkup("en"), /这一周，留下的足迹|了解足迹记录/);
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), "echoink-home-data-"));
   try {
     let now = new Date(2026, 8, 6, 10).getTime();
@@ -60,6 +64,10 @@ export async function runHomeWorkspaceDataTests(): Promise<void> {
     await fsp.writeFile(path.join(root, "wiki/index.md"), "# Index");
     await fsp.writeFile(path.join(root, "outputs/.ingest-tracker.md"), "# Tracker\n- raw/a.md");
     await fsp.writeFile(path.join(root, "raw/a.md"), "# Source");
+    snapshot = await buildKnowledgeBaseDashboardSnapshot(root, settings);
+    assert.equal(snapshot.health.assessment, "local-structure", "real structure is assessable without a historical initialization flag");
+    assert.equal(snapshot.health.score, 96);
+    assert.equal(settings.initialization.status, "not-started", "assessment does not write an initialization receipt");
     settings.initialization.status = "initialized";
     snapshot = await buildKnowledgeBaseDashboardSnapshot(root, settings);
     assert.equal(snapshot.health.score, 96);
