@@ -19183,6 +19183,23 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
   }
 }
 /* Hidden developer tools share the surrounding settings density and insets. */
+.echoink-developer-settings > .echoink-settings-group > .setting-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: var(--echoink-settings-space-4);
+}
+
+.echoink-developer-settings > .echoink-settings-group > .setting-item > .setting-item-info {
+  margin: 0;
+}
+
+.echoink-developer-settings > .echoink-settings-group > .setting-item > .setting-item-control {
+  width: auto;
+  justify-self: end;
+  justify-content: flex-end;
+}
+
 .echoink-developer-mode {
   box-sizing: border-box;
   min-width: 0;
