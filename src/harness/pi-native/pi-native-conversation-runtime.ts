@@ -1,3 +1,4 @@
+import { normalizePiWorkspacePermission, piWorkspaceAllowsTool, type PiWorkspaceAccess } from "./pi-workspace-access";
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type {
@@ -35,7 +36,7 @@ import {
 } from "./pi-chat-ui-projector";
 import {
   PiSessionDurabilityError,
-  assertPiSessionPreAssistantDurable,
+  assertPiSessionAppendsDurable,
   createDurablePiSession,
   createDurablePiSessionFromPrefix,
   discardCreatedDurablePiSession,
@@ -204,7 +205,9 @@ export interface PiNativeAgentSessionFactoryInput {
     userEntryId: string;
     userEntryText: string;
   }>;
+  currentWorkspaceAccess?(): Readonly<PiWorkspaceAccess> | null;
   currentKnowledgeTurnContext(): Readonly<PiNativeKnowledgeTurnContext> | null;
+  currentMaintenanceCommand?(): Promise<Readonly<PiKnowledgeMaintenanceCommandContext>>;
   currentSkillTurnContext?(): Readonly<PiNativeSkillTurnContext> | null;
   currentMemoryTurnContext?(): Readonly<PiNativeMemoryTurnContext> | null;
   currentNoteMentionTurnContext?(): Readonly<PiNativeNoteMentionTurnContext> | null;
@@ -256,13 +259,9 @@ export interface PiNativeSkillTurnContext {
   readonly content: string;
 }
 
-export function knowledgeWorkflowAllowsPersonalMemory(
-  workflow: "none" | "chat" | "ask" | "maintain"
-): boolean {
-  return workflow !== "maintain";
-}
-
-export function shouldPreflightPersonalKnowledge(text: string): boolean {
+export function shouldPreflightPersonalKnowledge(text: string, skillId?: string): boolean {
+  // The bound journal Skill already contains the template. Retrieval stays available on request.
+  if (skillId === "daily-journal" && !/(?:回看|查找|搜索|检索|之前|过去|旧|上次|笔记|资料|search|look\s*up|previous|notes)/iu.test(text)) return false;
   const normalized = text.normalize("NFKC").trim();
   if (!normalized) return false;
   if (/^(?:你好|嗨|哈喽|谢谢|收到|好的|ok|hello|hi|thanks)[!！,.，。?？\s]*$/iu.test(normalized)) {
@@ -305,6 +304,7 @@ export function knowledgeReferencesRequireFreshnessVerification(
 
 export function resolvePiTurnToolNames(input: Readonly<{
   commandKind: "chat" | "ask" | "maintain";
+  permission?: PiWorkspaceAccess["permission"];
   mode: PiChatMode;
   memoryMode: PiConversationMemoryMode;
   defaultToolNames: readonly string[];
@@ -313,35 +313,16 @@ export function resolvePiTurnToolNames(input: Readonly<{
   externalReadToolNames?: readonly string[];
   requiresFreshnessVerification?: boolean;
 }>): readonly string[] {
-  const freshnessTools = input.requiresFreshnessVerification
-    ? input.externalReadToolNames ?? []
-    : [];
-  if (input.commandKind === "ask") {
-    const memoryReads = input.memoryToolNames.filter((name) =>
-      name === "memory_search" || name === "memory_read"
-    );
-    return [
-      ...PI_KNOWLEDGE_READ_TOOL_IDS,
-      "note_read",
-      ...freshnessTools,
-      ...(input.memoryMode === "no_memory" ? [] : memoryReads)
-    ];
-  }
-  if (input.commandKind === "maintain") {
-    return [
-      "vault_search",
-      "note_read",
-      ...(input.externalReadToolNames ?? []),
-      PI_KNOWLEDGE_MAINTAIN_TOOL_ID
-    ];
-  }
-  if (input.mode === "plan") return [...input.planToolNames];
-  const external = new Set(input.externalReadToolNames ?? []);
-  const base = input.defaultToolNames.filter((name) => !external.has(name));
-  const withFreshness = [...base, ...freshnessTools];
-  return input.memoryMode === "no_memory"
-    ? withFreshness.filter((name) => !input.memoryToolNames.includes(name))
-    : withFreshness;
+  const candidates = input.mode === "plan" ? input.planToolNames : input.defaultToolNames;
+  return [...new Set(candidates)].filter((toolName) => piWorkspaceAllowsTool({
+    toolName,
+    permission: normalizePiWorkspacePermission(input.permission),
+    mode: input.mode,
+    memoryMode: input.memoryMode,
+    planToolNames: input.planToolNames,
+    memoryToolNames: input.memoryToolNames,
+    externalReadToolNames: input.externalReadToolNames ?? []
+  }));
 }
 
 export interface PiNativeTaskPlanTurnContext {
@@ -699,6 +680,8 @@ interface ActiveProductRun {
   projectId?: string;
   mode: PiChatMode;
   memoryMode: PiConversationMemoryMode;
+  permission: PiWorkspaceAccess["permission"];
+  maintenanceScope?: PiChatSubmitRequest["maintenanceScope"];
   noteMentions: readonly Readonly<PiChatNoteMention>[];
   documents: readonly Readonly<PiChatPreparedDocument>[];
   skillTurnContext: Readonly<PiNativeSkillTurnContext> | null;
@@ -1332,7 +1315,7 @@ export class PiNativeConversationRuntime {
     }
     this.submitting.add(request.conversationId);
     try {
-      return await this.submitPrepared(request);
+      return await this.submitPrepared(Object.freeze({ ...request, permission: normalizePiWorkspacePermission(request.permission) }));
     } finally {
       this.submitting.delete(request.conversationId);
     }
@@ -1347,6 +1330,7 @@ export class PiNativeConversationRuntime {
     const noteMentions = normalizePiChatNoteMentions(request.noteMentions);
     const documents = normalizePiChatPreparedDocuments(request.documents);
     const mode = normalizePiChatMode(request.mode);
+    const permission = normalizePiWorkspacePermission(request.permission);
     let catalog = await this.catalog.get(request.conversationId);
     if (!catalog) {
       const cwd = await this.options.resolveConversationCwd(
@@ -1494,13 +1478,12 @@ export class PiNativeConversationRuntime {
       ...(projectId ? { projectId } : {}),
       mode,
       memoryMode,
+      permission,
+      maintenanceScope: request.maintenanceScope,
       noteMentions,
       documents,
       skillTurnContext: dailyJournalSkillTurnContext({
-        catalog,
-        selectedRuntimeSkill,
-        explicitSkillSelected: Boolean(request.skillPath),
-        submittedAt: request.submittedAt
+        selectedSkillIds
       }),
       firstAssistantTextSeen: false,
       providerReasoningBlocks: new Map(),
@@ -1570,7 +1553,7 @@ export class PiNativeConversationRuntime {
       } else if (mode !== "plan"
         && knowledgeCommand.kind === "chat"
         && this.options.knowledge?.retrieveChat
-        && shouldPreflightPersonalKnowledge(request.text)) {
+        && shouldPreflightPersonalKnowledge(request.text, execution.skillTurnContext?.skillId)) {
         await this.emitRuntimeEvent(active, execution, {
           type: "knowledge_progress",
           status: "active",
@@ -1615,6 +1598,13 @@ export class PiNativeConversationRuntime {
           execution.requiresFreshnessVerification = true;
           this.configureToolsForTurn(active, knowledgeCommand, mode, memoryMode);
         }
+      } else if (knowledgeCommand.kind === "maintain" && permission === "read-only") {
+        execution.knowledgeObservation = createKnowledgeObservation("maintain", null);
+        active.knowledgeTurnContext = Object.freeze({
+          kind: "chat",
+          providerResourceText: "当前请求维护知识库。工作区只读：按需读取已有资料、分析并提出维护建议，不执行内容写入。",
+          references: Object.freeze([])
+        });
       } else if (knowledgeCommand.kind === "maintain") {
         const preference =
           await this.options.knowledge!.prepareMaintenancePreferences?.();
@@ -1661,15 +1651,14 @@ export class PiNativeConversationRuntime {
         active.sessionManager,
         execution.reasoningSummary
       );
-      const reasoningStartReadback = assertPiSessionPreAssistantDurable({
+      assertPiSessionAppendsDurable({
         sessionRoot: this.catalog.sessionRootPath,
         sessionManager: active.sessionManager,
         expectedEntryIds: [execution.reasoningStartEntryId]
       });
       persistPiActiveLeaf({
         sessionRoot: this.catalog.sessionRootPath,
-        sessionManager: active.sessionManager,
-        verifiedReadback: reasoningStartReadback
+        sessionManager: active.sessionManager
       });
     } catch (reasoningStartError) {
       const closeErrors: unknown[] = [];
@@ -1717,7 +1706,7 @@ export class PiNativeConversationRuntime {
         execution.baselineEntryIds,
         USER_ENTRY_WAIT_TIMEOUT_MS
       );
-      assertPiSessionPreAssistantDurable({
+      assertPiSessionAppendsDurable({
         sessionRoot: this.catalog.sessionRootPath,
         sessionManager: active.sessionManager,
         expectedEntryIds: [userEntry.id]
@@ -1775,6 +1764,7 @@ export class PiNativeConversationRuntime {
         userEntryId: userEntry.id,
         toolCallIds: [],
         memoryMode,
+        permission,
         ...(execution.memoryRecall ? { memoryRecall: execution.memoryRecall } : {}),
         ...(execution.knowledgeObservation
           ? { knowledge: freezeKnowledgeObservation(execution.knowledgeObservation) }
@@ -1855,6 +1845,7 @@ export class PiNativeConversationRuntime {
   ): void {
     const names = resolvePiTurnToolNames({
       commandKind: command.kind,
+      permission: active.currentRun?.permission ?? "read-only",
       mode,
       memoryMode,
       defaultToolNames: active.defaultToolNames,
@@ -1864,26 +1855,6 @@ export class PiNativeConversationRuntime {
       requiresFreshnessVerification:
         active.currentRun?.requiresFreshnessVerification === true
     });
-    if (command.kind === "ask") {
-      if (names.some((name) => !active.registeredToolNames.has(name))) {
-        throw new PiNativeConversationRuntimeError(
-          "agent_session_invalid",
-          "Pi Knowledge ask Memory Tool registry is incomplete"
-        );
-      }
-      active.session.setActiveToolsByName([...names]);
-      return;
-    }
-    if (command.kind === "maintain") {
-      if (names.some((name) => !active.registeredToolNames.has(name))) {
-        throw new PiNativeConversationRuntimeError(
-          "agent_session_invalid",
-          "Pi Knowledge maintenance Tool registry is incomplete"
-        );
-      }
-      active.session.setActiveToolsByName([...names]);
-      return;
-    }
     if (mode === "plan") {
       if (
         names.length === 0
@@ -2550,6 +2521,23 @@ export class PiNativeConversationRuntime {
           userEntryText: publicMessageText(userEntry.message)
         };
       },
+      currentMaintenanceCommand: async () => {
+        const run = holder.active?.currentRun;
+        if (!run) throw new Error("knowledge_maintenance_command_unavailable");
+        if (run.knowledgeWorkflow?.kind === "maintain") return run.knowledgeWorkflow.command;
+        const preference = await this.options.knowledge?.prepareMaintenancePreferences?.();
+        if (!preference) throw new Error("knowledge_maintenance_preferences_unavailable");
+        const routed = routeKnowledgeConversationCommand(run.requestText);
+        const request = routed.kind === "ask" ? routed.question : run.requestText;
+        const scope = run.maintenanceScope ?? await this.options.knowledge?.resolveMaintenanceScope?.(request);
+        return maintenanceCommandContext({
+          kind: "maintain", originalText: run.requestText, request
+        }, preference, scope);
+      },
+      currentWorkspaceAccess: () => {
+        const run = holder.active?.currentRun;
+        return run ? Object.freeze({ permission: run.permission, mode: run.mode, memoryMode: run.memoryMode }) : null;
+      },
       currentKnowledgeTurnContext: () =>
         holder.active?.knowledgeTurnContext ?? null,
       currentSkillTurnContext: () =>
@@ -2557,10 +2545,7 @@ export class PiNativeConversationRuntime {
       currentMemoryTurnContext: () => {
         const active = holder.active;
         const run = active?.currentRun;
-        const workflow = !run?.knowledgeWorkflow
-          ? "none"
-          : run.knowledgeWorkflow.kind;
-        if (!active || !run || !knowledgeWorkflowAllowsPersonalMemory(workflow)) return null;
+        if (!active || !run) return null;
         return Object.freeze({
           vaultId: catalog.vaultId,
           conversationId: catalog.conversationId,
@@ -2877,6 +2862,7 @@ export class PiNativeConversationRuntime {
         promptError
       );
       const maintenance = execution.knowledgeWorkflow?.kind === "maintain"
+        && execution.permission !== "read-only"
         ? execution.knowledgeWorkflow
         : null;
       const maintenanceResult = maintenance
@@ -2903,15 +2889,14 @@ export class PiNativeConversationRuntime {
       runEntries = entries.filter(
         (entry) => !execution.baselineEntryIds.has(entry.id)
       );
-      const verifiedReadback = assertPiSessionPreAssistantDurable({
+      assertPiSessionAppendsDurable({
         sessionRoot: this.catalog.sessionRootPath,
         sessionManager: active.sessionManager,
         expectedEntryIds: runEntries.map((entry) => entry.id)
       });
       persistPiActiveLeaf({
         sessionRoot: this.catalog.sessionRootPath,
-        sessionManager: active.sessionManager,
-        verifiedReadback
+        sessionManager: active.sessionManager
       });
       if (
         execution.mode === "plan"
@@ -2971,15 +2956,14 @@ export class PiNativeConversationRuntime {
           );
           active.session.state.messages =
             active.sessionManager.buildSessionContext().messages;
-          const verifiedReadback = assertPiSessionPreAssistantDurable({
+          assertPiSessionAppendsDurable({
             sessionRoot: this.catalog.sessionRootPath,
             sessionManager: active.sessionManager,
             expectedEntryIds: [assistantEntryId]
           });
           persistPiActiveLeaf({
             sessionRoot: this.catalog.sessionRootPath,
-            sessionManager: active.sessionManager,
-            verifiedReadback
+            sessionManager: active.sessionManager
           });
           entries = active.sessionManager.getEntries();
           runEntries = entries.filter(
@@ -4106,15 +4090,14 @@ export class PiNativeConversationRuntime {
       active.sessionManager,
       execution.reasoningSummary
     );
-    const verifiedReadback = assertPiSessionPreAssistantDurable({
+    assertPiSessionAppendsDurable({
       sessionRoot: this.catalog.sessionRootPath,
       sessionManager: active.sessionManager,
       expectedEntryIds: [execution.reasoningTerminalEntryId]
     });
     persistPiActiveLeaf({
       sessionRoot: this.catalog.sessionRootPath,
-      sessionManager: active.sessionManager,
-      verifiedReadback
+      sessionManager: active.sessionManager
     });
     await this.emitRuntimeEvent(active, execution, {
       type: "reasoning_summary",
@@ -4125,6 +4108,7 @@ export class PiNativeConversationRuntime {
       active.projection.runState
     );
     const maintenanceResult = execution.knowledgeWorkflow?.kind === "maintain"
+      && execution.permission !== "read-only"
       ? classifyKnowledgeMaintenanceResult(
           active.sessionManager.getEntries().filter(
             (entry) => !execution.baselineEntryIds.has(entry.id)
@@ -6411,43 +6395,14 @@ function assertValidSkillBinding(
 }
 
 function dailyJournalSkillTurnContext(input: Readonly<{
-  catalog: Readonly<PiConversationCatalogEntry>;
-  selectedRuntimeSkill: Readonly<PiRuntimeResolvedSkill> | null;
-  explicitSkillSelected: boolean;
-  submittedAt: number;
+  selectedSkillIds: readonly string[];
 }>): Readonly<PiNativeSkillTurnContext> | null {
-  if (
-    input.explicitSkillSelected
-    || input.catalog.defaultSkillId !== "daily-journal"
-    || input.selectedRuntimeSkill?.id !== "daily-journal"
-  ) return null;
-  const journalDirectory = input.catalog.journalDirectory;
-  const date = new Date(input.submittedAt);
-  if (!journalDirectory || !Number.isFinite(input.submittedAt)
-    || Number.isNaN(date.getTime())) {
-    throw new PiNativeConversationRuntimeError(
-      "skill_binding_invalid",
-      "daily-journal 会话缺少有效的固定目录或提交时间，本轮没有发送。"
-    );
-  }
-  const dateKey = [
-    date.getFullYear(),
-    String(date.getMonth() + 1).padStart(2, "0"),
-    String(date.getDate()).padStart(2, "0")
-  ].join("-");
-  const timeKey = [
-    String(date.getHours()).padStart(2, "0"),
-    String(date.getMinutes()).padStart(2, "0")
-  ].join(":");
+  if (!input.selectedSkillIds.includes("daily-journal")) return null;
   return Object.freeze({
     skillId: "daily-journal",
     content: [
-      "当前轮已绑定 daily-journal Skill。",
-      `会话固定日记目录：${journalDirectory}`,
-      `当前日期：${dateKey}`,
-      `当前时间：${timeKey}`,
-      `目标文件：${journalDirectory}/${dateKey}.md`,
-      "这些值来自会话创建时冻结的目录和本轮提交时间；不要改用会话 cwd 或设置页的新值。"
+      "当前使用 daily-journal Skill。直接交流，用户继续表达时继续聊；开场不检查文件、模板或目录。",
+      "用户明确要保存时，再调用 obsidian_context 获取当前原生日记设置、当天精确路径和已渲染模板，使用现有 note 工具保存。"
     ].join("\n")
   });
 }

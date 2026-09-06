@@ -1,3 +1,10 @@
+import { FileApprovalTicketStore } from "../../harness/pi-native/tool-authorization";
+import { FileDomainReceiptStore } from "../../harness/pi-native/domain-receipt-store";
+import { createPiVaultProductionAuthorizationPort, createPiVaultProductionWriteExecutionPort } from "../../plugin/pi-vault-tool-production";
+import { createPiVaultToolDefinitions } from "../../harness/pi-native/pi-vault-tool-contracts";
+import { createPiVaultToolSecurityAdapter, createSecurePiVaultToolResultCorrectionPort } from "../../harness/pi-native/pi-vault-tool-security-extension";
+import { EchoInkVaultToolEgressPolicy } from "../../harness/pi-native/vault-tool-result-safety";
+import { piWorkspaceAllowsTool, type PiWorkspaceAccess } from "../../harness/pi-native/pi-workspace-access";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
@@ -39,6 +46,7 @@ import {
 } from "../../plugin/obsidian-vault-domain-adapter";
 
 export async function runVaultDomainServiceTests(): Promise<void> {
+  await withFixture(assertWorkspacePermissionDispatchAndJournalWrites);
   await withFixture(assertUnsafeTargetsFailBeforeAccess);
   await withFixture(assertSearchAndReadLimits);
   await withFixture(assertWritesUseCasReadbackAndRecoverableTrash);
@@ -836,4 +844,72 @@ function isMissing(error: unknown): boolean {
 
 function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+async function assertWorkspacePermissionDispatchAndJournalWrites(fixture: Fixture): Promise<void> {
+  await fixture.write("journal/existing.md", "original body\n");
+  const identity = { vaultId: fixture.adapter.vaultId, conversationId: "workspace-permission", piSessionId: "workspace-session", productRunId: "workspace-run" };
+  const approvals = new FileApprovalTicketStore({ storageRootPath: fixture.outsideRoot, vaultId: identity.vaultId });
+  const receipts = new FileDomainReceiptStore({ storageRootPath: fixture.outsideRoot, vaultId: identity.vaultId });
+  await approvals.initialize();
+  await receipts.initialize();
+  let access: PiWorkspaceAccess = { permission: "read-only", mode: "agent", memoryMode: "normal" };
+  let approved = 0;
+  let additionalDispatches = 0;
+  const security = createPiVaultToolSecurityAdapter({
+    isToolAllowed: (toolName) => piWorkspaceAllowsTool({ ...access, toolName, planToolNames: ["note_read"], memoryToolNames: ["memory_read", "memory_search", "memory_write"], externalReadToolNames: ["external_read"] }),
+    authorization: createPiVaultProductionAuthorizationPort({
+      approvals, adapter: fixture.adapter, currentRunIdentity: () => identity,
+      userId: "fixture-user", deviceId: "fixture-device",
+      confirmation: { async confirm() { approved += 1; return true; } }
+    }),
+    resultCorrection: createSecurePiVaultToolResultCorrectionPort(new EchoInkVaultToolEgressPolicy()),
+    additionalToolSecurities: ["memory_write", "knowledge_maintain", "external_write", "external_read", "memory_read"].map((toolName) => ({
+      toolName,
+      async handleToolCall() { additionalDispatches += 1; },
+      async handleToolResult() { return { content: [], details: {}, isError: false }; }
+    }))
+  });
+  const handlers = new Map<string, (...args: any[]) => any>();
+  await security.inlineExtension.factory({ on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler) } as never);
+  const tools = createPiVaultToolDefinitions({ domainService: fixture.service, security, writeExecution: createPiVaultProductionWriteExecutionPort({ receipts, domainService: fixture.service }) });
+  let sequence = 0;
+  const call = async (toolName: string, input: Record<string, unknown>) => {
+    const toolCallId = `workspace-call-${++sequence}`;
+    const blocked = await handlers.get("tool_call")!({ toolName, toolCallId, input }, { signal: undefined });
+    if (blocked) return blocked;
+    const tool = tools.find((candidate) => candidate.name === toolName);
+    if (!tool) return undefined;
+    const result = await tool.execute(toolCallId, input, undefined, undefined);
+    return await handlers.get("tool_result")!({ toolName, toolCallId, ...result, isError: false });
+  };
+  for (const workflow of ["chat", "ask", "maintain", "daily-journal"]) {
+    for (const toolName of ["note_create", "note_update", "metadata_update", "note_move", "note_delete", "memory_write", "knowledge_maintain", "external_write"]) {
+      assert.deepEqual(await call(toolName, { relativePath: "journal/existing.md", content: workflow }), { block: true, reason: "tool_policy_blocked" });
+    }
+  }
+  assert.equal(approved, 0, "read-only never requests write approval");
+  assert.equal(additionalDispatches, 0, "all content write categories are rejected before their own handlers");
+  assert.equal(await fixture.read("journal/existing.md"), "original body\n");
+  await call("external_read", {});
+  assert.equal(additionalDispatches, 1);
+  access = { ...access, memoryMode: "no_memory" };
+  assert.deepEqual(await call("memory_read", { id: "record" }), { block: true, reason: "tool_policy_blocked" });
+  assert.equal(additionalDispatches, 1);
+
+  for (const permission of ["workspace-write", "danger-full-access"] as const) {
+    access = { permission, mode: "agent", memoryMode: "normal" };
+    const relativePath = `journal/${permission}.md`;
+    const body = "# 此刻速记\n今天完成了一件事。\n";
+    const created = await call("note_create", { relativePath, content: body });
+    assert.equal(created.isError, false);
+    assert.equal(await fixture.read(relativePath), body);
+    const read = await fixture.service.noteRead({ vaultId: identity.vaultId, relativePath });
+    const appended = body + "\n## 补记\n稍后补充的内容。\n";
+    assert.equal((await call("note_update", { relativePath, expectedVersion: read.snapshot.version, content: appended })).isError, false);
+    assert.equal(await fixture.read(relativePath), appended);
+    assert.equal((await call("note_update", { relativePath, expectedVersion: read.snapshot.version, content: "stale overwrite" })).isError, true);
+    assert.equal(await fixture.read(relativePath), appended, "CAS preserves the original and appended body on a stale write");
+  }
+  assert.ok(approved >= 4, "writable tools continue through the production approval and readback path");
 }

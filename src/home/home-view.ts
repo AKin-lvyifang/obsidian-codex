@@ -253,9 +253,7 @@ export class EchoInkHomeView extends ItemView {
       ? this.data?.records.find((record) => record.path === entry.targetPath)
       : null;
     const today = new Date();
-    const journalExists = this.app.vault.getAbstractFileByPath(
-      this.dataService.journalPathForDate(today)
-    ) instanceof TFile;
+    const journalExists = this.dataService.existingJournalForDate(today) !== null;
     if (entry.id === "wiki") {
       return [
         {
@@ -417,7 +415,6 @@ export class EchoInkHomeView extends ItemView {
 
   private async openConversationAction(action: HomeConversationAction): Promise<void> {
     const now = new Date();
-    let journalDirectory: string | undefined;
     if (action === "daily") {
       try {
         await this.plugin.requireAvailableEchoInkSkill("daily-journal");
@@ -434,12 +431,6 @@ export class EchoInkHomeView extends ItemView {
         );
         return;
       }
-      try {
-        journalDirectory = await this.dataService.ensureJournalDirectory(this.language);
-      } catch (error) {
-        new Notice(this.copy.conversation.cannotCreateSession(errorMessage(error)));
-        return;
-      }
     }
     try {
       await this.plugin.activateView();
@@ -453,8 +444,7 @@ export class EchoInkHomeView extends ItemView {
         message: homeConversationMessage(action, this.language),
         ...(action === "daily"
           ? {
-              defaultSkillId: "daily-journal",
-              journalDirectory: journalDirectory!
+              defaultSkillId: "daily-journal"
             }
           : {})
       });
@@ -498,8 +488,7 @@ export class EchoInkHomeView extends ItemView {
   }
 
   private async openJournal(date: Date): Promise<void> {
-    const path = normalizePath(this.dataService.journalPathForDate(date));
-    const existing = this.app.vault.getAbstractFileByPath(path);
+    const existing = this.dataService.existingJournalForDate(date);
     if (existing instanceof TFile) {
       await this.app.workspace.getLeaf("tab").openFile(existing, { active: true });
       return;

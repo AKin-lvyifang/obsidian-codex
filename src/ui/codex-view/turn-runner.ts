@@ -88,6 +88,11 @@ const activeComposerTransfers = new WeakMap<
   Readonly<QueuedTurnItem>
 >();
 
+const submittedPiAccess = new WeakMap<
+  CodexViewTurnContext["plugin"],
+  Map<string, Pick<TurnOptions, "permission" | "mode">>
+>();
+
 function uiText(
   view: Pick<CodexViewTurnContext, "plugin">,
   zh: string,
@@ -243,19 +248,25 @@ export async function enqueueComposerDraft(view: CodexViewTurnContext): Promise<
       );
       return;
     }
-    try {
-      await view.plugin.followUpPiConversation(session.id, item.text.trim());
-      view.clearComposerDraft();
-      view.renderQueue();
-      view.renderToolbar();
-      showNotice(view, "已加入当前 Pi 任务的后续消息", "Added to the current Pi task as a follow-up.");
-    } catch (error) {
-      new Notice(uiText(
-        view,
-        `加入 Pi Follow-up 失败：${localizedPiChatErrorMessage(view, error)}`,
-        `Could not add the Pi follow-up: ${localizedPiChatErrorMessage(view, error)}`
-      ));
+    const access = submittedPiAccess.get(view.plugin)?.get(session.id);
+    if (access?.permission === item.turnOptions.permission && access.mode === item.turnOptions.mode) {
+      try {
+        await view.plugin.followUpPiConversation(session.id, item.text.trim());
+        view.clearComposerDraft();
+        view.renderQueue();
+        view.renderToolbar();
+        showNotice(view, "已加入当前 Pi 任务的后续消息", "Added to the current Pi task as a follow-up.");
+      } catch (error) {
+        new Notice(localizedPiChatErrorMessage(view, error));
+      }
+      return;
     }
+    // Pi's text-only followUp cannot change access inside the active ProductRun.
+    view.turnQueue.enqueue(item);
+    view.clearComposerDraft();
+    view.renderQueue();
+    view.renderToolbar();
+    showNotice(view, "已加入队列", "Added to the queue.");
     return;
   }
   view.turnQueue.enqueue(item);
@@ -292,6 +303,12 @@ export async function steerPiChatFromComposer(
       "调整方向只支持文字；附件或 Skill 请留到下一轮发送。",
       "Steering supports text only. Send attachments or a Skill in the next turn."
     );
+    return;
+  }
+  const options = view.currentTurnOptions(session);
+  const access = submittedPiAccess.get(view.plugin)?.get(session.id);
+  if (access?.permission !== options.permission || access.mode !== options.mode) {
+    await enqueueComposerDraft(view);
     return;
   }
   try {
@@ -721,10 +738,12 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
       return "failed";
     }
     try {
-      maintenanceScope = await view.plugin.prepareEchoInkKnowledgeMaintenanceScope({
-        request: knowledgeCommand.request,
-        attachmentPaths: item.attachments.map((attachment) => attachment.path)
-      });
+      if (item.turnOptions.permission !== "read-only") {
+        maintenanceScope = await view.plugin.prepareEchoInkKnowledgeMaintenanceScope({
+          request: knowledgeCommand.request,
+          attachmentPaths: item.attachments.map((attachment) => attachment.path)
+        });
+      }
     } catch (error) {
       new Notice(localizedPiChatErrorMessage(view, error));
       return "failed";
@@ -872,6 +891,15 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
   let finalizingProjectionFlight: Promise<void> = Promise.resolve();
 
   view.running = true;
+  let accessByConversation = submittedPiAccess.get(view.plugin);
+  if (!accessByConversation) {
+    accessByConversation = new Map();
+    submittedPiAccess.set(view.plugin, accessByConversation);
+  }
+  accessByConversation.set(session.id, {
+    permission: item.turnOptions.permission,
+    mode: item.turnOptions.mode
+  });
   view.activeRunKind = "chat";
   view.activeRunSessionId = session.id;
   view.turnStartedAt = Date.now();
@@ -885,6 +913,7 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
       text: submittedText,
       submittedAt,
       mode: item.turnOptions.mode === "plan" ? "plan" : "agent",
+      permission: item.turnOptions.permission,
       providerSettingsId: item.turnOptions.providerSettingsId,
       runtimeProviderId: item.turnOptions.runtimeProviderId,
       modelId: item.turnOptions.model,
@@ -892,7 +921,7 @@ export async function startChatTurn(view: CodexViewTurnContext, session: StoredS
       memoryMode: piChatMemoryModeForGlobalSetting(
         view.plugin.settings?.memory?.useLongTermMemory !== false
       ),
-      ...(skillPath && skillName ? { skillId, skillPath, skillName } : {}),
+      ...(!defaultSkillId && skillPath && skillName ? { skillId, skillPath, skillName } : {}),
       ...(item.piDraftId ? { draftId: item.piDraftId } : {}),
       ...(maintenanceScope ? { maintenanceScope } : {}),
       ...(preparedImages.length ? { images: preparedImages } : {}),

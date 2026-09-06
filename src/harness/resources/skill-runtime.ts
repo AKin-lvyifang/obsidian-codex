@@ -1394,6 +1394,10 @@ function builtinTrigger(
   if (id === "daily-journal") {
     return trigger(false, 0);
   }
+  if (id === "obsidian-cli") return trigger(hit(/obsidian.?cli|原生.*命令|命令行.*obsidian/iu), 84);
+  if (id === "obsidian-markdown") return trigger(hit(/obsidian.*markdown|双链|wikilink|callout|frontmatter|笔记.*(?:嵌入|属性)|属性.*笔记/iu), 72);
+  if (id === "obsidian-bases") return trigger(hit(/\.base\b|obsidian.?bases|笔记.*(?:表格视图|筛选|公式|汇总)/iu), 84);
+  if (id === "json-canvas") return trigger(hit(/\.canvas\b|json.?canvas|obsidian.*(?:canvas|白板)|白板.*(?:节点|连线)/iu), 84);
   if (id === "clarify-real-question") {
     return trigger(hit(/说不清|有点乱|互相矛盾|目标.*(?:但是|却)|到底要解决|不知道.*问题|信息矛盾/iu), 62);
   }

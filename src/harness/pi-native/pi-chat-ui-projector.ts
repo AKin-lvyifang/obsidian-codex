@@ -285,6 +285,29 @@ interface DurableProviderReasoningBlock {
  * the existing ChatMessage view contract. Every method returns a fresh model.
  */
 export class PiChatUiProjector {
+  private readonly toolExecutionTimes = new Map<string, { startedAt: number; completedAt?: number }>();
+
+  private toolTimeKey(piSessionId: string, toolCallId: string): string {
+    return `${piSessionId}:${stableHashedIdentity("reasoning-tool", toolCallId)}`;
+  }
+
+  private applyReliableToolTimes(view: PiChatUiViewModel): void {
+    for (const message of view.messages) {
+      const identity = projectionIdentity(message.id);
+      if (identity?.kind !== "tool") continue;
+      const timing = this.toolExecutionTimes.get(this.toolTimeKey(view.piSessionId, identity.value));
+      if (timing) {
+        message.createdAt = timing.startedAt;
+        if (timing.completedAt !== undefined) message.completedAt = timing.completedAt;
+        else delete message.completedAt;
+      } else if (message.completedAt !== undefined) {
+        // Preserve ordering, but give the timeline no invented execution interval.
+        message.createdAt = message.completedAt;
+      }
+    }
+  }
+
+
   createEmpty(input: {
     readonly piSessionId: string;
     readonly activeLeafId?: string | null;
@@ -322,6 +345,24 @@ export class PiChatUiProjector {
       privacySafeToolRuns,
       currentRunId: input.productRunId
     };
+    // Reasoning summaries persist the actual tool events; assistant timestamps include model waiting.
+    for (const entry of input.entries) {
+      const summary = reasoningSummaryFromSessionEntry(entry, piSessionId);
+      for (const activity of summary?.activities ?? []) {
+        if (activity.kind !== "tool") continue;
+        const key = `${piSessionId}:${activity.id}`;
+        const previous = this.toolExecutionTimes.get(key);
+        // Closing a run also closes unfinished activities at terminalAt; that is not a tool end event.
+        const completedAt = (activity.status === "completed" || activity.status === "failed" || activity.status === "cancelled")
+          && activity.updatedAt !== summary?.terminalAt
+          ? activity.updatedAt
+          : previous?.startedAt === activity.startedAt ? previous.completedAt : undefined;
+        this.toolExecutionTimes.set(key, {
+          startedAt: activity.startedAt,
+          ...(completedAt !== undefined ? { completedAt } : {})
+        });
+      }
+    }
     const messages: ChatMessage[] = [];
     const pendingTools = new Set<string>();
 
@@ -396,6 +437,7 @@ export class PiChatUiProjector {
       updatedAt
     };
     applyToolProductStates(view, input);
+    this.applyReliableToolTimes(view);
     return view;
   }
 
@@ -516,6 +558,7 @@ export class PiChatUiProjector {
     view.provisionalMessageIds = uniqueStrings(view.provisionalMessageIds);
     view.pendingToolCallIds = uniqueStrings(view.pendingToolCallIds);
     applyToolProductStates(view, input);
+    this.applyReliableToolTimes(view);
     return view;
   }
 
@@ -569,6 +612,7 @@ export class PiChatUiProjector {
     }
     rebuilt.messages = dedupeMessages(rebuilt.messages);
     applyToolProductStates(rebuilt, input);
+    this.applyReliableToolTimes(rebuilt);
     return rebuilt;
   }
 
@@ -579,6 +623,7 @@ export class PiChatUiProjector {
   ): PiChatUiViewModel {
     const view = cloneView(current);
     applyToolProductStates(view, input);
+    this.applyReliableToolTimes(view);
     return view;
   }
 
@@ -818,7 +863,7 @@ export class PiChatUiProjector {
           privacySafe: context.privacySafeToolRuns.has(toolCall.toolCallId),
           status: initialPiToolCallStatus(toolCall.toolName),
           runId: toolRunId,
-          createdAt: observedAt,
+          createdAt: this.toolExecutionTimes.get(this.toolTimeKey(context.piSessionId, toolCall.toolCallId))?.startedAt ?? observedAt,
           vaultPath: context.vaultPath
         }));
         pendingTools.add(toolCall.toolCallId);
@@ -855,6 +900,7 @@ export class PiChatUiProjector {
       const status = cancelled ? "interrupted" : message.isError ? "failed" : "completed";
       const runId = context.toolRuns.get(toolCallId) ?? context.currentRunId;
       const existing = findByIdentity(messages, "tool", toolCallId);
+      const timing = this.toolExecutionTimes.get(this.toolTimeKey(context.piSessionId, toolCallId));
       const projected = toolMessage({
         scope: context.scope,
         toolCallId,
@@ -865,8 +911,8 @@ export class PiChatUiProjector {
         privacySafe: context.privacySafeToolRuns.has(toolCallId),
         status,
         runId,
-        createdAt: existing?.createdAt ?? messageTime(message, createdAt),
-        completedAt: messageTime(message, createdAt),
+        createdAt: timing?.completedAt !== undefined ? timing.startedAt : messageTime(message, createdAt),
+        completedAt: timing?.completedAt ?? messageTime(message, createdAt),
         vaultPath: context.vaultPath
       });
       const knowledgeBaseUi = projectKnowledgeMaintenanceReport({
@@ -1270,6 +1316,7 @@ export class PiChatUiProjector {
       view.runState = "running";
       return;
     }
+    this.toolExecutionTimes.set(this.toolTimeKey(view.piSessionId, event.toolCallId), { startedAt: event.occurredAt });
     const existing = findByIdentity(view.messages, "tool", event.toolCallId);
     const projected = toolMessage({
       scope,
@@ -1281,7 +1328,7 @@ export class PiChatUiProjector {
         ? existing.status!
         : initialPiToolCallStatus(event.toolName),
       runId: event.productRunId,
-      createdAt: existing?.createdAt ?? event.occurredAt,
+      createdAt: event.occurredAt,
       vaultPath
     });
     upsertMessage(view.messages, mergeToolMessages(existing, projected));
@@ -1338,6 +1385,8 @@ export class PiChatUiProjector {
       }
       return;
     }
+    const timing = this.toolExecutionTimes.get(this.toolTimeKey(view.piSessionId, event.toolCallId));
+    if (timing) timing.completedAt = event.occurredAt;
     const existing = findByIdentity(view.messages, "tool", event.toolCallId);
     const cancelled = isCancelledResult(event.result);
     const status = cancelled ? "interrupted" : event.isError ? "failed" : "completed";
@@ -1351,7 +1400,7 @@ export class PiChatUiProjector {
       privacySafe: event.privacySafe === true,
       status,
       runId: event.productRunId,
-      createdAt: existing?.createdAt ?? event.occurredAt,
+      createdAt: timing?.startedAt ?? event.occurredAt,
       completedAt: event.occurredAt,
       vaultPath
     });

@@ -62,7 +62,7 @@ interface AuthorizedMaintenanceExecution {
 
 export interface CreatePiKnowledgeMaintenanceSecurityOptions {
   currentRunIdentity(): Readonly<PiKnowledgeRunIdentity>;
-  currentCommand(): Readonly<PiKnowledgeMaintenanceCommandContext>;
+  currentCommand(): Readonly<PiKnowledgeMaintenanceCommandContext> | Promise<Readonly<PiKnowledgeMaintenanceCommandContext>>;
   /** True only after a successful external-read Tool result in this ProductRun. */
   hasSuccessfulExternalRead?(): boolean;
   readonly egress: VaultToolResultEgressPort;
@@ -100,7 +100,7 @@ implements PiVaultAdditionalToolSecurityPort {
     let externalReadVerified: boolean;
     try {
       identity = freezeIdentity(this.options.currentRunIdentity());
-      command = freezeCommand(this.options.currentCommand());
+      command = freezeCommand(await this.options.currentCommand());
       if (this.seenProductRunIds.has(identity.productRunId)) {
         return block("authorization_failed");
       }
@@ -271,7 +271,7 @@ export function createPiKnowledgeMaintenanceToolDefinition(
     name: PI_KNOWLEDGE_MAINTAIN_TOOL_ID,
     label: "维护知识库",
     description: [
-      "执行当前普通 Conversation 已绑定的知识维护动作。",
+      "用户要求维护知识库时，提交当前已确认范围内的知识维护动作。",
       echoInkKnowledgeMaintenanceProtocolPrompt(),
       "exact 范围只可使用已绑定单篇 Raw；batch 范围只可使用已绑定的 1-20 篇 Raw；query 范围必须从候选中选择唯一 sourcePaths；global 范围不得提供 sourcePaths。",
       "有明确 Raw 时只读取这些 Raw；只有 global 范围才读取 outputs/.ingest-tracker.md，",

@@ -7,6 +7,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   realpathSync,
   renameSync,
   statSync,
@@ -102,6 +103,14 @@ interface PiSessionFileIdentity {
   mtimeMs: number;
   ctimeMs: number;
 }
+
+// One cursor per opened manager; historical content remains owned by Pi.
+const verifiedAppends = new WeakMap<PiSessionManagerLike, {
+  sessionFile: string;
+  sessionId: string;
+  entryCount: number;
+  identity: PiSessionFileIdentity;
+}>();
 
 export interface PiSessionJsonlInspectionBase {
   sourcePath: string;
@@ -286,8 +295,7 @@ export function createDurablePiSessionFromPrefix(
     const empty = createDurablePiSession(options);
     persistPiActiveLeaf({
       sessionRoot: options.sessionRoot,
-      sessionManager: empty.sessionManager,
-      verifiedReadback: empty.inspection
+      sessionManager: empty.sessionManager
     });
     return empty;
   }
@@ -353,8 +361,7 @@ export function createDurablePiSessionFromPrefix(
   }
   persistPiActiveLeaf({
     sessionRoot: root.realPath,
-    sessionManager: derived.sessionManager,
-    verifiedReadback: derived.inspection
+    sessionManager: derived.sessionManager
   });
   return derived;
 }
@@ -677,20 +684,102 @@ export function assertPiSessionPreAssistantDurable(
       );
     }
   }
+  verifiedAppends.set(options.sessionManager, {
+    sessionFile,
+    sessionId: inspection.header.id,
+    entryCount: inspection.entries.length,
+    identity: inspection.fileIdentity
+  });
   return inspection;
+}
+
+/** Verify only new physical bytes on the already opened, validated manager. */
+export function assertPiSessionAppendsDurable(
+  options: AssertPiSessionReadbackOptions
+): void {
+  const manager = options.sessionManager;
+  const previous = verifiedAppends.get(manager);
+  if (!previous) {
+    assertPiSessionPreAssistantDurable(options);
+    return;
+  }
+  const root = resolveSessionRoot(options.sessionRoot, false);
+  const managerFile = manager.getSessionFile();
+  if (
+    !manager.isPersisted()
+    || !managerFile
+    || resolveDirectSessionFile(root, managerFile) !== previous.sessionFile
+    || realpathDirectory(manager.getSessionDir()) !== root.realPath
+    || manager.getSessionId() !== previous.sessionId
+  ) {
+    throw durabilityError("pi_session_path_unsafe", "The opened Pi Session binding changed");
+  }
+  const identity = assertRegularOwnedFile(previous.sessionFile);
+  assertSameFileIdentity(previous.sessionFile, previous.identity);
+  const entries = manager.getEntries();
+  const appended = entries.slice(previous.entryCount);
+  const pendingIds = new Set(appended.map((entry) => entry.id));
+  const knownIds = { has: (id: string) => !pendingIds.has(id) && manager.getEntry(id) !== undefined };
+  for (const entry of appended) {
+    if (validatePhysicalEntry(entry, 2, knownIds)) {
+      assertPiSessionPreAssistantDurable(options);
+      return;
+    }
+    pendingIds.delete(entry.id);
+  }
+  const expected = Buffer.from(appended.map((entry) => `${JSON.stringify(entry)}\n`).join(""));
+  if (
+    entries.length < previous.entryCount
+    || identity.size !== previous.identity.size + expected.length
+    || (expected.length === 0 && (
+      identity.mtimeMs !== previous.identity.mtimeMs
+      || identity.ctimeMs !== previous.identity.ctimeMs
+    ))
+  ) {
+    // Unexpected rewrites/corruption retain the full diagnostic path.
+    assertPiSessionPreAssistantDurable(options);
+    return;
+  }
+  if (expected.length > 0) {
+    const actual = Buffer.alloc(expected.length);
+    const descriptor = openSync(previous.sessionFile, "r");
+    try {
+      let offset = 0;
+      while (offset < actual.length) {
+        const count = readSync(descriptor, actual, offset, actual.length - offset,
+          previous.identity.size + offset);
+        if (count === 0) break;
+        offset += count;
+      }
+      assertStableFileSnapshot(previous.sessionFile, identity, identity.size);
+      if (offset !== actual.length || !actual.equals(expected)) {
+        assertPiSessionPreAssistantDurable(options);
+        return;
+      }
+    } finally {
+      closeSync(descriptor);
+    }
+  }
+  for (const entryId of options.expectedEntryIds ?? []) {
+    if (!manager.getEntry(entryId)) {
+      throw durabilityError("pi_session_readback_mismatch",
+        `Expected Pi Session Entry was not durable: ${entryId}`);
+    }
+  }
+  verifiedAppends.set(manager, {
+    ...previous,
+    entryCount: entries.length,
+    identity
+  });
 }
 
 /** Persist only the active leaf pointer, never a Branch Tree copy. */
 export function persistPiActiveLeaf(input: {
   sessionRoot: string;
   sessionManager: PiSessionManagerLike;
-  /** Reuse the caller's immediate strict JSONL readback when available. */
-  verifiedReadback?: Readonly<ValidPiSessionJsonlInspection>;
 }): string {
   const root = resolveSessionRoot(input.sessionRoot, false);
-  const inspection = input.verifiedReadback
-    ?? assertPiSessionPreAssistantDurable(input);
-  assertVerifiedReadbackMatchesManager(input.sessionManager, root, inspection);
+  assertPiSessionAppendsDurable(input);
   const header = requireManagerHeader(input.sessionManager);
   const activeLeafId = input.sessionManager.getLeafId();
   if (
@@ -708,54 +797,6 @@ export function persistPiActiveLeaf(input: {
     activeLeafId
   } satisfies ActiveLeafMetadata);
   return metadataPath;
-}
-
-function assertVerifiedReadbackMatchesManager(
-  sessionManager: PiSessionManagerLike,
-  root: ResolvedSessionRoot,
-  inspection: Readonly<ValidPiSessionJsonlInspection>
-): void {
-  assertManagerPublicShape(sessionManager);
-  if (!sessionManager.isPersisted()) {
-    throw durabilityError(
-      "pi_session_readback_mismatch",
-      "The Pi SessionManager is not persistent"
-    );
-  }
-  const managerFile = sessionManager.getSessionFile();
-  if (!managerFile) {
-    throw durabilityError(
-      "pi_session_readback_mismatch",
-      "The persistent Pi SessionManager has no Session file"
-    );
-  }
-  const sessionFile = resolveDirectSessionFile(root, managerFile);
-  if (inspection.sourcePath !== sessionFile) {
-    throw durabilityError(
-      "pi_session_readback_mismatch",
-      "The supplied Pi Session readback belongs to a different Session file"
-    );
-  }
-  const managerRoot = realpathDirectory(sessionManager.getSessionDir());
-  if (managerRoot !== root.realPath) {
-    throw durabilityError(
-      "pi_session_path_unsafe",
-      "The Pi SessionManager is bound to a different Session Root"
-    );
-  }
-  const header = requireManagerHeader(sessionManager);
-  const managerEntries: FileEntry[] = [header, ...sessionManager.getEntries()];
-  const diskEntries: FileEntry[] = [inspection.header, ...inspection.entries];
-  if (
-    sessionManager.getSessionId() !== inspection.header.id
-    || inspection.header.version !== ECHOINK_PI_SESSION_VERSION
-    || !sameJson(managerEntries, diskEntries)
-  ) {
-    throw durabilityError(
-      "pi_session_readback_mismatch",
-      "Pi Session changed after strict JSONL readback"
-    );
-  }
 }
 
 /**
@@ -1022,7 +1063,7 @@ function invalidInspection(input: {
 function validatePhysicalEntry(
   value: unknown,
   lineNumber: number,
-  knownIds: ReadonlySet<string>
+  knownIds: Pick<ReadonlySet<string>, "has">
 ): string | null {
   if (!isRecord(value)) return "Pi Session line is not a JSON object";
   if (lineNumber === 1) return validateSessionHeader(value);
@@ -1111,7 +1152,7 @@ function validateSessionHeader(value: Record<string, unknown>): string | null {
 
 function validateSessionEntryBase(
   value: Record<string, unknown>,
-  knownIds: ReadonlySet<string>
+  knownIds: Pick<ReadonlySet<string>, "has">
 ): string | null {
   if (!validSafeIdentifier(value.id)) return "Pi Session Entry id is invalid";
   if (knownIds.has(value.id)) return "Pi Session Entry id is duplicated";

@@ -19,6 +19,7 @@ import type {
 } from "../harness/resources/skill-runtime";
 import { AGENT_AVATAR_PRESETS, resolveAgentAvatarUrl } from "../ui/agent-avatar-presets";
 import { normalizeJournalDirectory } from "../home/journal-directory";
+import { readNativeJournalSettings, saveNativeJournalFolder } from "../home/native-journal";
 import { AgentIdentityModal } from "../ui/agent-identity-modal";
 import { renderAnimateIcon } from "../ui/animate-icon";
 import {
@@ -199,6 +200,7 @@ export class CodexSettingTab extends PluginSettingTab {
   private readonly knowledgeDashboardTooltipState: KnowledgeDashboardTooltipState =
     createKnowledgeDashboardTooltipState();
   private displayFrame: number | null = null;
+  private displayFrameWindow: Window | null = null;
   private settingsTitleEl: HTMLElement | null = null;
   private settingsTabsEl: HTMLElement | null = null;
   private settingsBodyEl: HTMLElement | null = null;
@@ -245,10 +247,7 @@ export class CodexSettingTab extends PluginSettingTab {
     this.settingsVisible = true;
     this.lastRenderedSettingsTab = null;
     this.settingsTabIconAnimation = null;
-    if (this.displayFrame !== null) {
-      window.cancelAnimationFrame(this.displayFrame);
-      this.displayFrame = null;
-    }
+    this.cancelScheduledDisplay();
     this.renderSettingsShell();
     const pendingResourceId = this.plugin.consumeEchoInkSettingsResourceDetail?.() ?? "";
     if (pendingResourceId) {
@@ -279,10 +278,7 @@ export class CodexSettingTab extends PluginSettingTab {
     this.knowledgeDashboardError = "";
     disposeKnowledgeDashboardTooltipState(this.knowledgeDashboardTooltipState);
     this.disconnectSettingsTabsResizeObserver();
-    if (this.displayFrame !== null) {
-      window.cancelAnimationFrame(this.displayFrame);
-      this.displayFrame = null;
-    }
+    this.cancelScheduledDisplay();
     super.hide();
     if (shouldConfirmKnowledgePreference) {
       this.knowledgePreferenceClosePromptRunning = true;
@@ -385,10 +381,21 @@ export class CodexSettingTab extends PluginSettingTab {
   private scheduleDisplay(): void {
     if (!this.settingsVisible) return;
     if (this.displayFrame !== null) return;
-    this.displayFrame = window.requestAnimationFrame(() => {
+    const settingsWindow = this.containerEl.ownerDocument.defaultView ?? window;
+    this.displayFrameWindow = settingsWindow;
+    this.displayFrame = settingsWindow.requestAnimationFrame(() => {
       this.displayFrame = null;
+      this.displayFrameWindow = null;
       this.renderSettingsContent();
     });
+  }
+
+  private cancelScheduledDisplay(): void {
+    if (this.displayFrame !== null) {
+      this.displayFrameWindow?.cancelAnimationFrame(this.displayFrame);
+    }
+    this.displayFrame = null;
+    this.displayFrameWindow = null;
   }
 
   private captureTabFocusIntent(): void {
@@ -683,22 +690,20 @@ export class CodexSettingTab extends PluginSettingTab {
     applySettingsRow(new Setting(journalGroup)
       .setName(zh ? "日记保存文件夹" : "Journal folder")
       .setDesc(zh
-        ? "填写当前 Vault 内的相对路径。首页日历、模板创建和日记会话都会使用这个文件夹。"
-        : "Enter a relative path inside this vault. The Home calendar, template creation, and journal conversations use this folder.")
+        ? "与 Obsidian 原生日记共用文件夹。日期格式和模板可在原生日记设置中调整；默认按月存放，每天一篇。"
+        : "Shared with Obsidian Daily notes. Set the date format and template there; the default is one note per day in monthly folders.")
       .addText((text) => {
         const label = zh ? "日记保存文件夹" : "Journal folder";
-        text.setPlaceholder("journal").setValue(this.plugin.settings.journalDirectory);
+        text.setPlaceholder("journal").setValue(readNativeJournalSettings(this.app, this.plugin.settings.journalDirectory).folder);
         text.inputEl.setAttr("aria-label", label);
         const saveDirectory = async (): Promise<void> => {
-          const previous = this.plugin.settings.journalDirectory;
+          const previous = readNativeJournalSettings(this.app, this.plugin.settings.journalDirectory).folder;
           const normalized = normalizeJournalDirectory(text.getValue());
           text.setValue(normalized);
           if (normalized === previous) return;
-          this.plugin.settings.journalDirectory = normalized;
           try {
-            await this.plugin.saveSettings(true);
+            await saveNativeJournalFolder(this.app, normalized);
           } catch {
-            this.plugin.settings.journalDirectory = previous;
             text.setValue(previous);
             new Notice(zh ? "日记保存文件夹未保存，请重试" : "Journal folder was not saved. Try again.");
           }
@@ -1694,8 +1699,8 @@ export class CodexSettingTab extends PluginSettingTab {
     const page = createSettingsPage(container, {
       title: copy.knowledge.title,
       description: zh
-        ? "在普通 EchoInk 会话中用 /ask 提问、用 /maintain 提炼。/ask 始终只读；显式 /maintain 会在一轮内安全写入并回读验证。"
-        : "Use /ask and /maintain in a normal EchoInk conversation. /ask is always read-only; an explicit /maintain safely writes and verifies readback in one turn."
+        ? "/ask 先查知识库，有依据时展示 Sources；最终没有找到时会说明，并按需使用已有外部资料或模型知识补答。/maintain 用于整理资料。是否写入由会话底部的工作区选项和你的要求决定：只读可分析，可写时按现有流程执行并核对结果。"
+        : "Use /ask to search your knowledge base first and show Sources when evidence is found. If none is found, EchoInk says so and may use available external sources or model knowledge. Use /maintain to organize material. Writing follows the workspace option below the conversation and your request: read-only allows analysis; writable modes use the existing workflow and verify results."
     });
     page.addClass("codex-knowledge-settings");
     this.renderSettingsActionError(page, "knowledge");

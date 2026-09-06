@@ -645,6 +645,7 @@ const context = await esbuild.context({
   // those ESM helpers; controlled Chat never uses their package-relative CLI
   // resources, extensions, clipboard, or image workers.
   define: {
+    "process.env.NODE_ENV": JSON.stringify(isProd ? "production" : "development"),
     "import.meta.url": JSON.stringify(
       "file:///__echoink_pi_runtime__/main.js"
     )
@@ -655,6 +656,14 @@ const context = await esbuild.context({
       : "src/main.ts"
   ],
   bundle: true,
+  // Pi's published shrinkwrap keeps identical nested copies after npm dedupe.
+  // Aliases resolve from this project's root, including package subpath exports.
+  alias: {
+    "@earendil-works/pi-ai": "@earendil-works/pi-ai",
+    "@earendil-works/pi-agent-core": "@earendil-works/pi-agent-core",
+    yaml: "yaml",
+    typebox: "typebox"
+  },
   loader: {
     ".md": "text",
     ".svg": "dataurl",
@@ -686,6 +695,7 @@ const context = await esbuild.context({
   target: "es2022",
   logLevel: "info",
   sourcemap: isProd ? false : "inline",
+  minify: isProd,
   treeShaking: true,
   plugins: [
     piOpenAICodexOAuthPlugin,

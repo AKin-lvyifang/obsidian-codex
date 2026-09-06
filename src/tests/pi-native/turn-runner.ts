@@ -28,6 +28,7 @@ import {
   piConversationUnreadAnswerAt,
   sendMessage,
   startChatTurn,
+  steerPiChatFromComposer,
   startQueuedTurnItem,
   startNextQueuedTurn
 } from "../../ui/codex-view/turn-runner";
@@ -1929,9 +1930,9 @@ async function agentSettlementOnlyFinalizesPiChatTurn(): Promise<void> {
     piSessionId: session.piSessionId,
     productRunId: "product-run-turn-runner"
   }, "turn runner subscribes to the exact active Approval run");
-  assert.equal(submittedRequest?.skillId, "knowledge-review");
-  assert.equal(submittedRequest?.skillPath, "skills/knowledge-review/SKILL.md");
-  assert.equal(submittedRequest?.skillName, "knowledge-review");
+  assert.equal(submittedRequest?.skillId, undefined);
+  assert.equal(submittedRequest?.skillPath, undefined);
+  assert.equal(submittedRequest?.skillName, undefined);
   assert.equal(submittedRequest?.memoryMode, "normal");
   assert.equal(submittedRequest?.images?.length, 1);
   assert.equal(submittedRequest?.documents?.length, 1);
@@ -2402,6 +2403,9 @@ Promise<void> {
   const pendingSubmit = deferred<typeof handle>();
   let listener: PiChatRuntimeEventListener | null = null;
   let projectionReads = 0;
+  let capturedPermission: string | undefined;
+  const followUps: string[] = [];
+  const steers: string[] = [];
   let unreadPersistenceCalls = 0;
   const plugin = {
     settings: {
@@ -2410,7 +2414,9 @@ Promise<void> {
       activeSessionId: runningSession.id
     },
     getVaultPath: () => "/vault",
-    submitPiChat: async () => await pendingSubmit.promise,
+    submitPiChat: async (request: PiChatSubmitRequest) => { capturedPermission = request.permission; return await pendingSubmit.promise; },
+    followUpPiConversation: async (_id: string, text: string) => { followUps.push(text); },
+    steerPiConversation: async (_id: string, text: string) => { steers.push(text); },
     subscribePiRun: (_productRunId: string, next: PiChatRuntimeEventListener) => {
       listener = next;
       return { unsubscribe: () => { listener = null; } };
@@ -2513,6 +2519,34 @@ Promise<void> {
 
   pendingSubmit.resolve(handle);
   await waitFor(() => listener !== null);
+  assert.equal(capturedPermission, "read-only", "switching conversations cannot replace the submitted permission");
+  view.ensureSession = () => runningSession;
+  view.sessionById = () => runningSession;
+  view.turnQueue = new RuntimeTurnQueue();
+  view.renderQueue = () => undefined;
+  const nextMessage = { ...item, id: "same-access-followup", text: "same access", turnOptions: { ...item.turnOptions } };
+  view.createQueuedTurnFromComposer = async () => nextMessage;
+  await enqueueComposerDraft(view);
+  assert.deepEqual(followUps, ["same access"], "matching access keeps Pi follow-up");
+  nextMessage.id = "different-access-queued";
+  nextMessage.text = "write in next turn";
+  nextMessage.turnOptions.permission = "danger-full-access";
+  await enqueueComposerDraft(view);
+  nextMessage.turnOptions.permission = "read-only";
+  assert.deepEqual(followUps, ["same access"]);
+  assert.equal(view.turnQueue.itemsForSession(runningSession.id)[0]?.turnOptions.permission, "danger-full-access", "different access queues an independent frozen snapshot");
+  view.inputEl = { value: "same access steering" };
+  view.attachments = [];
+  view.currentTurnOptions = () => nextMessage.turnOptions;
+  await steerPiChatFromComposer(view);
+  assert.deepEqual(steers, ["same access steering"]);
+  nextMessage.id = "different-mode-steering";
+  nextMessage.text = "plan this in the next turn";
+  nextMessage.turnOptions.mode = "plan";
+  await steerPiChatFromComposer(view);
+  nextMessage.turnOptions.mode = "agent";
+  assert.deepEqual(steers, ["same access steering"], "steering cannot change the active run's access");
+  assert.equal(view.turnQueue.itemsForSession(runningSession.id)[1]?.turnOptions.mode, "plan");
   await emit(listener, runtimeEvent({
     type: "message_start",
     messageKey: "assistant-pending",

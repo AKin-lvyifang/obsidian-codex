@@ -21,6 +21,7 @@ await esbuild.build({
       'import { runPiConversationStartupTests } from "./src/tests/pi-native/conversation-startup";',
       'import { runPiConversationTabsTests } from "./src/tests/pi-native/conversation-tabs";',
       'import { runPiNativeTurnRunnerTests } from "./src/tests/pi-native/turn-runner";',
+      'import { runDailyJournalPipelineTests } from "./src/tests/pi-native/daily-journal-pipeline";',
       'import { runPiImageInputTests } from "./src/tests/pi-native/pi-image-input";',
       'import { runPiDocumentInputTests } from "./src/tests/pi-native/pi-document-input";',
       'import { runMessageListIdentityTests } from "./src/tests/message-list-identity";',
@@ -35,6 +36,7 @@ await esbuild.build({
       "await runPiConversationTabsTests();",
       "await runPiChatUiProjectorTests();",
       "await runPiNativeTurnRunnerTests();",
+      "await runDailyJournalPipelineTests();",
       "await runPiImageInputTests();",
       "await runPiDocumentInputTests();",
       "await runMessageListIdentityTests();",
@@ -42,7 +44,7 @@ await esbuild.build({
       "await runComposerActionTests();",
       "await runNoteMentionTests();",
       'console.log("Current Pi Conversation acceptance: PASS");'
-    ].join("\n"),
+    ].filter((line) => !process.argv.includes("--daily-journal") || line.startsWith("import ") || line.includes("runDailyJournalPipelineTests") || line.includes("console.log")).join("\n"),
     resolveDir: rootDir,
     sourcefile: "pi-conversation-test-entry.ts",
     loader: "ts"

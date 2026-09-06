@@ -770,7 +770,7 @@ function reliableDurationMs(message: Pick<ChatMessage, "createdAt" | "completedA
     || startedAt <= 0
     || typeof completedAt !== "number"
     || !Number.isFinite(completedAt)
-    || completedAt < startedAt
+    || completedAt <= startedAt
   ) return undefined;
   return completedAt - startedAt;
 }

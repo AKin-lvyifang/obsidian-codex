@@ -785,7 +785,7 @@ export class PersonalMemoryRepository {
     this.assertRuntime(runtime);
     await this.initialize();
     return await this.withMutation(async () => {
-      await this.assertManagedTreeSafe();
+      await this.assertManagedPathsSafe([this.layout.manifest, this.layout.audit]);
       await this.refreshPrimaryCachesBeforeWrite();
       if (request.operation === "supersede"
         || request.operation === "close"
@@ -2735,6 +2735,7 @@ export class PersonalMemoryRepository {
     const currentRecords = await this.readAllRecords(manifest);
     const existingMetadata = manifest.records.find((record) => record.file === relativePath);
     const target = this.absoluteFromRelative(relativePath);
+    await this.assertManagedPathsSafe([target]);
     let parsed: PersonalMemoryRecord | null = null;
     if (await pathExists(target)) {
       parsed = parseRecord(await readFile(target, "utf8"), relativePath);
@@ -3276,6 +3277,26 @@ export class PersonalMemoryRepository {
     }
   }
 
+  private async assertManagedPathsSafe(targets: readonly string[]): Promise<void> {
+    const vaultStat = await lstat(this.vaultPath);
+    if (vaultStat.isSymbolicLink()) {
+      throw new PersonalMemoryAccessError("unsafe_path", "Active Vault root must not be a symlink");
+    }
+    const vaultRealPath = await realpath(this.vaultPath);
+    const paths = new Set<string>();
+    for (const target of targets) {
+      this.assertManagedPath(target);
+      let current = path.resolve(target);
+      while (current !== this.vaultPath) {
+        paths.add(current);
+        current = path.dirname(current);
+      }
+    }
+    for (const target of [...paths].sort((a, b) => a.length - b.length)) {
+      await inspectManagedTreeNodeSafety(target, vaultRealPath, { allowMissing: true });
+    }
+  }
+
   private async assertManagedTreeSafe(): Promise<void> {
     const vaultStat = await lstat(this.vaultPath);
     if (vaultStat.isSymbolicLink()) {
@@ -3304,6 +3325,7 @@ export class PersonalMemoryRepository {
     secondaryForIndex?: readonly SecondaryMemoryRecord[]
   ): Promise<TransactionChange[]> {
     const secondarySnapshot = secondaryForIndex ?? this.secondaryCache;
+    await this.assertManagedPathsSafe([this.layout.audit]);
     const previousAudit = await readTextOrEmpty(this.layout.audit);
     return dedupeChanges([
       ...extra,
@@ -3330,6 +3352,10 @@ export class PersonalMemoryRepository {
     const transactionId = `txn_${randomUUID().replaceAll("-", "")}`;
     const transactionRoot = path.join(this.layout.transactions, transactionId);
     const backupRoot = path.join(transactionRoot, "backup");
+    await this.assertManagedPathsSafe([
+      backupRoot,
+      ...changes.map((change) => this.absoluteFromRelative(change.relativePath))
+    ]);
     await mkdir(backupRoot, { recursive: true });
     const entries: TransactionPlanEntry[] = [];
     for (const [index, change] of changes.entries()) {
@@ -3358,6 +3384,7 @@ export class PersonalMemoryRepository {
       let appliedChanges = 0;
       for (const change of changes) {
         const target = this.absoluteFromRelative(change.relativePath);
+        await this.assertManagedPathsSafe([target]);
         if (change.content === undefined) {
           if (await pathExists(target)) await unlink(target);
         } else {
@@ -3616,6 +3643,7 @@ export class PersonalMemoryRepository {
 
   private async readRecordFromDisk(metadata: ManifestRecord): Promise<PersonalMemoryRecord> {
     const target = this.absoluteFromRelative(metadata.file);
+    await this.assertManagedPathsSafe([target]);
     const parsed = parseRecord(await readFile(target, "utf8"), metadata.file);
     if (stableJson(recordMetadata(parsed)) !== stableJson(metadata)) {
       throw new PersonalMemoryAccessError("invalid_request", `Memory metadata drift detected for ${metadata.id}`);
@@ -3630,6 +3658,7 @@ export class PersonalMemoryRepository {
         "Identity file hashes are unavailable; reload before writing"
       );
     }
+    await this.assertManagedPathsSafe([this.layout.agent, this.layout.user]);
     const [agent, user] = await Promise.all([
       readUtf8Bounded(this.layout.agent, AGENT_MD_HARD_MAX_BYTES, "AGENT.md"),
       readUtf8Bounded(this.layout.user, USER_MD_HARD_MAX_BYTES, "USER.md")

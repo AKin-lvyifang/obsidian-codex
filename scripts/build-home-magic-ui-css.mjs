@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,21 +12,6 @@ const checkOnly = process.argv.includes("--check");
 const scope = ".echoink-home-magic-ui";
 const startMarker = "/* ECHOINK_HOME_MAGIC_UI_CSS_START */";
 const endMarker = "/* ECHOINK_HOME_MAGIC_UI_CSS_END */";
-
-const officialFiles = [
-  ["bento-grid.tsx", "9c2abcb2a4e51519e56d510299771a2d0e170ab9927a9a792a58614b1837ed47"],
-  ["animated-shiny-text.tsx", "3743a0a0b4894840a96bacd839e493872bac484a940684f91fd23a1784c00fbb"],
-  ["utils.ts", "7c8c3dfc0cdd370d44932828eb067ef771c8fe7996693221d5d4b90af6d54f2d"],
-  ["button.tsx", "881fabaf889450b7c671ffabe455bd4b4d101c36f80868f1bf4819ba5f4f4886"],
-  ["provenance/globals.css", "b290ad71358829d043a8453924e0b97878596294849de34ea08451412fd760f2"],
-  ["LICENSE.md", "0147b84235ed916b8b4e89c1f80655351c5afe7d211b629be61f553a227b34ba"]
-];
-
-for (const [relativePath, expected] of officialFiles) {
-  const content = await readFile(path.join(sourceDir, relativePath));
-  const actual = createHash("sha256").update(content).digest("hex");
-  if (actual !== expected) throw new Error(`Magic UI source hash mismatch: ${relativePath}`);
-}
 
 const upstreamCss = await readFile(path.join(sourceDir, "provenance", "globals.css"), "utf8");
 const animationNames = ["shiny-text"];

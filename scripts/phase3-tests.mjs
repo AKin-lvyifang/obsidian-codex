@@ -9,6 +9,7 @@ const outputDir = path.join(rootDir, ".tmp");
 const outputFile = path.join(outputDir, "knowledge-tests.mjs");
 const obsidianShimPath = path.join(rootDir, "src", "tests", "obsidian-shim.ts");
 const homeWorkbenchOnly = process.argv.includes("--home-workbench");
+const nativeJournalOnly = process.argv.includes("--native-journal");
 
 const fullSuiteImports = [
   'import { runPhase3KnowledgeRetrieverTests } from "./src/tests/phase3-knowledge-retriever";',
@@ -16,7 +17,8 @@ const fullSuiteImports = [
   'import { runKnowledgeMaintenancePreferenceTests } from "./src/tests/knowledge-maintenance-preferences";',
   'import { runPiKnowledgeReadToolTests } from "./src/tests/pi-native/knowledge-read-tools";',
   'import { runPhase3KnowledgeMaintenanceServiceTests } from "./src/tests/pi-native/phase3-maintenance-service";',
-  'import { runKnowledgeInitializationTests } from "./src/tests/knowledge-initialization";'
+  'import { runKnowledgeInitializationTests } from "./src/tests/knowledge-initialization";',
+  'import { runNativeJournalTests } from "./src/tests/native-journal";'
 ];
 const fullSuiteRuns = [
   "await runKnowledgeAgentIndexTests();",
@@ -24,13 +26,17 @@ const fullSuiteRuns = [
   "await runPiKnowledgeReadToolTests();",
   "await runPhase3KnowledgeRetrieverTests();",
   "await runPhase3KnowledgeMaintenanceServiceTests();",
-  "await runKnowledgeInitializationTests();"
+  "await runKnowledgeInitializationTests();",
+  "await runNativeJournalTests();"
 ];
 
 await mkdir(outputDir, { recursive: true });
 await esbuild.build({
   stdin: {
-    contents: [
+    contents: (nativeJournalOnly ? [
+      'import { runNativeJournalTests } from "./src/tests/native-journal";',
+      "await runNativeJournalTests();"
+    ] : [
       ...(homeWorkbenchOnly ? [] : fullSuiteImports),
       'import { runHomeWorkbenchTests } from "./src/tests/home-workbench";',
       "await runHomeWorkbenchTests();",
@@ -38,7 +44,7 @@ await esbuild.build({
       `console.log(${JSON.stringify(homeWorkbenchOnly
         ? "Home workbench acceptance: PASS"
         : "Current Knowledge query and maintenance acceptance: PASS")});`
-    ].join("\n"),
+    ]).join("\n"),
     resolveDir: rootDir,
     sourcefile: "knowledge-test-entry.ts",
     loader: "ts"

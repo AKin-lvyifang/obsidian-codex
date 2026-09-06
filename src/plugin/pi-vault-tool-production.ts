@@ -127,6 +127,9 @@ export function createPiVaultProductionAuthorizationPort(
   }
   return Object.freeze({
     async authorize(input: Readonly<AuthorizePiVaultToolCallInput>) {
+      if (input.signal?.aborted) {
+        throw new PiVaultToolAuthorizationError("approval_cancelled");
+      }
       const identity = requireRunIdentity(options.currentRunIdentity());
       if (identity.vaultId !== options.approvals.vaultId) {
         throw new PiVaultToolAuthorizationError("authorization_failed");
@@ -145,6 +148,9 @@ export function createPiVaultProductionAuthorizationPort(
           throw new PiVaultToolAuthorizationError("tool_policy_blocked");
         }
         throw error;
+      }
+      if (input.signal?.aborted) {
+        throw new PiVaultToolAuthorizationError("approval_cancelled");
       }
       const normalizedArguments = normalizeJsonValue(input.arguments);
       if (input.policy.effectType === "read") {
@@ -473,10 +479,18 @@ async function resolveAuthorizationTarget(
     vaultId,
     relativePath,
     mustExist: !create,
+    allowMissingParentDirectories: create,
     expectedKind: "file"
   });
   if (create && target.exists) {
     throw new PiVaultToolAuthorizationError("tool_policy_blocked");
+  }
+  if (toolId === "note_read") {
+    return freezeTarget({
+      resolvedTarget: { relativePath: target.relativePath },
+      targetVersion: null,
+      preview: { operation: toolId, relativePath: target.relativePath }
+    });
   }
   const snapshot = create
     ? null
@@ -485,13 +499,6 @@ async function resolveAuthorizationTarget(
       target,
       toolId === "note_update" ? undefined : 0
     );
-  if (toolId === "note_read") {
-    return freezeTarget({
-      resolvedTarget: { relativePath: target.relativePath },
-      targetVersion: snapshotEvidence(snapshot),
-      preview: { operation: toolId, relativePath: target.relativePath }
-    });
-  }
   if (toolId === "note_create" || toolId === "note_update") {
     const content = requireString(args.content);
     const contentSha256 = sha256(content);
@@ -928,14 +935,7 @@ function freezeTarget(input: ResolvedAuthorizationTarget): ResolvedAuthorization
   });
 }
 
-function snapshotEvidence(snapshot: Readonly<VaultFileSnapshot> | null): JsonValue {
-  if (!snapshot) return null;
-  return normalizeJsonValue({
-    version: snapshot.version,
-    contentSha256: snapshot.contentSha256,
-    byteLength: snapshot.byteLength
-  });
-}
+
 
 function formatApprovalBody(target: JsonValue, preview: JsonValue): string {
   const previewRecord = plainRecord(preview);

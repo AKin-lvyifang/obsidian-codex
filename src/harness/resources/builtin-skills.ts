@@ -1,3 +1,5 @@
+import { OBSIDIAN_BUILTIN_SKILLS } from "./obsidian-skills";
+
 export const BUILTIN_SKILL_IDS = Object.freeze([
   "clarify-real-question",
   "two-layer-explanation",
@@ -7,7 +9,11 @@ export const BUILTIN_SKILL_IDS = Object.freeze([
   "minimum-real-world-experiment",
   "knowledge-review",
   "self-discovery-life-design",
-  "daily-journal"
+  "daily-journal",
+  "obsidian-cli",
+  "obsidian-markdown",
+  "obsidian-bases",
+  "json-canvas"
 ] as const);
 
 export type BuiltinSkillId = (typeof BUILTIN_SKILL_IDS)[number];
@@ -261,69 +267,26 @@ export const BUILTIN_SKILLS: readonly BuiltinSkillDefinition[] = Object.freeze([
     "在首页日记会话中自然交谈，并在用户准备好后安全创建或追加当天日记。",
     `## 用途与触发
 
-只在 EchoInk 明确把当前会话绑定到 \`daily-journal\` 时使用。不要根据普通聊天内容自动启用，也不要把会话工作目录当成日记目录。
+用于明确绑定 daily-journal 的会话，或用户明确选择本 Skill 的日记任务。
 
-EchoInk 会在当前轮提供这个会话创建时固定下来的日记目录、日期、时间和目标文件路径。后续每一轮都继续使用同一目录；不得自行改用设置页里的新值。
+## 交谈
 
-## 交谈方式
+直接回应用户此刻的经历和感受，开场不用任何工具检查文件、模板、目录或设置。用户继续表达时继续聊；只追问对内容必要的问题，不询问文件路径，也不展示模板源码或模板选择器。
 
-1. 先自然地陪用户回顾此刻发生了什么、真正想留下什么，不展示模板源码，也不要求用户先选择模板。
-2. 信息不足时只追问对日记内容真正必要的问题。用户还在表达时继续聊，不急着写文件。
-3. 用户准备好生成或补记时，再使用现有笔记 Tool。Tool 的审批、Vault 边界、版本冲突保护和写后回读仍然有效，Skill 不得绕过。
+## 保存
 
-## 新建当天日记
+用户明确要保存、生成日记或补记时：
 
-当天目标文件不存在时，按下面的“此刻速记”模板组织 Markdown，并调用 \`note_create\` 写入当前会话给出的目标路径。允许根据本次谈话对标题下的正文做轻微措辞或空行调整，但保留 frontmatter 字段和三个固定标题。
-
-\`\`\`markdown
----
-date: {{date}}
-template: 此刻速记
-tags:
-  - journal
----
-
-# {{date}} 此刻速记
-
-## 现在发生了什么
-
-{{现在发生的事}}
-
-## 想记住的一点
-
-{{想留下的感受、判断或提醒}}
-\`\`\`
-
-## 追加当天日记
-
-当天目标文件已经存在时：
-
-1. 必须先用 \`note_read\` 读取完整原文。
-2. 如果读取失败、结果被截断，或没有取得本次读取对应的 \`expectedVersion\`，立即停止，不得覆盖文件。
-3. 保留完整原文，只在末尾追加：
-
-\`\`\`markdown
-## 补记 · {{HH:mm}}
-
-### 现在发生了什么
-
-{{本次补记内容}}
-
-### 想记住的一点
-
-{{本次想留下的一点}}
-\`\`\`
-
-4. 调用 \`note_update\` 时必须携带刚才读取到的 \`expectedVersion\`。版本冲突就停止并告诉用户重新读取，不能重试覆盖。
-
-## 完成判断
-
-只有 Tool 返回成功并完成既有写后回读，才能告诉用户日记已经保存。创建、读取、审批、更新或回读中的任何一步失败，都要如实说明当前文件没有被可靠写入。
+1. 调用 \`obsidian_context\`。程序会读取当前 Obsidian 原生日记设置并返回日期、时间、精确 \`targetPath\`、是否已存在和已渲染的 \`templateContent\`。不要搜索 Vault 猜设置，不使用旧会话目录或之前轮次的日期路径。
+2. 新文件使用本次返回的模板正文，在对应标题下写入本次内容。默认模板是“此刻速记”，保留 date/template/tags:journal 和“现在发生了什么”“想记住的一点”；用户有自定义模板时尊重返回的实际模板。调用 \`note_create\` 写入精确路径。
+3. 文件已存在时先 \`note_read\` 完整读取；读取失败、截断或缺少 \`expectedVersion\` 就停止。保留全部原文，末尾追加“## 补记 · HH:mm”，下面用“### 现在发生了什么”和“### 想记住的一点”记录本次补记。
+4. \`note_update\` 携带刚才读取的 \`expectedVersion\`。版本冲突就停止，重新读取后再决定，不能覆盖旧内容。
 
 ## 边界
 
-不得改写当天已有原文，不得在读取被截断时拼接，不得静默退回普通聊天或其他 Skill，不得新增日记专用 Tool，也不得把模板正文复制到聊天栏供用户切换。`
-  )
+工作区选项继续决定读写，现有确认、Vault 边界和写后回读继续有效。只读时可以整理内容，但不能保存；Skill 本文不会授予写入权限。只有工具返回成功且完成回读，才告诉用户已经保存。失败时如实说明，没有这项 Skill 时不得静默替换为其他流程。`
+  ),
+  ...OBSIDIAN_BUILTIN_SKILLS
 ]);
 
 export function renderBuiltinSkill(definition: BuiltinSkillDefinition): string {

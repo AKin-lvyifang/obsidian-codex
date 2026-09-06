@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import fsp from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
+import { bindKnowledgeIndexToVault } from "../plugin/pi-production-runtime-composition";
 import {
   mkdir,
   mkdtemp,
@@ -21,6 +24,7 @@ import { isRawMarkdownPath } from "../knowledge-base/raw-digest";
 
 export async function runKnowledgeAgentIndexTests(): Promise<void> {
   assertRawMarkdownExtensionContract();
+  await assertIndexEventInvalidation();
   const vaultPath = await mkdtemp(path.join(tmpdir(), "echoink-knowledge-index-vault-"));
   const storageRootPath = await mkdtemp(path.join(tmpdir(), "echoink-knowledge-index-state-"));
   try {
@@ -387,6 +391,87 @@ export async function runKnowledgeAgentIndexTests(): Promise<void> {
   } finally {
     await rm(vaultPath, { recursive: true, force: true });
     await rm(storageRootPath, { recursive: true, force: true });
+  }
+}
+
+async function assertIndexEventInvalidation(): Promise<void> {
+  const root = await fsp.realpath(await mkdtemp(path.join(tmpdir(), "echoink-index-events-")));
+  const vaultPath = path.join(root, "vault");
+  const index = new KnowledgeAgentIndex({ vaultPath, storageRootPath: path.join(root, "state") });
+  type Listener = (file: { path: string }, oldPath?: string) => void;
+  const listeners = new Map<string, Listener>();
+  const unbind = bindKnowledgeIndexToVault({ vault: {
+    on: (name: string, listener: Listener) => {
+      listeners.set(name, listener);
+      return name;
+    },
+    offref: (name: string) => listeners.delete(name)
+  } } as never, index);
+  const emit = (name: string, file: string, oldPath?: string) =>
+    listeners.get(name)?.({ path: file }, oldPath);
+  try {
+    await mkdir(vaultPath, { recursive: true });
+    await index.refresh();
+    await writeFixture(vaultPath, "wiki/events.md", "CREATED_EVENT_TOKEN");
+    emit("create", "wiki/events.md");
+    assert.equal((await index.search({ query: "CREATED_EVENT_TOKEN" })).total, 1);
+    await writeFixture(vaultPath, "wiki/events.md", "MODIFIED_EVENT_TOKEN");
+    emit("modify", "wiki/events.md");
+    assert.equal((await index.search({ query: "CREATED_EVENT_TOKEN" })).total, 0);
+    assert.equal((await index.search({ query: "MODIFIED_EVENT_TOKEN" })).total, 1);
+    await fsp.rename(path.join(vaultPath, "wiki/events.md"), path.join(vaultPath, "wiki/renamed.md"));
+    emit("rename", "wiki/renamed.md", "wiki/events.md");
+    assert.equal((await index.search({ query: "MODIFIED_EVENT_TOKEN" })).hits[0]?.vaultRelativePath, "wiki/renamed.md");
+    await rm(path.join(vaultPath, "wiki/renamed.md"));
+    emit("delete", "wiki/renamed.md");
+    assert.equal((await index.search({ query: "MODIFIED_EVENT_TOKEN" })).total, 0);
+
+    const duringPath = path.join(vaultPath, "wiki/during-refresh.md");
+    await writeFile(duringPath, "BEFORE_SCAN_EVENT_TOKEN");
+    let entered!: () => void;
+    let release!: () => void;
+    const enteredRead = new Promise<void>((resolve) => { entered = resolve; });
+    const releaseRead = new Promise<void>((resolve) => { release = resolve; });
+    const originalReadFile = fsp.readFile;
+    let pause = true;
+    fsp.readFile = (async (...args: Parameters<typeof fsp.readFile>) => {
+      const bytes = await originalReadFile(...args);
+      if (args[0] === duringPath && pause) {
+        pause = false;
+        entered();
+        await releaseRead;
+      }
+      return bytes;
+    }) as typeof fsp.readFile;
+    syncBuiltinESMExports();
+    try {
+      const refreshing = index.refresh();
+      await enteredRead;
+      await writeFile(duringPath, "AFTER_SCAN_EVENT_TOKEN");
+      emit("modify", "wiki/during-refresh.md");
+      release();
+      await refreshing;
+      assert.equal((await index.search({ query: "AFTER_SCAN_EVENT_TOKEN" })).total, 1);
+      assert.equal((await index.search({ query: "BEFORE_SCAN_EVENT_TOKEN" })).total, 0);
+    } finally {
+      release();
+      fsp.readFile = originalReadFile;
+      syncBuiltinESMExports();
+    }
+
+    const rawText = "RAW_BEFORE_EVENT_TOKEN";
+    await writeFixture(vaultPath, "raw/source.md", rawText);
+    await writeFixture(vaultPath, "wiki/derived.md", `Derived\n${formatKnowledgeRawSourceMarker("raw/source.md", revision(rawText))}\n`);
+    emit("create", "raw/source.md");
+    emit("create", "wiki/derived.md");
+    assert.ok(await index.readReliableKnowledgeForRaw("raw/source.md"));
+    await writeFixture(vaultPath, "raw/source.md", "RAW_CHANGED_BEFORE_EVENT_DELIVERY");
+    assert.equal(await index.readReliableKnowledgeForRaw("raw/source.md"), null,
+      "a delayed file event cannot make stale Raw-derived content reliable");
+  } finally {
+    unbind();
+    assert.equal(listeners.size, 0);
+    await rm(root, { recursive: true, force: true });
   }
 }
 

@@ -38,6 +38,7 @@ import {
   type KnowledgeInitializationVaultFile
 } from "../knowledge-base/initializer";
 import { pluginDataDir } from "./plugin-data-paths";
+import { initializeNativeJournal } from "../home/native-journal";
 
 export type KnowledgeMaintenanceSurfaceStatus = Readonly<{
   state: "ready";
@@ -315,6 +316,7 @@ function createKnowledgeInitializationHost(
       }
     },
     createFolder: ensureFolder,
+    configureNativeJournal: () => initializeNativeJournal(plugin.app, plugin.settings.journalDirectory),
     async createText(relativePath: string, content: string): Promise<void> {
       const normalized = normalizePath(relativePath);
       const parentFolder = knowledgeInitializationParentFolder(normalized);

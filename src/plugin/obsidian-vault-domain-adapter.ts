@@ -97,7 +97,7 @@ export class ObsidianVaultDomainAdapter implements VaultDomainAdapter {
       ? `${input.scope.relativePath}/`
       : "";
     const results: VaultAdapterSearchResult[] = [];
-    for (const file of this.app.vault.getMarkdownFiles()) {
+    for (const file of this.app.vault.getFiles().filter((entry) => /\.(md|base|canvas)$/iu.test(entry.path))) {
       if (results.length >= input.maxResults) break;
       if (
         scopePrefix
@@ -111,14 +111,16 @@ export class ObsidianVaultDomainAdapter implements VaultDomainAdapter {
         mustExist: true,
         expectedKind: "file"
       });
-      const snapshot = await this.readFile(target, {
-        maxBytes: Math.min(
-          SEARCH_SCAN_LIMIT_BYTES,
-          Math.max(1, input.maxExcerptBytes)
-        )
-      });
-      if (!snapshot) continue;
+      const maxBytes = Math.min(SEARCH_SCAN_LIMIT_BYTES, Math.max(1, input.maxExcerptBytes));
       const pathMatches = target.relativePath.toLocaleLowerCase().includes(query);
+      if (!pathMatches) {
+        const prefix = await readSearchPrefix(target.absolutePath, maxBytes);
+        if (!prefix.toLocaleLowerCase().includes(query)) continue;
+      }
+      // Only matched candidates need the complete content revision. Recheck the
+      // match in the returned snapshot in case the file changed during search.
+      const snapshot = await this.readFile(target, { maxBytes });
+      if (!snapshot) continue;
       const contentIndex = snapshot.content.toLocaleLowerCase().indexOf(query);
       if (!pathMatches && contentIndex < 0) continue;
       results.push(Object.freeze({
@@ -547,6 +549,22 @@ function hasHiddenPathSegment(relativePath: string): boolean {
   return relativePath.split("/").some((segment) =>
     segment.startsWith(".") && segment.length > 1
   );
+}
+
+async function readSearchPrefix(absolutePath: string, limit: number): Promise<string> {
+  const handle = await fsp.open(absolutePath, "r");
+  try {
+    const bytes = Buffer.alloc(limit);
+    let offset = 0;
+    while (offset < limit) {
+      const { bytesRead } = await handle.read(bytes, offset, limit - offset, null);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    return decodeUtf8Prefix(bytes.subarray(0, offset));
+  } finally {
+    await handle.close();
+  }
 }
 
 async function readAndDigest(

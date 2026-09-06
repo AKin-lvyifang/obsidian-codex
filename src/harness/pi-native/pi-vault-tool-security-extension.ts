@@ -7,7 +7,6 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { PiKnowledgeReference } from "./contracts";
 import {
-  canonicalJsonStringify,
   isWriteToolAuthorizationContext,
   normalizeToolAuthorizationContext,
   type ToolAuthorizationContext
@@ -83,6 +82,8 @@ export interface PiVaultToolResultCorrectionPort {
 }
 
 export interface CreatePiVaultToolSecurityAdapterOptions {
+  /** Same ProductRun policy used to publish the active tool list. Checked before dispatch. */
+  readonly isToolAllowed?: (toolName: string) => boolean;
   /** Required fail-closed port; there is no allow-all authorization default. */
   readonly authorization: PiVaultToolAuthorizationPort;
   /** Required fail-closed port; there is no unsanitized result default. */
@@ -168,8 +169,7 @@ implements PiVaultToolExecutionSecurityPort {
       || record.authorization.toolId !== input.toolId
       || record.policy.toolId !== input.toolId
       || !isDeepStrictEqual(record.policy, input.policy)
-      || canonicalJsonStringify(record.arguments)
-        !== canonicalJsonStringify(input.arguments)
+      || !isDeepStrictEqual(record.arguments, input.arguments)
     ) {
       throw new PiVaultToolAuthorizationError("authorization_failed");
     }
@@ -198,6 +198,13 @@ implements PiVaultToolExecutionSecurityPort {
     event: ToolCallEvent,
     signal: AbortSignal | undefined
   ): Promise<Readonly<{ block: true; reason: PiVaultToolBlockReason }> | void> {
+    if (this.options.isToolAllowed) {
+      try {
+        if (!this.options.isToolAllowed(event.toolName)) return block("tool_policy_blocked");
+      } catch {
+        return block("authorization_failed");
+      }
+    }
     if (!isPiVaultToolId(event.toolName)) {
       const additionalSecurity = this.additionalToolSecurities.find((security) =>
         additionalToolSecurityHandles(security, event.toolName));
@@ -361,8 +368,7 @@ function assertAuthorizationMatches(
     || authorization.toolVersion !== PI_VAULT_TOOL_VERSION
     || authorization.policyVersion !== PI_VAULT_TOOL_POLICY_VERSION
     || authorization.effectType !== policy.effectType
-    || canonicalJsonStringify(authorization.normalizedArguments)
-      !== canonicalJsonStringify(args)
+    || !isDeepStrictEqual(authorization.normalizedArguments, args)
     || (policy.effectType === "user_write")
       !== isWriteToolAuthorizationContext(authorization)
   ) {

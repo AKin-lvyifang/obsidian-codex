@@ -1,3 +1,4 @@
+import { normalizePiWorkspacePermission } from "./pi-workspace-access";
 import { isDeepStrictEqual } from "node:util";
 import { readdir, stat } from "node:fs/promises";
 import * as path from "node:path";
@@ -623,6 +624,7 @@ function normalizeProductRun(value: unknown): PiProductRunRecord {
     ],
     [
       "assistantEntryId",
+      "permission",
       "terminalState",
       "agentSettledAt",
       "settledAt",
@@ -747,6 +749,7 @@ function normalizeProductRun(value: unknown): PiProductRunRecord {
     ...(assistantEntryId ? { assistantEntryId } : {}),
     toolCallIds,
     memoryMode: requireMemoryMode(object.memoryMode),
+    ...(object.permission === undefined ? {} : { permission: normalizePiWorkspacePermission(object.permission) }),
     state,
     ...(terminalState ? { terminalState } : {}),
     activeLeafId,
@@ -1074,6 +1077,7 @@ function cloneProductRun(run: Readonly<PiProductRunRecord>): PiProductRunRecord 
     ...(run.assistantEntryId ? { assistantEntryId: run.assistantEntryId } : {}),
     toolCallIds: [...run.toolCallIds],
     memoryMode: run.memoryMode,
+    ...(run.permission === undefined ? {} : { permission: run.permission }),
     state: run.state,
     ...(run.terminalState ? { terminalState: run.terminalState } : {}),
     activeLeafId: run.activeLeafId,

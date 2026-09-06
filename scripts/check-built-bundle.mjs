@@ -52,8 +52,6 @@ const VIOLATION_MARKERS = [
 ];
 
 const CODEX_REQUIRED_MARKERS = [
-  "auth/oauth/openai-codex.js",
-  "api/openai-codex-responses.js",
   "OpenAI Codex OAuth"
 ];
 

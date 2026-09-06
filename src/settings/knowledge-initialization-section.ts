@@ -815,8 +815,8 @@ export class KnowledgeInitializationSection {
     panel.createDiv({
       cls: "echoink-knowledge-init-plan-copy",
       text: zh
-        ? "恢复只会补建缺少的文件夹，不会移动、删除或改写任何笔记，也不会调用模型。"
-        : "Recovery only creates missing folders. It never moves, deletes, or rewrites notes and does not call a model."
+        ? "补建缺少的文件夹和速记模板，补齐原生日记与模板设置；保留已有笔记、用户模板和自定义配置，无需模型。"
+        : "Create missing folders and the quick journal template, and complete Daily notes and Templates settings. Existing notes, templates, and custom settings are preserved. No model is needed."
     });
     const actions = panel.createDiv({ cls: "echoink-knowledge-init-actions" });
     const restore = actions.createEl("button", {
@@ -856,13 +856,14 @@ export class KnowledgeInitializationSection {
       if (generation !== this.loadGeneration) return;
       this.structure = result.structure;
       this.loaded = true;
+      new Notice(this.zh ? "日记与模板设置已补齐，已有自定义配置已保留。" : "Journal and template settings are ready. Existing custom settings were preserved.");
     } catch (error) {
       if (generation !== this.loadGeneration) return;
       this.recordActionError(
         error,
         this.zh
-          ? "文件夹体系没有恢复完成。已有笔记没有被移动或删除，请检查 Vault 是否可写后重试。"
-          : "The folder structure was not fully restored. Existing notes were not moved or deleted; check that the Vault is writable and try again."
+          ? "文件夹、日记或模板设置未补齐。请检查原生插件与 Vault 是否可用后重试。"
+          : "Folder, journal, or template setup is incomplete. Check the core plugins and Vault, then try again."
       );
       await this.reloadAfterActionError();
     } finally {
@@ -1367,6 +1368,13 @@ export class KnowledgeInitializationSection {
       attr: { type: "button" }
     });
     maintain.onclick = () => void this.startRecommended();
+    const journal = actions.createEl("button", {
+      cls: "echoink-knowledge-init-secondary",
+      text: zh ? "补齐日记与模板设置" : "Complete journal and template setup",
+      attr: { type: "button" }
+    });
+    journal.disabled = this.busy;
+    journal.onclick = () => void this.restoreStructure();
   }
 
   // ---------------------------------------------------------------- helpers

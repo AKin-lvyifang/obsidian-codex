@@ -1,3 +1,5 @@
+import { BUILTIN_SKILLS } from "../harness/resources/builtin-skills";
+import { shouldPreflightPersonalKnowledge } from "../harness/pi-native/pi-native-conversation-runtime";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
@@ -22,25 +24,29 @@ import {
   formatKnowledgeReferencesForPrompt
 } from "../knowledge-base/query";
 import { KnowledgeAgentIndex } from "../knowledge-base/knowledge-agent-index";
-import { createProductionPiKnowledgeRuntime } from "../plugin/pi-production-runtime-composition";
+import { createProductionPiKnowledgeRuntime, createPiKnowledgeInlineExtension } from "../plugin/pi-production-runtime-composition";
 
 export async function runPhase3KnowledgeRetrieverTests(): Promise<void> {
-  assert.match(
-    KNOWLEDGE_NO_EVIDENCE_RESOURCE,
-    /没有找到可引用的 Vault 依据[^]*不得结束 Agent 运行/u
-  );
-  assert.match(
-    KNOWLEDGE_NO_EVIDENCE_RESOURCE,
-    /未要求只依据 Vault[^]*使用模型通用能力回答/u
-  );
-  assert.match(
-    KNOWLEDGE_NO_EVIDENCE_RESOURCE,
-    /明确要求只依据 Vault[^]*克制说明无法从当前 Vault 得出结论/u
-  );
-  assert.match(
-    KNOWLEDGE_NO_EVIDENCE_RESOURCE,
-    /禁止 memory_write[^]*knowledge_maintain/u
-  );
+  assert.match(KNOWLEDGE_NO_EVIDENCE_RESOURCE, /初次检索状态/);
+  assert.match(KNOWLEDGE_NO_EVIDENCE_RESOURCE, /后续取得依据时[^]*不再声称没有找到/);
+  assert.match(KNOWLEDGE_NO_EVIDENCE_RESOURCE, /只读外部工具或模型知识补答/);
+  assert.match(KNOWLEDGE_NO_EVIDENCE_RESOURCE, /没有实际联网核验[^]*未联网核验/);
+  assert.doesNotMatch(KNOWLEDGE_NO_EVIDENCE_RESOURCE, /当前轮是 \/ask|禁止 memory_write|当前轮只允许/);
+  const journal = BUILTIN_SKILLS.find((item) => item.id === "daily-journal")!;
+  const handlers = new Map<string, (...args: any[]) => any>();
+  const extension = createPiKnowledgeInlineExtension({
+    vaultSecurity: { name: "fixture-security", factory: () => undefined },
+    currentTurn: () => null,
+    currentWorkspaceAccess: () => ({ permission: "workspace-write", mode: "agent", memoryMode: "normal" }),
+    currentSkillTurn: () => ({ skillId: "daily-journal", content: journal.body })
+  });
+  await extension.factory({ on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler) } as never);
+  const request = await handlers.get("before_agent_start")!({ systemPrompt: "EchoInk", prompt: "想把今天发生的事记下来。" });
+  assert.match(request.systemPrompt, /workspace-write/);
+  assert.match(request.message.content, /obsidian_context[^]*templateContent/);
+  assert.doesNotMatch(request.message.content, /当前轮是 \/ask|当前轮只允许/);
+  assert.equal(shouldPreflightPersonalKnowledge("想把今天发生的事记下来。", "daily-journal"), false);
+  assert.equal(shouldPreflightPersonalKnowledge("回看之前的笔记再补充", "daily-journal"), true);
   const vaultPath = await mkdtemp(path.join(tmpdir(), "echoink-phase3-retriever-"));
   const outsidePath = await mkdtemp(path.join(tmpdir(), "echoink-phase3-outside-"));
   try {
@@ -190,6 +196,10 @@ export async function runPhase3KnowledgeRetrieverTests(): Promise<void> {
       knowledgePreferences: {} as never,
       usage: {} as never
     });
+    assert.deepEqual(await productionRuntime.resolveMaintenanceScope!("RAW_SCOPE_TOKEN"), {
+      mode: "query", candidatePaths: ["raw/source.md"]
+    });
+    await assert.rejects(productionRuntime.resolveMaintenanceScope!("NO_MATCH_ZZXXQQ"), /不会回退到全局维护/u);
     const productionChat = await productionRuntime.retrieveChat!({
       vaultId: "vault-production-chat",
       conversationId: "conversation-production-chat",
@@ -207,6 +217,13 @@ export async function runPhase3KnowledgeRetrieverTests(): Promise<void> {
       item.recordedAt !== undefined
       && item.verificationStatus === "local_revision_verified"
     ), true);
+
+    const emptyChat = await productionRuntime.retrieveChat!({ vaultId: "vault-production-chat", conversationId: "conversation-production-chat", piSessionId: "pi-production-chat", productRunId: "empty-chat", question: "NO_MATCH_ZZXXQQ", explicitPaths: [], includeUnrefined: false });
+    assert.equal(emptyChat.status, "no_evidence");
+    assert.doesNotMatch(emptyChat.providerResourceText, /当前轮是 \/ask|禁止 memory_write|当前轮只允许/);
+    const emptyAsk = await productionRuntime.retrieveAsk({ vaultId: "vault-production-chat", conversationId: "conversation-production-chat", piSessionId: "pi-production-chat", productRunId: "empty-ask", question: "NO_MATCH_ZZXXQQ", explicitPaths: [], includeUnrefined: false });
+    assert.match(emptyAsk.providerResourceText, /只读外部工具或模型知识补答/);
+    assert.match(emptyAsk.providerResourceText, /未联网核验/);
 
     assert.deepEqual(
       await snapshotFixtureTree(vaultPath),

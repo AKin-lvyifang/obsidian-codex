@@ -1,3 +1,5 @@
+export { default as moment } from "moment";
+
 const testGlobal = globalThis as unknown as { window?: Window };
 if (!testGlobal.window) {
   testGlobal.window = globalThis as unknown as Window;

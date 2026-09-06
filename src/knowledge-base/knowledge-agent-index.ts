@@ -154,6 +154,8 @@ export class KnowledgeAgentIndex {
   readonly indexPath: string;
   private current: StoredKnowledgeAgentIndex | null = null;
   private refreshInFlight: Promise<KnowledgeAgentIndexRefreshResult> | null = null;
+  private invalidationVersion = 0;
+  private refreshedVersion = -1;
 
   constructor(input: Readonly<{
     vaultPath: string;
@@ -170,9 +172,38 @@ export class KnowledgeAgentIndex {
     this.indexPath = path.join(this.storageRootPath, KNOWLEDGE_AGENT_INDEX_FILE);
   }
 
+  /** Hosts call this for create/modify/rename/delete and committed local writes. */
+  invalidate(relativePath?: string): void {
+    if (relativePath !== undefined) {
+      const root = relativePath.replace(/\\/gu, "/").split("/", 1)[0]?.toLowerCase();
+      if (!KNOWLEDGE_ROOTS.includes(root as KnowledgeAgentKind)) return;
+    }
+    this.invalidationVersion += 1;
+  }
+
   async refresh(): Promise<KnowledgeAgentIndexRefreshResult> {
+    this.invalidate();
+    return await this.refreshInvalidated();
+  }
+
+  private async ensureFresh(): Promise<void> {
+    while (!this.current || this.refreshedVersion !== this.invalidationVersion) {
+      await this.refreshInvalidated();
+    }
+  }
+
+  private async refreshInvalidated(): Promise<KnowledgeAgentIndexRefreshResult> {
     if (this.refreshInFlight) return await this.refreshInFlight;
-    const running = this.performRefresh();
+    const running = (async () => {
+      let result: KnowledgeAgentIndexRefreshResult;
+      do {
+        const version = this.invalidationVersion;
+        result = await this.performRefresh();
+        // A file event received during the scan must survive its completion.
+        this.refreshedVersion = version;
+      } while (this.refreshedVersion !== this.invalidationVersion);
+      return result;
+    })();
     this.refreshInFlight = running;
     try {
       return await running;
@@ -184,7 +215,7 @@ export class KnowledgeAgentIndex {
   async search(
     request: Readonly<KnowledgeAgentSearchRequest>
   ): Promise<KnowledgeAgentSearchResult> {
-    await this.refresh();
+    await this.ensureFresh();
     const index = this.requireCurrent();
     const mode = request.mode ?? "search";
     if (mode === "recent" && request.query !== undefined) {
@@ -271,7 +302,7 @@ export class KnowledgeAgentIndex {
     vaultRelativePath: string;
     expectedContentRevision?: string;
   }>): Promise<KnowledgeAgentReadResult> {
-    await this.refresh();
+    await this.ensureFresh();
     const index = this.requireCurrent();
     const relativePath = normalizeKnowledgePath(input.vaultRelativePath);
     const entry = index.entries[relativePath];
@@ -303,6 +334,7 @@ export class KnowledgeAgentIndex {
     const bytes = await fsp.readFile(absolutePath);
     const currentRevision = contentRevision(bytes);
     if (currentRevision !== entry.contentRevision) {
+      this.invalidate(relativePath);
       throw new KnowledgeAgentIndexError(
         "source_changed",
         "Knowledge entry changed while it was being read."
@@ -318,7 +350,7 @@ export class KnowledgeAgentIndex {
   async readReliableKnowledgeForRaw(
     vaultRelativePath: string
   ): Promise<Readonly<KnowledgeAgentReliableRawKnowledge> | null> {
-    await this.refresh();
+    await this.ensureFresh();
     const index = this.requireCurrent();
     const rawPath = normalizeRawSourcePath(vaultRelativePath);
     const raw = index.entries[rawPath];
@@ -345,6 +377,15 @@ export class KnowledgeAgentIndex {
         content: current.content
       });
     }));
+    if (!await pathExists(path.join(this.vaultPath, rawPath))) {
+      this.invalidate(rawPath);
+      return null;
+    }
+    const rawFile = await resolveIndexedFile(this.vaultPath, rawPath);
+    if (await streamedContentRevision(rawFile) !== raw.contentRevision) {
+      this.invalidate(rawPath);
+      return null;
+    }
     return Object.freeze({
       rawPath,
       rawContentRevision: raw.contentRevision,

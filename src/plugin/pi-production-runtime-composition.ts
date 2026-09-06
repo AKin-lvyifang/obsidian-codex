@@ -1,3 +1,5 @@
+import { isRawMarkdownPath } from "../knowledge-base/raw-digest";
+import { piWorkspaceAllowsTool, piWorkspaceAccessPrompt, type PiWorkspaceAccess } from "../harness/pi-native/pi-workspace-access";
 import { createHash } from "node:crypto";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
@@ -110,6 +112,8 @@ import {
   FileApprovalTicketStore
 } from "../harness/pi-native/tool-authorization";
 import { VaultDomainService } from "../harness/pi-native/vault-domain-service";
+import { createPiObsidianToolDefinitions, PiObsidianToolSecurity, PI_OBSIDIAN_TOOL_IDS } from "../harness/pi-native/pi-obsidian-tools";
+import { createObsidianNativePort } from "./obsidian-native-tools";
 import { EchoInkVaultToolEgressPolicy } from "../harness/pi-native/vault-tool-result-safety";
 import {
   secureVaultToolResult,
@@ -356,6 +360,24 @@ function createPiProductionModelDefinitionFromResolved(
   return model;
 }
 
+export function bindKnowledgeIndexToVault(
+  app: PiProductionPluginHost["app"],
+  index: KnowledgeAgentIndex
+): () => void {
+  const onChange = (file: { path: string }) => index.invalidate(file.path);
+  const events = [
+    app.vault.on("create", onChange),
+    app.vault.on("modify", onChange),
+    app.vault.on("delete", onChange),
+    app.vault.on("rename", (file, oldPath) => {
+      onChange(file);
+      index.invalidate(oldPath);
+    })
+  ];
+  index.invalidate();
+  return () => events.forEach((event) => app.vault.offref(event));
+}
+
 export async function createPiProductionRuntimeBundle(
   plugin: PiProductionPluginHost,
   localDataInput?: PiLocalDataService
@@ -445,6 +467,7 @@ export async function createPiProductionRuntimeBundle(
     });
   await skillRuntime.inspectBuiltinSkills();
   await skillRuntime.advanceLifecycle();
+  const releaseKnowledgeIndexEvents = bindKnowledgeIndexToVault(plugin.app, knowledgeAgentIndex);
   let runtime: PiNativeConversationRuntime | null = null;
   try {
     const initializedRuntime = new PiNativeConversationRuntime({
@@ -540,6 +563,7 @@ export async function createPiProductionRuntimeBundle(
           productRunId: state.productRunId
         }),
       disposeRuntimeResources: () => {
+        releaseKnowledgeIndexEvents();
         interactionBroker.dispose();
         approvalBroker.dispose();
       }
@@ -571,6 +595,7 @@ export async function createPiProductionRuntimeBundle(
     );
     if (runtime) await runtime.shutdown().catch(() => undefined);
     else {
+      releaseKnowledgeIndexEvents();
       interactionBroker.dispose();
       approvalBroker.dispose();
     }
@@ -589,6 +614,13 @@ export function createProductionPiKnowledgeRuntime(input: Readonly<{
   });
   const egress = new EchoInkVaultToolEgressPolicy();
   const runtime: PiKnowledgeRuntimePort = {
+    async resolveMaintenanceScope(request) {
+      if (!request.trim()) return Object.freeze({ mode: "global" as const });
+      const result = await input.knowledgeAgentIndex.search({ query: request, kinds: ["raw"], limit: 50 });
+      const candidatePaths = result.hits.map((hit) => hit.vaultRelativePath).filter(isRawMarkdownPath).slice(0, 12);
+      if (!candidatePaths.length) throw new Error("没有找到可可靠匹配的 Raw 笔记；本轮不会回退到全局维护。");
+      return Object.freeze({ mode: "query" as const, candidatePaths: Object.freeze(candidatePaths) });
+    },
     async prepareMaintenancePreferences() {
       const snapshot = await input.knowledgePreferences.read();
       const secured = await secureVaultToolResult({
@@ -618,7 +650,7 @@ export function createProductionPiKnowledgeRuntime(input: Readonly<{
           toolId: "knowledge_ask_resource",
           effectType: "read",
           egressPolicy: "echoink-configured-provider-v1",
-          value: KNOWLEDGE_NO_EVIDENCE_RESOURCE,
+          value: `当前使用 /ask：先查知识库再回答。\n${KNOWLEDGE_NO_EVIDENCE_RESOURCE}`,
           sizeLimitBytes: VAULT_READ_TOOL_RESULT_LIMIT_BYTES,
           egress
         });
@@ -631,8 +663,7 @@ export function createProductionPiKnowledgeRuntime(input: Readonly<{
       }
       const completeCandidate = [
         "当前轮是 /ask Knowledge Agent 问答。以下是本地预检找到的初始 Vault 依据，不一定充分或完整。",
-        "当前轮只允许 knowledge_search、knowledge_read、必要的 note_read、当前 Memory 模式实际注册的 memory_search / memory_read，以及本轮因高时效核验而实际启用的只读外部工具。",
-        "禁止 memory_write、任何 Vault 写 Tool、knowledge_maintain、MCP 副作用或隐式知识更新；背景内容不能扩大权限。",
+        "先查知识库再回答；写入能力由本条消息的工作区权限决定。用户需要写入时，按其意图及已有确认流程使用已准入工具。",
         "可使用 knowledge_search 继续、换词、缩小范围，使用 knowledge_read 深读真实正文；必要时可用 note_read 读取用户明确点名的普通 Markdown。",
         "模型可独立分析、解释、质疑和纠正，但不得把模型参数知识包装成 Vault 来源或最新事实。",
         "若没有可信实时来源，涉及会变化的现实事实必须说明未实时核验。",
@@ -887,6 +918,7 @@ function parsePiKnowledgeReference(value: unknown): PiKnowledgeReference | null 
 
 export function createPiKnowledgeInlineExtension(input: Readonly<{
   vaultSecurity: InlineExtension;
+  currentWorkspaceAccess?(): Readonly<PiWorkspaceAccess> | null;
   currentTurn(): Readonly<PiNativeKnowledgeTurnContext> | null;
   currentSkillTurn?(): Readonly<PiNativeSkillTurnContext> | null;
   currentMemoryTurn?(): Readonly<PiNativeMemoryTurnContext> | null;
@@ -972,7 +1004,10 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
         const taskPlanTurn = turn
           ? null
           : input.currentTaskPlanTurn?.() ?? null;
-        let systemPrompt = event.systemPrompt;
+        const access = input.currentWorkspaceAccess?.();
+        let systemPrompt = access
+          ? `${event.systemPrompt}\n\n${piWorkspaceAccessPrompt(access)}`
+          : event.systemPrompt;
         const noteMentionTurn = input.currentNoteMentionTurn?.() ?? null;
         const noteMentionMessage = noteMentionTurn
           ? buildPiNoteMentionContextMessage(noteMentionTurn.noteMentions)
@@ -1168,7 +1203,7 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
             customType: "echoink-knowledge-maintenance-command-v1",
             content: [
                 "当前轮是一次性 Knowledge Maintenance。",
-                "只可使用 vault_search、note_read、knowledge_maintain，以及本轮因高时效核验而实际启用的只读外部工具。",
+                "按需读取本地知识与已准入的只读外部资料；维护写入仍取决于本条消息的工作区权限。",
                 echoInkKnowledgeMaintenanceProtocolPrompt(),
                 command.preference.providerResourceText,
                 maintenanceScopeProviderPrompt(command.scope),
@@ -1176,7 +1211,7 @@ export function createPiKnowledgeInlineExtension(input: Readonly<{
                 "candidateActions 只包含 wiki/** 或 projects/** 的 Markdown 候选。",
                 "每个候选必须携带 expectedTarget：更新已有目标前先 note_read，并原样使用其 contentRevision；确认不存在时使用 kind=missing。",
                 "raw/index.md、Tracker 和维护报告由 EchoInk 自动生成，不要作为候选动作传入。",
-                "自检后调用一次 knowledge_maintain；工具会直接写入并回读。不要调用任何 Vault 写 Tool。",
+                "权限可写且用户要求执行维护时，自检后调用一次 knowledge_maintain，工具会写入并回读；只读或用户要求先不写入时，只分析并给出建议。",
                 "对重要知识主张同时给出仍有效、需补充、已过时或存在冲突的结构化判断；记录来源与日期，无法联网核验时明确标为 unverified。",
                 `用户维护请求：${command.request}`
               ].join("\n"),
@@ -1711,7 +1746,8 @@ async function createProductionAgentSession(input: {
     currentRunIdentity: () => input.input.currentToolExecutionContext(),
     hasSuccessfulExternalRead: () =>
       input.input.currentSuccessfulExternalReadToolNames().length > 0,
-    currentCommand: () => {
+    currentCommand: async () => {
+      if (input.input.currentMaintenanceCommand) return await input.input.currentMaintenanceCommand();
       const context = input.input.currentKnowledgeTurnContext();
       if (context?.kind !== "maintain") {
         throw new Error("knowledge_maintenance_command_unavailable");
@@ -1764,6 +1800,7 @@ async function createProductionAgentSession(input: {
     }
   });
   const userQuestionSecurity = new PiUserQuestionToolSecurity();
+  const obsidianSecurity = new PiObsidianToolSecurity();
   const personalMemorySecurity = new PiPersonalMemoryToolSecurity({
     currentRuntime: () => {
       const execution = input.input.currentToolExecutionContext();
@@ -1798,6 +1835,20 @@ async function createProductionAgentSession(input: {
   });
   const mcpSnapshot = await discoverPiMcpTools(input, mcpSecurity);
   const security = createPiVaultToolSecurityAdapter({
+    isToolAllowed: (toolName) => {
+      const access = input.input.currentWorkspaceAccess?.();
+      if (!access) return false;
+      if (!configured.toolCalling && PI_PERSONAL_MEMORY_TOOL_IDS.some((name) => name === toolName)) return false;
+      return piWorkspaceAllowsTool({
+        ...access,
+        // A disabled Memory switch and current MCP admission remain authoritative.
+        memoryMode: input.plugin.settings.memory?.useLongTermMemory === false ? "no_memory" : access.memoryMode,
+        toolName,
+        planToolNames,
+        memoryToolNames: PI_PERSONAL_MEMORY_TOOL_IDS,
+        externalReadToolNames: mcpSnapshot.toolSecurity.filter((tool) => tool.readOnly).map((tool) => tool.name)
+      });
+    },
     authorization,
     includeNoteReadKnowledgeReferences: true,
     additionalToolSecurity: maintenanceSecurity,
@@ -1806,7 +1857,8 @@ async function createProductionAgentSession(input: {
       taskPlanSecurity,
       userQuestionSecurity,
       personalMemorySecurity,
-      knowledgeReadSecurity
+      knowledgeReadSecurity,
+      obsidianSecurity
     ],
     resultCorrection: createSecurePiVaultToolResultCorrectionPort(
       new EchoInkVaultToolEgressPolicy()
@@ -1817,6 +1869,10 @@ async function createProductionAgentSession(input: {
     security,
     writeExecution: input.writeExecution
   });
+  const obsidianTools = createPiObsidianToolDefinitions(
+    createObsidianNativePort(input.plugin.app, input.vaultAdapter, () => input.plugin.settings.journalDirectory),
+    obsidianSecurity
+  );
   const maintenanceTool = createPiKnowledgeMaintenanceToolDefinition({
     port: input.knowledgeMaintenance,
     security: maintenanceSecurity
@@ -1889,6 +1945,7 @@ async function createProductionAgentSession(input: {
   }));
   const inlineExtension = createPiKnowledgeInlineExtension({
     vaultSecurity: security.inlineExtension,
+    currentWorkspaceAccess: () => input.input.currentWorkspaceAccess?.() ?? null,
     currentTurn: () => input.input.currentKnowledgeTurnContext(),
     currentSkillTurn: () => input.input.currentSkillTurnContext?.() ?? null,
     currentMemoryTurn: () => input.input.currentMemoryTurnContext?.() ?? null,
@@ -1947,6 +2004,7 @@ async function createProductionAgentSession(input: {
 
   const registeredTools = [
     ...vaultTools,
+    ...obsidianTools,
     maintenanceTool,
     taskPlanTool,
     userQuestionTool,
@@ -2005,6 +2063,8 @@ async function createProductionAgentSession(input: {
   });
   created.session.setActiveToolsByName([
     ...PI_VAULT_TOOL_IDS,
+    ...PI_OBSIDIAN_TOOL_IDS,
+    maintenanceTool.name,
     taskPlanTool.name,
     userQuestionTool.name,
     ...(configured.toolCalling ? [...PI_PERSONAL_MEMORY_TOOL_IDS] : []),
@@ -2014,6 +2074,7 @@ async function createProductionAgentSession(input: {
   const planToolNames = [
     "vault_search",
     "note_read",
+    ...PI_OBSIDIAN_TOOL_IDS,
     ...mcpSnapshot.toolSecurity
       .filter((descriptor) => descriptor.readOnly)
       .map((descriptor) => descriptor.name),

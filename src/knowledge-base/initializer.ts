@@ -174,6 +174,7 @@ export interface KnowledgeInitializationHost {
   pathExists(relativePath: string): Promise<boolean>;
   pathKind(relativePath: string): Promise<KnowledgeBasePathKind>;
   createFolder(relativePath: string): Promise<void>;
+  configureNativeJournal?(): Promise<void>;
   createText(relativePath: string, content: string): Promise<void>;
   createBinary(relativePath: string, content: ArrayBuffer): Promise<void>;
   updateText(relativePath: string, expectedContentHash: string, content: string): Promise<void>;
@@ -333,6 +334,7 @@ export class KnowledgeBaseInitializer {
       }
       emit(index + 1, root);
     }
+    await this.host.configureNativeJournal?.();
     return Object.freeze({
       structure: await this.inspectStructure(),
       createdRoots: Object.freeze(createdRoots)
@@ -630,6 +632,8 @@ export class KnowledgeBaseInitializer {
         await this.persistJob(job);
       }
     }
+    assertNotCancelled(signal);
+    await this.host.configureNativeJournal?.();
   }
 
   private async moveNotes(job: KnowledgeInitializationJob, signal: AbortSignal): Promise<void> {

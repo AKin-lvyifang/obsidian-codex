@@ -15,7 +15,7 @@ import type {
 import type {
   EchoInkReasoningSummarySnapshot
 } from "../../types/reasoning-summary";
-import type { ReasoningEffort } from "../../types/app-server";
+import type { PermissionMode, ReasoningEffort } from "../../types/app-server";
 import type {
   EchoInkTurnInteraction,
   EchoInkTurnInteractionRecord
@@ -134,6 +134,8 @@ export interface PiProductRunRecord {
   assistantEntryId?: string;
   toolCallIds: string[];
   memoryMode: PiConversationMemoryMode;
+  /** Absent only in historical runs; new runs persist the submitted permission. */
+  permission?: PermissionMode;
   state: PiProductRunState;
   terminalState?: PiProductRunTerminalState;
   activeLeafId: string | null;
@@ -239,6 +241,7 @@ export interface PiKnowledgeUsageEvent {
 
 /** Read-only Phase 3 domain seam used by the Pi-native runtime. */
 export interface PiKnowledgeRuntimePort {
+  resolveMaintenanceScope?(request: string): Promise<PiKnowledgeMaintenanceScope>;
   prepareMaintenancePreferences?(): Promise<Readonly<{
     profileVersion: string;
     state: "default" | "custom";
@@ -355,6 +358,8 @@ export interface PiChatSubmitRequest {
   noteMentions?: readonly Readonly<PiChatNoteMention>[];
   /** The composer mode captured for this exact queued turn. */
   mode?: PiChatMode;
+  /** Workspace permission frozen when this message was sent, including queued turns. */
+  permission?: PermissionMode;
   /** Saved Provider configuration identity captured with this exact turn. */
   providerSettingsId?: string;
   /** Runtime Provider identity captured with this exact Composer turn. */

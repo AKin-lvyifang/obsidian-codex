@@ -176,9 +176,12 @@ Promise<void> {
     ];
     settings.activeSessionId = archived.conversationId;
     let persisted = 0;
+    const vaultEvents = new Set<string>();
     const plugin = {
       app: {
         vault: {
+          on: (name: string) => { vaultEvents.add(name); return name; },
+          offref: (name: string) => vaultEvents.delete(name),
           getMarkdownFiles: () => [],
           getFileByPath: () => null,
           getAbstractFileByPath: () => null
@@ -225,6 +228,7 @@ Promise<void> {
 
     const bundle = await createPiProductionRuntimeBundle(plugin, localData);
     try {
+      assert.equal(vaultEvents.size, 4);
       assert.equal(
         sessionOpens,
         0,
@@ -250,6 +254,7 @@ Promise<void> {
       assert.equal(persisted, 1);
     } finally {
       await bundle.runtime.shutdown();
+      assert.equal(vaultEvents.size, 0, "runtime shutdown releases Knowledge file event listeners");
     }
   } finally {
     await rm(root, { recursive: true, force: true });

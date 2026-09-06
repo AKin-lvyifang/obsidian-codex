@@ -501,8 +501,7 @@ export class VaultDomainService {
     const target = await this.resolver.resolve({
       vaultId: input.vaultId,
       relativePath: input.relativePath,
-      allowMissingParentDirectories:
-        this.options.allowMissingParentDirectories === true,
+      allowMissingParentDirectories: true,
       mustExist: false,
       expectedKind: "file"
     });
