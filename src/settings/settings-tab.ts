@@ -1,5 +1,6 @@
 import { Notice, PluginSettingTab, Setting, TFile, normalizePath, setIcon, setTooltip } from "obsidian";
 import type CodexForObsidianPlugin from "../main";
+import { DeveloperModePanel } from "./developer-mode-panel";
 import type { PiConversationCatalogEntry } from "../harness/pi-native/contracts";
 import {
   type PersonalMemoryKind,
@@ -227,6 +228,7 @@ export class CodexSettingTab extends PluginSettingTab {
   private onboardingCoachmarkHandle: EchoInkOnboardingCoachmarkHandle | null = null;
   private onboardingRestoreFocusEl: HTMLElement | null = null;
   private onboardingRefreshGeneration = 0;
+  private developerPanel: DeveloperModePanel | null = null;
 
   constructor(private readonly plugin: CodexForObsidianPlugin) {
     super(plugin.app, plugin);
@@ -259,6 +261,8 @@ export class CodexSettingTab extends PluginSettingTab {
   }
 
   hide(): void {
+    this.developerPanel?.dispose();
+    this.developerPanel = null;
     const shouldConfirmKnowledgePreference =
       this.settingsDetail === "knowledge-preferences"
       && knowledgeMaintenancePreferenceIsDirty(
@@ -322,6 +326,8 @@ export class CodexSettingTab extends PluginSettingTab {
   }
 
   private renderSettingsContent(): void {
+    this.developerPanel?.dispose();
+    this.developerPanel = null;
     this.ensureSettingsShell();
     this.captureTabFocusIntent();
     this.captureSettingsFocusIntent();
@@ -757,6 +763,42 @@ export class CodexSettingTab extends PluginSettingTab {
       }));
 
     this.renderFilePersonalizationSettings(page);
+    this.renderDeveloperModeSettings(page);
+    this.renderAboutSection(page);
+  }
+
+  private renderDeveloperModeSettings(page: HTMLElement): void {
+    const access = this.plugin.developerMode;
+    if (!access?.revealed) return;
+    const language = this.plugin.settings.settingsLanguage;
+    const zh = language !== "en";
+    const section = createSettingsSection(page, {
+      title: zh ? "开发者模式" : "Developer mode",
+      surface: "group"
+    });
+    section.addClass("echoink-developer-settings");
+    const group = createSettingsGroup(section);
+    const label = zh ? "开发者模式" : "Developer mode";
+    applySettingsRow(new Setting(group).setName(label).setDesc(zh
+      ? "显示记忆与做梦的测试操作。仅在当前插件会话中生效。"
+      : "Show memory and Dream testing actions for this plugin session.")
+      .addToggle((toggle) => {
+        labelSettingsToggle(toggle, label);
+        toggle.toggleEl.setAttribute("data-developer-toggle", "true");
+        toggle.setValue(access.enabled).onChange((enabled) => {
+          access.setEnabled(enabled);
+          this.renderSettingsContent();
+        });
+      }));
+    if (!access.enabled) return;
+    const panelEl = group.createDiv({ cls: "echoink-developer-panel" });
+    const panel = new DeveloperModePanel(panelEl, this.plugin.getDeveloperModeService(), zh,
+      () => this.settingsVisible && this.developerPanel === panel
+        && this.plugin.settings.settingsLanguage === language
+        && visibleSettingsTab(this.plugin.settings.settingsTab) === "general",
+      () => { if (access.enabled) this.scheduleDisplay(); });
+    this.developerPanel = panel;
+    void panel.render();
   }
 
   private renderFilePersonalizationSettings(page: HTMLElement): void {
@@ -836,7 +878,6 @@ export class CodexSettingTab extends PluginSettingTab {
         }));
     }
 
-    this.renderAboutSection(page);
   }
 
   private renderAboutSection(page: HTMLElement): void {
@@ -859,7 +900,9 @@ export class CodexSettingTab extends PluginSettingTab {
     const nameArea = header.createDiv({ cls: "echoink-about-name-area" });
     nameArea.createDiv({ cls: "echoink-about-name", text: "Codex EchoInk" });
     const versionEl = nameArea.createDiv({ cls: "echoink-about-version", text: `v${version}` });
-    versionEl.addEventListener("click", (event) => this.plugin.handleDeveloperVersionClick(event.altKey));
+    versionEl.addEventListener("click", (event) => {
+      if (this.plugin.developerMode.click(event.altKey)) this.renderSettingsContent();
+    });
 
     // Description
     card.createDiv({

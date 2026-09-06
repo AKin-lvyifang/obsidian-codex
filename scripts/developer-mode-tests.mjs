@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import esbuild from "esbuild";
@@ -15,6 +15,19 @@ try {
     external: ["@earendil-works/pi-agent-core", "@earendil-works/pi-ai", "@earendil-works/pi-coding-agent", "yaml"],
     plugins: [{ name: "obsidian-fixture", setup(build) {
       build.onResolve({ filter: /^obsidian$/ }, () => ({ path: path.join(root, "src/tests/obsidian-shim.ts") }));
+      build.onResolve({ filter: /^echoink:test-settings-dom$/ }, () => ({ path: "settings-dom", namespace: "fixture" }));
+      build.onLoad({ filter: /.*/, namespace: "fixture" }, async () => {
+        // Reuse the existing DOM fixture without importing its unrelated test runner.
+        const source = await readFile(path.join(root, "src/tests/provider-settings-behavior.ts"), "utf8");
+        const start = source.indexOf("function installProviderModalDomFixture(): void {");
+        const end = source.indexOf("function withSettingsTabDefaults<", start);
+        if (start < 0 || end < 0) throw new Error("Settings DOM fixture boundaries were not found");
+        return { loader: "ts", contents: [
+          "let providerModalTestDocument: ProviderModalTestDocument;",
+          source.slice(start, end),
+          "export { installProviderModalDomFixture, ProviderModalTestElement };"
+        ].join("\n") };
+      });
     } }], outfile: output, logLevel: "silent"
   });
   const result = spawnSync(process.execPath, [output], {

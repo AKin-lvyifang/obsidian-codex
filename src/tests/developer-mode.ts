@@ -2,12 +2,15 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { App } from "obsidian";
+import { installProviderModalDomFixture, ProviderModalTestElement } from "echoink:test-settings-dom";
 import Plugin from "../main";
+import { CodexSettingTab } from "../settings/settings-tab";
+import { DEFAULT_SETTINGS } from "../settings/settings";
 import { PiLocalDataService } from "../plugin/pi-local-data-service";
 import { ProductActivityGate } from "../plugin/api-provider-activation-service";
-import { LocalDeveloperAccess } from "../plugin/developer-mode/access";
+import { DeveloperModeAccess } from "../plugin/developer-mode/access";
 import { DeveloperModeService } from "../plugin/developer-mode/service";
 import { MemoryDeveloperBackups } from "../plugin/developer-mode/memory-backups";
 import { seedDeveloperMemories } from "../plugin/developer-mode/seed";
@@ -21,59 +24,240 @@ import { createSecondaryRecord, serializeSecondaryRecord } from "../harness/memo
 import { applyDreamProfileUpdate, emptyUserProfileState } from "../harness/memory/user-profile-state";
 import { renderUserMarkdown } from "../harness/memory/cognitive-projection";
 
-function unlock(access: LocalDeveloperAccess): void {
+function unlock(access: DeveloperModeAccess): void {
   for (let i = 0; i < 6; i++) assert.equal(access.click(true), false);
   assert.equal(access.click(true), true);
+  access.setEnabled(true);
 }
 
-async function accessAndScript(): Promise<void> {
-  let marker = "";
-  let now = 100;
-  let desktop = true;
-  const access = new LocalDeveloperAccess({ isDesktop: () => desktop, readMarker: () => marker, now: () => now });
-  for (const invalid of ["", "{", "null", "[]", '{"enabled":"true"}', '{"enabled":false}']) {
-    marker = invalid;
-    for (let i = 0; i < 8; i++) assert.equal(access.click(true), false);
-    assert.throws(() => access.require(), /locked/u);
-  }
-  marker = '{"enabled":true}';
-  desktop = false;
-  assert.equal(access.click(true), false);
-  desktop = true;
-  for (let i = 0; i < 6; i++) access.click(true);
-  now += 5_001;
-  assert.equal(access.click(true), false);
-  access.click(false);
-  unlock(access);
-  access.require();
-  marker = '{"enabled":false}';
-  assert.throws(() => access.require(), /locked/u);
-  marker = '{"enabled":true}';
-  assert.throws(() => access.require(), /locked/u);
-  const reloaded = new LocalDeveloperAccess({ isDesktop: () => true, readMarker: () => marker });
-  assert.throws(() => reloaded.require(), /locked/u);
-  unlock(reloaded);
-  reloaded.lock();
-  assert.throws(() => reloaded.require(), /locked/u);
-  const home = await fs.mkdtemp(path.join(tmpdir(), "echoink-developer-home-"));
-  try {
-    for (const action of ["enable", "disable"]) {
-      const run = spawnSync(process.execPath, ["--input-type=module", "-e", [
-        'import os from "node:os";',
-        'import { syncBuiltinESMExports } from "node:module";',
-        'os.homedir = () => process.env.ECHOINK_DEVELOPER_TEST_HOME;',
-        'syncBuiltinESMExports();',
-        'process.argv = [process.execPath, "scripts/echoink-developer-mode.mjs", process.argv[1]];',
-        'await import("./scripts/echoink-developer-mode.mjs");'
-      ].join("\n"), action], {
-        env: { ...process.env, ECHOINK_DEVELOPER_TEST_HOME: home }, encoding: "utf8"
-      });
-      assert.equal(run.status, 0, run.stderr);
-      assert.equal(JSON.parse(await fs.readFile(path.join(home, ".echoink/developer-mode.json"), "utf8")).enabled, action === "enable");
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+async function settingsDomLifecycle(): Promise<void> {
+  installProviderModalDomFixture();
+  const frames = new Map<number, FrameRequestCallback>();
+  let frameId = 0;
+  window.requestAnimationFrame = (callback) => { frames.set(++frameId, callback); return frameId; };
+  window.cancelAnimationFrame = (id) => { frames.delete(id); };
+  Object.assign(document.defaultView!, {
+    requestAnimationFrame: window.requestAnimationFrame,
+    cancelAnimationFrame: window.cancelAnimationFrame
+  });
+  const flush = async () => {
+    for (let pass = 0; pass < 20; pass++) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      if (!frames.size) return;
+      const pending = [...frames.values()];
+      frames.clear();
+      for (const callback of pending) callback(performance.now());
     }
-    assert.deepEqual(await fs.readdir(home), [".echoink"]);
-  } finally { await fs.rm(home, { recursive: true, force: true }); }
-  console.log("PASS local marker, revoke, desktop, gesture, reload, script isolation");
+    assert.fail("Settings rendering did not settle");
+  };
+  let now = 100;
+  const access = new DeveloperModeAccess(() => now);
+  let statusWait: Promise<void> | null = null;
+  let actionWait: Promise<void> | null = null;
+  let backup: string | null = null;
+  let reads = 0;
+  let saves = 0;
+  const actions: string[] = [];
+  const system = {
+    repository: { readUserControlState: async () => {
+      reads++;
+      const pending = statusWait;
+      statusWait = null;
+      await pending;
+      return { records: Array.from({ length: 7 }, () => ({ status: "current" })) };
+    } },
+    dreamStateStore: { read: async () => ({ pendingMemoryIds: ["sample"], lastRunAt: 0, lastSuccessAt: 0 }) },
+    scheduler: { lastResult: null }, engine: { isRunning: false },
+    forceDreamRun: async () => {
+      actions.push("dream");
+      return { processedMemoryIds: [], failedMemoryIds: [], factsCreated: 0 };
+    }
+  };
+  const service = new DeveloperModeService(access, {
+    getSystem: async () => system as never, vaultName: () => "Disposable DOM fixture",
+    foregroundBusy: () => false, writable: () => true, withLocalActivity: (action) => action(),
+    latestBackup: async () => backup,
+    changeMemory: async (action) => {
+      actions.push(action);
+      await actionWait;
+      backup = "fixture/developer-backups/reset.json";
+      return { backup, preservedLearningConflicts: 0 } as never;
+    }
+  });
+  const settings = structuredClone(DEFAULT_SETTINGS);
+  settings.settingsTab = "general";
+  settings.settingsLanguage = "zh-CN";
+  const plugin = {
+    app: new App(), manifest: { id: "codex-echoink", version: "2.1.0" }, settings,
+    developerMode: access, getDeveloperModeService: () => service,
+    saveSettings: async () => { saves++; }, refreshLanguageSurfaces: async () => {},
+    getCodexView: () => null, isEchoInkOnboardingRequested: () => false
+  };
+  const tab = new CodexSettingTab(plugin as never);
+  // Unrelated profile data is unavailable; About and the developer switch must still render.
+  (tab as any).personalMemoryError = "fixture";
+  const root = tab.containerEl as unknown as ProviderModalTestElement;
+  const find = (selector: string, parent = root): ProviderModalTestElement => {
+    const element = parent.querySelector(selector);
+    assert.ok(element, `Missing settings element: ${selector}`);
+    return element;
+  };
+  const buttons = (parent = root) => parent.querySelectorAll("[data-developer-action]");
+  const action = (name: string) => find(`[data-developer-action="${name}"]`);
+  const panel = () => find(".echoink-developer-panel");
+  const toggle = () => find("input", find("[data-developer-toggle]"));
+  const setEnabled = (enabled: boolean) => { toggle().checked = enabled; toggle().fireEvent("change"); };
+  const clickVersion = (altKey: boolean) => find(".echoink-about-version").fireEvent("click", { altKey });
+  const confirm = () => {
+    const button = panel().querySelectorAll("button").find((item) => /^(确认并执行|Confirm and continue)$/u.test(item.textContent));
+    assert.ok(button, "Reset/restore must show a confirmation button");
+    return button;
+  };
+  const navigate = async (name: string) => {
+    const button = find(`[data-settings-tab="${name}"]`);
+    button.fireEvent("pointerdown");
+    button.fireEvent("click");
+    await flush();
+  };
+  const changeLanguage = async (language: string) => {
+    const select = find("select");
+    select.value = language;
+    select.fireEvent("change");
+    await flush();
+  };
+  try {
+    tab.display();
+    await flush();
+    assert.equal(root.querySelector("[data-developer-toggle]"), null);
+    access.setEnabled(true);
+    assert.equal(access.enabled, false);
+    for (let i = 0; i < 7; i++) clickVersion(false);
+    for (let i = 0; i < 6; i++) clickVersion(true);
+    assert.equal(access.revealed, false);
+    now += 5_001;
+    clickVersion(true);
+    assert.equal(root.querySelector("[data-developer-toggle]"), null, "Expired clicks must not reveal the switch");
+    clickVersion(false);
+    for (let i = 0; i < 6; i++) clickVersion(true);
+    now += 5_000;
+    clickVersion(true);
+    assert.equal(access.revealed, true);
+    assert.equal(toggle().checked, false);
+    assert.equal(buttons().length, 0);
+    assert.equal(reads, 0);
+    assert.deepEqual(actions, []);
+    await assert.rejects(service.execute("dream"), /locked/u);
+    setEnabled(true);
+    await flush();
+    assert.deepEqual(buttons().map((item) => item.dataset.developerAction), ["seed", "dream", "reset", "restore"]);
+    assert.match(panel().textContent, /记忆 7 条 · Dream 待处理 1 条/u);
+    assert.equal(action("restore").disabled, true);
+    const staleSeed = action("seed");
+    action("reset").fireEvent("click");
+    assert.deepEqual(actions, [], "The first reset click only opens confirmation");
+    const staleConfirm = confirm();
+    setEnabled(false);
+    staleSeed.fireEvent("click");
+    staleConfirm.fireEvent("click");
+    await flush();
+    assert.equal(buttons().length, 0);
+    assert.equal(access.revealed, true);
+    assert.deepEqual(actions, []);
+    await assert.rejects(service.execute("reset"), /locked/u);
+    assert.equal(saves, 0, "The gesture and developer switch must not persist settings");
+    setEnabled(true);
+    await flush();
+    action("dream").fireEvent("click");
+    await flush();
+    assert.deepEqual(actions, ["dream"]);
+    assert.match(panel().textContent, /Dream 已处理/u);
+
+    // Invalidate a real pending status read through each settings lifecycle transition.
+    for (const transition of ["disable", "navigate", "language", "hide"] as const) {
+      const wait = deferred();
+      statusWait = wait.promise;
+      tab.display();
+      await flush();
+      const oldPanel = panel();
+      assert.equal(buttons(oldPanel).length, 0);
+      if (transition === "disable") setEnabled(false);
+      if (transition === "navigate") await navigate("review");
+      if (transition === "language") await changeLanguage("en");
+      if (transition === "hide") tab.hide();
+      wait.resolve();
+      await flush();
+      assert.equal(oldPanel.textContent, "", `${transition}: delayed status must not revive the old panel`);
+      if (transition !== "language") assert.equal(buttons().length, 0);
+      if (transition === "disable") setEnabled(true);
+      if (transition === "navigate") await navigate("general");
+      if (transition === "language") {
+        assert.match(panel().textContent, /7 memories · 1 pending for Dream/u);
+        assert.equal(action("reset").textContent, "Back up and reset memory and Dream");
+        assert.doesNotMatch(find(".echoink-developer-settings").textContent, /[\u4e00-\u9fff]/u);
+        await changeLanguage("zh-CN");
+      }
+      if (transition === "hide") tab.display();
+      await flush();
+      assert.equal(toggle().checked, true);
+      assert.equal(buttons().length, 4);
+    }
+
+    // Transactions already handed to the host finish normally after leaving the UI.
+    for (const operation of ["reset", "restore"] as const) {
+      const wait = deferred();
+      actionWait = wait.promise;
+      const before = actions.length;
+      action(operation).fireEvent("click");
+      assert.equal(actions.length, before);
+      confirm().fireEvent("click");
+      await flush();
+      assert.equal(actions.at(-1), operation);
+      assert.equal(service.busy, true);
+      const oldPanel = panel();
+      if (operation === "reset") setEnabled(false);
+      else {
+        await navigate("review");
+        await navigate("general");
+        assert.ok(buttons().every((button) => button.disabled), "Reopened panel must reflect the running operation");
+      }
+      wait.resolve();
+      actionWait = null;
+      await flush();
+      assert.equal(service.busy, false);
+      assert.equal(oldPanel.textContent, "");
+      if (operation === "reset") {
+        assert.equal(buttons().length, 0);
+        setEnabled(true);
+        await flush();
+      }
+      assert.ok(buttons().every((button) => !button.disabled), "Current panel must reflect transaction completion");
+    }
+    assert.deepEqual(actions, ["dream", "reset", "restore"]);
+    tab.hide();
+    tab.display();
+    await flush();
+    assert.equal(toggle().checked, true);
+    access.reset();
+    tab.display();
+    await flush();
+    assert.equal(root.querySelector("[data-developer-toggle]"), null);
+    assert.equal(access.enabled, false);
+    const reloaded = new Plugin().developerMode;
+    assert.equal(reloaded.revealed, false);
+    assert.equal(reloaded.enabled, false);
+    await assert.rejects(service.execute("dream"), /locked/u);
+    console.log("PASS settings DOM: gesture/time window, default-off inline switch, four actions, confirmation, disable rejection, async status/transaction lifecycle, navigation, language, reopen, reload");
+  } finally {
+    tab.hide();
+    root.remove();
+    frames.clear();
+  }
 }
 
 async function repositoryAndLifecycle(): Promise<void> {
@@ -133,7 +317,7 @@ async function repositoryAndLifecycle(): Promise<void> {
     assert.ok(dream!.processedMemoryIds.length > 0);
     assert.ok(calls > 0);
     assert.deepEqual(system.scheduler.lastResult, dream);
-    const access = new LocalDeveloperAccess({ isDesktop: () => true, readMarker: () => '{"enabled":true}' });
+    const access = new DeveloperModeAccess();
     unlock(access);
     const gate = new ProductActivityGate();
     let writable = true;
@@ -152,7 +336,7 @@ async function repositoryAndLifecycle(): Promise<void> {
     const queued = service.execute("seed");
     await assert.rejects(service.execute("restore"), /busy/u);
     await queued;
-    access.lock();
+    access.setEnabled(false);
     await assert.rejects(service.execute("seed"), /locked/u);
 
     // Install recognizable sentinels across independent stores and unknown files.
@@ -282,12 +466,12 @@ async function repositoryAndLifecycle(): Promise<void> {
 async function pluginResetLifecycle(system: CognitiveSystem, reopen: () => Promise<CognitiveSystem>, vault: string): Promise<void> {
   const originalCreate = PiLocalDataService.create;
   const host = Object.create(Plugin.prototype) as any;
-  const access = new LocalDeveloperAccess({ isDesktop: () => true, readMarker: () => '{"enabled":true}' });
+  const access = new DeveloperModeAccess();
   unlock(access);
   let shutdowns = 0;
   const local = (cognitive: CognitiveSystem) => ({ personalMemory: cognitive.repository, dispose: () => cognitive.repository.dispose() });
   Object.assign(host, {
-    developerAccess: access, developerMemoryChanging: false,
+    developerMode: access, developerMemoryChanging: false,
     settings: { defaultPermission: "workspace-write", memory: { useLongTermMemory: true, dreamEnabled: true, dreamRunsPerDay: 3 } },
     productActivity: new ProductActivityGate(), piRunConversations: new Map(), piSubmittingConversations: new Set(),
     piConversationActivationTasks: new Map(), piConversationActivationLane: Promise.resolve(),
@@ -357,6 +541,6 @@ async function schedulerDisposeDuringDueRead(): Promise<void> {
   console.log("PASS scheduler disposed during asynchronous due check");
 }
 
-await accessAndScript();
+await settingsDomLifecycle();
 await repositoryAndLifecycle();
 await schedulerDisposeDuringDueRead();

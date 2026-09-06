@@ -1,5 +1,5 @@
 import type { CognitiveSystem } from "../../harness/memory/cognitive-system";
-import { LocalDeveloperAccess } from "./access";
+import { DeveloperModeAccess } from "./access";
 import { seedDeveloperMemories } from "./seed";
 import type { DeveloperMemoryChange } from "./memory-backups";
 
@@ -18,7 +18,7 @@ export interface DeveloperModeHost {
 export class DeveloperModeService {
   busy = false;
 
-  constructor(readonly access: LocalDeveloperAccess, private readonly host: DeveloperModeHost) {}
+  constructor(readonly access: DeveloperModeAccess, private readonly host: DeveloperModeHost) {}
 
   async status() {
     this.access.require();

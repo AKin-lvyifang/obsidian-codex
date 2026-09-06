@@ -1,9 +1,8 @@
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
-import { Notice, Platform, Plugin } from "obsidian";
-import { LocalDeveloperAccess } from "./plugin/developer-mode/access";
+import { Notice, Plugin } from "obsidian";
+import { DeveloperModeAccess } from "./plugin/developer-mode/access";
 import { DeveloperModeService } from "./plugin/developer-mode/service";
-import { DeveloperModeModal } from "./settings/developer-mode-modal";
 import { MemoryDeveloperBackups, type DeveloperMemoryChange } from "./plugin/developer-mode/memory-backups";
 import type { AuthInteraction } from "@earendil-works/pi-ai";
 import { closeMcpBrokerConnectionPool } from "./resources/mcp-broker";
@@ -192,7 +191,7 @@ export default class CodexForObsidianPlugin extends Plugin {
   private personalMemoryCorrection: PersonalMemoryCorrectionService | null = null;
   private readonly productActivity = new ProductActivityGate();
   private developerMemoryChanging = false;
-  private readonly developerAccess = new LocalDeveloperAccess({ isDesktop: () => Platform.isDesktopApp });
+  readonly developerMode = new DeveloperModeAccess();
   private developerService: DeveloperModeService | null = null;
   private onboardingRequested = false;
   private onboardingRibbonAnchor: HTMLElement | null = null;
@@ -229,7 +228,7 @@ export default class CodexForObsidianPlugin extends Plugin {
   }
 
   private async performUnload(): Promise<void> {
-    this.developerAccess.lock();
+    this.developerMode.reset();
     this.clearEchoInkOnboardingWorkspaceCoachmark(false);
     this.onboardingRibbonAnchor = null;
     const cognitive = this.cognitiveSystem
@@ -958,10 +957,9 @@ export default class CodexForObsidianPlugin extends Plugin {
     return await this.productActivity.run(action);
   }
 
-  handleDeveloperVersionClick(altKey: boolean): void {
-    if (!this.developerAccess.click(altKey)) return;
+  getDeveloperModeService(): DeveloperModeService {
     if (!this.developerService) {
-      this.developerService = new DeveloperModeService(this.developerAccess, {
+      this.developerService = new DeveloperModeService(this.developerMode, {
         getSystem: () => this.getCognitiveSystem(),
         vaultName: () => this.app.vault.getName(),
         foregroundBusy: () => this.developerMemoryChanging || this.piRunConversations.size > 0
@@ -974,11 +972,11 @@ export default class CodexForObsidianPlugin extends Plugin {
         ).latestResetPath()
       });
     }
-    new DeveloperModeModal(this.app, this.developerService, this.settings.settingsLanguage !== "en").open();
+    return this.developerService;
   }
 
   private async changeDeveloperMemory(action: "reset" | "restore"): Promise<DeveloperMemoryChange> {
-    this.developerAccess.require();
+    this.developerMode.require();
     if (this.developerMemoryChanging || this.piRunConversations.size > 0
       || this.piSubmittingConversations.size > 0 || this.cognitiveSystem?.engine.isRunning) {
       throw new Error("developer_mode_busy");
@@ -1000,7 +998,7 @@ export default class CodexForObsidianPlugin extends Plugin {
       this.piLocalDataFlight = null;
       this.personalMemoryCorrection = null;
       const backups = new MemoryDeveloperBackups(localData.personalMemory.layout.root);
-      this.developerAccess.require();
+      this.developerMode.require();
       return await backups.change(action, async () => {
         const next = await PiLocalDataService.create(this, { recoverDeveloperChange: false });
         try {

@@ -1,34 +1,42 @@
-import { Modal, Setting, type App } from "obsidian";
+import { Setting } from "obsidian";
 import type { DeveloperAction, DeveloperModeService, DeveloperResult, DeveloperStatus } from "../plugin/developer-mode/service";
 
-export class DeveloperModeModal extends Modal {
+export class DeveloperModePanel {
   private running = false;
-  private closed = false;
+  private disposed = false;
+  private renderVersion = 0;
   private message = "";
   private failed = false;
   private vault = "";
 
-  constructor(app: App, private readonly service: DeveloperModeService, private readonly zh: boolean) {
-    super(app);
-  }
+  constructor(
+    private readonly contentEl: HTMLElement,
+    private readonly service: DeveloperModeService,
+    private readonly zh: boolean,
+    private readonly isCurrent: () => boolean,
+    private readonly onActionSettled: () => void
+  ) {}
 
-  onOpen(): void { this.closed = false; void this.render(); }
-  onClose(): void { this.closed = true; this.contentEl.empty(); }
+  dispose(): void { this.disposed = true; this.renderVersion++; this.contentEl.empty(); }
+  private active(): boolean {
+    return !this.disposed && this.service.access.enabled && this.contentEl.isConnected && this.isCurrent();
+  }
   private t(zh: string, en: string): string { return this.zh ? zh : en; }
 
-  private async render(): Promise<void> {
-    if (this.closed) return;
+  async render(): Promise<void> {
+    if (!this.active()) return;
+    const version = ++this.renderVersion;
+    const current = (): boolean => this.active() && version === this.renderVersion;
     const el = this.contentEl;
     el.empty();
     el.addClass("echoink-developer-mode");
-    el.createEl("h2", { text: this.t("本机开发者模式", "Local developer mode") });
     let status: DeveloperStatus;
     try { status = await this.service.status(); }
     catch (error) {
-      if (!this.closed) el.createEl("p", { cls: "echoink-developer-error", text: this.errorText(error) });
+      if (current()) el.createEl("p", { cls: "echoink-developer-error", text: this.errorText(error) });
       return;
     }
-    if (this.closed) return;
+    if (!current()) return;
     this.vault = status.vault;
     el.createEl("p", { text: `${this.t("当前 Vault", "Current Vault")}: ${status.vault}` });
     el.createEl("p", { text: this.t(
@@ -46,10 +54,12 @@ export class DeveloperModeModal extends Modal {
       text: this.message || (status.busy ? this.t("正在执行，请稍候。", "An operation is running. Please wait.") : "")
     });
     output.setAttribute("role", "status");
-    const add = (action: DeveloperAction, title: string, desc: string): void => {
+    const add = (action: DeveloperAction, title: string, desc: string, disabled = false): void => {
       new Setting(el).setName(title).setDesc(desc).addButton((button) => {
-        button.setButtonText(title).setDisabled(this.running || status.busy)
+        button.buttonEl.setAttribute("data-developer-action", action);
+        button.setButtonText(title).setDisabled(this.running || status.busy || disabled)
           .onClick(() => {
+            if (!this.active()) return;
             if (action === "reset" || action === "restore") this.confirm(action);
             else void this.run(action);
           });
@@ -67,18 +77,18 @@ export class DeveloperModeModal extends Modal {
       "先确认范围，再自动备份。保留笔记、会话、知识库、Skills 和配置。",
       "Review the scope, then back up automatically. Notes, conversations, Knowledge, Skills, and settings are preserved."
     ));
-    if (status.backup) add("restore", this.t("恢复最近一次重置备份", "Restore latest reset backup"), this.t(
+    add("restore", this.t("恢复最近一次重置备份", "Restore latest reset backup"), this.t(
       "恢复前先备份当前记忆状态，原备份不会被覆盖。",
       "Protect the current memory state before restoring. The original backup is kept."
-    ));
+    ), !status.backup);
     new Setting(el).addButton((button) => button
       .setButtonText(this.t("刷新状态", "Refresh status"))
-      .setDisabled(this.running).onClick(() => void this.render()))
-      .addButton((button) => button.setButtonText(this.t("锁定开发者菜单", "Lock developer menu"))
-        .setDisabled(this.running).onClick(() => { this.service.access.lock(); this.close(); }));
+      .setDisabled(this.running).onClick(() => void this.render()));
   }
 
   private confirm(action: "reset" | "restore"): void {
+    if (!this.active()) return;
+    this.renderVersion++;
     this.contentEl.empty();
     this.contentEl.createEl("h2", { text: action === "reset"
       ? this.t("确认重置当前 Vault 的记忆", "Confirm memory reset for this Vault")
@@ -106,7 +116,8 @@ export class DeveloperModeModal extends Modal {
   }
 
   private async run(action: DeveloperAction): Promise<void> {
-    if (this.running) return;
+    if (this.running || !this.active()) return;
+    this.renderVersion++;
     this.running = true;
     this.contentEl.empty();
     this.contentEl.createEl("p", { text: this.t("正在执行，请稍候…", "Working, please wait…"), attr: { role: "status" } });
@@ -115,7 +126,11 @@ export class DeveloperModeModal extends Modal {
       this.failed = result.action === "dream" && (result.result.providerUnavailable || Boolean(result.result.error));
       this.message = this.resultText(result);
     } catch (error) { this.failed = true; this.message = this.errorText(error); }
-    finally { this.running = false; await this.render(); }
+    finally {
+      this.running = false;
+      if (this.active()) await this.render();
+      else this.onActionSettled();
+    }
   }
 
   private dreamText(result: NonNullable<DeveloperStatus["lastResult"]>): string {
@@ -143,7 +158,7 @@ export class DeveloperModeModal extends Modal {
   private errorText(error: unknown): string {
     const message = error instanceof Error ? error.message : String(error);
     const known: Record<string, [string, string]> = {
-      developer_mode_locked: ["开发者模式已锁定。本机开关有效后，请重新执行隐藏手势。", "Developer mode is locked. Enable the local marker and repeat the hidden gesture."],
+      developer_mode_locked: ["开发者模式已关闭，请先在基础设置中打开开关。", "Developer mode is off. Enable it in General settings first."],
       developer_mode_busy: ["会话、做梦或本地数据正在执行，请结束后重试。", "A conversation, Dream, or local data operation is busy. Retry when it finishes."],
       developer_mode_read_only: ["当前工作区为只读，不能执行数据写入。", "The workspace is read-only; data changes are disabled."],
       developer_dream_unavailable: ["Dream 未运行：请检查长期记忆、做梦开关及忙碌状态。", "Dream did not run. Check the Memory and Dream switches and busy state."],
