@@ -15519,17 +15519,24 @@ button.echoink-picker-row:focus-visible {
   gap: 12px;
 }
 
-.echoink-about-logo {
+button.echoink-about-logo {
   flex-shrink: 0;
   display: grid;
   width: 38px;
   height: 38px;
+  padding: 0;
   align-items: center;
   justify-content: center;
   border: 1px solid var(--background-modifier-border);
   border-radius: 10px;
   color: var(--text-normal);
   background: var(--background-secondary);
+  box-shadow: none;
+}
+
+button.echoink-about-logo:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
 }
 
 .echoink-about-logo svg {

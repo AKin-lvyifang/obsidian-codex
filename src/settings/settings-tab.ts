@@ -900,14 +900,17 @@ export class CodexSettingTab extends PluginSettingTab {
 
     // Logo + name + version
     const header = card.createDiv({ cls: "echoink-about-header" });
-    const logoWrap = header.createDiv({ cls: "echoink-about-logo" });
+    const logoWrap = header.createEl("button", {
+      cls: "echoink-about-logo",
+      attr: { type: "button", "aria-label": "EchoInk Agent" }
+    });
     setIcon(logoWrap, "feather");
-    const nameArea = header.createDiv({ cls: "echoink-about-name-area" });
-    nameArea.createDiv({ cls: "echoink-about-name", text: "Codex EchoInk" });
-    const versionEl = nameArea.createDiv({ cls: "echoink-about-version", text: `v${version}` });
-    versionEl.addEventListener("click", (event) => {
+    logoWrap.addEventListener("click", (event) => {
       if (this.plugin.developerMode.click(event.altKey)) this.renderSettingsContent();
     });
+    const nameArea = header.createDiv({ cls: "echoink-about-name-area" });
+    nameArea.createDiv({ cls: "echoink-about-name", text: "EchoInk Agent" });
+    nameArea.createDiv({ cls: "echoink-about-version", text: `v${version}` });
 
     // Description
     card.createDiv({

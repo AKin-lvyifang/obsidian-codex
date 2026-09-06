@@ -113,7 +113,7 @@ async function settingsDomLifecycle(): Promise<void> {
   const panel = () => find(".echoink-developer-panel");
   const toggle = () => find("input", find("[data-developer-toggle]"));
   const setEnabled = (enabled: boolean) => { toggle().checked = enabled; toggle().fireEvent("change"); };
-  const clickVersion = (altKey: boolean) => find(".echoink-about-version").fireEvent("click", { altKey });
+  const clickLogo = (altKey: boolean) => find(".echoink-about-logo").fireEvent("click", { altKey });
   const confirm = () => {
     const button = panel().querySelectorAll("button").find((item) => /^(确认并执行|Confirm and continue)$/u.test(item.textContent));
     assert.ok(button, "Reset/restore must show a confirmation button");
@@ -137,16 +137,23 @@ async function settingsDomLifecycle(): Promise<void> {
     assert.equal(root.querySelector("[data-developer-toggle]"), null);
     access.setEnabled(true);
     assert.equal(access.enabled, false);
-    for (let i = 0; i < 7; i++) clickVersion(false);
-    for (let i = 0; i < 6; i++) clickVersion(true);
+    const logo = find(".echoink-about-logo");
+    assert.equal(logo.localName, "button", "The entire logo area is a native, keyboard-accessible button");
+    assert.equal(logo.getAttribute("type"), "button");
+    assert.equal(logo.getAttribute("aria-label"), "EchoInk Agent");
+    assert.equal(find(".echoink-about-name").textContent, "EchoInk Agent");
+    for (let i = 0; i < 7; i++) find(".echoink-about-version").fireEvent("click", { altKey: true });
+    assert.equal(access.revealed, false, "The version number must no longer reveal developer mode");
+    for (let i = 0; i < 7; i++) clickLogo(false);
+    for (let i = 0; i < 6; i++) clickLogo(true);
     assert.equal(access.revealed, false);
     now += 5_001;
-    clickVersion(true);
+    clickLogo(true);
     assert.equal(root.querySelector("[data-developer-toggle]"), null, "Expired clicks must not reveal the switch");
-    clickVersion(false);
-    for (let i = 0; i < 6; i++) clickVersion(true);
+    clickLogo(false);
+    for (let i = 0; i < 6; i++) clickLogo(true);
     now += 5_000;
-    clickVersion(true);
+    clickLogo(true);
     assert.equal(access.revealed, true);
     assert.equal(toggle().checked, false);
     assert.equal(buttons().length, 0);
@@ -197,6 +204,7 @@ async function settingsDomLifecycle(): Promise<void> {
       if (transition === "disable") setEnabled(true);
       if (transition === "navigate") await navigate("general");
       if (transition === "language") {
+        assert.equal(find(".echoink-about-name").textContent, "EchoInk Agent");
         assert.match(panel().textContent, /7 memories · 1 pending for Dream/u);
         assert.equal(action("reset").textContent, "Back up and reset memory and Dream");
         assert.doesNotMatch(find(".echoink-developer-settings").textContent, /[\u4e00-\u9fff]/u);
@@ -252,7 +260,7 @@ async function settingsDomLifecycle(): Promise<void> {
     assert.equal(reloaded.revealed, false);
     assert.equal(reloaded.enabled, false);
     await assert.rejects(service.execute("dream"), /locked/u);
-    console.log("PASS settings DOM: gesture/time window, default-off inline switch, four actions, confirmation, disable rejection, async status/transaction lifecycle, navigation, language, reopen, reload");
+    console.log("PASS settings DOM: feather-button gesture/time window, inert version number, EchoInk Agent branding, default-off inline switch, four actions, confirmation, disable rejection, async status/transaction lifecycle, navigation, language, reopen, reload");
   } finally {
     tab.hide();
     root.remove();
