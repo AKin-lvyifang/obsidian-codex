@@ -245,18 +245,21 @@ export class EchoInkHomeView extends ItemView {
     const modal = new Modal(this.app); this.activityModal = modal;
     modal.contentEl.addClass("echoink-home-activity-dialog");
     modal.titleEl.setText(this.t(dayOnly ? "当天全部足迹" : "这一周留下的足迹", dayOnly ? "All activity for this day" : "This week's activity"));
-    modal.contentEl.createEl("p", { text: this.t("同一天、同一笔记、同一种动作合并记录；重读指再次打开已打开过的笔记。开始记录前没有历史。", "Each action is counted once per note per day. Reopened means opening a note you have opened before. Earlier history is unavailable.") });
     if (!help) {
       const events = this.events.filter((e) => dayOnly ? e.date === this.selectedDate : this.weekDates().includes(e.date));
+      const notes = new Set(events.map((event) => event.path)).size;
+      modal.contentEl.createEl("p", { cls: "lead", text: this.t(`${events.length} 次积累，${notes} 篇笔记。点开标题，回到具体内容。`, `Activity: ${events.length} · Notes: ${notes}. Select a title to return to its content.`) });
       if (!events.length) modal.contentEl.createEl("p", { text: this.t("这段时间还没有足迹", "No activity recorded for this period") });
       for (const e of events) {
         const row = modal.contentEl.createDiv({ cls: "trace-row" });
-        row.createEl("time", { text: this.shortDate(e.date) });
-        row.createSpan({ text: this.kind(e.kind) });
-        const button = row.createEl("button", { text: this.data?.records.find((r) => r.path === e.path)?.title ?? e.path });
+        row.createEl("time", { text: e.date.slice(5).replace("-", "."), attr: { datetime: e.date } });
+        row.createEl("b", { cls: `mark ${{ created: "new", modified: "edit", reopened: "revisit" }[e.kind]}`, attr: { "aria-hidden": "true" } });
+        const entry = row.createSpan({ text: `${this.kind(e.kind)} · ` });
+        const button = entry.createEl("button", { text: this.data?.records.find((r) => r.path === e.path)?.title ?? e.path, attr: { type: "button" } });
         button.onclick = () => { modal.close(); void this.openNote(e.path); };
       }
     }
+    modal.contentEl.createEl("p", { cls: "helper", text: this.t("同一天、同一笔记、同一种动作合并记录；重读指再次打开已打开过的笔记。开始记录前没有历史。", "Each action is counted once per note per day. Reopened means opening a note you have opened before. Earlier history is unavailable.") });
     modal.open();
   }
   private openSearch(): void {
