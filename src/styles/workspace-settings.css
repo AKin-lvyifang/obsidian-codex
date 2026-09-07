@@ -1097,8 +1097,8 @@
 .echoink-settings-demo .codex-knowledge-settings>.standard-section{display:block;gap:0;margin:26px 0 0}
 .echoink-settings-demo .codex-knowledge-settings>.standard-section>.settings-card-header{margin:0 0 11px;gap:0}
 .echoink-settings-demo .codex-knowledge-settings>.standard-section>.settings-card-header h3{font-size:calc(var(--font-text-size,16px)*.875);font-weight:500}
-.echoink-settings-demo .codex-knowledge-settings>.standard-section>.settings-card{padding:0 18px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
-.echoink-settings-demo .codex-knowledge-settings>.standard-section>.settings-card>.setting-row{padding:17px 0;border:0;margin:0}
+.echoink-settings-demo .codex-knowledge-settings>.standard-section>.settings-card{padding:0;border:1px solid var(--line);border-radius:8px;background:var(--bg);overflow:hidden}
+.echoink-settings-demo .codex-knowledge-settings>.standard-section>.settings-card>.setting-row{padding:17px 18px;border:0;margin:0}
 .echoink-settings-demo .settings-knowledge-dashboard .section-heading{align-items:center}
 .echoink-settings-demo .settings-knowledge-dashboard .section-heading .settings-note{margin:5px 0 0}
 .echoink-settings-demo .settings-knowledge-dashboard .panel-heading h3{display:flex;align-items:center;gap:7px}
