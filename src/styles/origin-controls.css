@@ -52,7 +52,7 @@
 .echoink-settings-demo input.echoink-origin-control.echoink-origin-control[data-slot=input] {height:auto;min-height:32px}
 .echoink-settings-demo :is(.codex-provider-modal-field,.codex-mcp-server-form)>.echoink-origin-control[data-slot=select-trigger] {width:100%}
 .echoink-origin-control[data-slot=select-content] {
-  position:relative;z-index:100;min-width:var(--radix-select-trigger-width);max-width:calc(100vw - 24px);
+  position:relative;z-index:calc(var(--layer-modal,100) + 1);min-width:var(--radix-select-trigger-width);max-width:calc(100vw - 24px);
   max-height:min(24rem,var(--radix-select-content-available-height));overflow:hidden;
   margin:4px 0;border:1px solid var(--origin-line);border-radius:6px;background:var(--origin-bg);
   color:var(--origin-text);box-shadow:0 6px 24px #0002;font:11px/1.55 var(--font-interface,sans-serif);

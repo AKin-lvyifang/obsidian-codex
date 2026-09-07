@@ -9,12 +9,18 @@ export async function runOriginControlsDom(Fixture: new () => AsyncFixture) {
   const results: string[] = [];
   const main = document.querySelector<HTMLElement>("#fixture")!;
   const report = document.querySelector<HTMLElement>("#report")!;
+  // Match the production page/group/row hierarchy so legacy action selectors
+  // participate in the cascade, just as they do in Obsidian Settings.
+  const body = document.createElement("div"); body.className = "codex-settings-body"; main.append(body);
+  const page = document.createElement("div"); page.className = "echoink-settings-page"; body.append(page);
+  const card = document.createElement("section"); card.className = "echoink-settings-section is-group settings-card"; page.append(card);
+  const group = document.createElement("div"); group.className = "echoink-settings-group settings-stack"; card.append(group);
   const errors: string[] = [];
   window.addEventListener("error", (event) => errors.push(event.message));
   const section = (label: string) => {
-    const row = document.createElement("div"); row.className = "setting-item";
-    const copy = document.createElement("span"); copy.className = "setting-item-info"; copy.textContent = label; row.append(copy);
-    const controls = document.createElement("div"); controls.className = "setting-item-control"; row.append(controls); main.append(row); return controls;
+    const row = document.createElement("div"); row.className = "setting-item echoink-settings-row setting-row";
+    const copy = document.createElement("span"); copy.className = "setting-item-info setting-copy"; copy.textContent = label; row.append(copy);
+    const controls = document.createElement("div"); controls.className = "setting-item-control setting-controls"; row.append(controls); group.append(row); return controls;
   };
   const run = async (name: string, test: () => void | Promise<void>) => {
     try { await test(); results.push(`PASS ${name}`); }
@@ -56,14 +62,17 @@ export async function runOriginControlsDom(Fixture: new () => AsyncFixture) {
     const select = createOriginSelect(controls, { attr: { "aria-label": "Language" } }, [{ value: "zh", label: "中文" }, { value: "en", label: "English" }], "zh").element;
     select.onchange = () => { selected = select.value; };
     select.focus(); key(select, "Enter"); await frame();
-    const option = main.querySelector<HTMLElement>('[role=option][data-state=checked]')!;
-    assert(option, "popup not mounted in owning settings scope");
+    const popup = document.getElementById(select.getAttribute("aria-controls")!)!;
+    const option = popup?.querySelector<HTMLElement>('[role=option][data-state=checked]')!;
+    assert(option && popup.ownerDocument === select.ownerDocument, "popup not mounted in owning document");
+    const bounds = option.getBoundingClientRect();
+    assert(bounds.width > 0 && bounds.height > 0 && popup.contains(document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2)), "popup option is clipped or visually covered by the native settings hierarchy");
     key(option, "ArrowDown"); await frame();
     key(document.activeElement as HTMLElement, "Enter"); await frame();
     assert(selected === "en" && select.value === "en", "selected value did not reach callback");
     select.focus(); key(select, "Enter"); await frame();
     key(document.activeElement as HTMLElement, "Escape"); await frame();
-    assert(!main.querySelector('[data-slot=select-content]') && document.activeElement === select, "Escape failed to close and restore focus");
+    assert(!document.querySelector('[data-slot=select-content]') && document.activeElement === select, "Escape failed to close and restore focus");
   });
   await run("slider continuous keyboard commits and focus", async () => {
     const controls = section("Runs per day"); controls.classList.add("general-range");
@@ -108,8 +117,20 @@ export async function runOriginControlsDom(Fixture: new () => AsyncFixture) {
     select.focus(); key(select, "Enter"); await frame();
     key(other.activeElement as HTMLElement, "Escape"); await frame();
     assert(!other.querySelector('[data-slot=select-content]') && other.activeElement === select, "owning document Escape/focus failed");
+    let selected = "a";
+    const radios = createOriginRadioGroup(host, "a", "Default model", (value) => { selected = value; });
+    const radioItems = ["a", "b", "c"].map((value) => {
+      const row = other.createElement("div"); row.className = "codex-provider-model-choice"; radios.element.append(row);
+      const selection = other.createElement("div"); selection.className = "codex-provider-model-choice-selection"; row.append(selection);
+      const label = other.createElement("label"); label.className = "codex-provider-model-choice-default"; label.textContent = value; selection.append(label);
+      return radios.addItem(label, value, value === "b");
+    });
+    radioItems[0].focus(); key(radioItems[0], "ArrowDown"); await frame();
+    assert(selected === "c" && other.activeElement === radioItems[2] && radioItems[2].getAttribute("aria-checked") === "true" && radioItems[0].getAttribute("aria-checked") === "false", "owning document radio ArrowDown/disabled skip failed");
+    key(radioItems[2], "ArrowUp"); await frame();
+    assert(selected === "a" && other.activeElement === radioItems[0] && radioItems[0].getAttribute("aria-checked") === "true" && radioItems[2].getAttribute("aria-checked") === "false", "owning document radio ArrowUp/mutual exclusion failed");
     disposeOriginControls(host);
-    assert(!host.querySelector('[data-slot]'), "root cleanup left controls or popup");
+    assert(!host.querySelector('[data-slot]') && !other.querySelector('[data-slot=select-content]'), "root cleanup left controls or popup");
     iframe.remove();
   });
   createOriginButton(section("Button"), { text: "Save", cls: "echoink-amicro-button mod-cta" });

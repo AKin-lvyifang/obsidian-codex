@@ -4436,7 +4436,7 @@ button.echoink-settings-navigation-row:focus-visible {
     max-width: 100%;
   }
 
-  .echoink-settings-row .setting-item-control > button {
+  .echoink-settings-row .setting-item-control > button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])) {
     flex: 0 1 auto;
     max-width: 100%;
     height: auto;
@@ -4473,10 +4473,10 @@ button.echoink-settings-navigation-row:focus-visible {
   }
 
   .codex-settings-tabs button.codex-settings-tab,
-  .codex-resource-manager button.codex-resource-tab,
-  .codex-resource-manager button.codex-resource-refresh,
-  .codex-provider-model-manager button.codex-provider-add-button,
-  .codex-provider-model-manager button.codex-provider-row-action,
+  .codex-resource-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-resource-tab,
+  .codex-resource-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-resource-refresh,
+  .codex-provider-model-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-add-button,
+  .codex-provider-model-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-row-action,
   .codex-provider-saved-row,
   .codex-resource-row,
   .codex-provider-combobox-chevron {
@@ -4674,9 +4674,9 @@ button.echoink-settings-navigation-row:focus-visible {
   display: none;
 }
 
-.codex-resource-manager button.codex-resource-tab,
-.codex-resource-manager button.codex-resource-add,
-.codex-resource-manager button.codex-resource-refresh {
+.codex-resource-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-resource-tab,
+.codex-resource-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-resource-add,
+.codex-resource-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-resource-refresh {
   appearance: none;
   display: inline-flex;
   align-items: center;
@@ -4698,48 +4698,48 @@ button.echoink-settings-navigation-row:focus-visible {
     transform 80ms ease;
 }
 
-.codex-resource-manager button.codex-resource-tab {
+.codex-resource-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-resource-tab {
   flex: 0 0 auto;
   padding: 0 9px;
   border-radius: 7px;
 }
 
-.codex-resource-manager button.codex-resource-tab:not(.is-active):hover,
-.codex-resource-manager button.codex-resource-add:hover,
-.codex-resource-manager button.codex-resource-refresh:hover {
+.codex-resource-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-resource-tab:not(.is-active):hover,
+.codex-resource-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-resource-add:hover,
+.codex-resource-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-resource-refresh:hover {
   color: var(--text-normal);
   background: var(--background-modifier-hover);
 }
 
-.codex-resource-manager button.codex-resource-tab.is-active {
+.codex-resource-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-resource-tab.is-active {
   color: var(--text-accent);
   background: color-mix(in srgb, var(--interactive-accent) 9%, var(--background-primary));
 }
 
-.codex-resource-manager button.codex-resource-tab:focus,
-.codex-resource-manager button.codex-resource-add:focus,
-.codex-resource-manager button.codex-resource-refresh:focus {
+.codex-resource-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-resource-tab:focus,
+.codex-resource-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-resource-add:focus,
+.codex-resource-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-resource-refresh:focus {
   outline: none;
   box-shadow: none;
 }
 
-.codex-resource-manager button.codex-resource-tab:focus-visible,
-.codex-resource-manager button.codex-resource-add:focus-visible,
-.codex-resource-manager button.codex-resource-refresh:focus-visible {
+.codex-resource-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-resource-tab:focus-visible,
+.codex-resource-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-resource-add:focus-visible,
+.codex-resource-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-resource-refresh:focus-visible {
   color: var(--text-normal);
   background: var(--background-modifier-hover);
   outline: 2px solid var(--interactive-accent);
   outline-offset: -2px;
 }
 
-.codex-resource-manager button.codex-resource-tab:active,
-.codex-resource-manager button.codex-resource-add:active,
-.codex-resource-manager button.codex-resource-refresh:active {
+.codex-resource-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-resource-tab:active,
+.codex-resource-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-resource-add:active,
+.codex-resource-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-resource-refresh:active {
   transform: scale(0.96);
 }
 
-.codex-resource-manager button.codex-resource-add,
-.codex-resource-manager button.codex-resource-refresh {
+.codex-resource-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-resource-add,
+.codex-resource-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-resource-refresh {
   gap: 6px;
   padding: 0 9px;
   border-radius: 7px;
@@ -4753,7 +4753,7 @@ button.echoink-settings-navigation-row:focus-visible {
   min-width: 0;
 }
 
-.codex-resource-manager button.codex-resource-refresh:disabled {
+.codex-resource-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-resource-refresh:disabled {
   color: var(--text-faint);
   cursor: not-allowed;
   opacity: 0.65;
@@ -4908,7 +4908,7 @@ button.echoink-settings-navigation-row:focus-visible {
   overflow-wrap: anywhere;
 }
 
-.codex-provider-model-manager button.codex-provider-add-button {
+.codex-provider-model-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-add-button {
   appearance: none;
   display: inline-flex;
   flex: 0 0 auto;
@@ -4933,24 +4933,24 @@ button.echoink-settings-navigation-row:focus-visible {
     transform 80ms ease;
 }
 
-.codex-provider-model-manager button.codex-provider-add-button:hover {
+.codex-provider-model-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-add-button:hover {
   border-color: var(--background-modifier-border-hover);
   background: var(--background-modifier-hover);
 }
 
-.codex-provider-model-manager button.codex-provider-add-button:focus-visible,
-.codex-provider-model-manager button.codex-provider-row-action:focus-visible,
+.codex-provider-model-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-add-button:focus-visible,
+.codex-provider-model-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-row-action:focus-visible,
 .codex-provider-saved-provider:focus-visible {
   outline: 2px solid var(--interactive-accent);
   outline-offset: 2px;
 }
 
-.codex-provider-model-manager button.codex-provider-add-button:active,
-.codex-provider-model-manager button.codex-provider-row-action:active {
+.codex-provider-model-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-add-button:active,
+.codex-provider-model-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-row-action:active {
   transform: scale(0.96);
 }
 
-.codex-provider-model-manager button.codex-provider-add-button svg {
+.codex-provider-model-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-add-button svg {
   width: 15px;
   height: 15px;
 }
@@ -5192,7 +5192,7 @@ button.echoink-settings-navigation-row:focus-visible {
   background: var(--background-modifier-warning, var(--background-primary-alt));
 }
 
-.codex-provider-model-manager button.codex-provider-row-action {
+.codex-provider-model-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-row-action {
   appearance: none;
   display: inline-flex;
   flex: 0 0 28px;
@@ -5214,16 +5214,16 @@ button.echoink-settings-navigation-row:focus-visible {
     transform 80ms ease;
 }
 
-.codex-provider-model-manager button.codex-provider-row-action:hover {
+.codex-provider-model-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-row-action:hover {
   color: var(--text-normal);
   background: var(--background-modifier-hover);
 }
 
-.codex-provider-model-manager button.codex-provider-row-action.is-delete:hover {
+.codex-provider-model-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-row-action.is-delete:hover {
   color: var(--text-error);
 }
 
-.codex-provider-model-manager button.codex-provider-row-action svg {
+.codex-provider-model-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-row-action svg {
   width: 16px;
   height: 16px;
 }
@@ -5264,7 +5264,7 @@ button.echoink-settings-navigation-row:focus-visible {
     flex-direction: column;
   }
 
-  .codex-provider-model-manager button.codex-provider-add-button {
+  .codex-provider-model-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-add-button {
     align-self: flex-start;
   }
 
@@ -5470,7 +5470,7 @@ button.echoink-settings-navigation-row:focus-visible {
   min-width: 0;
 }
 
-.codex-provider-model-modal button.codex-provider-modal-icon-button {
+.codex-provider-model-modal button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-modal-icon-button {
   display: inline-flex;
   flex: 0 0 40px;
   align-items: center;
@@ -5487,20 +5487,20 @@ button.echoink-settings-navigation-row:focus-visible {
   cursor: pointer;
 }
 
-.codex-provider-model-modal button.codex-provider-modal-icon-button:hover {
+.codex-provider-model-modal button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-modal-icon-button:hover {
   color: var(--text-normal);
   background: var(--background-modifier-hover);
   background-color: var(--background-modifier-hover);
   box-shadow: none;
 }
 
-.codex-provider-model-modal button.codex-provider-modal-icon-button:focus-visible {
+.codex-provider-model-modal button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-modal-icon-button:focus-visible {
   box-shadow: none;
   outline: 2px solid var(--interactive-accent);
   outline-offset: 2px;
 }
 
-.codex-provider-model-modal button.codex-provider-modal-icon-button svg {
+.codex-provider-model-modal button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-modal-icon-button svg {
   width: 18px;
   height: 18px;
 }
@@ -5510,7 +5510,7 @@ button.echoink-settings-navigation-row:focus-visible {
   min-width: 0;
 }
 
-.codex-provider-model-modal button.codex-provider-combobox-trigger {
+.codex-provider-model-modal button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-combobox-trigger {
   appearance: none;
   display: flex;
   align-items: center;
@@ -5530,12 +5530,12 @@ button.echoink-settings-navigation-row:focus-visible {
   cursor: pointer;
 }
 
-.codex-provider-model-modal button.codex-provider-combobox-trigger:hover {
+.codex-provider-model-modal button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-combobox-trigger:hover {
   border-color: var(--background-modifier-border-hover);
   background: var(--background-modifier-hover);
 }
 
-.codex-provider-model-modal button.codex-provider-combobox-trigger:focus-visible,
+.codex-provider-model-modal button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-combobox-trigger:focus-visible,
 .codex-provider-combobox.is-open > .codex-provider-combobox-trigger {
   border-color: var(--interactive-accent);
   outline: 2px solid color-mix(in srgb, var(--interactive-accent) 24%, transparent);
@@ -5634,7 +5634,7 @@ button.echoink-settings-navigation-row:focus-visible {
   overscroll-behavior: contain;
 }
 
-.codex-provider-model-modal button.codex-provider-combobox-option {
+.codex-provider-model-modal button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-combobox-option {
   appearance: none;
   display: flex;
   align-items: center;
@@ -5653,25 +5653,25 @@ button.echoink-settings-navigation-row:focus-visible {
   cursor: pointer;
 }
 
-.codex-provider-model-modal button.codex-provider-combobox-option:hover,
-.codex-provider-model-modal button.codex-provider-combobox-option:focus-visible {
+.codex-provider-model-modal button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-combobox-option:hover,
+.codex-provider-model-modal button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-combobox-option:focus-visible {
   background: var(--background-modifier-hover);
 }
 
-.codex-provider-model-modal button.codex-provider-combobox-option:focus-visible {
+.codex-provider-model-modal button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-combobox-option:focus-visible {
   outline: 2px solid var(--interactive-accent);
   outline-offset: -2px;
 }
 
-.codex-provider-model-modal button.codex-provider-combobox-option.is-selected {
+.codex-provider-model-modal button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-combobox-option.is-selected {
   background: color-mix(in srgb, var(--interactive-accent) 8%, transparent);
 }
 
-.codex-provider-model-modal button.codex-provider-combobox-option:active {
+.codex-provider-model-modal button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-combobox-option:active {
   background: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
 }
 
-.codex-provider-model-modal button.codex-provider-combobox-option:disabled {
+.codex-provider-model-modal button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-combobox-option:disabled {
   color: var(--text-faint);
   background: transparent;
   cursor: not-allowed;
@@ -5949,7 +5949,7 @@ body.theme-dark .codex-provider-brand-svg[data-provider-brand="qwen"] > path {
   box-shadow: none;
 }
 
-.codex-provider-model-modal button.codex-provider-inline-retry,
+.codex-provider-model-modal button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-inline-retry,
 .codex-provider-model-modal .codex-provider-context-shortcuts button {
   height: auto;
   min-height: 0;
@@ -5964,14 +5964,14 @@ body.theme-dark .codex-provider-brand-svg[data-provider-brand="qwen"] > path {
   cursor: pointer;
 }
 
-.codex-provider-model-modal button.codex-provider-inline-retry:hover,
+.codex-provider-model-modal button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-inline-retry:hover,
 .codex-provider-model-modal .codex-provider-context-shortcuts button:hover {
   background: transparent;
   background-color: transparent;
   box-shadow: none;
 }
 
-.codex-provider-model-modal button.codex-provider-inline-retry:focus-visible,
+.codex-provider-model-modal button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-inline-retry:focus-visible,
 .codex-provider-model-modal .codex-provider-context-shortcuts button:focus-visible {
   box-shadow: none;
   outline: 2px solid var(--interactive-accent);
@@ -6130,8 +6130,8 @@ body.theme-dark .codex-provider-brand-svg[data-provider-brand="qwen"] > path {
     max-height: min(320px, calc(100vh - 120px));
   }
 
-  .codex-provider-model-modal button.codex-provider-combobox-trigger,
-  .codex-provider-model-modal button.codex-provider-combobox-option {
+  .codex-provider-model-modal button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-combobox-trigger,
+  .codex-provider-model-modal button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-combobox-option {
     min-height: 44px;
   }
 
@@ -6321,7 +6321,7 @@ body.theme-dark .codex-provider-brand-svg[data-provider-brand="qwen"] > path {
   outline: none;
 }
 
-.codex-resource-manager button.codex-resource-search-clear {
+.codex-resource-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-resource-search-clear {
   position: absolute;
   z-index: 1;
   top: 50%;
@@ -6342,12 +6342,12 @@ body.theme-dark .codex-provider-brand-svg[data-provider-brand="qwen"] > path {
   cursor: pointer;
 }
 
-.codex-resource-manager button.codex-resource-search-clear:hover {
+.codex-resource-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-resource-search-clear:hover {
   color: var(--text-normal);
   background: var(--background-modifier-hover);
 }
 
-.codex-resource-manager button.codex-resource-search-clear:focus-visible {
+.codex-resource-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-resource-search-clear:focus-visible {
   outline: 2px solid var(--interactive-accent);
   outline-offset: -2px;
 }
@@ -16571,23 +16571,23 @@ button.echoink-about-logo:focus-visible {
 
 /* ------------------------------------------------------------------ */
 /* EchoInk settings actions — native CSS adaptation of Amicro buttons. */
-/* React/Motion/Tailwind are deliberately not part of the plugin runtime. */
+/* Legacy action styling; Origin semantic controls are excluded below. */
 /* ------------------------------------------------------------------ */
 
 :is(
   .echoink-amicro-button,
-  .echoink-settings-page .setting-item-control > button,
+  .echoink-settings-page .setting-item-control > button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])),
   .echoink-settings-page .echoink-settings-inline-actions > button,
   .echoink-settings-page .echoink-settings-compact-actions > button,
   .echoink-settings-page .echoink-personalization-actions > button,
   .echoink-memory-correction-actions > button,
   .echoink-picker-cancel-btn,
-  .codex-provider-model-manager button,
-  .codex-resource-manager button,
-  .codex-provider-model-modal button,
-  .codex-mcp-server-modal button,
+  .codex-provider-model-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])),
+  .codex-resource-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])),
+  .codex-provider-model-modal button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])),
+  .codex-mcp-server-modal button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])),
   .echoink-agent-identity-modal button,
-  .modal.echoink-knowledge-note-picker button,
+  .modal.echoink-knowledge-note-picker button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])),
   .echoink-onboarding-coachmark button
 ) {
   transition-property: color, background-color, border-color, box-shadow, transform, opacity;
@@ -16600,10 +16600,10 @@ button.echoink-about-logo:focus-visible {
 :is(
   .echoink-amicro-button.is-primary,
   .echoink-settings-page button.mod-cta,
-  .codex-provider-model-modal button.mod-cta,
-  .codex-mcp-server-modal button.mod-cta,
+  .codex-provider-model-modal button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).mod-cta,
+  .codex-mcp-server-modal button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).mod-cta,
   .echoink-agent-identity-modal button.mod-cta,
-  .modal.echoink-knowledge-note-picker button.mod-cta,
+  .modal.echoink-knowledge-note-picker button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).mod-cta,
   .echoink-onboarding-coachmark button.mod-cta
 ) {
   min-height: 36px;
@@ -16617,10 +16617,10 @@ button.echoink-about-logo:focus-visible {
 :is(
   .echoink-amicro-button.is-primary,
   .echoink-settings-page button.mod-cta,
-  .codex-provider-model-modal button.mod-cta,
-  .codex-mcp-server-modal button.mod-cta,
+  .codex-provider-model-modal button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).mod-cta,
+  .codex-mcp-server-modal button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).mod-cta,
   .echoink-agent-identity-modal button.mod-cta,
-  .modal.echoink-knowledge-note-picker button.mod-cta,
+  .modal.echoink-knowledge-note-picker button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).mod-cta,
   .echoink-onboarding-coachmark button.mod-cta
 ):is(:hover, :focus-visible):not(:disabled) {
   background: var(--interactive-accent-hover);
@@ -16631,7 +16631,7 @@ button.echoink-about-logo:focus-visible {
    only where a modal/footer action must remain visibly separate. */
 :is(
   .echoink-amicro-button.is-secondary,
-  .echoink-settings-page .setting-item-control > button:not(.mod-warning),
+  .echoink-settings-page .setting-item-control > button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])):not(.mod-warning),
   .codex-provider-model-modal .codex-provider-modal-actions > button:not(.mod-cta),
   .codex-mcp-server-modal .codex-mcp-server-modal-footer > button:not(.mod-cta),
   .echoink-agent-identity-cancel,
@@ -16649,7 +16649,7 @@ button.echoink-about-logo:focus-visible {
 
 :is(
   .echoink-amicro-button.is-secondary,
-  .echoink-settings-page .setting-item-control > button:not(.mod-warning),
+  .echoink-settings-page .setting-item-control > button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])):not(.mod-warning),
   .codex-provider-model-modal .codex-provider-modal-actions > button:not(.mod-cta),
   .codex-mcp-server-modal .codex-mcp-server-modal-footer > button:not(.mod-cta),
   .echoink-agent-identity-cancel,
@@ -16672,7 +16672,7 @@ button.echoink-about-logo:focus-visible {
   .echoink-settings-page .echoink-personalization-actions > button:not(.mod-warning),
   .echoink-memory-correction-actions > button:not(.mod-cta),
   .echoink-knowledge-init-note-remove,
-  .codex-provider-model-manager button.codex-provider-row-action:not(.is-delete),
+  .codex-provider-model-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-row-action:not(.is-delete),
   .echoink-agent-profile-reselect:not(.is-primary):not(.is-danger),
   .echoink-settings-back,
   .echoink-settings-state-action,
@@ -16691,7 +16691,7 @@ button.echoink-about-logo:focus-visible {
   .echoink-settings-page .echoink-personalization-actions > button:not(.mod-warning),
   .echoink-memory-correction-actions > button:not(.mod-cta),
   .echoink-knowledge-init-note-remove,
-  .codex-provider-model-manager button.codex-provider-row-action:not(.is-delete),
+  .codex-provider-model-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-row-action:not(.is-delete),
   .echoink-agent-profile-reselect:not(.is-primary):not(.is-danger),
   .echoink-settings-back,
   .echoink-settings-state-action,
@@ -16706,7 +16706,7 @@ button.echoink-about-logo:focus-visible {
 :is(
   .echoink-amicro-button.is-danger,
   .echoink-settings-page button.mod-warning,
-  .codex-provider-model-manager button.codex-provider-row-action.is-delete,
+  .codex-provider-model-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-row-action.is-delete,
   .echoink-settings-page .echoink-settings-inline-actions > button.mod-warning,
   .echoink-settings-page .echoink-settings-compact-actions > button.mod-warning,
   .echoink-memory-correction-actions > button.mod-warning
@@ -16720,7 +16720,7 @@ button.echoink-about-logo:focus-visible {
 :is(
   .echoink-amicro-button.is-danger,
   .echoink-settings-page button.mod-warning,
-  .codex-provider-model-manager button.codex-provider-row-action.is-delete,
+  .codex-provider-model-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-provider-row-action.is-delete,
   .echoink-settings-page .echoink-settings-inline-actions > button.mod-warning,
   .echoink-settings-page .echoink-settings-compact-actions > button.mod-warning,
   .echoink-memory-correction-actions > button.mod-warning
@@ -16733,7 +16733,7 @@ button.echoink-about-logo:focus-visible {
    status-first treatment and just make their keyboard/pressed states agree. */
 :is(
   .codex-settings-tabs button.codex-settings-tab,
-  .codex-resource-manager button.codex-resource-tab,
+  .codex-resource-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])).codex-resource-tab,
   .echoink-knowledge-init-tab,
   .echoink-picker-row,
   .codex-provider-combobox-trigger,
@@ -16926,18 +16926,18 @@ button.echoink-about-logo:focus-visible {
 
 :is(
   .echoink-amicro-button,
-  .echoink-settings-page .setting-item-control > button,
+  .echoink-settings-page .setting-item-control > button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])),
   .echoink-settings-page .echoink-settings-inline-actions > button,
   .echoink-settings-page .echoink-settings-compact-actions > button,
   .echoink-settings-page .echoink-personalization-actions > button,
   .echoink-memory-correction-actions > button,
   .echoink-picker-cancel-btn,
-  .codex-provider-model-manager button,
-  .codex-resource-manager button,
-  .codex-provider-model-modal button,
-  .codex-mcp-server-modal button,
+  .codex-provider-model-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])),
+  .codex-resource-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])),
+  .codex-provider-model-modal button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])),
+  .codex-mcp-server-modal button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])),
   .echoink-agent-identity-modal button,
-  .modal.echoink-knowledge-note-picker button,
+  .modal.echoink-knowledge-note-picker button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])),
   .echoink-onboarding-coachmark button
 ):active:not(:disabled) {
   transform: scale(0.96);
@@ -16945,16 +16945,16 @@ button.echoink-about-logo:focus-visible {
 
 :is(
   .echoink-amicro-button,
-  .echoink-settings-page .setting-item-control > button,
+  .echoink-settings-page .setting-item-control > button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])),
   .echoink-settings-page .echoink-settings-inline-actions > button,
   .echoink-settings-page .echoink-settings-compact-actions > button,
   .echoink-settings-page .echoink-personalization-actions > button,
-  .codex-provider-model-manager button,
-  .codex-resource-manager button,
-  .codex-provider-model-modal button,
-  .codex-mcp-server-modal button,
+  .codex-provider-model-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])),
+  .codex-resource-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])),
+  .codex-provider-model-modal button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])),
+  .codex-mcp-server-modal button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])),
   .echoink-agent-identity-modal button,
-  .modal.echoink-knowledge-note-picker button,
+  .modal.echoink-knowledge-note-picker button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])),
   .echoink-onboarding-coachmark button
 ):focus-visible {
   outline: 2px solid var(--interactive-accent);
@@ -16973,18 +16973,18 @@ button.echoink-about-logo:focus-visible {
   :is(
     .echoink-amicro-button,
     .echoink-amicro-button-icon > span,
-    .echoink-settings-page .setting-item-control > button,
+    .echoink-settings-page .setting-item-control > button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])),
     .echoink-settings-page .echoink-settings-inline-actions > button,
     .echoink-settings-page .echoink-settings-compact-actions > button,
     .echoink-settings-page .echoink-personalization-actions > button,
     .echoink-memory-correction-actions > button,
     .echoink-picker-cancel-btn,
-    .codex-provider-model-manager button,
-    .codex-resource-manager button,
-    .codex-provider-model-modal button,
-    .codex-mcp-server-modal button,
+    .codex-provider-model-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])),
+    .codex-resource-manager button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])),
+    .codex-provider-model-modal button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])),
+    .codex-mcp-server-modal button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])),
     .echoink-agent-identity-modal button,
-    .modal.echoink-knowledge-note-picker button,
+    .modal.echoink-knowledge-note-picker button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])),
     .echoink-onboarding-coachmark button
   ) {
     animation: none !important;
@@ -20690,7 +20690,7 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
 .echoink-settings-demo :is(.echoink-agent-identity-footer,.echoink-memory-correction-actions,.echoink-personalization-actions,.codex-mcp-server-modal-footer,.codex-provider-modal-actions){display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .echoink-settings-demo :is(.echoink-agent-identity-footer,.echoink-memory-correction-actions,.echoink-personalization-actions,.codex-mcp-server-modal-footer,.codex-provider-modal-actions)>button{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-width:0;height:auto;min-height:34px;padding:8px 13px;line-height:1.4;border-radius:6px;white-space:normal}
 
-.echoink-settings-demo :is(.setting-item-control,.echoink-settings-feature-actions,.echoink-knowledge-init-actions,.codex-resource-toolbar-actions,.echoink-settings-inline-actions)>button{height:auto;min-height:34px;padding:8px 13px;line-height:1.4;white-space:normal}
+.echoink-settings-demo :is(.setting-item-control,.echoink-settings-feature-actions,.echoink-knowledge-init-actions,.codex-resource-toolbar-actions,.echoink-settings-inline-actions)>button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])){height:auto;min-height:34px;padding:8px 13px;line-height:1.4;white-space:normal}
 .echoink-settings-demo .echoink-knowledge-init-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .echoink-settings-demo .echoink-settings-page .echoink-personalization-actions{width:100%;justify-content:space-between;gap:12px}
 .echoink-settings-demo .echoink-settings-page .echoink-personalization-actions>button{border:1px solid var(--line);background:var(--bg);color:var(--text)}
@@ -20776,7 +20776,7 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
 .echoink-settings-demo input.echoink-origin-control.echoink-origin-control[data-slot=input] {height:auto;min-height:32px}
 .echoink-settings-demo :is(.codex-provider-modal-field,.codex-mcp-server-form)>.echoink-origin-control[data-slot=select-trigger] {width:100%}
 .echoink-origin-control[data-slot=select-content] {
-  position:relative;z-index:100;min-width:var(--radix-select-trigger-width);max-width:calc(100vw - 24px);
+  position:relative;z-index:calc(var(--layer-modal,100) + 1);min-width:var(--radix-select-trigger-width);max-width:calc(100vw - 24px);
   max-height:min(24rem,var(--radix-select-content-available-height));overflow:hidden;
   margin:4px 0;border:1px solid var(--origin-line);border-radius:6px;background:var(--origin-bg);
   color:var(--origin-text);box-shadow:0 6px 24px #0002;font:11px/1.55 var(--font-interface,sans-serif);

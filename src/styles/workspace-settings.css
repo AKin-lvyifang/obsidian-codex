@@ -1149,7 +1149,7 @@
 .echoink-settings-demo :is(.echoink-agent-identity-footer,.echoink-memory-correction-actions,.echoink-personalization-actions,.codex-mcp-server-modal-footer,.codex-provider-modal-actions){display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .echoink-settings-demo :is(.echoink-agent-identity-footer,.echoink-memory-correction-actions,.echoink-personalization-actions,.codex-mcp-server-modal-footer,.codex-provider-modal-actions)>button{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-width:0;height:auto;min-height:34px;padding:8px 13px;line-height:1.4;border-radius:6px;white-space:normal}
 
-.echoink-settings-demo :is(.setting-item-control,.echoink-settings-feature-actions,.echoink-knowledge-init-actions,.codex-resource-toolbar-actions,.echoink-settings-inline-actions)>button{height:auto;min-height:34px;padding:8px 13px;line-height:1.4;white-space:normal}
+.echoink-settings-demo :is(.setting-item-control,.echoink-settings-feature-actions,.echoink-knowledge-init-actions,.codex-resource-toolbar-actions,.echoink-settings-inline-actions)>button:not(:where([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger])){height:auto;min-height:34px;padding:8px 13px;line-height:1.4;white-space:normal}
 .echoink-settings-demo .echoink-knowledge-init-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .echoink-settings-demo .echoink-settings-page .echoink-personalization-actions{width:100%;justify-content:space-between;gap:12px}
 .echoink-settings-demo .echoink-settings-page .echoink-personalization-actions>button{border:1px solid var(--line);background:var(--bg);color:var(--text)}

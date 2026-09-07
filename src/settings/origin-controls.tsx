@@ -1,6 +1,6 @@
 import { createPortal, flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { Button } from "../ui/components/origin/button";
 import { Input } from "../ui/components/origin/input";
 import { Switch } from "../ui/components/origin/switch";
@@ -111,16 +111,23 @@ export function createOriginSelect(parent: HTMLElement, options: ElementOptions,
   let disabled = false;
   const items = [...choices];
   let open = false;
-  // Keep the portal in the same settings/modal document and themed DOM tree.
-  const portalHost = parent.closest<HTMLElement>(".echoink-settings-demo, .echoink-settings-inline-editor, .modal") ?? parent;
+  // Restore Origin/Radix's body portal, explicitly bound to the owning window.
+  // Settings' size containment and native scrollport must not clip fixed content.
+  const portalHost = parent.ownerDocument.body;
+  let popupTheme: CSSProperties = {};
+  const capturePopupTheme = () => {
+    const computed = parent.ownerDocument.defaultView!.getComputedStyle(island.element());
+    const properties = ["--accent", "--accent-bg", "--line", "--bg", "--text", "--soft", "--secondary", "--font-text-size", "--font-interface"];
+    popupTheme = Object.fromEntries(properties.map((name) => [name, computed.getPropertyValue(name)]).filter(([, value]) => value.trim())) as CSSProperties;
+  };
   const emptyValue = "__echoink_empty_selection__";
-  const render = () => island.render(<Select value={value || emptyValue} disabled={disabled} open={open} onOpenChange={(next) => { open = next; render(); }} onValueChange={(next) => {
+  const render = () => island.render(<Select value={value || emptyValue} disabled={disabled} open={open} onOpenChange={(next) => { open = next; if (next) capturePopupTheme(); render(); }} onValueChange={(next) => {
     value = next === emptyValue ? "" : next; render();
     const element = island.element();
     element.dispatchEvent(new (element.ownerDocument.defaultView!.Event)("change", { bubbles: true }));
   }}>
     <SelectTrigger ref={island.ref} className="echoink-origin-control"><SelectValue /></SelectTrigger>
-    <SelectContent container={portalHost} className="echoink-origin-control" position="popper"
+    <SelectContent container={portalHost} className="echoink-origin-control" position="popper" style={popupTheme}
       onFocusCapture={(event) => {
         const content = event.currentTarget;
         // Radix's fallback focus loop reads the main document. In a detached
@@ -176,7 +183,23 @@ export function createOriginSlider(parent: HTMLElement, options: {
 export function createOriginRadioGroup(parent: HTMLElement, value: string, label: string, onChange: (value: string) => void) {
   const island = createIsland(parent);
   const items: { parent: HTMLElement; value: string; disabled: boolean; ref: (element: HTMLButtonElement | null) => void }[] = [];
-  const render = () => island.render(<RadioGroup ref={island.ref} className="echoink-origin-radio-group" value={value} aria-label={label} onValueChange={(next) => { value = next; render(); onChange(next); }}>
+  const render = () => island.render(<RadioGroup ref={island.ref} className="echoink-origin-radio-group" value={value} aria-label={label}
+    onKeyDownCapture={(event) => {
+      const group = event.currentTarget;
+      if (group.ownerDocument === document || !["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      const items = Array.from(group.querySelectorAll<HTMLButtonElement>('[data-slot=radio-group-item]:not(:disabled)'));
+      if (!items.length) return;
+      const current = items.indexOf(group.ownerDocument.activeElement as HTMLButtonElement);
+      const forward = event.key === "ArrowDown" || event.key === "ArrowRight";
+      const index = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1
+        : (current + (forward ? 1 : -1) + items.length) % items.length;
+      event.preventDefault(); event.stopPropagation();
+      // Radix's roving-focus and arrow-key ref read the main document. Keep its
+      // real radio activation while resolving keyboard focus in this window.
+      items[index].focus();
+      items[index].click();
+    }}
+    onValueChange={(next) => { value = next; render(); onChange(next); }}>
     {items.map((item) => createPortal(<RadioGroupItem ref={item.ref} className="echoink-origin-control" value={item.value} disabled={item.disabled} />, item.parent, item.value))}
   </RadioGroup>);
   render();
