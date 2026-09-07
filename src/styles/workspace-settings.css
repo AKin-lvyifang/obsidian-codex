@@ -1015,6 +1015,7 @@
 .echoink-settings-demo .health-card.is-bad .health-score strong{color:var(--danger)}
 .echoink-settings-demo .health-card.is-risk .health-score strong{color:var(--amber)}
 .echoink-settings-demo .health-card.is-unknown .health-score strong{color:var(--muted)}
+.echoink-settings-demo{position:relative}
 .echoink-settings-demo .echoink-settings-help{display:inline-flex;position:relative;vertical-align:middle}
 .echoink-settings-demo .echoink-settings-help-trigger{display:grid;place-items:center;padding:0!important;width:13px!important;min-height:13px!important;height:13px!important;border:1px solid var(--muted);border-radius:50%;background:none;font-size:9px!important;color:var(--secondary);line-height:1}
 .echoink-settings-demo .echoink-settings-help-panel{position:absolute;top:22px;left:0;width:min(300px,65cqw);padding:11px 13px;background:var(--bg);border:1px solid var(--line);border-radius:7px;box-shadow:0 8px 24px #0002;color:var(--secondary);font-size:calc(var(--font-text-size,16px)*.6875);font-weight:400;line-height:1.85;z-index:20;overflow:auto;overflow-wrap:anywhere}

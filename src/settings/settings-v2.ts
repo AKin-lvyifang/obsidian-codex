@@ -114,18 +114,22 @@ export function addSettingsHelp(setting: Setting, summary: string, explanation: 
   let detachObserver: MutationObserver | undefined;
   const cancelHide = () => { if (hideTimer !== undefined) view?.clearTimeout(hideTimer); hideTimer = undefined; };
   const hide = () => {
-    cancelHide(); panel.hidden = true;
+    cancelHide(); panel.hidden = true; panel.remove();
     view?.removeEventListener("scroll", hideOnScroll, true);
     view?.removeEventListener("resize", hide);
     detachObserver?.disconnect(); detachObserver = undefined;
   };
   const hideOnScroll = (event: Event) => { if (!panel.contains(event.target as Node)) hide(); };
   const show = () => {
+    // Obsidian setting names and legacy groups can clip their descendants.
+    // Keep the themed tooltip in the settings surface, outside those rows.
+    const surface = wrapper.closest<HTMLElement>(".echoink-settings-demo") ?? wrapper;
+    surface.appendChild(panel);
     cancelHide(); panel.hidden = false;
     panel.style.removeProperty("max-height");
     panel.style.left = "0px"; panel.style.top = "22px";
     const anchor = wrapper.getBoundingClientRect();
-    const root = wrapper.closest(".echoink-settings-demo")?.getBoundingClientRect();
+    const root = surface.getBoundingClientRect();
     const viewport = view?.visualViewport;
     const header = wrapper.closest(".echoink-settings-demo")?.querySelector(".codex-settings-tabs-slot")?.getBoundingClientRect();
     const top = Math.max((viewport?.offsetTop ?? 0) + 8, (root?.top ?? 0) + 8, (header?.bottom ?? 0) + 8);
@@ -139,8 +143,8 @@ export function addSettingsHelp(setting: Setting, summary: string, explanation: 
     const upwards = bounds.height > below && above > below;
     const height = Math.min(bounds.height, upwards ? above : below);
     panel.style.maxHeight = `${upwards ? above : below}px`;
-    panel.style.left = `${Math.max(left, Math.min(anchor.left - 14, right - bounds.width)) - anchor.left}px`;
-    panel.style.top = `${upwards ? -height - 9 : anchor.height + 9}px`;
+    panel.style.left = `${Math.max(left, Math.min(anchor.left - 14, right - bounds.width)) - root.left}px`;
+    panel.style.top = `${(upwards ? anchor.top - height - 9 : anchor.bottom + 9) - root.top}px`;
     view?.addEventListener("scroll", hideOnScroll, true);
     view?.addEventListener("resize", hide);
     if (!detachObserver && view?.MutationObserver) {
@@ -149,8 +153,10 @@ export function addSettingsHelp(setting: Setting, summary: string, explanation: 
     }
   };
   wrapper.onmouseenter = show;
-  wrapper.onmouseleave = () => { cancelHide(); hideTimer = view?.setTimeout(hide, 120); };
+  const scheduleHide = () => { cancelHide(); hideTimer = view?.setTimeout(hide, 120); };
+  wrapper.onmouseleave = scheduleHide;
   panel.onmouseenter = cancelHide;
+  panel.onmouseleave = scheduleHide;
   button.onfocus = show;
   button.onblur = hide;
   button.onclick = show;
