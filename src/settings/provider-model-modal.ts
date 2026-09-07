@@ -2061,16 +2061,17 @@ function focusOpenCombobox(
 ): void {
   (search.ownerDocument.defaultView ?? window).requestAnimationFrame(() => {
     if (!search.isConnected || !search.closest(".codex-provider-combobox")?.hasClass("is-open")) return;
+    const visible = visibleComboboxOptions(options);
+    const selected = visible.find((option) => option.getAttribute("aria-selected") === "true");
+    selected?.scrollIntoView({ block: "nearest" });
     if (focusTarget === "search") {
-      search.focus();
+      search.focus({ preventScroll: true });
       return;
     }
-    const visible = visibleComboboxOptions(options);
     if (!visible.length) {
       search.focus();
       return;
     }
-    const selected = visible.find((option) => option.getAttribute("aria-selected") === "true");
     (selected ?? (focusTarget === "last" ? visible[visible.length - 1] : visible[0])).focus();
   });
 }

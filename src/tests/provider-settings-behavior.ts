@@ -9816,7 +9816,10 @@ async function assertProviderPickerGroupingAndFiltering(): Promise<void> {
   assert.equal(picker.hasClass("is-open"), false);
   assert.equal(trigger.getAttribute("aria-expanded"), "false");
   assert.equal(providerModalTestDocument.activeElement, trigger);
+  const beforeSelectedScroll = selected.scrollIntoViewCalls;
   trigger.click();
+  assert.equal(selected.scrollIntoViewCalls, beforeSelectedScroll + 1, "pointer opening brings the current Provider into the constrained list viewport");
+  assert.equal(providerModalTestDocument.activeElement, search, "showing the current Provider preserves search focus");
   headings[0].click();
   search.value = "codex";
   search.fireEvent("input");
