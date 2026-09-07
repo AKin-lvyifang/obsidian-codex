@@ -187,9 +187,10 @@ export function createOriginRadioGroup(parent: HTMLElement, value: string, label
     onKeyDownCapture={(event) => {
       const group = event.currentTarget;
       if (group.ownerDocument === document || !["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
       const items = Array.from(group.querySelectorAll<HTMLButtonElement>('[data-slot=radio-group-item]:not(:disabled)'));
-      if (!items.length) return;
-      const current = items.indexOf(group.ownerDocument.activeElement as HTMLButtonElement);
+      const current = items.indexOf(event.target as HTMLButtonElement);
+      if (current < 0 || group.ownerDocument.activeElement !== items[current]) return;
       const forward = event.key === "ArrowDown" || event.key === "ArrowRight";
       const index = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1
         : (current + (forward ? 1 : -1) + items.length) % items.length;

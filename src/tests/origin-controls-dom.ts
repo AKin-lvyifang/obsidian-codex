@@ -2,7 +2,7 @@ import { createOriginButton, createOriginCheck, createOriginInput, createOriginR
 
 type AsyncFixture = { runMcpToggleAction(toggle: OriginCheckElement, action: (checked: boolean) => Promise<void>): Promise<void> };
 const frame = () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-const key = (element: HTMLElement, value: string) => element.dispatchEvent(new (element.ownerDocument.defaultView!.KeyboardEvent)("keydown", { key: value, bubbles: true, cancelable: true }));
+const key = (element: HTMLElement, value: string, modifiers: KeyboardEventInit = {}) => element.dispatchEvent(new (element.ownerDocument.defaultView!.KeyboardEvent)("keydown", { key: value, bubbles: true, cancelable: true, ...modifiers }));
 const assert = (condition: unknown, message: string) => { if (!condition) throw new Error(message); };
 
 export async function runOriginControlsDom(Fixture: new () => AsyncFixture) {
@@ -129,6 +129,21 @@ export async function runOriginControlsDom(Fixture: new () => AsyncFixture) {
     assert(selected === "c" && other.activeElement === radioItems[2] && radioItems[2].getAttribute("aria-checked") === "true" && radioItems[0].getAttribute("aria-checked") === "false", "owning document radio ArrowDown/disabled skip failed");
     key(radioItems[2], "ArrowUp"); await frame();
     assert(selected === "a" && other.activeElement === radioItems[0] && radioItems[0].getAttribute("aria-checked") === "true" && radioItems[2].getAttribute("aria-checked") === "false", "owning document radio ArrowUp/mutual exclusion failed");
+    const modelRow = radioItems[0].closest<HTMLElement>(".codex-provider-model-choice")!;
+    const context = createOriginInput(modelRow, { value: "8192", attr: { "aria-label": "Context window" } });
+    const enabled = createOriginCheck(modelRow.querySelector<HTMLElement>(".codex-provider-model-choice-selection")!);
+    for (const control of [context, enabled]) {
+      control.focus();
+      for (const direction of ["ArrowDown", "Home", "End"]) {
+        assert(key(control, direction), "radio group intercepted a model field key"); await frame();
+        assert(selected === "a" && other.activeElement === control, "model field key changed default model or focus");
+      }
+    }
+    radioItems[0].focus();
+    for (const modifier of ["metaKey", "ctrlKey", "altKey", "shiftKey"] as const) {
+      assert(key(radioItems[0], "ArrowDown", { [modifier]: true }), "radio group intercepted a modified key"); await frame();
+      assert(selected === "a" && other.activeElement === radioItems[0], "modified radio key changed default model or focus");
+    }
     disposeOriginControls(host);
     assert(!host.querySelector('[data-slot]') && !other.querySelector('[data-slot=select-content]'), "root cleanup left controls or popup");
     iframe.remove();
