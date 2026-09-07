@@ -1,3 +1,4 @@
+import { createOriginButton, disposeOriginControls } from "../settings/origin-controls";
 import { App, Modal, Setting } from "obsidian";
 
 export function confirmModal(
@@ -159,6 +160,7 @@ class ConfirmModal extends Modal {
 
   onClose(): void {
     this.finish(false);
+    disposeOriginControls(this.contentEl);
     this.contentEl.empty();
   }
 
@@ -216,6 +218,7 @@ class TextInputModal extends Modal {
 
   onClose(): void {
     this.finish(null);
+    disposeOriginControls(this.contentEl);
     this.contentEl.empty();
   }
 
@@ -314,11 +317,11 @@ export class MemoryCorrectionModal extends Modal {
     });
 
     const actions = contentEl.createDiv({ cls: "echoink-memory-correction-actions" });
-    this.correctButton = actions.createEl("button", {
+    this.correctButton = createOriginButton(actions, {
       text: zh ? "修正" : "Correct",
       attr: { type: "button" }
     });
-    this.saveButton = actions.createEl("button", {
+    this.saveButton = createOriginButton(actions, {
       cls: "mod-cta",
       text: zh ? "保存" : "Save",
       attr: { type: "button" }
@@ -360,6 +363,7 @@ export class MemoryCorrectionModal extends Modal {
     this.generationController?.abort();
     this.generationController = null;
     if (!this.saving) this.finish("cancelled");
+    disposeOriginControls(this.contentEl);
     this.contentEl.empty();
   }
 
@@ -580,6 +584,7 @@ class SelectInputModal extends Modal {
 
   onClose(): void {
     this.finish(null);
+    disposeOriginControls(this.contentEl);
     this.contentEl.empty();
   }
 
@@ -644,6 +649,7 @@ class RequestInputModal extends Modal {
 
   onClose(): void {
     this.finish({});
+    disposeOriginControls(this.contentEl);
     this.contentEl.empty();
   }
 

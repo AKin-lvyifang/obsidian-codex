@@ -70,6 +70,7 @@
     "clsx": "2.1.1",
     "framer-motion": "12.23.24",
     "pinyin-pro": "3.29.3",
+    "radix-ui": "1.6.7",
     "react": "19.1.1",
     "react-dom": "19.1.1",
     "tailwind-merge": "3.3.1",

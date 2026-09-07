@@ -12366,6 +12366,16 @@ class ProviderModalTestElement {
     return child;
   }
 
+  insertBefore(child: ProviderModalTestElement, reference: ProviderModalTestElement): ProviderModalTestElement {
+    child.parentElement?.removeChild(child);
+    const index = this.children.indexOf(reference);
+    if (index < 0) return this.appendChild(child);
+    child.parentElement = this;
+    child.setConnected(this.connected);
+    this.children.splice(index, 0, child);
+    return child;
+  }
+
   removeChild(child: ProviderModalTestElement): ProviderModalTestElement {
     const index = this.children.indexOf(child);
     if (index >= 0) this.children.splice(index, 1);
@@ -12624,6 +12634,7 @@ function dataAttributeKey(name: string): string {
 
 function withSettingsTabDefaults<T extends object>(plugin: T) {
   return {
+    register: () => undefined,
     getEchoInkKnowledgeInitializationState: async () => null,
     getEchoInkKnowledgeBaseStructure: async () =>
       makeKnowledgeBaseStructureFixture("uninitialized"),

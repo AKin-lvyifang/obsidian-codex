@@ -14,6 +14,8 @@ try {
     loader: { ".md": "text", ".svg": "dataurl", ".webp": "dataurl" },
     external: ["@earendil-works/pi-agent-core", "@earendil-works/pi-ai", "@earendil-works/pi-coding-agent", "yaml"],
     plugins: [{ name: "obsidian-fixture", setup(build) {
+      build.onResolve({ filter: /(?:^|\/)origin-controls$/ }, () => ({ path: path.join(root, "src/tests/origin-controls-shim.ts") }));
+      build.onResolve({ filter: /(?:^|\/)origin-setting$/ }, () => ({ path: path.join(root, "src/tests/origin-setting-shim.ts") }));
       build.onResolve({ filter: /^obsidian$/ }, () => ({ path: path.join(root, "src/tests/obsidian-shim.ts") }));
       build.onResolve({ filter: /^echoink:test-settings-dom$/ }, () => ({ path: "settings-dom", namespace: "fixture" }));
       build.onLoad({ filter: /.*/, namespace: "fixture" }, async () => {

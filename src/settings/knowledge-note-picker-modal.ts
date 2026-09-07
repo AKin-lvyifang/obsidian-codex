@@ -1,3 +1,4 @@
+import { createOriginInput, createOriginButton, createOriginCheck, disposeOriginControls } from "./origin-controls";
 import { Modal, type App } from "obsidian";
 import type {
   KnowledgeInitializationAssignment,
@@ -110,7 +111,7 @@ export class KnowledgeNotePickerModal extends Modal {
         : (zh ? `添加笔记到 ${targetLabel}` : `Add notes to ${targetLabel}`)
     );
     const body = this.contentEl.createDiv({ cls: "echoink-knowledge-note-picker-body" });
-    this.searchEl = body.createEl("input", {
+    this.searchEl = createOriginInput(body, {
       cls: "echoink-knowledge-note-picker-search",
       attr: {
         type: "search",
@@ -132,14 +133,14 @@ export class KnowledgeNotePickerModal extends Modal {
       cls: "echoink-knowledge-note-picker-error",
       attr: { role: "alert", "aria-live": "assertive" }
     });
-    this.cancelEl = footer.createEl("button", {
+    this.cancelEl = createOriginButton(footer, {
       cls: "echoink-knowledge-note-picker-cancel",
       text: zh ? "取消" : "Cancel",
       attr: { type: "button" }
     });
     applyAmicroButton(this.cancelEl, { variant: "secondary" });
     this.cancelEl.onclick = () => this.close();
-    this.confirmEl = footer.createEl("button", {
+    this.confirmEl = createOriginButton(footer, {
       cls: "mod-cta echoink-knowledge-note-picker-confirm",
       text: this.confirmLabel(),
       attr: { type: "button" }
@@ -152,6 +153,7 @@ export class KnowledgeNotePickerModal extends Modal {
   }
 
   onClose(): void {
+    disposeOriginControls(this.contentEl);
     if (this.keydownHandler) {
       this.modalEl.removeEventListener("keydown", this.keydownHandler);
       this.keydownHandler = null;
@@ -184,6 +186,7 @@ export class KnowledgeNotePickerModal extends Modal {
     if (!list) return;
     const { zh, targetRole } = this.options;
     const rawTarget = targetRole === "raw";
+    disposeOriginControls(list);
     list.empty();
     const query = this.query.trim().toLocaleLowerCase();
     const visible = this.notes.filter((note) =>
@@ -226,7 +229,7 @@ export class KnowledgeNotePickerModal extends Modal {
         text: note.sourcePath,
         attr: { title: note.sourcePath }
       });
-      const checkbox = row.createEl("input", {
+      const checkbox = createOriginCheck(row, {
         cls: "echoink-knowledge-note-picker-checkbox",
         attr: { type: "checkbox" }
       });

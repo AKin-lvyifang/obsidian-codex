@@ -15,6 +15,27 @@ const obsidianShimPath = path.join(
 );
 
 await mkdir(outputDir, { recursive: true });
+if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "origin-dom") {
+  const ts = await import("typescript");
+  const source = await readFile(path.join(rootDir, "src/settings/settings-tab.ts"), "utf8");
+  const ast = ts.createSourceFile("settings-tab.ts", source, ts.ScriptTarget.Latest, true);
+  const declaration = ast.statements.find((node) => ts.isClassDeclaration(node) && node.name?.text === "CodexSettingTab");
+  const method = declaration.members.find((node) => ts.isMethodDeclaration(node) && node.name.getText(ast) === "runMcpToggleAction").getText(ast);
+  const directory = path.join(outputDir, "origin-dom");
+  await mkdir(directory, { recursive: true });
+  await esbuild.build({
+    stdin: { contents: `import {runOriginControlsDom} from "./src/tests/origin-controls-dom";
+      class Notice { constructor(message){} }
+      class Fixture { plugin={settings:{settingsLanguage:"en"}}; scheduleDisplay(){} announceSettingsStatus(){} ${method} }
+      runOriginControlsDom(Fixture).catch(error=>{document.querySelector("#report").textContent=error.stack;document.querySelector("#report").dataset.result="failed";});`, resolveDir: rootDir, loader: "ts" },
+    bundle: true, format: "esm", platform: "browser", define: { "process.env.NODE_ENV": '"development"' },
+    outfile: path.join(directory, "regression.js"), logLevel: "silent"
+  });
+  await writeFile(path.join(directory, "index.html"), '<!doctype html><meta charset="utf-8"><title>Origin controls regression</title><link rel="stylesheet" href="styles.css"><style>body{margin:0;padding:20px}:root{--font-text-size:16px}#fixture{max-width:656px}#report{white-space:pre-wrap;padding:20px;font:12px/1.8 monospace}.setting-item{display:flex}.echoink-settings-demo{padding:18px}</style><main id="fixture" class="echoink-settings-demo"></main><pre id="report">Running…</pre><script type="module" src="regression.js"></script>');
+  await writeFile(path.join(directory, "styles.css"), await readFile(path.join(rootDir, "styles.css")));
+  console.log(`Open ${path.join(directory, "index.html")}; #report[data-result=passed] is the browser result.`);
+  process.exit(0);
+}
 if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "archive-ime") {
   const ts = await import("typescript");
   const source = await readFile(path.join(rootDir, "src/settings/settings-tab.ts"), "utf8");
@@ -31,6 +52,7 @@ if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "archive-ime") {
     stdin: { contents: `
       import {createSettingsPage,createSettingsSection,createSettingsCompactList,createSettingsState,showSettingsInlineConfirmation} from "./src/settings/settings-v2";
       import {runArchiveSearchImeRegression} from "./src/tests/archive-search-ime";
+      import {createOriginInput,createOriginButton,disposeOriginControls} from "./src/settings/origin-controls";
       class ArchiveFixture {
         plugin={settings:{settingsLanguage:"zh-CN"}}; settingsVisible=true; displayFrame=null; displayFrameWindow=null;
         archivedConversationQuery=""; archivedConversationBusyId=""; archivedConversationsLoading=false; archivedConversationsError="";
@@ -39,7 +61,7 @@ if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "archive-ime") {
         // The shell adapter only empties the body and routes back to archives,
         // as renderSettingsContent does. Both event handling and frame scheduling
         // below are copied verbatim from the current production AST at build time.
-        renderSettingsContent(){this.renders++;this.containerEl.empty();this.renderArchivedConversationSettings(this.containerEl);}
+        renderSettingsContent(){this.renders++;disposeOriginControls(this.containerEl);this.containerEl.empty();this.renderArchivedConversationSettings(this.containerEl);}
         ${method("renderArchivedConversationSettings")}
         ${method("scheduleDisplay")}
       }
@@ -99,6 +121,8 @@ await esbuild.build({
   plugins: [{
     name: "provider-settings-test-shims",
     setup(build) {
+      build.onResolve({ filter: /(?:^|\/)origin-controls$/ }, () => ({ path: path.join(rootDir, "src/tests/origin-controls-shim.ts") }));
+      build.onResolve({ filter: /(?:^|\/)origin-setting$/ }, () => ({ path: path.join(rootDir, "src/tests/origin-setting-shim.ts") }));
       build.onResolve({ filter: /^obsidian$/ }, () => ({
         path: obsidianShimPath
       }));

@@ -97,6 +97,7 @@ async function settingsDomLifecycle(): Promise<void> {
   settings.settingsTab = "general";
   settings.settingsLanguage = "zh-CN";
   const plugin = {
+    register: () => undefined,
     app: new App(), manifest: { id: "codex-echoink", version: "2.1.0" }, settings,
     developerMode: access, getDeveloperModeService: () => service,
     saveSettings: async () => { saves++; }, refreshLanguageSurfaces: async () => {},

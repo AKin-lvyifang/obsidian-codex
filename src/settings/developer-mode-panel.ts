@@ -1,4 +1,5 @@
-import { Setting } from "obsidian";
+import { OriginSetting } from "./origin-setting";
+import { createOriginButton, disposeOriginControls } from "./origin-controls";
 import type { DeveloperAction, DeveloperModeService, DeveloperResult, DeveloperStatus } from "../plugin/developer-mode/service";
 import { applySettingsRow } from "./settings-v2";
 
@@ -21,6 +22,7 @@ export class DeveloperModePanel {
   dispose(): void {
     this.disposed = true;
     this.renderVersion++;
+    disposeOriginControls(this.contentEl);
     this.contentEl.empty();
     this.contentEl.style.removeProperty("min-height");
   }
@@ -43,6 +45,7 @@ export class DeveloperModePanel {
     const version = ++this.renderVersion;
     const current = (): boolean => this.active() && version === this.renderVersion;
     const el = this.contentEl;
+    disposeOriginControls(el);
     el.empty();
     el.addClass("echoink-developer-mode");
     this.renderMessage(this.t("正在读取状态…", "Loading status…"), "loading");
@@ -50,6 +53,7 @@ export class DeveloperModePanel {
     try { status = await this.service.status(); }
     catch (error) {
       if (current()) {
+        disposeOriginControls(el);
         el.empty();
         el.style.removeProperty("min-height");
         this.renderMessage(this.errorText(error), "error");
@@ -57,13 +61,14 @@ export class DeveloperModePanel {
       return;
     }
     if (!current()) return;
+    disposeOriginControls(el);
     el.empty();
     el.style.removeProperty("min-height");
     this.vault = status.vault;
     const summary = el.createDiv({ cls: "echoink-developer-status" });
     const heading = summary.createDiv({ cls: "echoink-developer-status-heading" });
     heading.createEl("h4", { text: this.t("当前状态", "Current status") });
-    const refresh = heading.createEl("button", {
+    const refresh = createOriginButton(heading, {
       text: this.t("刷新", "Refresh"), attr: { type: "button" }
     });
     refresh.disabled = this.running;
@@ -88,7 +93,7 @@ export class DeveloperModePanel {
     else if (status.busy) this.renderMessage(this.t("正在执行，请稍候。", "An operation is running. Please wait."), "busy");
     const actions = el.createDiv({ cls: "echoink-developer-actions" });
     const add = (action: DeveloperAction, title: string, verb: string, desc: string, disabled = false): void => {
-      applySettingsRow(new Setting(actions).setName(title).setDesc(desc).addButton((button) => {
+      applySettingsRow(new OriginSetting(actions).setName(title).setDesc(desc).addOriginButton((button) => {
         button.buttonEl.setAttribute("data-developer-action", action);
         button.buttonEl.setAttribute("aria-label", title);
         button.setButtonText(verb).setDisabled(this.running || status.busy || disabled)
@@ -120,6 +125,7 @@ export class DeveloperModePanel {
   private confirm(action: "reset" | "restore"): void {
     if (!this.active()) return;
     this.renderVersion++;
+    disposeOriginControls(this.contentEl);
     this.contentEl.empty();
     const confirmation = this.contentEl.createDiv({ cls: "echoink-developer-confirm" });
     confirmation.createEl("h4", { text: action === "reset"
@@ -141,9 +147,9 @@ export class DeveloperModePanel {
       "将先保护当前状态，再恢复最近一次重置前的记忆。",
       "The current state will be protected before restoring the memories from the latest reset."
     ) });
-    const controls = new Setting(confirmation)
-      .addButton((button) => button.setButtonText(this.t("取消", "Cancel")).onClick(() => void this.render()))
-      .addButton((button) => button.setButtonText(this.t("确认并执行", "Confirm and continue"))
+    const controls = new OriginSetting(confirmation)
+      .addOriginButton((button) => button.setButtonText(this.t("取消", "Cancel")).onClick(() => void this.render()))
+      .addOriginButton((button) => button.setButtonText(this.t("确认并执行", "Confirm and continue"))
         .setWarning().onClick(() => void this.run(action)));
     controls.settingEl.addClass("echoink-developer-confirm-actions");
   }
@@ -153,6 +159,7 @@ export class DeveloperModePanel {
     this.renderVersion++;
     this.running = true;
     this.contentEl.style.setProperty("min-height", `${this.contentEl.getBoundingClientRect().height}px`);
+    disposeOriginControls(this.contentEl);
     this.contentEl.empty();
     this.renderMessage(this.t("正在执行，请稍候…", "Working, please wait…"), "busy");
     try {

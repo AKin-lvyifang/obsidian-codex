@@ -1,3 +1,5 @@
+import { OriginSetting } from "./origin-setting";
+import { createOriginInput, createOriginButton, createOriginSwitch, createOriginSlider, disposeOriginControls, type OriginCheckElement } from "./origin-controls";
 import { renderSettingsKnowledgeDashboard } from "./knowledge-dashboard";
 import { BUILTIN_SKILLS } from "../harness/resources/builtin-skills";
 import { mountSettingsEditor } from "./inline-editor";
@@ -240,6 +242,7 @@ export class CodexSettingTab extends PluginSettingTab {
 
   constructor(private readonly plugin: CodexForObsidianPlugin) {
     super(plugin.app, plugin);
+    this.plugin.register(() => disposeOriginControls(this.containerEl));
     this.resourceSnapshot = snapshotFromWorkspaceResourceCache(this.plugin.settings.workspaceResourceCache);
     this.resourceLoaded = loadedTabsFromWorkspaceResourceCache(this.plugin.settings.workspaceResourceCache);
     this.resourceLoadErrors = errorsFromWorkspaceResourceCache(this.plugin.settings.workspaceResourceCache);
@@ -287,6 +290,7 @@ export class CodexSettingTab extends PluginSettingTab {
     disposeKnowledgeDashboardTooltipState(this.knowledgeDashboardTooltipState);
     this.disconnectSettingsTabsResizeObserver();
     this.cancelScheduledDisplay();
+    disposeOriginControls(this.containerEl);
     super.hide();
     if (shouldConfirmKnowledgePreference) {
       this.knowledgePreferenceClosePromptRunning = true;
@@ -312,6 +316,7 @@ export class CodexSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.removeClass("echoink-settings-demo");
     containerEl.addClass("echoink-settings-host");
+    disposeOriginControls(containerEl);
     containerEl.empty();
     const workspace = containerEl.createDiv({ cls: "echoink-settings-demo" });
     this.settingsTitleEl = workspace.createDiv({ cls: "codex-settings-title" });
@@ -348,13 +353,16 @@ export class CodexSettingTab extends PluginSettingTab {
       if (!titleEl || !tabsEl || !bodyEl) return;
       clearKnowledgeDashboardHealthTooltips(this.knowledgeDashboardTooltipState);
       this.knowledgeDashboardEl = null;
+      disposeOriginControls(titleEl);
       titleEl.empty();
+      disposeOriginControls(tabsEl);
       tabsEl.empty();
       const activeInline = this.inlineEditor;
       if (activeInline && activeInline.tab === visibleSettingsTab(this.plugin.settings.settingsTab)) activeInline.host.remove();
       else if (activeInline) { activeInline.dispose(); this.inlineEditor = null; }
+      disposeOriginControls(bodyEl);
       bodyEl.empty();
-      const pageTitle = new Setting(titleEl)
+      const pageTitle = new OriginSetting(titleEl)
         .setName(copy.title)
         .setHeading();
       pageTitle.settingEl.addClass("echoink-settings-page-title-row");
@@ -681,7 +689,7 @@ export class CodexSettingTab extends PluginSettingTab {
       surface: "group"
     });
     const interfaceGroup = createSettingsGroup(interfaceSection);
-    applySettingsRow(new Setting(interfaceGroup).setName(copy.general.settingsLanguage).setDesc(copy.general.settingsLanguageDesc).addDropdown((dropdown) => {
+    applySettingsRow(new OriginSetting(interfaceGroup).setName(copy.general.settingsLanguage).setDesc(copy.general.settingsLanguageDesc).addOriginDropdown((dropdown) => {
       dropdown.selectEl.setAttr("aria-label", copy.general.settingsLanguage);
       for (const language of SETTINGS_LANGUAGE_OPTIONS) dropdown.addOption(language, copy.general.languageOptions[language]);
       dropdown.setValue(this.plugin.settings.settingsLanguage);
@@ -693,10 +701,10 @@ export class CodexSettingTab extends PluginSettingTab {
       });
     }));
 
-    applySettingsRow(new Setting(interfaceGroup)
+    applySettingsRow(new OriginSetting(interfaceGroup)
       .setName(copy.general.autoOpen)
       .setDesc(zh ? "Obsidian 启动后自动打开 EchoInk 侧栏。" : "Open the EchoInk sidebar when Obsidian starts.")
-      .addToggle((toggle) => {
+      .addOriginToggle((toggle) => {
         labelSettingsToggle(toggle, copy.general.autoOpen);
         toggle.setValue(this.plugin.settings.autoOpen).onChange(async (value) => {
           this.plugin.settings.autoOpen = value;
@@ -704,10 +712,10 @@ export class CodexSettingTab extends PluginSettingTab {
         });
       }));
 
-    applySettingsRow(new Setting(interfaceGroup)
+    applySettingsRow(new OriginSetting(interfaceGroup)
       .setName(copy.general.autoOpenHome)
       .setDesc(zh ? "Obsidian 启动后显示 EchoInk 首页概览。" : "Show the EchoInk home overview when Obsidian starts.")
-      .addToggle((toggle) => {
+      .addOriginToggle((toggle) => {
         labelSettingsToggle(toggle, copy.general.autoOpenHome);
         toggle.setValue(this.plugin.settings.autoOpenHome).onChange(async (value) => {
           this.plugin.settings.autoOpenHome = value;
@@ -720,12 +728,12 @@ export class CodexSettingTab extends PluginSettingTab {
       surface: "group"
     });
     const journalGroup = createSettingsGroup(journalSection);
-    applySettingsRow(new Setting(journalGroup)
+    applySettingsRow(new OriginSetting(journalGroup)
       .setName(zh ? "日记保存文件夹" : "Journal folder")
       .setDesc(zh
         ? "与 Obsidian 原生日记共用文件夹。日期格式和模板可在原生日记设置中调整；默认按月存放，每天一篇。"
         : "Shared with Obsidian Daily notes. Set the date format and template there; the default is one note per day in monthly folders.")
-      .addText((text) => {
+      .addOriginText((text) => {
         const label = zh ? "日记保存文件夹" : "Journal folder";
         text.setPlaceholder("journal").setValue(readNativeJournalSettings(this.app, this.plugin.settings.journalDirectory).folder);
         text.inputEl.setAttr("aria-label", label);
@@ -754,12 +762,12 @@ export class CodexSettingTab extends PluginSettingTab {
       surface: "group"
     });
     const memoryGroup = createSettingsGroup(memorySection);
-    const memoryToggle = applySettingsRow(new Setting(memoryGroup)
+    const memoryToggle = applySettingsRow(new OriginSetting(memoryGroup)
       .setName(zh ? "使用长期记忆" : "Use long-term memory")
       .setDesc(zh
         ? "开启后，Agent 可在所有新旧对话中自主记住、更新、忘掉和整理长期记忆。关闭后仍保留 Agent 名称、头像与基础人格，但不会读取或写入记忆、不会做梦，也不会加载从长期协作中形成的用户画像或 Agent 学习内容。"
         : "When enabled, the Agent can remember, update, forget, and consolidate long-term memory in every conversation. When disabled, its name, avatar, and base personality remain, but it does not read or write memory, dream, or load user-profile or Agent learning content formed through long-term collaboration.")
-      .addToggle((toggle) => {
+      .addOriginToggle((toggle) => {
         labelSettingsToggle(toggle, zh ? "使用长期记忆" : "Use long-term memory");
         toggle.setValue(this.plugin.settings.memory.useLongTermMemory).onChange(async (enabled) => {
           this.plugin.settings.memory.useLongTermMemory = enabled;
@@ -773,12 +781,12 @@ export class CodexSettingTab extends PluginSettingTab {
     addSettingsHelp(memoryToggle, zh ? "Agent 可在新旧对话中记住、更新、忘掉和整理记忆。" : "The Agent can remember, update, forget, and consolidate memory across conversations.", memoryToggle.descEl.textContent ?? "");
 
     // --- Dream scheduler settings ---
-    const dreamToggle = applySettingsRow(new Setting(memoryGroup)
+    const dreamToggle = applySettingsRow(new OriginSetting(memoryGroup)
       .setName(zh ? "离线记忆整理（做梦）" : "Offline memory consolidation (dreaming)")
       .setDesc(zh
         ? "默认开启。开启后，Obsidian 打开期间定时处理一级 Memory，生成只帮助召回、不代表用户确认的二级联想，并更新用户画像与 Agent 长期形成的处事方式。关闭后，一级 Memory 仍在对话当轮正常写入和召回；派生状态与积压会保留，重新开启后继续处理。"
         : "Enabled by default. While Obsidian is open, it periodically processes primary Memory, creates secondary associations that aid recall without representing user confirmation, and updates the user profile and the Agent's learned ways of working. When disabled, primary Memory still writes and recalls; derived state and backlog are preserved and resume after re-enabling.")
-      .addToggle((toggle) => {
+      .addOriginToggle((toggle) => {
         labelSettingsToggle(toggle, zh ? "离线记忆整理" : "Memory consolidation");
         toggle.setValue(this.plugin.settings.memory.dreamEnabled).onChange(async (enabled) => {
           this.plugin.settings.memory.dreamEnabled = enabled;
@@ -788,24 +796,21 @@ export class CodexSettingTab extends PluginSettingTab {
 
     addSettingsHelp(dreamToggle, zh ? "Obsidian 打开期间，定时整理 Memory，更新用户画像与 Agent 长期形成的处事方式。" : "While Obsidian is open, consolidate Memory and update the user profile and the Agent’s learned ways of working.", dreamToggle.descEl.textContent ?? "");
 
-    let runsOutput: HTMLOutputElement | undefined;
-    const runsSetting = applySettingsRow(new Setting(memoryGroup)
+    const runsSetting = applySettingsRow(new OriginSetting(memoryGroup)
       .setName(zh ? "每日整理次数" : "Runs per day")
-      .setDesc(zh
-        ? "每天执行几次离线整理（1–6 次）。"
-        : "Choose how many consolidation runs to schedule each day (1–6).")
-      .addSlider((slider) => {
-        slider.setLimits(1, 6, 1)
-          .setValue(this.plugin.settings.memory.dreamRunsPerDay)
-          .setDynamicTooltip()
-          .onChange(async (value) => {
-            this.plugin.settings.memory.dreamRunsPerDay = value;
-            runsOutput?.setText(zh ? `${value} 次/天` : `${value}/day`);
-            await this.plugin.saveSettings();
-          });
-      }));
+      .setDesc(zh ? "每天执行几次离线整理（1–6 次）。" : "Choose how many consolidation runs to schedule each day (1–6)."));
     runsSetting.controlEl.addClass("general-range");
-    runsOutput = runsSetting.controlEl.createEl("output", { text: zh ? `${this.plugin.settings.memory.dreamRunsPerDay} 次/天` : `${this.plugin.settings.memory.dreamRunsPerDay}/day` });
+    const runsOutput = runsSetting.controlEl.createEl("output", { text: zh ? `${this.plugin.settings.memory.dreamRunsPerDay} 次/天` : `${this.plugin.settings.memory.dreamRunsPerDay}/day` });
+    const slider = createOriginSlider(runsSetting.controlEl, {
+      value: this.plugin.settings.memory.dreamRunsPerDay, min: 1, max: 6, step: 1,
+      label: zh ? "每日整理次数" : "Runs per day",
+      onValueChange: (value) => { runsOutput.setText(zh ? `${value} 次/天` : `${value}/day`); },
+      onValueCommit: (value) => {
+        this.plugin.settings.memory.dreamRunsPerDay = value;
+        void this.plugin.saveSettings();
+      }
+    });
+    runsSetting.controlEl.insertBefore(slider, runsOutput);
 
     this.renderFilePersonalizationSettings(page);
     this.renderDeveloperModeSettings(page);
@@ -824,10 +829,10 @@ export class CodexSettingTab extends PluginSettingTab {
     section.addClass("echoink-developer-settings");
     const group = createSettingsGroup(section);
     const label = zh ? "显示测试工具" : "Show testing tools";
-    applySettingsRow(new Setting(group).setName(label).setDesc(zh
+    applySettingsRow(new OriginSetting(group).setName(label).setDesc(zh
       ? "显示记忆与做梦的测试操作。仅在当前插件会话中生效。"
       : "Show memory and Dream testing actions for this plugin session.")
-      .addToggle((toggle) => {
+      .addOriginToggle((toggle) => {
         labelSettingsToggle(toggle, label);
         toggle.toggleEl.setAttribute("data-developer-toggle", "true");
         toggle.setValue(access.enabled).onChange((enabled) => {
@@ -875,10 +880,10 @@ export class CodexSettingTab extends PluginSettingTab {
     this.addAgentProfileCard(group);
     // User profile: read-only (maintained by dreaming / memory corrections)
     this.addReadOnlyUserProfileCard(group, this.personalMemoryState.user);
-    applySettingsRow(new Setting(group)
+    applySettingsRow(new OriginSetting(group)
       .setName(this.copy.general.customWelcome)
       .setDesc(this.copy.general.customWelcomeDesc)
-      .addToggle((toggle) => {
+      .addOriginToggle((toggle) => {
         labelSettingsToggle(toggle, this.copy.general.customWelcome);
         toggle.setValue(this.plugin.settings.customWelcomeEnabled).onChange(async (value) => {
           this.plugin.settings.customWelcomeEnabled = value;
@@ -888,10 +893,10 @@ export class CodexSettingTab extends PluginSettingTab {
         });
       }));
     if (this.plugin.settings.customWelcomeEnabled) {
-      applySettingsRow(new Setting(group)
+      applySettingsRow(new OriginSetting(group)
         .setName(this.copy.general.welcomeTitle)
         .setDesc(this.copy.general.welcomeTitleDesc)
-        .addText((text) => {
+        .addOriginText((text) => {
           text
             .setValue(this.plugin.settings.customWelcomeTitle)
             .setPlaceholder("What's new?")
@@ -903,10 +908,10 @@ export class CodexSettingTab extends PluginSettingTab {
           text.inputEl.maxLength = 80;
           text.inputEl.setAttr("aria-label", this.copy.general.welcomeTitle);
         }));
-      applySettingsRow(new Setting(group)
+      applySettingsRow(new OriginSetting(group)
         .setName(this.copy.general.welcomeGreeting)
         .setDesc(this.copy.general.welcomeGreetingDesc)
-        .addText((text) => {
+        .addOriginText((text) => {
           text
             .setValue(this.plugin.settings.customWelcomeSubtitle)
             .setPlaceholder("当前 Conversation 需要先选择工作区；添加笔记只作为本轮上下文。")
@@ -937,7 +942,7 @@ export class CodexSettingTab extends PluginSettingTab {
 
     // Logo + name + version
     const header = card.createDiv({ cls: "echoink-about-header" });
-    const logoWrap = header.createEl("button", {
+    const logoWrap = createOriginButton(header, {
       cls: "echoink-about-logo",
       attr: { type: "button", "aria-label": "EchoInk Agent" }
     });
@@ -1058,7 +1063,7 @@ export class CodexSettingTab extends PluginSettingTab {
     card.dataset.profileState = ready ? "ready" : "error";
 
     const header = card.createDiv({ cls: "echoink-agent-profile-card-header" });
-    const profileCardHeading = new Setting(header)
+    const profileCardHeading = new OriginSetting(header)
       .setName(zh ? "Agent 画像" : "Agent profile")
       .setHeading();
     profileCardHeading.settingEl.addClass("echoink-agent-profile-heading-row");
@@ -1066,7 +1071,7 @@ export class CodexSettingTab extends PluginSettingTab {
     profileCardHeading.nameEl.setAttr("id", profileCardTitleId);
     profileCardHeading.nameEl.setAttr("role", "heading");
     profileCardHeading.nameEl.setAttr("aria-level", "4");
-    const templateBtn = header.createEl("button", {
+    const templateBtn = createOriginButton(header, {
       cls: "echoink-agent-profile-reselect",
       attr: {
         type: "button",
@@ -1130,7 +1135,7 @@ export class CodexSettingTab extends PluginSettingTab {
       ? (zh ? "选择风格并设置身份" : "Choose a style and set identity")
       : (zh ? "编辑 Agent 身份" : "Edit Agent identity");
     const editIdentityBtn = ready
-      ? identitySide.createEl("button", {
+      ? createOriginButton(identitySide, {
           cls: "echoink-agent-identity-edit text-button",
           attr: {
             type: "button",
@@ -1160,7 +1165,7 @@ export class CodexSettingTab extends PluginSettingTab {
       cls: "echoink-agent-profile-content",
       attr: { "aria-labelledby": profileContentTitleId }
     });
-    const profileContentHeading = new Setting(contentSide)
+    const profileContentHeading = new OriginSetting(contentSide)
       .setName(zh ? "我的公开画像" : "My public profile")
       .setHeading();
     profileContentHeading.settingEl.addClass("echoink-agent-profile-heading-row");
@@ -1176,7 +1181,7 @@ export class CodexSettingTab extends PluginSettingTab {
         cls: "echoink-agent-profile-section is-current",
         attr: { "aria-labelledby": currentSectionTitleId }
       });
-      const currentSectionHeading = new Setting(currentSection)
+      const currentSectionHeading = new OriginSetting(currentSection)
         .setName(zh ? "当前方式" : "How I work now")
         .setHeading();
       currentSectionHeading.settingEl.addClass("echoink-agent-profile-heading-row");
@@ -1200,7 +1205,7 @@ export class CodexSettingTab extends PluginSettingTab {
         cls: "echoink-agent-profile-section is-growth",
         attr: { "aria-labelledby": growthSectionTitleId }
       });
-      const growthSectionHeading = new Setting(growthSection)
+      const growthSectionHeading = new OriginSetting(growthSection)
         .setName(zh ? "长期成长" : "Long-term growth")
         .setHeading();
       growthSectionHeading.settingEl.addClass("echoink-agent-profile-heading-row");
@@ -1290,6 +1295,7 @@ export class CodexSettingTab extends PluginSettingTab {
 
   private showTemplatePicker(refs: AgentProfileCardRefs, zh: boolean): void {
     const panel = refs.pickerPanel;
+    disposeOriginControls(panel);
     panel.empty();
     panel.addClass("is-visible");
     this.setTemplatePickerExpanded(refs, true);
@@ -1334,7 +1340,7 @@ export class CodexSettingTab extends PluginSettingTab {
     let currentRow: HTMLElement | null = null;
     for (const template of AGENT_TEMPLATES) {
       const isCurrent = currentTemplateId === template.id;
-      const row = list.createEl("button", {
+      const row = createOriginButton(list, {
         cls: "echoink-picker-row general-template",
         attr: {
           type: "button",
@@ -1403,7 +1409,7 @@ export class CodexSettingTab extends PluginSettingTab {
     }
 
     const cancelRow = panel.createDiv({ cls: "echoink-picker-cancel-row" });
-    const cancelBtn = cancelRow.createEl("button", {
+    const cancelBtn = createOriginButton(cancelRow, {
       cls: "echoink-picker-cancel-btn",
       text: zh ? "取消" : "Cancel",
       attr: { type: "button" }
@@ -1418,6 +1424,7 @@ export class CodexSettingTab extends PluginSettingTab {
   private closeTemplatePicker(refs: AgentProfileCardRefs): void {
     if (!refs.templateBtn.isConnected || !refs.pickerPanel.isConnected) return;
     refs.pickerPanel.removeClass("is-visible");
+    disposeOriginControls(refs.pickerPanel);
     refs.pickerPanel.empty();
     refs.pickerPanel.onkeydown = null;
     this.setTemplatePickerExpanded(refs, false);
@@ -1652,7 +1659,7 @@ export class CodexSettingTab extends PluginSettingTab {
     const filter = page.createDiv({ cls: "history-filter" });
     const filterLabel = zh ? "维护日志日期筛选" : "Maintenance log date filter";
     filter.createSpan({ text: zh ? "按日期筛选" : "Filter by date" });
-    const date = filter.createEl("input", { attr: {
+    const date = createOriginInput(filter, { attr: {
       type: "date", "aria-label": filterLabel,
       "data-echoink-focus-key": "knowledge:maintenance-history:date"
     } });
@@ -1661,7 +1668,7 @@ export class CodexSettingTab extends PluginSettingTab {
       this.knowledgeMaintenanceHistoryDate = date.value;
       this.scheduleDisplay();
     };
-    const clear = filter.createEl("button", { cls: "text-button", text: zh ? "清除" : "Clear", attr: {
+    const clear = createOriginButton(filter, { cls: "text-button", text: zh ? "清除" : "Clear", attr: {
       type: "button", "aria-label": zh ? "清除日期筛选" : "Clear date filter",
       "data-echoink-focus-key": "knowledge:maintenance-history:clear"
     } });
@@ -1696,11 +1703,11 @@ export class CodexSettingTab extends PluginSettingTab {
       return;
     }
     for (const entry of entries) {
-      const row = new Setting(group)
+      const row = new OriginSetting(group)
         .setName(knowledgeMaintenanceHistoryTitle(entry, zh))
         .setDesc(knowledgeMaintenanceHistoryDescription(entry, zh));
       if (entry.reportPath) {
-        row.addButton((button) => {
+        row.addOriginButton((button) => {
           const label = zh ? "查看明细" : "View details";
           button
             .setButtonText(label)
@@ -1769,12 +1776,12 @@ export class CodexSettingTab extends PluginSettingTab {
         ? provider.models.map((model) => ({ provider, model }))
         : []
     );
-    const modelSetting = applySettingsRow(new Setting(runGroup)
+    const modelSetting = applySettingsRow(new OriginSetting(runGroup)
       .setName(zh ? "EchoInk 当前模型" : "Current EchoInk model")
       .setDesc(zh
         ? "普通聊天、/ask、/maintain 与选区翻译共用这个模型。"
         : "Chat, /ask, /maintain, and selection translation share this model.")
-      .addDropdown((dropdown) => {
+      .addOriginDropdown((dropdown) => {
         dropdown.selectEl.setAttr("aria-label", zh ? "EchoInk 当前模型" : "Current EchoInk model");
         if (availableTargets.length === 0) {
           dropdown.addOption("", this.plugin.settings.apiProviders.length === 0
@@ -1805,10 +1812,7 @@ export class CodexSettingTab extends PluginSettingTab {
                   : (zh ? "（需重新保存 API Key）" : " (API key required)")
               )}`
             );
-            const option = Array.from(dropdown.selectEl.options).find(
-              (item) => item.value === value
-            );
-            if (option && !credentialReady) option.disabled = true;
+            dropdown.setOptionDisabled(value, !credentialReady);
           }
         }
         dropdown
@@ -1860,7 +1864,7 @@ export class CodexSettingTab extends PluginSettingTab {
           });
         dropdown.selectEl.disabled = availableTargets.length === 0;
       })
-      .addButton((button) => button
+      .addOriginButton((button) => button
         .setButtonText(zh ? "管理模型" : "Manage models")
         .onClick(() => void this.activateSettingsTab("providers", true))));
     modelSetting.settingEl.dataset.echoinkFocusKey = "knowledge:provider";
@@ -1976,13 +1980,14 @@ export class CodexSettingTab extends PluginSettingTab {
     const loadedEditor: Readonly<KnowledgeMaintenancePreferenceEditorState> =
       editor;
 
-    const row = applySettingsRow(new Setting(preferenceGroup)
+    const row = applySettingsRow(new OriginSetting(preferenceGroup)
       .setName(zh ? "偏好 Markdown" : "Preference Markdown")
       .setDesc(zh
         ? "保存在插件私有目录；不会写入 Vault 知识文件。"
         : "Stored in the plugin-private directory and never written into Vault knowledge files.")
       .setClass("echoink-personalization-instruction-row")
       .setClass("echoink-knowledge-preference-row"));
+    disposeOriginControls(row.controlEl);
     row.controlEl.empty();
     const textarea = row.controlEl.createEl("textarea", {
       cls: "echoink-personalization-textarea echoink-knowledge-preference-textarea",
@@ -2005,14 +2010,14 @@ export class CodexSettingTab extends PluginSettingTab {
     const actions = row.controlEl.createDiv({
       cls: "echoink-personalization-actions"
     });
-    const restore = actions.createEl("button", {
+    const restore = createOriginButton(actions, {
       text: zh ? "恢复 EchoInk 默认" : "Restore EchoInk default",
       attr: {
         type: "button",
         "data-echoink-focus-key": "knowledge:preferences:restore"
       }
     });
-    const save = actions.createEl("button", {
+    const save = createOriginButton(actions, {
       cls: "echoink-settings-save-button",
       text: zh ? "保存" : "Save",
       attr: {
@@ -2117,15 +2122,15 @@ export class CodexSettingTab extends PluginSettingTab {
     this.addReviewAction(actions, copy.review.generateAgent, "agent-chat");
     this.addReviewAction(actions, copy.review.generateKnowledge, "knowledge-base");
     const controls = createSettingsGroup(summary);
-    const outputSetting = applySettingsRow(new Setting(controls)
+    const outputSetting = applySettingsRow(new OriginSetting(controls)
       .setName(copy.review.outputDir)
       .setDesc(zh ? "默认保存到 outputs，也可选择当前 Vault 内任意文件夹。" : "Defaults to outputs; choose any folder in this Vault.")
-      .addText((text) => {
+      .addOriginText((text) => {
         text.inputEl.setAttr("aria-label", copy.review.outputDir);
         text.setValue(settings.outputDir === "." ? (zh ? "Vault 根目录" : "Vault root") : settings.outputDir);
         text.inputEl.readOnly = true;
       })
-      .addButton((button) => button
+      .addOriginButton((button) => button
         .setButtonText(zh ? "选择" : "Choose")
         .onClick(() => void this.chooseReviewOutputFolder())));
     outputSetting.settingEl.dataset.echoinkFocusKey = "review:output-dir";
@@ -2208,7 +2213,7 @@ export class CodexSettingTab extends PluginSettingTab {
     if (!this.archivedConversations && !this.archivedConversationsLoading && !this.archivedConversationsError) {
       void this.loadArchivedConversations();
     }
-    const search = page.createEl("input", {
+    const search = createOriginInput(page, {
       cls: "echoink-review-archive-search settings-input",
       attr: {
         type: "search",
@@ -2267,13 +2272,13 @@ export class CodexSettingTab extends PluginSettingTab {
         text: `${zh ? "归档时间" : "Archived"} · ${new Date(entry.updatedAt).toLocaleString()}`
       });
       const rowActions = row.createDiv({ cls: "echoink-settings-compact-actions" });
-      const restore = rowActions.createEl("button", {
+      const restore = createOriginButton(rowActions, {
         text: busy ? (zh ? "处理中…" : "Working…") : (zh ? "恢复" : "Restore"),
         attr: { type: "button", "aria-label": `${zh ? "恢复" : "Restore"} ${entry.title}` }
       });
       restore.disabled = Boolean(this.archivedConversationBusyId);
       restore.onclick = () => void this.restoreArchivedConversation(entry);
-      const remove = rowActions.createEl("button", {
+      const remove = createOriginButton(rowActions, {
         text: zh ? "删除" : "Delete",
         cls: "mod-warning",
         attr: { type: "button", "aria-label": `${zh ? "删除" : "Delete"} ${entry.title}` }
@@ -2435,7 +2440,7 @@ export class CodexSettingTab extends PluginSettingTab {
       const actions = header.createDiv({
         cls: "echoink-settings-compact-actions echoink-memory-card-actions"
       });
-      const correct = actions.createEl("button", {
+      const correct = createOriginButton(actions, {
         text: zh ? "修正" : "Correct",
         attr: {
           type: "button",
@@ -2445,7 +2450,7 @@ export class CodexSettingTab extends PluginSettingTab {
       });
       correct.disabled = this.memoryActionRunning;
       correct.onclick = () => void this.correctPersonalMemoryRecord(record);
-      const forget = actions.createEl("button", {
+      const forget = createOriginButton(actions, {
         cls: "mod-warning",
         text: zh ? "忘掉" : "Forget",
         attr: {
@@ -2628,7 +2633,7 @@ export class CodexSettingTab extends PluginSettingTab {
   private addReviewAction(container: HTMLElement, label: string, kind: ReviewReportKind): void {
     const copy = this.copy;
     const zh = this.plugin.settings.settingsLanguage !== "en";
-    const button = container.createEl("button", {
+    const button = createOriginButton(container, {
       cls: "review-generate-card",
       attr: {
         type: "button",
@@ -2681,7 +2686,7 @@ export class CodexSettingTab extends PluginSettingTab {
   private addReviewRangeMode(container: HTMLElement): void {
     const copy = this.copy;
     const settings = this.plugin.settings.review;
-    this.decorateSetting(new Setting(container).setName(copy.review.rangeMode).addDropdown((dropdown) => {
+    this.decorateSetting(new OriginSetting(container).setName(copy.review.rangeMode).addOriginDropdown((dropdown) => {
       dropdown.selectEl.setAttr("aria-label", copy.review.rangeMode);
       dropdown
         .addOption("previous-week", copy.review.rangeOptions["previous-week"])
@@ -2697,7 +2702,7 @@ export class CodexSettingTab extends PluginSettingTab {
   private addReviewOpenAfterRun(container: HTMLElement): void {
     const copy = this.copy;
     const settings = this.plugin.settings.review;
-    this.decorateSetting(new Setting(container).setName(copy.review.openHtmlAfterRun).addToggle((toggle) => {
+    this.decorateSetting(new OriginSetting(container).setName(copy.review.openHtmlAfterRun).addOriginToggle((toggle) => {
       labelSettingsToggle(toggle, copy.review.openHtmlAfterRun);
       toggle.setValue(settings.openHtmlAfterRun).onChange(async (value) => {
         settings.openHtmlAfterRun = value;
@@ -2756,7 +2761,7 @@ export class CodexSettingTab extends PluginSettingTab {
     SETTINGS_TABS.forEach((tab, index) => {
       const label = copy.tabs[tab.id];
       const isActive = activeTab === tab.id;
-      const button = tabs.createEl("button", {
+      const button = createOriginButton(tabs, {
         cls: `codex-settings-tab ${isActive ? "is-active" : ""}`,
         attr: {
           id: settingsTabDomId(tab.id),
@@ -3008,7 +3013,7 @@ export class CodexSettingTab extends PluginSettingTab {
         "The current model is used for subsequent conversations."
       )
     });
-    const addButton = addSection.createEl("button", {
+    const addButton = createOriginButton(addSection, {
       cls: "codex-provider-add-button",
       attr: { type: "button", "data-echoink-focus-key": "providers:add" }
     });
@@ -3127,13 +3132,13 @@ export class CodexSettingTab extends PluginSettingTab {
         });
       }
       if (saved.id !== active?.id) {
-        const use = rowMeta.createEl("button", { cls: "text-button", text: label("设为当前", "Set as current"), attr: { type: "button", "data-echoink-focus-key": `provider:${saved.id}:activate` } });
+        const use = createOriginButton(rowMeta, { cls: "text-button", text: label("设为当前", "Set as current"), attr: { type: "button", "data-echoink-focus-key": `provider:${saved.id}:activate` } });
         use.onclick = () => void this.runSettingsButtonAction(use, "providers", async () => {
           const result = await this.saveAndActivateProviderModel(saved, "", this.verifiedProviderConnections.get(saved.id) === providerConfigurationFingerprint(saved), saved);
           if (!result.saved) throw new Error(result.message ?? this.copy.providers.saveFailed);
         });
       }
-      const edit = rowMeta.createEl("button", {
+      const edit = createOriginButton(rowMeta, {
         cls: "codex-provider-row-action is-edit",
         text: label("编辑", "Edit"),
         attr: {
@@ -3147,7 +3152,7 @@ export class CodexSettingTab extends PluginSettingTab {
       edit.onclick = () => {
         this.openProviderModelModal(saved, true);
       };
-      const remove = rowMeta.createEl("button", {
+      const remove = createOriginButton(rowMeta, {
         cls: "codex-provider-row-action is-delete",
         attr: {
           type: "button",
@@ -3538,7 +3543,7 @@ export class CodexSettingTab extends PluginSettingTab {
     onChange: (value: string) => Promise<void>,
     type: "text" | "password" = "text"
   ): void {
-    const setting = new Setting(container).setName(label).addText((text) => {
+    const setting = new OriginSetting(container).setName(label).addOriginText((text) => {
       text.setPlaceholder(placeholder).setValue(value).onChange(onChange);
       text.inputEl.type = type;
       text.inputEl.setAttr("aria-label", label);
@@ -3582,7 +3587,7 @@ export class CodexSettingTab extends PluginSettingTab {
     RESOURCE_TABS.forEach((tab, index) => {
       const label = copy.resources.tabs[tab.id];
       const isActive = activeTab === tab.id;
-      const button = tabs.createEl("button", {
+      const button = createOriginButton(tabs, {
         cls: `codex-resource-tab ${isActive ? "is-active" : ""}`,
         attr: {
           id: resourceTabDomId(tab.id),
@@ -3621,7 +3626,7 @@ export class CodexSettingTab extends PluginSettingTab {
     this.renderResourceSearch(toolbar, activeTab);
     const toolbarActions = toolbar.createDiv({ cls: "codex-resource-toolbar-actions" });
     if (activeTab === "mcp") {
-      const add = toolbarActions.createEl("button", {
+      const add = createOriginButton(toolbarActions, {
         cls: "codex-resource-add",
         attr: {
           type: "button",
@@ -3633,7 +3638,7 @@ export class CodexSettingTab extends PluginSettingTab {
       add.createSpan({ text: this.plugin.settings.settingsLanguage === "en" ? "Add server" : "新增 Server" });
       add.onclick = () => this.openMcpServerModal();
     }
-    const refresh = toolbarActions.createEl("button", {
+    const refresh = createOriginButton(toolbarActions, {
       cls: "codex-resource-refresh",
       attr: { type: "button", "aria-label": copy.resources.refreshTitle, "data-echoink-focus-key": "resources:refresh" }
     });
@@ -3725,7 +3730,7 @@ export class CodexSettingTab extends PluginSettingTab {
     );
     details.addClass("echoink-resource-status-card");
     if (resource.kind === "skill") {
-      const toggle = details.createEl("input", { cls: "codex-resource-toggle", attr: {
+      const toggle = createOriginSwitch(details, { cls: "codex-resource-toggle", attr: {
         type: "checkbox", "aria-label": english ? `Enable ${resource.name}` : `启用 ${resource.name}`,
         "data-echoink-focus-key": `resource:${resource.id}:enabled`
       } });
@@ -3746,7 +3751,7 @@ export class CodexSettingTab extends PluginSettingTab {
     }
     const path = resource.contentPath ?? resource.configPath ?? "";
     if (path) {
-      const pathButton = details.createEl("button", {
+      const pathButton = createOriginButton(details, {
         cls: "codex-copyable-value resource-status-path",
         attr: {
           type: "button",
@@ -3942,13 +3947,14 @@ export class CodexSettingTab extends PluginSettingTab {
         "error"
       );
     }
-    const row = applySettingsRow(new Setting(group)
+    const row = applySettingsRow(new OriginSetting(group)
       .setName("SKILL.md")
       .setDesc(english
         ? "This Vault file is the single source used for installation, editing, validation, and model runs."
         : "这份 Vault 文件是安装、编辑、有效性检查和模型运行共同使用的唯一真源。")
       .setClass("echoink-personalization-instruction-row")
       .setClass("echoink-builtin-skill-editor-row"));
+    disposeOriginControls(row.controlEl);
     row.controlEl.empty();
     const textarea = row.controlEl.createEl("textarea", {
       cls: "echoink-personalization-textarea echoink-builtin-skill-textarea",
@@ -3975,14 +3981,14 @@ export class CodexSettingTab extends PluginSettingTab {
     const actions = row.controlEl.createDiv({
       cls: "echoink-personalization-actions echoink-skill-editor-actions"
     });
-    const restore = actions.createEl("button", {
+    const restore = createOriginButton(actions, {
       text: english ? "Restore EchoInk default" : "恢复 EchoInk 默认",
       attr: {
         type: "button",
         "data-echoink-focus-key": `resource:${resource.id}:skill-restore`
       }
     });
-    const save = actions.createEl("button", {
+    const save = createOriginButton(actions, {
       cls: "echoink-settings-save-button",
       text: english ? "Save" : "保存",
       attr: {
@@ -4125,7 +4131,7 @@ export class CodexSettingTab extends PluginSettingTab {
     const copy = row.createDiv({ cls: "codex-mcp-server-toggle-copy" });
     copy.createDiv({ cls: "codex-mcp-server-toggle-title", text: options.title });
     copy.createDiv({ cls: "codex-mcp-server-toggle-description", text: options.description });
-    const toggle = row.createEl("input", {
+    const toggle = createOriginSwitch(row, {
       attr: {
         type: "checkbox",
         "aria-label": options.title,
@@ -4143,7 +4149,7 @@ export class CodexSettingTab extends PluginSettingTab {
     action: (checked: boolean) => Promise<void>;
   }): void {
     const label = container.createEl("label", { cls: "codex-mcp-tool-policy-toggle" });
-    const toggle = label.createEl("input", {
+    const toggle = createOriginSwitch(label, {
       attr: { type: "checkbox", "data-echoink-focus-key": options.focusKey }
     });
     toggle.checked = options.checked;
@@ -4152,7 +4158,7 @@ export class CodexSettingTab extends PluginSettingTab {
   }
 
   private async runMcpToggleAction(
-    toggle: HTMLInputElement,
+    toggle: OriginCheckElement,
     action: (checked: boolean) => Promise<void>
   ): Promise<void> {
     const next = toggle.checked;
@@ -4188,7 +4194,7 @@ export class CodexSettingTab extends PluginSettingTab {
     const searchWrap = container.createDiv({ cls: "codex-resource-search" });
     const icon = searchWrap.createSpan({ cls: "codex-resource-search-icon" });
     setIcon(icon, "search");
-    const input = searchWrap.createEl("input", {
+    const input = createOriginInput(searchWrap, {
       cls: "codex-resource-search-input",
       attr: {
         type: "search",
@@ -4198,7 +4204,7 @@ export class CodexSettingTab extends PluginSettingTab {
       }
     });
     input.value = this.resourceSearchQuery[tab];
-    const clear = searchWrap.createEl("button", {
+    const clear = createOriginButton(searchWrap, {
       cls: "codex-resource-search-clear",
       attr: { type: "button", "aria-label": copy.resources.clearSearch, "data-echoink-focus-key": `resources:clear:${tab}` }
     });
@@ -4389,7 +4395,7 @@ export class CodexSettingTab extends PluginSettingTab {
     const connectionStatus = resource.kind === "mcp-server" ? mcpConnectionStatus(resource, this.plugin.settings.resources) : "not-mcp";
     const meta = resourceDisplayMeta(resource, this.plugin.settings.resources, this.plugin.settings.settingsLanguage);
     const title = content.createDiv({ cls: "codex-resource-row-title" });
-    const nameButton = title.createEl("button", {
+    const nameButton = createOriginButton(title, {
       cls: "codex-resource-row-name",
       text: name,
       attr: {
@@ -4432,7 +4438,7 @@ export class CodexSettingTab extends PluginSettingTab {
     const desc = resource.description || resource.contentPath || resource.configPath || copy.resources.noDesc;
     const description = [desc, meta].filter(Boolean).join(" · ");
     if (description) content.createDiv({ cls: "codex-resource-row-desc", text: description });
-    const toggle = row.createEl("input", {
+    const toggle = createOriginSwitch(row, {
       cls: "codex-resource-toggle",
       attr: {
         type: "checkbox",
@@ -4510,7 +4516,7 @@ export class CodexSettingTab extends PluginSettingTab {
 
   private renderMcpConnectionActions(row: HTMLElement, resource: EchoInkResource, status: ReturnType<typeof mcpConnectionStatus>): void {
     const actions = row.createDiv({ cls: "echoink-settings-inline-actions" });
-    const configure = actions.createEl("button", {
+    const configure = createOriginButton(actions, {
       text: this.plugin.settings.settingsLanguage === "en"
         ? (status === "imported-only" || status === "missing-config" ? "Configure connection" : "Edit connection")
         : (status === "imported-only" || status === "missing-config" ? "补全连接配置" : "编辑连接配置"),
@@ -4518,14 +4524,14 @@ export class CodexSettingTab extends PluginSettingTab {
     });
     configure.onclick = () => this.openMcpServerModal(resource);
     if (status === "connectable" || status === "verified" || status === "failed") {
-      const test = actions.createEl("button", {
+      const test = createOriginButton(actions, {
         text: this.plugin.settings.settingsLanguage === "en" ? "Test connection" : "测试连接",
         attr: { type: "button", "data-echoink-focus-key": `resource:${resource.id}:test` }
       });
       test.onclick = () => void this.testMcpConnection(resource, test);
     }
     if (resource.source === "manual") {
-      const remove = actions.createEl("button", {
+      const remove = createOriginButton(actions, {
         cls: "mod-warning",
         text: this.plugin.settings.settingsLanguage === "en" ? "Delete server" : "删除 Server",
         attr: { type: "button", "data-echoink-focus-key": `resource:${resource.id}:delete` }

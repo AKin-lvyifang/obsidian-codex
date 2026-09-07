@@ -1,4 +1,5 @@
 import { type Modal, setIcon } from "obsidian";
+import { disposeOriginControls } from "./origin-controls";
 
 /** Mount an existing form lifecycle inside Settings without opening another window. */
 export function mountSettingsEditor(modal: Modal, host: HTMLElement, backLabel: string, onBack: () => void): () => void {
@@ -16,6 +17,7 @@ export function mountSettingsEditor(modal: Modal, host: HTMLElement, backLabel: 
     if (disposed) return;
     disposed = true;
     modal.onClose();
+    disposeOriginControls(host);
     host.remove();
   };
   const close = () => { if (disposed) return; dispose(); onBack(); };
@@ -24,7 +26,7 @@ export function mountSettingsEditor(modal: Modal, host: HTMLElement, backLabel: 
   else modal.close = close;
   back.onclick = () => modal.close();
   host.addEventListener("keydown", (event) => {
-    if (event.key !== "Escape" || event.defaultPrevented || host.querySelector(".codex-provider-combobox.is-open")) return;
+    if (event.key !== "Escape" || event.defaultPrevented || host.querySelector(".codex-provider-combobox.is-open, [data-slot=select-content][data-state=open]")) return;
     event.preventDefault(); event.stopPropagation(); modal.close();
   });
   void modal.onOpen();

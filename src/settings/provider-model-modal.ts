@@ -1,3 +1,4 @@
+import { createOriginInput, createOriginButton, createOriginCheck, createOriginSwitch, createOriginSelect, createOriginRadioGroup, disposeOriginControls } from "./origin-controls";
 import { App, Modal, setIcon, setTooltip } from "obsidian";
 import type {
   AuthEvent,
@@ -220,6 +221,7 @@ export class ProviderModelModal extends Modal {
     this.liveRegionEl = null;
     this.modalEl.removeClass("codex-provider-model-modal");
     this.titleEl.empty();
+    disposeOriginControls(this.contentEl);
     this.contentEl.empty();
   }
 
@@ -264,6 +266,7 @@ export class ProviderModelModal extends Modal {
       });
     }
 
+    disposeOriginControls(this.contentEl);
     this.contentEl.empty();
     this.contentEl.addClass("codex-provider-modal-content");
     this.contentEl.createEl("p", {
@@ -311,7 +314,7 @@ export class ProviderModelModal extends Modal {
     });
     const actions = footer.createDiv({ cls: "codex-provider-modal-actions" });
     if (providerId !== "openai-codex") {
-      const test = actions.createEl("button", {
+      const test = createOriginButton(actions, {
         text: this.options.copy.providers.testConnection,
         attr: { type: "button", "data-modal-focus-key": "provider-test-connection" }
       });
@@ -319,13 +322,13 @@ export class ProviderModelModal extends Modal {
       test.disabled = !this.canTestConnection() || this.preflight.state.status === "loading" || this.saving;
       test.onclick = () => { this.focusIntent = "provider-test-connection"; void this.testConnection(); };
     }
-    const cancel = actions.createEl("button", {
+    const cancel = createOriginButton(actions, {
       text: this.label("取消", "Cancel"),
       attr: { type: "button", "data-modal-focus-key": "cancel" }
     });
     applyAmicroButton(cancel, { variant: "secondary" });
     cancel.onclick = () => this.close();
-    const save = actions.createEl("button", {
+    const save = createOriginButton(actions, {
       cls: "mod-cta",
       text: this.options.copy.providers.saveAndUse,
       attr: { type: "button", "data-modal-focus-key": "save" }
@@ -614,7 +617,7 @@ export class ProviderModelModal extends Modal {
       ),
       attr: { id: descriptionId }
     });
-    const input = field.createEl("input", {
+    const input = createOriginInput(field, {
       cls: "codex-provider-modal-input",
       attr: {
         id: inputId,
@@ -642,7 +645,7 @@ export class ProviderModelModal extends Modal {
     const inputId = this.controlId("apiKey");
     const field = this.createField(container, "API Key", inputId);
     const controls = field.createDiv({ cls: "codex-provider-modal-input-control" });
-    const input = controls.createEl("input", {
+    const input = createOriginInput(controls, {
       cls: "codex-provider-modal-input",
       attr: {
         id: inputId,
@@ -661,7 +664,7 @@ export class ProviderModelModal extends Modal {
       this.invalidatePreflight();
       this.clearFieldError("apiKey", input);
     };
-    const reveal = controls.createEl("button", {
+    const reveal = createOriginButton(controls, {
       cls: "codex-provider-modal-icon-button",
       attr: {
         type: "button",
@@ -712,7 +715,7 @@ export class ProviderModelModal extends Modal {
     const actions = card.createDiv({ cls: "codex-provider-oauth-actions" });
     const connected = this.codexAuthStatus.state !== "disconnected";
     if (connected) {
-      const logout = actions.createEl("button", {
+      const logout = createOriginButton(actions, {
         text: this.label("退出登录", "Log out"),
         attr: {
           type: "button",
@@ -722,7 +725,7 @@ export class ProviderModelModal extends Modal {
       logout.disabled = this.codexAuthLoading;
       logout.onclick = () => void this.logoutCodex();
     } else if (!this.codexLoginController) {
-      const login = actions.createEl("button", {
+      const login = createOriginButton(actions, {
         cls: "mod-cta",
         text: this.codexAuthLoading
           ? this.label("正在读取…", "Loading…")
@@ -737,7 +740,7 @@ export class ProviderModelModal extends Modal {
     }
 
     if (this.codexAuthUrl) {
-      const reopen = actions.createEl("button", {
+      const reopen = createOriginButton(actions, {
         text: this.label("重新打开登录页面", "Reopen login page"),
         attr: {
           type: "button",
@@ -759,7 +762,7 @@ export class ProviderModelModal extends Modal {
         ),
         attr: { for: inputId }
       });
-      const input = manual.createEl("input", {
+      const input = createOriginInput(manual, {
         cls: "codex-provider-modal-input",
         attr: {
           id: inputId,
@@ -775,7 +778,7 @@ export class ProviderModelModal extends Modal {
       const manualActions = manual.createDiv({
         cls: "codex-provider-oauth-manual-actions"
       });
-      const finish = manualActions.createEl("button", {
+      const finish = createOriginButton(manualActions, {
         cls: "mod-cta",
         text: this.label("完成授权", "Complete authorization"),
         attr: { type: "button" }
@@ -786,7 +789,7 @@ export class ProviderModelModal extends Modal {
         finish.disabled = !this.codexManualCode.trim();
       };
       finish.onclick = () => this.finishCodexManualCode();
-      const cancel = manualActions.createEl("button", {
+      const cancel = createOriginButton(manualActions, {
         text: this.label("停止", "Stop"),
         attr: { type: "button" }
       });
@@ -955,7 +958,7 @@ export class ProviderModelModal extends Modal {
     copy.createEl("h3", { text: this.label("已启用模型", "Enabled models") });
     copy.createEl("p", { text: this.label("勾选可用模型，再指定一个默认模型。", "Enable available models and choose one as the default.") });
     const actions = header.createDiv({ cls: "codex-provider-model-actions" });
-    const discover = actions.createEl("button", {
+    const discover = createOriginButton(actions, {
       text: this.preflight.state.status === "idle"
         ? this.label("获取模型", "Get models")
         : this.label("刷新模型", "Refresh models"),
@@ -978,14 +981,18 @@ export class ProviderModelModal extends Modal {
     });
     this.renderPreflightStatus(statusRow);
     const list = field.createDiv({ cls: "codex-provider-model-checklist" });
-    for (const modelId of this.modelChoices()) {
-      this.renderModelChoice(list, modelId);
-    }
+    const group = createOriginRadioGroup(list, this.draft.defaultModelId, this.label("默认模型", "Default model"), (modelId) => {
+      if (!setApiProviderDefaultModel(this.draft, modelId)) return;
+      this.focusIntent = `model-default:${modelId}`;
+      this.invalidatePreflight();
+      this.render();
+    });
+    for (const modelId of this.modelChoices()) this.renderModelChoice(group.element, modelId, group);
     this.renderManualModelFallback(field);
     this.renderFieldError(field, "model");
   }
 
-  private renderModelChoice(container: HTMLElement, modelId: string): void {
+  private renderModelChoice(container: HTMLElement, modelId: string, group: ReturnType<typeof createOriginRadioGroup>): void {
     const enabled = getApiProviderModel(this.draft, modelId);
     const model = enabled ?? createApiProviderModelConfig(
       this.providerId,
@@ -999,7 +1006,7 @@ export class ProviderModelModal extends Modal {
     const enabledLabel = selection.createEl("label", {
       cls: "codex-provider-model-choice-enabled"
     });
-    const checkbox = enabledLabel.createEl("input", {
+    const checkbox = createOriginCheck(enabledLabel, {
       attr: {
         type: "checkbox",
         "data-modal-focus-key": `model-enabled:${modelId}`
@@ -1014,21 +1021,9 @@ export class ProviderModelModal extends Modal {
     const defaultLabel = selection.createEl("label", {
       cls: "codex-provider-model-choice-default"
     });
-    const radio = defaultLabel.createEl("input", {
-      attr: {
-        type: "radio",
-        name: `${this.accessibilityId}-default-model`,
-        "data-modal-focus-key": `model-default:${modelId}`
-      }
-    });
-    radio.checked = this.draft.defaultModelId === modelId;
-    radio.disabled = !enabled;
-    radio.onchange = () => {
-      if (!radio.checked || !setApiProviderDefaultModel(this.draft, modelId)) return;
-      this.focusIntent = `model-default:${modelId}`;
-      this.invalidatePreflight();
-      this.render();
-    };
+    const radio = group.addItem(defaultLabel, modelId, !enabled);
+    radio.setAttr("data-modal-focus-key", `model-default:${modelId}`);
+    radio.setAttr("aria-label", this.label(`默认模型 ${model.id}`, `Default model ${model.id}`));
     defaultLabel.createSpan({
       text: this.label("默认", "Default")
     });
@@ -1068,7 +1063,7 @@ export class ProviderModelModal extends Modal {
       )
     });
     const controls = fallback.createDiv({ cls: "codex-provider-manual-model-controls" });
-    const input = controls.createEl("input", {
+    const input = createOriginInput(controls, {
       cls: "codex-provider-modal-input",
       attr: {
         type: "text",
@@ -1082,7 +1077,7 @@ export class ProviderModelModal extends Modal {
       this.manualModelId = input.value;
       this.clearFieldError("model", input);
     };
-    const add = controls.createEl("button", {
+    const add = createOriginButton(controls, {
       attr: {
         type: "button",
         "data-modal-focus-key": "manual-model-add"
@@ -1263,7 +1258,7 @@ export class ProviderModelModal extends Modal {
     const focusKey = `model:${model.id}:${key}`;
     const invalidDraft = this.numberDrafts.get(focusKey);
     field.createEl("label", { text: label, attr: { for: id } });
-    const input = field.createEl("input", {
+    const input = createOriginInput(field, {
       cls: "codex-provider-modal-input",
       attr: {
         id,
@@ -1404,6 +1399,7 @@ export class ProviderModelModal extends Modal {
     container: HTMLElement,
     model: ApiProviderModelConfig
   ): void {
+    disposeOriginControls(container);
     container.empty();
     container.className = `codex-provider-model-capabilities is-${model.metadataSource}`;
     for (const text of this.modelCapabilityTags(model)) {
@@ -1435,7 +1431,7 @@ export class ProviderModelModal extends Modal {
         || this.preflight.state.status === "temporary_failure"
       )
     ) {
-      const retry = statusRow.createEl("button", {
+      const retry = createOriginButton(statusRow, {
         cls: "codex-provider-inline-retry",
         text: this.label("重试", "Retry"),
         attr: {
@@ -1460,6 +1456,7 @@ export class ProviderModelModal extends Modal {
     );
     if (!statusRow) return;
     statusRow.className = `codex-provider-model-status is-${this.preflight.state.status}`;
+    disposeOriginControls(statusRow);
     statusRow.empty();
     this.renderPreflightStatus(statusRow);
     const discover = this.contentEl.querySelector<HTMLButtonElement>(
@@ -1574,7 +1571,7 @@ export class ProviderModelModal extends Modal {
       this.label("接口地址", "Endpoint URL"),
       endpointId
     );
-    const endpointInput = endpoint.createEl("input", {
+    const endpointInput = createOriginInput(endpoint, {
       cls: "codex-provider-modal-input",
       attr: {
         id: endpointId,
@@ -1606,25 +1603,12 @@ export class ProviderModelModal extends Modal {
       protocolId
     );
     protocolField.addClass("codex-provider-protocol-field");
-    const select = protocolField.createEl("select", {
+    const select = createOriginSelect(protocolField, {
       cls: "codex-provider-modal-input",
-      attr: {
-        id: protocolId,
-        "data-modal-focus-key": "protocol"
-      }
-    });
+      attr: { id: protocolId, "data-modal-focus-key": "protocol" }
+    }, (["openai-completions", "openai-responses", "anthropic-messages"] as const)
+      .map((item) => ({ value: item, label: this.options.copy.providers.protocolOptions[item] })), this.draft.apiProtocol).element;
     this.applyFieldAccessibility(select, "protocol");
-    for (const item of [
-      "openai-completions",
-      "openai-responses",
-      "anthropic-messages"
-    ] as const) {
-      select.createEl("option", {
-        value: item,
-        text: this.options.copy.providers.protocolOptions[item]
-      });
-    }
-    select.value = this.draft.apiProtocol;
     select.onchange = () => {
       this.focusIntent = "protocol";
       this.draft.apiProtocol = select.value as ApiProviderProtocol;
@@ -1650,7 +1634,7 @@ export class ProviderModelModal extends Modal {
     const control = container.createEl("label", {
       cls: `codex-provider-custom-toggle${options.disabled ? " is-disabled" : ""}`
     });
-    const input = control.createEl("input", {
+    const input = createOriginSwitch(control, {
       cls: "codex-resource-toggle",
       attr: { type: "checkbox", role: "switch", "data-modal-focus-key": `toggle:${focusKey}` }
     });

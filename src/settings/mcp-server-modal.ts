@@ -1,3 +1,4 @@
+import { createOriginInput, createOriginButton, createOriginCheck, createOriginSelect, disposeOriginControls, type OriginCheckElement } from "./origin-controls";
 import { App, Modal } from "obsidian";
 import type { EchoInkMcpServerDraft } from "../plugin/mcp-settings-service";
 import type {
@@ -65,6 +66,7 @@ export class McpServerModal extends Modal {
 
   onClose(): void {
     this.titleEl.empty();
+    disposeOriginControls(this.contentEl);
     this.contentEl.empty();
     this.modalEl.removeClass("codex-mcp-server-modal");
   }
@@ -82,6 +84,7 @@ export class McpServerModal extends Modal {
     this.titleEl.setText(this.editing
       ? this.label("编辑 MCP Server", "Edit MCP server")
       : this.label("新增 MCP Server", "Add MCP server"));
+    disposeOriginControls(this.contentEl);
     this.contentEl.empty();
     const form = this.contentEl.createDiv({
       cls: "codex-mcp-server-form",
@@ -115,13 +118,10 @@ export class McpServerModal extends Modal {
       "transport"
     );
     transportField.addClass("is-wide");
-    const select = transportField.createEl("select", {
+    const select = createOriginSelect(transportField, {
       cls: "codex-mcp-server-select",
       attr: { id: this.controlId("transport"), "data-mcp-modal-focus-key": "transport" }
-    });
-    select.createEl("option", { value: "http", text: "HTTP" });
-    select.createEl("option", { value: "stdio", text: "stdio" });
-    select.value = this.transport;
+    }, [{ value: "http", label: "HTTP" }, { value: "stdio", label: "stdio" }], this.transport).element;
     select.onchange = () => {
       this.transport = select.value === "stdio" ? "stdio" : "http";
       this.endpoint = "";
@@ -236,7 +236,7 @@ export class McpServerModal extends Modal {
       "credential-secret"
     );
     secretField.addClass("is-wide");
-    const secretInput = secretField.createEl("input", {
+    const secretInput = createOriginInput(secretField, {
       cls: "codex-mcp-server-input",
       attr: {
         id: this.controlId("credential-secret"),
@@ -250,7 +250,7 @@ export class McpServerModal extends Modal {
     });
     this.decorateFieldControl(secretField, secretInput, "credential-secret");
     secretInput.value = this.credentialSecret;
-    let clearInput: HTMLInputElement | null = null;
+    let clearInput: OriginCheckElement | null = null;
     secretInput.oninput = () => {
       this.credentialSecret = secretInput.value;
       if (this.credentialSecret && this.clearCredential) {
@@ -261,7 +261,7 @@ export class McpServerModal extends Modal {
 
     if (this.existingCredential) {
       const clearRow = credential.createEl("label", { cls: "codex-mcp-credential-clear" });
-      const clear = clearRow.createEl("input", { attr: { type: "checkbox" } });
+      const clear = createOriginCheck(clearRow, { attr: { type: "checkbox" } });
       clearInput = clear;
       clear.checked = this.clearCredential;
       clear.onchange = () => {
@@ -280,14 +280,14 @@ export class McpServerModal extends Modal {
       text: this.errorMessage
     });
     const footer = this.contentEl.createDiv({ cls: "codex-mcp-server-modal-footer" });
-    const cancel = footer.createEl("button", {
+    const cancel = createOriginButton(footer, {
       text: this.label("取消", "Cancel"),
       attr: { type: "button", "data-mcp-modal-focus-key": "cancel" }
     });
     applyAmicroButton(cancel, { variant: "secondary" });
     cancel.disabled = this.saving;
     cancel.onclick = () => this.close();
-    const save = footer.createEl("button", {
+    const save = createOriginButton(footer, {
       cls: "mod-cta",
       text: this.saving ? this.label("保存中…", "Saving…") : this.label("保存 Server", "Save server"),
       attr: { type: "button", "data-mcp-modal-focus-key": "save" }
@@ -324,7 +324,7 @@ export class McpServerModal extends Modal {
     onInput: (value: string) => void;
   }): void {
     const field = this.createField(container, input.label, input.description, input.key);
-    const control = field.createEl("input", {
+    const control = createOriginInput(field, {
       cls: "codex-mcp-server-input",
       attr: {
         id: this.controlId(input.key),

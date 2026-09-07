@@ -20415,11 +20415,7 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
 .echoink-settings-demo input:focus,.echoink-settings-demo select:focus,.echoink-settings-demo textarea:focus{border-color:var(--accent);outline:2px solid var(--accent-bg);outline-offset:1px}
 .echoink-settings-demo input[type=range]{accent-color:var(--accent);max-width:170px}
 .echoink-settings-demo input[type=checkbox],.echoink-settings-demo input[type=radio]{accent-color:var(--accent)}
-.echoink-settings-demo .checkbox-container{width:36px;height:21px;min-width:36px;background:var(--line);border-radius:20px;box-shadow:none}
-.echoink-settings-demo .checkbox-container.is-enabled{background:var(--accent)}
-.echoink-settings-demo .checkbox-container:after{width:15px;height:15px;top:3px;left:3px;box-shadow:0 1px 3px #0002}
-.echoink-settings-demo .checkbox-container.is-enabled:after{transform:translateX(15px)}
-.echoink-settings-demo button:not(.codex-settings-tab):not(.codex-resource-tab):not(.text-button):not(.provider-group-button):not(.codex-provider-combobox-option):not(.echoink-about-logo):not(.echoink-settings-navigation-row){font-family:inherit;font-size:calc(var(--font-text-size,16px)*.6875);height:auto;min-height:30px;box-shadow:none}
+.echoink-settings-demo button:not(.codex-settings-tab):not(.codex-resource-tab):not(.text-button):not(.provider-group-button):not(.codex-provider-combobox-option):not(.echoink-about-logo):not(.echoink-settings-navigation-row):not(.echoink-origin-control){font-family:inherit;font-size:calc(var(--font-text-size,16px)*.6875);height:auto;min-height:30px;box-shadow:none}
 .echoink-settings-demo .echoink-amicro-button,.echoink-settings-demo .mod-cta{--interactive-accent:var(--accent);--interactive-normal:var(--bg);--interactive-hover:var(--soft)}
 .echoink-settings-demo .echoink-settings-navigation-row{border:0;border-radius:0;border-top:1px solid var(--line);padding:17px 0;background:none;box-shadow:none;width:100%;height:auto;white-space:normal}
 .echoink-settings-demo .echoink-settings-navigation-row:first-child{border-top:0}
@@ -20592,12 +20588,12 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
  .echoink-settings-demo .echoink-knowledge-protocol-list{grid-template-columns:repeat(2,1fr)}
 }
 @container settings (max-width:600px){
- .echoink-settings-demo .setting-item:not(:has(.checkbox-container)){flex-direction:column;align-items:stretch;gap:11px}
- .echoink-settings-demo .setting-item:not(:has(.checkbox-container))>.setting-item-control{max-width:none;width:100%;justify-content:flex-end}
+ .echoink-settings-demo .setting-item:not(:has([data-slot=switch])){flex-direction:column;align-items:stretch;gap:11px}
+ .echoink-settings-demo .setting-item:not(:has([data-slot=switch]))>.setting-item-control{max-width:none;width:100%;justify-content:flex-end}
  /* Keep Demo switch rows compact after the legacy narrow setting-row layout. */
- .echoink-settings-demo .settings-stack>.setting-item:has(>.setting-item-control>.checkbox-container){flex-direction:row;flex-wrap:nowrap;align-items:stretch}
- .echoink-settings-demo .settings-stack>.setting-item:has(>.setting-item-control>.checkbox-container)>.setting-item-info{width:auto;align-self:stretch;text-align:left}
- .echoink-settings-demo .settings-stack>.setting-item:has(>.setting-item-control>.checkbox-container)>.setting-item-control{width:auto;max-width:none;align-self:center;justify-content:flex-end}
+ .echoink-settings-demo .settings-stack>.setting-item:has(>.setting-item-control>[data-slot=switch]){flex-direction:row;flex-wrap:nowrap;align-items:stretch}
+ .echoink-settings-demo .settings-stack>.setting-item:has(>.setting-item-control>[data-slot=switch])>.setting-item-info{width:auto;align-self:stretch;text-align:left}
+ .echoink-settings-demo .settings-stack>.setting-item:has(>.setting-item-control>[data-slot=switch])>.setting-item-control{width:auto;max-width:none;align-self:center;justify-content:flex-end}
  .echoink-settings-demo .setting-item-control input:not([type=range]){width:100%}
  .echoink-settings-demo .echoink-agent-profile-card-body{grid-template-columns:1fr}
  .echoink-settings-demo .echoink-agent-profile-identity{border:0;border-bottom:1px solid var(--line);padding:0 0 17px}
@@ -20626,12 +20622,6 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
 .echoink-settings-demo .heatmap-month{grid-row:1}
 
 /* Preserve the native checkbox event and checked state with the Demo switch. */
-.echoink-settings-demo input.codex-resource-toggle[type=checkbox]{appearance:none;-webkit-appearance:none;position:relative;display:block;flex:0 0 36px;width:36px;min-width:36px;height:21px;min-height:21px;margin:0;padding:0;border:0;border-radius:20px;background:var(--line);box-shadow:none;cursor:pointer;transition:background .16s ease}
-.echoink-settings-demo input.codex-resource-toggle[type=checkbox]:after{content:"";position:absolute;display:block;top:3px;left:3px;width:15px;height:15px;border:0;border-radius:50%;background:#fff;box-shadow:0 1px 3px #0002;transform:translateX(0);transition:transform .16s ease;-webkit-mask:none;mask:none}
-.echoink-settings-demo input.codex-resource-toggle[type=checkbox]:checked{background:var(--accent)}
-.echoink-settings-demo input.codex-resource-toggle[type=checkbox]:checked:after{transform:translateX(15px)}
-.echoink-settings-demo input.codex-resource-toggle[type=checkbox]:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
-.echoink-settings-demo input.codex-resource-toggle[type=checkbox]:disabled{opacity:.45;cursor:default}
 
 /* Page structures use their existing controls and the single native scrollport. */
 .echoink-settings-demo .echoink-settings-inline-editor>.settings-back,.echoink-settings-demo .echoink-settings-page>.settings-back{margin:23px 0 2px}
@@ -20722,7 +20712,7 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
 
 .echoink-settings-demo .echoink-settings-feature-card.echoink-resource-status-card{border:0;border-radius:0;padding:0;background:none;gap:16px;align-items:center}
 .echoink-settings-demo .echoink-resource-status-card>.echoink-settings-feature-copy{flex:1 1 0;min-width:0}
-.echoink-settings-demo .echoink-resource-status-card>input.codex-resource-toggle{flex:0 0 36px;margin-left:auto}
+.echoink-settings-demo .echoink-resource-status-card>[data-slot=switch]{flex:0 0 36px;margin-left:auto}
 .echoink-settings-demo .echoink-resource-status-card>button.resource-status-path{display:flex;align-items:center;gap:10px;flex:0 0 100%;width:100%;min-width:0;max-width:100%;padding:13px 0 0;border:0;border-top:1px solid var(--line);border-radius:0;text-align:left;background:none}
 .echoink-settings-demo .resource-status-path-label{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-family:var(--font-monospace);font-size:calc(var(--font-text-size,16px)*.6875);color:var(--secondary)}
 
@@ -20731,5 +20721,108 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
  .echoink-settings-demo .echoink-agent-profile-card-header>.echoink-agent-profile-heading-row{align-items:stretch;text-align:left;width:100%;flex-basis:100%}
  .echoink-settings-demo .echoink-agent-profile-card-header .setting-item-info{align-self:stretch;text-align:left}
  .echoink-settings-demo .echoink-agent-profile-card-header .setting-item-name{justify-content:flex-start}
+}
+/* MIT Origin UI primitive styling, scoped to the actual library controls.
+   EchoInk maps Origin's utility styles to the approved Demo tokens. No preflight. */
+.echoink-origin-control {
+  --origin-accent:var(--accent,var(--interactive-accent,#7860b3));
+  --origin-line:var(--line,var(--background-modifier-border,#e6e7eb));
+  --origin-bg:var(--bg,var(--background-primary,#fff));
+  --origin-text:var(--text,var(--text-normal,#303238));
+  --origin-soft:var(--soft,var(--background-secondary,#f7f7f9));
+  --origin-muted:var(--secondary,var(--text-muted,#73767e));
+  box-sizing:border-box;
+}
+:is(.echoink-settings-demo,.modal) .echoink-origin-control[data-slot=switch] {
+  appearance:none;position:relative;display:inline-flex;align-items:center;flex:0 0 36px;
+  width:36px;min-width:36px;max-width:36px;height:21px;min-height:21px;max-height:21px;
+  margin:0;padding:0;border:1px solid transparent;border-radius:20px;box-shadow:none;
+  background:var(--origin-line);vertical-align:middle;cursor:pointer;transition:background .16s;
+}
+:is(.echoink-settings-demo,.modal) .echoink-origin-control[data-slot=switch][data-state=checked] {background:var(--origin-accent)}
+.echoink-origin-control[data-slot=switch]::before,.echoink-origin-control[data-slot=switch]::after {content:none}
+.echoink-origin-control [data-slot=switch-thumb] {
+  position:absolute;display:block;top:2px;left:2px;width:15px;height:15px;margin:0;
+  border:0;border-radius:50%;background:#fff;box-shadow:0 1px 3px #0002;pointer-events:none;
+  transform:translateX(0);transition:transform .16s;
+}
+.echoink-origin-control [data-slot=switch-thumb][data-state=checked] {transform:translateX(15px)}
+:is(.echoink-settings-demo,.modal) .echoink-origin-control:is([data-slot=checkbox],[data-slot=radio-group-item]) {
+  appearance:none;display:inline-flex;position:relative;align-items:center;justify-content:center;flex:0 0 16px;
+  width:16px;min-width:16px;height:16px;min-height:16px;margin:0;padding:0;border:1px solid var(--origin-line);
+  border-radius:4px;background:var(--origin-bg);box-shadow:none;vertical-align:middle;cursor:pointer;
+}
+:is(.echoink-settings-demo,.modal) .echoink-origin-control[data-slot=radio-group-item] {border-radius:50%}
+:is(.echoink-settings-demo,.modal) .echoink-origin-control:is([data-slot=checkbox],[data-slot=radio-group-item])[data-state=checked] {
+  background:var(--origin-accent);border-color:var(--origin-accent);color:#fff;
+}
+.echoink-origin-control:is([data-slot=checkbox],[data-slot=radio-group-item])>span {display:grid;place-items:center}
+.echoink-origin-control[data-slot=checkbox] svg {width:9px;height:9px;fill:currentColor;stroke:none}
+.echoink-origin-control[data-slot=radio-group-item] svg {width:6px;height:6px;fill:currentColor;stroke:none}
+.echoink-origin-radio-group {display:flex;flex-direction:column;gap:inherit;min-width:0}
+:is(.echoink-settings-demo,.modal) .echoink-origin-control:is([data-slot=input],[data-slot=select-trigger]) {
+  min-width:0;max-width:100%;min-height:32px;height:auto;margin:0;padding:7px 10px;
+  border:1px solid var(--origin-line);border-radius:6px;background:var(--origin-bg);box-shadow:none;
+  font-family:inherit;font-size:calc(var(--font-text-size,16px)*.6875);line-height:1.55;color:var(--origin-text);
+}
+:is(.echoink-settings-demo,.modal) .echoink-origin-control[data-slot=select-trigger] {
+  display:inline-flex;align-items:center;justify-content:space-between;gap:8px;text-align:start;cursor:pointer;
+}
+.echoink-origin-control[data-slot=select-trigger]>[data-slot=select-value] {min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.echoink-origin-control[data-slot=select-trigger]>span:last-child {display:flex;flex:none;color:var(--origin-muted)}
+.echoink-origin-control[data-slot=select-trigger] svg {width:16px;height:16px;fill:currentColor;stroke:none}
+.echoink-settings-demo .setting-item-control {display:flex;align-items:center;justify-content:flex-end;margin-right:0;padding-right:0}
+.echoink-settings-demo .setting-item-control>.echoink-origin-control[data-slot=input] {width:230px}
+.echoink-settings-demo input.echoink-origin-control.echoink-origin-control[data-slot=input] {height:auto;min-height:32px}
+.echoink-settings-demo :is(.codex-provider-modal-field,.codex-mcp-server-form)>.echoink-origin-control[data-slot=select-trigger] {width:100%}
+.echoink-origin-control[data-slot=select-content] {
+  position:relative;z-index:100;min-width:var(--radix-select-trigger-width);max-width:calc(100vw - 24px);
+  max-height:min(24rem,var(--radix-select-content-available-height));overflow:hidden;
+  margin:4px 0;border:1px solid var(--origin-line);border-radius:6px;background:var(--origin-bg);
+  color:var(--origin-text);box-shadow:0 6px 24px #0002;font:11px/1.55 var(--font-interface,sans-serif);
+}
+.echoink-origin-control[data-slot=select-content] [data-radix-select-viewport] {padding:4px}
+.echoink-origin-control[data-slot=select-item] {
+  position:relative;display:flex;align-items:center;min-width:0;padding:7px 10px 7px 28px;
+  border-radius:4px;outline:none;cursor:default;user-select:none;overflow-wrap:anywhere;
+}
+.echoink-origin-control[data-slot=select-item]>span:first-child {position:absolute;left:8px;display:flex;align-items:center}
+.echoink-origin-control[data-slot=select-item] svg {width:14px;height:14px;fill:currentColor;stroke:none}
+.echoink-origin-control[data-slot=select-item][data-highlighted] {background:var(--accent-bg,var(--origin-soft));color:var(--origin-accent)}
+.echoink-origin-control [data-slot^=select-scroll] {display:flex;align-items:center;justify-content:center;padding:3px;color:var(--origin-muted)}
+.echoink-origin-control [data-slot^=select-scroll] svg {width:16px;height:16px;fill:currentColor;stroke:none}
+.echoink-origin-control[data-slot=select-item][data-disabled] {opacity:.45;pointer-events:none}
+.echoink-settings-demo .general-range {gap:18px;flex-wrap:nowrap}
+.echoink-settings-demo .general-range>.echoink-origin-control[data-slot=slider] {
+  position:relative;display:flex;align-items:center;flex:0 0 150px;width:150px;height:16px;
+  margin:0;padding:0;touch-action:none;user-select:none;
+}
+.echoink-origin-control [data-slot=slider-track] {position:relative;display:block;flex:1;height:4px;overflow:hidden;border-radius:4px;background:var(--origin-line)}
+.echoink-origin-control [data-slot=slider-range] {position:absolute;height:100%;background:var(--origin-accent)}
+.echoink-origin-control [data-slot=slider-thumb] {display:block;width:16px;height:16px;border:0;border-radius:50%;background:var(--origin-accent);box-shadow:none;cursor:grab}
+.echoink-origin-control [data-slot=slider-thumb]:active {cursor:grabbing}
+:is(.echoink-settings-demo,.modal) .echoink-origin-control[data-slot=button]:is(.echoink-origin-button,.echoink-amicro-button,.mod-cta,.button) {
+  display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:32px;height:auto;
+  padding:7px 10px;border:1px solid var(--origin-line);border-radius:6px;font-size:calc(var(--font-text-size,16px)*.6875);line-height:1.55;
+  background:var(--origin-bg);color:var(--origin-text);box-shadow:none;
+}
+:is(.echoink-settings-demo,.modal) .echoink-origin-control[data-slot=button]:is(.mod-cta,.is-primary) {background:var(--origin-accent);border-color:var(--origin-accent);color:#fff}
+:is(.echoink-settings-demo,.modal) .echoink-origin-control[data-slot=button]:is(.is-tertiary,.is-icon) {background:transparent;border-color:transparent}
+:is(.echoink-settings-demo,.modal) .echoink-origin-control[data-slot=button]:is(.settings-danger,.is-danger,.mod-warning) {color:var(--text-error,#b44f4f)}
+:is(.echoink-settings-demo,.modal) .echoink-origin-control[data-slot=button]:disabled {opacity:.45;cursor:default}
+:is(.echoink-settings-demo,.modal) .echoink-origin-control:is([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger]):focus-visible,
+.echoink-origin-control [data-slot=slider-thumb]:focus-visible {outline:2px solid var(--origin-accent);outline-offset:3px}
+:is(.echoink-settings-demo,.modal) .echoink-origin-control:is([data-slot=switch],[data-slot=checkbox],[data-slot=radio-group-item],[data-slot=select-trigger]):disabled {opacity:.45;cursor:default}
+.echoink-settings-demo .codex-provider-custom-toggle>[data-slot=switch] {order:2;margin-left:auto}
+.echoink-settings-demo .codex-provider-custom-toggle-copy {min-width:0}
+@container settings (max-width:760px) {
+  .echoink-settings-demo .setting-item-control>.echoink-origin-control[data-slot=input] {width:200px}
+}
+@container settings (max-width:600px) {
+  .echoink-settings-demo .setting-item-control>.echoink-origin-control[data-slot=input] {width:100%;flex:1}
+  .echoink-settings-demo .general-range>.echoink-origin-control[data-slot=slider] {width:105px;flex:1;min-width:105px}
+}
+@media (prefers-reduced-motion:reduce) {
+  .echoink-origin-control[data-slot=switch],.echoink-origin-control [data-slot=switch-thumb] {transition:none}
 }
 /* ECHOINK_WORKSPACE_SETTINGS_END */

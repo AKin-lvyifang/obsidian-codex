@@ -1,0 +1,189 @@
+import { createPortal, flushSync } from "react-dom";
+import { createRoot, type Root } from "react-dom/client";
+import type { ReactNode } from "react";
+import { Button } from "../ui/components/origin/button";
+import { Input } from "../ui/components/origin/input";
+import { Switch } from "../ui/components/origin/switch";
+import { Checkbox } from "../ui/components/origin/checkbox";
+import { Slider } from "../ui/components/origin/slider";
+import { RadioGroup, RadioGroupItem } from "../ui/components/origin/radio-group";
+import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "../ui/components/origin/select";
+
+type ElementOptions = { cls?: string; text?: string; attr?: Record<string, string | number | boolean>; type?: string; value?: string };
+type Island = { root: Root; element: HTMLElement | null; document: Document; disposed: boolean };
+const islands = new Set<Island>();
+const windowCleanup = new Map<Document, () => void>();
+
+/** Portals keep the existing DOM hierarchy, labels and direct-child layout. */
+function createIsland(parent: HTMLElement) {
+  const document = parent.ownerDocument;
+  const fragment = new document.defaultView!.DocumentFragment();
+  const island: Island = { root: createRoot(fragment), element: null, document, disposed: false };
+  islands.add(island);
+  if (!windowCleanup.has(document)) {
+    const cleanup = () => disposeOriginControls(document.documentElement);
+    document.defaultView?.addEventListener("pagehide", cleanup);
+    document.defaultView?.addEventListener("beforeunload", cleanup);
+    windowCleanup.set(document, cleanup);
+  }
+  return {
+    ref: (element: HTMLElement | null) => { island.element = element; },
+    render: (node: ReactNode) => { if (!island.disposed) flushSync(() => island.root.render(createPortal(node, parent))); },
+    element: () => island.element!
+  };
+}
+
+/** Call before empty/remove and on the owning view's close/unload. */
+export function disposeOriginControls(container: HTMLElement): void {
+  for (const island of [...islands].reverse()) {
+    if (island.document !== container.ownerDocument || !island.element || !container.contains(island.element)) continue;
+    islands.delete(island);
+    island.disposed = true;
+    island.root.unmount();
+  }
+  const document = container.ownerDocument;
+  if (![...islands].some((island) => island.document === document)) {
+    const cleanup = windowCleanup.get(document);
+    if (cleanup) {
+      document.defaultView?.removeEventListener("pagehide", cleanup);
+      document.defaultView?.removeEventListener("beforeunload", cleanup);
+      windowCleanup.delete(document);
+    }
+  }
+}
+
+function decorate(element: HTMLElement, options: ElementOptions): void {
+  if (options.cls) element.classList.add(...options.cls.split(/\s+/u).filter(Boolean));
+  for (const [name, value] of Object.entries(options.attr ?? {})) element.setAttribute(name, String(value));
+  if (options.text) element.textContent = options.text;
+}
+
+/** Uncontrolled native fields preserve the existing input/IME/selection handlers. */
+export function createOriginInput(parent: HTMLElement, options: ElementOptions = {}): HTMLInputElement {
+  const island = createIsland(parent);
+  island.render(<Input ref={island.ref} className="echoink-origin-control" type={String(options.attr?.type ?? options.type ?? "text")} />);
+  const element = island.element() as HTMLInputElement;
+  decorate(element, options);
+  if (options.value !== undefined) element.value = options.value;
+  return element;
+}
+
+export function createOriginButton(parent: HTMLElement, options: ElementOptions = {}): HTMLButtonElement {
+  const island = createIsland(parent);
+  island.render(<Button ref={island.ref} className={`echoink-origin-control${options.cls ? "" : " echoink-origin-button"}`} type="button" variant="outline" />);
+  const element = island.element() as HTMLButtonElement;
+  decorate(element, options);
+  return element;
+}
+
+export type OriginCheckElement = HTMLButtonElement & { checked: boolean };
+
+export function createOriginSwitch(parent: HTMLElement, options: ElementOptions = {}) {
+  return createOriginCheck(parent, options, "switch");
+}
+
+/** The real Radix button owns state; programmatic rollback updates that same control. */
+export function createOriginCheck(parent: HTMLElement, options: ElementOptions = {}, kind: "switch" | "checkbox" = "checkbox"): OriginCheckElement {
+  const island = createIsland(parent);
+  let checked = false;
+  let disabled = false;
+  const Control = kind === "switch" ? Switch : Checkbox;
+  const render = () => island.render(<Control ref={island.ref} className="echoink-origin-control" checked={checked} disabled={disabled}
+    onCheckedChange={(value) => {
+      checked = value === true;
+      render();
+      const element = island.element();
+      element.dispatchEvent(new (element.ownerDocument.defaultView!.Event)("change", { bubbles: true }));
+    }} />);
+  render();
+  const element = island.element() as OriginCheckElement;
+  Object.defineProperty(element, "checked", { get: () => checked, set: (value: boolean) => { checked = Boolean(value); render(); } });
+  Object.defineProperty(element, "disabled", { get: () => disabled, set: (value: boolean) => { disabled = Boolean(value); render(); } });
+  decorate(element, { ...options, attr: Object.fromEntries(Object.entries(options.attr ?? {}).filter(([key]) => key !== "type" && key !== "role")) });
+  return element;
+}
+
+export type OriginSelectElement = HTMLButtonElement & { value: string };
+export function createOriginSelect(parent: HTMLElement, options: ElementOptions,
+  choices: readonly { value: string; label: string; disabled?: boolean }[], initialValue = "") {
+  const island = createIsland(parent);
+  let value = initialValue || choices[0]?.value || "";
+  let disabled = false;
+  const items = [...choices];
+  let open = false;
+  // Keep the portal in the same settings/modal document and themed DOM tree.
+  const portalHost = parent.closest<HTMLElement>(".echoink-settings-demo, .echoink-settings-inline-editor, .modal") ?? parent;
+  const emptyValue = "__echoink_empty_selection__";
+  const render = () => island.render(<Select value={value || emptyValue} disabled={disabled} open={open} onOpenChange={(next) => { open = next; render(); }} onValueChange={(next) => {
+    value = next === emptyValue ? "" : next; render();
+    const element = island.element();
+    element.dispatchEvent(new (element.ownerDocument.defaultView!.Event)("change", { bubbles: true }));
+  }}>
+    <SelectTrigger ref={island.ref} className="echoink-origin-control"><SelectValue /></SelectTrigger>
+    <SelectContent container={portalHost} className="echoink-origin-control" position="popper"
+      onFocusCapture={(event) => {
+        const content = event.currentTarget;
+        // Radix's fallback focus loop reads the main document. In a detached
+        // Obsidian window that loop falls through from the selected item to the
+        // listbox; keep its real selected item focused in the owning document.
+        if (content.ownerDocument !== document && event.target === content) {
+          (content.querySelector<HTMLElement>('[role=option][data-state=checked]:not([data-disabled])')
+            ?? content.querySelector<HTMLElement>('[role=option]:not([data-disabled])'))?.focus();
+        }
+      }}
+      onKeyDown={(event) => {
+        const content = event.currentTarget;
+        if (content.ownerDocument === document || !["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+        const options = Array.from(content.querySelectorAll<HTMLElement>('[role=option]:not([data-disabled])'));
+        const current = options.indexOf(content.ownerDocument.activeElement as HTMLElement);
+        const index = event.key === "Home" ? 0 : event.key === "End" ? options.length - 1
+          : Math.max(0, Math.min(options.length - 1, current + (event.key === "ArrowDown" ? 1 : -1)));
+        event.preventDefault();
+        options[index]?.focus();
+        options[index]?.scrollIntoView({ block: "nearest" });
+      }}
+      onEscapeKeyDown={(event) => { event.preventDefault(); event.stopPropagation(); open = false; render(); }}>
+      {items.map((item) => <SelectItem className="echoink-origin-control" key={item.value} value={item.value || emptyValue} disabled={item.disabled}>{item.label}</SelectItem>)}
+    </SelectContent>
+  </Select>);
+  render();
+  const element = island.element() as OriginSelectElement;
+  Object.defineProperty(element, "value", { get: () => value, set: (next: string) => { value = next; render(); } });
+  Object.defineProperty(element, "disabled", { get: () => disabled, set: (next: boolean) => { disabled = Boolean(next); render(); } });
+  decorate(element, options);
+  return { element,
+    addOption(next: string, label: string) { items.push({ value: next, label }); if (!value) value = next; render(); },
+    setOptionDisabled(next: string, disabled: boolean) { const item = items.find((item) => item.value === next); if (item) { item.disabled = disabled; render(); } }
+  };
+}
+
+export function createOriginSlider(parent: HTMLElement, options: {
+  value: number; min: number; max: number; step: number; label: string;
+  onValueChange(value: number): void; onValueCommit(value: number): void;
+}) {
+  const island = createIsland(parent);
+  let value = options.value;
+  island.render(<Slider ref={island.ref} className="echoink-origin-control" defaultValue={[value]}
+    min={options.min} max={options.max} step={options.step} aria-label={options.label}
+    onValueChange={(values) => { value = values[0]; options.onValueChange(value); }}
+    onValueCommit={(values) => options.onValueCommit(values[0])} />);
+  const element = island.element();
+  element.querySelector("[role=slider]")?.setAttribute("aria-label", options.label);
+  return element;
+}
+
+/** One Root for the whole list; portals keep every item inside its DOM collection. */
+export function createOriginRadioGroup(parent: HTMLElement, value: string, label: string, onChange: (value: string) => void) {
+  const island = createIsland(parent);
+  const items: { parent: HTMLElement; value: string; disabled: boolean; ref: (element: HTMLButtonElement | null) => void }[] = [];
+  const render = () => island.render(<RadioGroup ref={island.ref} className="echoink-origin-radio-group" value={value} aria-label={label} onValueChange={(next) => { value = next; render(); onChange(next); }}>
+    {items.map((item) => createPortal(<RadioGroupItem ref={item.ref} className="echoink-origin-control" value={item.value} disabled={item.disabled} />, item.parent, item.value))}
+  </RadioGroup>);
+  render();
+  return { element: island.element(), addItem(parent: HTMLElement, itemValue: string, disabled: boolean): HTMLButtonElement {
+    let element: HTMLButtonElement | null = null;
+    items.push({ parent, value: itemValue, disabled, ref: (node) => { element = node; } });
+    render();
+    return element!;
+  } };
+}

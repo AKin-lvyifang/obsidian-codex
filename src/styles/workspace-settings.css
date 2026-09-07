@@ -874,11 +874,7 @@
 .echoink-settings-demo input:focus,.echoink-settings-demo select:focus,.echoink-settings-demo textarea:focus{border-color:var(--accent);outline:2px solid var(--accent-bg);outline-offset:1px}
 .echoink-settings-demo input[type=range]{accent-color:var(--accent);max-width:170px}
 .echoink-settings-demo input[type=checkbox],.echoink-settings-demo input[type=radio]{accent-color:var(--accent)}
-.echoink-settings-demo .checkbox-container{width:36px;height:21px;min-width:36px;background:var(--line);border-radius:20px;box-shadow:none}
-.echoink-settings-demo .checkbox-container.is-enabled{background:var(--accent)}
-.echoink-settings-demo .checkbox-container:after{width:15px;height:15px;top:3px;left:3px;box-shadow:0 1px 3px #0002}
-.echoink-settings-demo .checkbox-container.is-enabled:after{transform:translateX(15px)}
-.echoink-settings-demo button:not(.codex-settings-tab):not(.codex-resource-tab):not(.text-button):not(.provider-group-button):not(.codex-provider-combobox-option):not(.echoink-about-logo):not(.echoink-settings-navigation-row){font-family:inherit;font-size:calc(var(--font-text-size,16px)*.6875);height:auto;min-height:30px;box-shadow:none}
+.echoink-settings-demo button:not(.codex-settings-tab):not(.codex-resource-tab):not(.text-button):not(.provider-group-button):not(.codex-provider-combobox-option):not(.echoink-about-logo):not(.echoink-settings-navigation-row):not(.echoink-origin-control){font-family:inherit;font-size:calc(var(--font-text-size,16px)*.6875);height:auto;min-height:30px;box-shadow:none}
 .echoink-settings-demo .echoink-amicro-button,.echoink-settings-demo .mod-cta{--interactive-accent:var(--accent);--interactive-normal:var(--bg);--interactive-hover:var(--soft)}
 .echoink-settings-demo .echoink-settings-navigation-row{border:0;border-radius:0;border-top:1px solid var(--line);padding:17px 0;background:none;box-shadow:none;width:100%;height:auto;white-space:normal}
 .echoink-settings-demo .echoink-settings-navigation-row:first-child{border-top:0}
@@ -1051,12 +1047,12 @@
  .echoink-settings-demo .echoink-knowledge-protocol-list{grid-template-columns:repeat(2,1fr)}
 }
 @container settings (max-width:600px){
- .echoink-settings-demo .setting-item:not(:has(.checkbox-container)){flex-direction:column;align-items:stretch;gap:11px}
- .echoink-settings-demo .setting-item:not(:has(.checkbox-container))>.setting-item-control{max-width:none;width:100%;justify-content:flex-end}
+ .echoink-settings-demo .setting-item:not(:has([data-slot=switch])){flex-direction:column;align-items:stretch;gap:11px}
+ .echoink-settings-demo .setting-item:not(:has([data-slot=switch]))>.setting-item-control{max-width:none;width:100%;justify-content:flex-end}
  /* Keep Demo switch rows compact after the legacy narrow setting-row layout. */
- .echoink-settings-demo .settings-stack>.setting-item:has(>.setting-item-control>.checkbox-container){flex-direction:row;flex-wrap:nowrap;align-items:stretch}
- .echoink-settings-demo .settings-stack>.setting-item:has(>.setting-item-control>.checkbox-container)>.setting-item-info{width:auto;align-self:stretch;text-align:left}
- .echoink-settings-demo .settings-stack>.setting-item:has(>.setting-item-control>.checkbox-container)>.setting-item-control{width:auto;max-width:none;align-self:center;justify-content:flex-end}
+ .echoink-settings-demo .settings-stack>.setting-item:has(>.setting-item-control>[data-slot=switch]){flex-direction:row;flex-wrap:nowrap;align-items:stretch}
+ .echoink-settings-demo .settings-stack>.setting-item:has(>.setting-item-control>[data-slot=switch])>.setting-item-info{width:auto;align-self:stretch;text-align:left}
+ .echoink-settings-demo .settings-stack>.setting-item:has(>.setting-item-control>[data-slot=switch])>.setting-item-control{width:auto;max-width:none;align-self:center;justify-content:flex-end}
  .echoink-settings-demo .setting-item-control input:not([type=range]){width:100%}
  .echoink-settings-demo .echoink-agent-profile-card-body{grid-template-columns:1fr}
  .echoink-settings-demo .echoink-agent-profile-identity{border:0;border-bottom:1px solid var(--line);padding:0 0 17px}
@@ -1085,12 +1081,6 @@
 .echoink-settings-demo .heatmap-month{grid-row:1}
 
 /* Preserve the native checkbox event and checked state with the Demo switch. */
-.echoink-settings-demo input.codex-resource-toggle[type=checkbox]{appearance:none;-webkit-appearance:none;position:relative;display:block;flex:0 0 36px;width:36px;min-width:36px;height:21px;min-height:21px;margin:0;padding:0;border:0;border-radius:20px;background:var(--line);box-shadow:none;cursor:pointer;transition:background .16s ease}
-.echoink-settings-demo input.codex-resource-toggle[type=checkbox]:after{content:"";position:absolute;display:block;top:3px;left:3px;width:15px;height:15px;border:0;border-radius:50%;background:#fff;box-shadow:0 1px 3px #0002;transform:translateX(0);transition:transform .16s ease;-webkit-mask:none;mask:none}
-.echoink-settings-demo input.codex-resource-toggle[type=checkbox]:checked{background:var(--accent)}
-.echoink-settings-demo input.codex-resource-toggle[type=checkbox]:checked:after{transform:translateX(15px)}
-.echoink-settings-demo input.codex-resource-toggle[type=checkbox]:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
-.echoink-settings-demo input.codex-resource-toggle[type=checkbox]:disabled{opacity:.45;cursor:default}
 
 /* Page structures use their existing controls and the single native scrollport. */
 .echoink-settings-demo .echoink-settings-inline-editor>.settings-back,.echoink-settings-demo .echoink-settings-page>.settings-back{margin:23px 0 2px}
@@ -1181,7 +1171,7 @@
 
 .echoink-settings-demo .echoink-settings-feature-card.echoink-resource-status-card{border:0;border-radius:0;padding:0;background:none;gap:16px;align-items:center}
 .echoink-settings-demo .echoink-resource-status-card>.echoink-settings-feature-copy{flex:1 1 0;min-width:0}
-.echoink-settings-demo .echoink-resource-status-card>input.codex-resource-toggle{flex:0 0 36px;margin-left:auto}
+.echoink-settings-demo .echoink-resource-status-card>[data-slot=switch]{flex:0 0 36px;margin-left:auto}
 .echoink-settings-demo .echoink-resource-status-card>button.resource-status-path{display:flex;align-items:center;gap:10px;flex:0 0 100%;width:100%;min-width:0;max-width:100%;padding:13px 0 0;border:0;border-top:1px solid var(--line);border-radius:0;text-align:left;background:none}
 .echoink-settings-demo .resource-status-path-label{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-family:var(--font-monospace);font-size:calc(var(--font-text-size,16px)*.6875);color:var(--secondary)}
 

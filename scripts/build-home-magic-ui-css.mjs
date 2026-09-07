@@ -60,7 +60,8 @@ const current = extractGeneratedBlock(styles);
 const settingsStart = "/* ECHOINK_WORKSPACE_SETTINGS_START */";
 const settingsEnd = "/* ECHOINK_WORKSPACE_SETTINGS_END */";
 const settingsSource = await readFile(path.join(rootDir, "src/styles/workspace-settings.css"), "utf8");
-const settingsGenerated = [settingsStart, settingsSource.trim(), settingsEnd].join("\n");
+const originSource = await readFile(path.join(rootDir, "src/styles/origin-controls.css"), "utf8");
+const settingsGenerated = [settingsStart, settingsSource.trim(), originSource.trim(), settingsEnd].join("\n");
 const settingsIndex = styles.indexOf(settingsStart);
 const settingsCurrent = settingsIndex < 0 ? "" : styles.slice(settingsIndex, styles.indexOf(settingsEnd, settingsIndex) + settingsEnd.length);
 

@@ -1,3 +1,4 @@
+import { createOriginButton, disposeOriginControls } from "./origin-controls";
 import { Setting, setIcon } from "obsidian";
 import { applyAmicroButton } from "./amicro-buttons";
 
@@ -35,7 +36,7 @@ export function createSettingsPage(
     cls: `echoink-settings-page${options.detail ? " is-detail" : ""}`
   });
   if (options.onBack) {
-    const back = page.createEl("button", {
+    const back = createOriginButton(page, {
       cls: "echoink-settings-back settings-back text-button",
       attr: {
         type: "button",
@@ -176,9 +177,9 @@ export function showSettingsInlineConfirmation(container: HTMLElement, trigger: 
   const panel = container.createDiv({ cls: "echoink-settings-inline-confirm review-confirm", attr: { role: "group", "aria-label": options.confirmLabel } });
   panel.createEl("p", { text: options.message });
   const actions = panel.createDiv({ cls: "settings-inline" });
-  const cancel = actions.createEl("button", { cls: "button", text: options.cancelLabel, attr: { type: "button" } });
-  const confirm = actions.createEl("button", { cls: "button settings-danger", text: options.confirmLabel, attr: { type: "button" } });
-  const close = () => { panel.remove(); if (inlineConfirmations.get(root) === close) inlineConfirmations.delete(root); trigger.setAttr("aria-expanded", "false"); };
+  const cancel = createOriginButton(actions, { cls: "button", text: options.cancelLabel, attr: { type: "button" } });
+  const confirm = createOriginButton(actions, { cls: "button settings-danger", text: options.confirmLabel, attr: { type: "button" } });
+  const close = () => { disposeOriginControls(panel); panel.remove(); if (inlineConfirmations.get(root) === close) inlineConfirmations.delete(root); trigger.setAttr("aria-expanded", "false"); };
   inlineConfirmations.set(root, close);
   trigger.setAttr("aria-expanded", "true");
   cancel.onclick = () => { close(); trigger.focus({ preventScroll: true }); };
@@ -212,7 +213,7 @@ export function createSettingsNavigationRow(
   section: HTMLElement,
   options: SettingsNavigationRowOptions
 ): HTMLButtonElement {
-  const row = section.createEl("button", {
+  const row = createOriginButton(section, {
     cls: "echoink-settings-navigation-row setting-row",
     attr: {
       type: "button",
@@ -258,7 +259,7 @@ export function createSettingsState(
   });
   state.createDiv({ cls: "echoink-settings-state-message", text: message });
   if (action) {
-    const button = state.createEl("button", {
+    const button = createOriginButton(state, {
       cls: "echoink-settings-state-action",
       text: action.label,
       attr: { type: "button" }
