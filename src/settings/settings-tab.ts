@@ -107,6 +107,7 @@ import { McpServerModal } from "./mcp-server-modal";
 import {
   applySettingsRow,
   addSettingsHelp,
+  showSettingsInlineConfirmation,
   createSettingsCompactList,
   createSettingsFeatureCard,
   createSettingsGroup,
@@ -1236,7 +1237,7 @@ export class CodexSettingTab extends PluginSettingTab {
     }
 
     const pickerPanel = card.createDiv({
-      cls: "echoink-template-picker",
+      cls: "echoink-template-picker general-template-picker",
       attr: ready ? {
         id: pickerId,
         "aria-labelledby": pickerTriggerId
@@ -1293,6 +1294,17 @@ export class CodexSettingTab extends PluginSettingTab {
     panel.addClass("is-visible");
     this.setTemplatePickerExpanded(refs, true);
     panel.onkeydown = (event: KeyboardEvent) => {
+      if (event.isComposing || event.keyCode === 229) return;
+      if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+        const rows = Array.from(panel.querySelectorAll<HTMLButtonElement>(".echoink-picker-row"));
+        const index = rows.indexOf(panel.ownerDocument.activeElement as HTMLButtonElement);
+        if (index >= 0) {
+          event.preventDefault();
+          const next = event.key === "Home" ? 0 : event.key === "End" ? rows.length - 1 : (index + (event.key === "ArrowDown" ? 1 : rows.length - 1)) % rows.length;
+          rows[next]?.focus();
+        }
+        return;
+      }
       if (event.key !== "Escape") return;
       event.preventDefault();
       event.stopPropagation();
@@ -1316,14 +1328,14 @@ export class CodexSettingTab extends PluginSettingTab {
       text: zh ? `${AGENT_TEMPLATES.length} 种风格` : `${AGENT_TEMPLATES.length} styles`
     });
 
-    const list = panel.createDiv({ cls: "echoink-picker-list" });
+    const list = panel.createDiv({ cls: "echoink-picker-list general-template-grid" });
     const currentTemplateId = refs.templateBtn.dataset.templateId ?? "";
     let firstRow: HTMLElement | null = null;
     let currentRow: HTMLElement | null = null;
     for (const template of AGENT_TEMPLATES) {
       const isCurrent = currentTemplateId === template.id;
       const row = list.createEl("button", {
-        cls: "echoink-picker-row",
+        cls: "echoink-picker-row general-template",
         attr: {
           type: "button",
           "data-template-id": template.id,
@@ -1333,18 +1345,18 @@ export class CodexSettingTab extends PluginSettingTab {
       firstRow ??= row;
       if (isCurrent) currentRow = row;
       row.classList.toggle("is-current", isCurrent);
-      const heading = row.createDiv({ cls: "echoink-picker-row-heading" });
+      const heading = row.createEl("strong", { cls: "echoink-picker-row-heading" });
       heading.createSpan({
         cls: "echoink-picker-row-name",
         text: zh ? template.labelZh : template.labelEn
       });
       if (isCurrent) {
         heading.createSpan({
-          cls: "echoink-picker-current-badge",
+          cls: "echoink-picker-current-badge settings-badge",
           text: zh ? "当前模板" : "Current"
         });
       }
-      row.createDiv({
+      row.createEl("p", {
         cls: "echoink-picker-row-desc",
         text: template.complexProblemMethod
       });
@@ -2263,7 +2275,11 @@ export class CodexSettingTab extends PluginSettingTab {
         attr: { type: "button", "aria-label": `${zh ? "删除" : "Delete"} ${entry.title}` }
       });
       remove.disabled = Boolean(this.archivedConversationBusyId);
-      remove.onclick = () => void this.softDeleteArchivedConversation(entry);
+      remove.onclick = () => showSettingsInlineConfirmation(row, remove, {
+        message: zh ? `删除“${entry.title}”后无法在设置中恢复。确认删除这条会话？` : `Delete “${entry.title}”? It cannot be restored in Settings afterward.`,
+        confirmLabel: zh ? "确认删除" : "Confirm deletion", cancelLabel: zh ? "取消" : "Cancel",
+        onConfirm: () => this.softDeleteArchivedConversation(entry)
+      });
     }
   }
 
@@ -2306,16 +2322,6 @@ export class CodexSettingTab extends PluginSettingTab {
 
   private async softDeleteArchivedConversation(entry: Readonly<PiConversationCatalogEntry>): Promise<void> {
     if (this.archivedConversationBusyId) return;
-    const accepted = await confirmModal(
-      this.app,
-      `${this.plugin.settings.settingsLanguage === "en" ? "Delete conversation" : "删除会话"}“${entry.title}”？`,
-      this.plugin.settings.settingsLanguage === "en"
-        ? "You cannot restore this conversation in Settings after deletion."
-        : "删除后无法在设置中恢复。",
-      this.plugin.settings.settingsLanguage === "en" ? "Delete" : "删除",
-      this.plugin.settings.settingsLanguage === "en" ? "Cancel" : "取消"
-    );
-    if (!accepted) return;
     this.archivedConversationBusyId = entry.conversationId;
     this.scheduleDisplay();
     try {
@@ -2445,7 +2451,11 @@ export class CodexSettingTab extends PluginSettingTab {
         }
       });
       forget.disabled = this.memoryActionRunning;
-      forget.onclick = () => void this.forgetPersonalMemoryRecord(record);
+      forget.onclick = () => showSettingsInlineConfirmation(row, forget, {
+        message: zh ? `忘掉“${record.title}”后，它不会再被召回；相关用户画像与 Agent 长期学习内容会同步更新。` : `After “${record.title}” is forgotten, it will no longer be recalled. Related user-profile and Agent learning projections will be updated too.`,
+        confirmLabel: zh ? "确认忘掉" : "Confirm forgetting", cancelLabel: this.copy.common.cancel,
+        onConfirm: () => this.forgetPersonalMemoryRecord(record)
+      });
 
       const fields = row.createDiv({ cls: "echoink-memory-card-fields" });
       const content = fields.createDiv({
@@ -2569,16 +2579,6 @@ export class CodexSettingTab extends PluginSettingTab {
     this.scheduleDisplay();
     let forgotten = false;
     try {
-      const accepted = await confirmModal(
-        this.app,
-        zh ? "确认忘掉这条 Memory？" : "Forget this Memory?",
-        zh
-          ? `忘掉“${record.title}”后，它不会再被召回；相关用户画像与 Agent 长期学习内容会同步更新。`
-          : `After “${record.title}” is forgotten, it will no longer be recalled. Related user-profile and Agent learning projections will be updated too.`,
-        zh ? "忘掉" : "Forget",
-        this.copy.common.cancel
-      );
-      if (!accepted) return;
       await this.plugin.forgetEchoInkPersonalMemory(
         record.id,
         zh
@@ -3153,7 +3153,13 @@ export class CodexSettingTab extends PluginSettingTab {
         }
       });
       setIcon(remove, "trash-2");
-      remove.onclick = () => void this.deleteSavedProviderModel(saved.id);
+      remove.onclick = () => showSettingsInlineConfirmation(row, remove, {
+        message: `${this.copy.providers.deleteConfirm(providerDisplayName)} ${saved.id === active?.id
+          ? label("将删除当前使用中的模型。EchoInk 会切换到下一项；若没有其他项，则进入未配置状态。", "The active model will be removed. EchoInk will switch to the next saved model, or become unconfigured if none remains.")
+          : label("这会删除已保存的模型配置。", "This removes the saved model configuration.")}`,
+        confirmLabel: label("确认删除", "Confirm deletion"), cancelLabel: this.copy.common.cancel,
+        onConfirm: () => this.deleteSavedProviderModel(saved.id)
+      });
     }
 
     if (this.plugin.settings.apiProviders.length === 0) {
@@ -3369,29 +3375,6 @@ export class CodexSettingTab extends PluginSettingTab {
       (item) => item.id === providerId
     );
     if (!provider) return;
-    const providerDisplayName = apiProviderConfiguredDisplayName(
-      normalizeApiProviderId(
-        provider.providerId,
-        provider.baseUrl,
-        provider.name
-      ),
-      provider.name,
-      this.plugin.settings.settingsLanguage
-    );
-    const accepted = await confirmModal(
-      this.app,
-      this.copy.providers.deleteConfirm(providerDisplayName),
-      this.plugin.settings.activeApiProviderId === providerId
-        ? (this.plugin.settings.settingsLanguage === "en"
-          ? "The active model will be removed. EchoInk will switch to the next saved model, or become unconfigured if none remains."
-          : "将删除当前使用中的模型。EchoInk 会切换到下一项；若没有其他项，则进入未配置状态。")
-        : (this.plugin.settings.settingsLanguage === "en"
-          ? "This removes the saved model configuration."
-          : "这会删除已保存的模型配置。"),
-      this.copy.common.delete,
-      this.copy.common.cancel
-    );
-    if (!accepted) return;
     const wasActive = this.plugin.settings.activeApiProviderId === providerId;
     const fallback = this.plugin.settings.apiProviders.find(
       (item) => item.id !== providerId && apiProviderHasUsableCredential(
@@ -4543,7 +4526,11 @@ export class CodexSettingTab extends PluginSettingTab {
         text: this.plugin.settings.settingsLanguage === "en" ? "Delete server" : "删除 Server",
         attr: { type: "button", "data-echoink-focus-key": `resource:${resource.id}:delete` }
       });
-      remove.onclick = () => void this.deleteMcpServer(resource, remove);
+      remove.onclick = () => showSettingsInlineConfirmation(row, remove, {
+        message: this.plugin.settings.settingsLanguage === "en" ? `Delete ${resource.name} and its local connection settings? This does not execute any MCP tool.` : `删除 ${resource.name} 及其本地连接设置？此操作不会执行任何 MCP Tool。`,
+        confirmLabel: this.plugin.settings.settingsLanguage === "en" ? "Confirm deletion" : "确认删除", cancelLabel: this.copy.common.cancel,
+        onConfirm: () => this.deleteMcpServer(resource, remove)
+      });
     }
   }
 
@@ -4572,16 +4559,6 @@ export class CodexSettingTab extends PluginSettingTab {
 
   private async deleteMcpServer(resource: EchoInkResource, button: HTMLButtonElement): Promise<void> {
     const english = this.plugin.settings.settingsLanguage === "en";
-    const accepted = await confirmModal(
-      this.app,
-      english ? "Delete MCP server" : "删除 MCP Server",
-      english
-        ? `Delete ${resource.name} and its local connection settings? This does not execute any MCP tool.`
-        : `删除 ${resource.name} 及其本地连接设置？此操作不会执行任何 MCP Tool。`,
-      english ? "Delete" : "删除",
-      english ? "Cancel" : "取消"
-    );
-    if (!accepted) return;
     button.disabled = true;
     try {
       await this.plugin.deleteEchoInkMcpServer(resource.id);

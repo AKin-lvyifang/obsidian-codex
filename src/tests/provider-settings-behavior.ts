@@ -2568,6 +2568,17 @@ async function assertSettingsAccessibleNamesAndOverflow(): Promise<void> {
   }
   assert.doesNotMatch(tab.containerEl.textContent, /pi-session\.jsonl|conversation-archived/u);
   assert.doesNotMatch(tab.containerEl.textContent, /Pi Session|JSONL|Catalog|软删除/u);
+  const archiveRemove = tab.containerEl.querySelector<HTMLButtonElement>('button[aria-label="删除 归档会话样例"]')!;
+  const modalCount = openTestModals.length;
+  archiveRemove.click();
+  const inlineConfirm = tab.containerEl.querySelector<ProviderModalTestElement>(".echoink-settings-inline-confirm");
+  assert.ok(inlineConfirm, "archive deletion asks inside the row");
+  assert.equal(openTestModals.length, modalCount, "archive confirmation does not open a modal");
+  assert.match(inlineConfirm.textContent, /无法在设置中恢复/u);
+  inlineConfirm.fireEvent("keydown", { key: "Escape" });
+  assert.equal(tab.containerEl.querySelector(".echoink-settings-inline-confirm"), null);
+  assert.equal(providerModalTestDocument.activeElement, archiveRemove);
+  assert.equal(mutable.archivedConversations.length, 1, "cancelling keeps the archived conversation");
   const settingsTabSourceForArchivedConversation = readFileSync(
     "src/settings/settings-tab.ts",
     "utf8"
@@ -2583,8 +2594,6 @@ async function assertSettingsAccessibleNamesAndOverflow(): Promise<void> {
     archivedConversationActionStart,
     archivedConversationActionEnd
   );
-  assert.match(archivedConversationActionSource, /Delete conversation/u);
-  assert.match(archivedConversationActionSource, /删除后无法在设置中恢复/u);
   assert.match(archivedConversationActionSource, /Conversation deleted\./u);
   assert.match(archivedConversationActionSource, /已删除会话/u);
   assert.doesNotMatch(archivedConversationActionSource, /Pi Session|JSONL|soft-delete|软删除/u);
@@ -2660,10 +2669,11 @@ async function assertSettingsAccessibleNamesAndOverflow(): Promise<void> {
 
   correctionActions[1]!.click();
   await settleMicrotasks();
-  const cancelForget = openTestModals.at(-1);
-  assert.ok(cancelForget, "Review forget opens a confirmation modal");
-  assert.match(cancelForget!.contentEl.textContent, /不会再被召回/u);
-  const cancelForgetButton = (cancelForget!.contentEl as unknown as ProviderModalTestElement)
+  const cancelForget = tab.containerEl.querySelector<ProviderModalTestElement>(".echoink-settings-inline-confirm");
+  assert.ok(cancelForget, "Review forget opens confirmation inside the card");
+  assert.equal(openTestModals.length, modalCount);
+  assert.match(cancelForget.textContent, /不会再被召回/u);
+  const cancelForgetButton = cancelForget
     .querySelectorAll<ProviderModalTestElement>("button")
     .find((button) => button.textContent === "取消");
   assert.ok(cancelForgetButton);
@@ -2678,12 +2688,12 @@ async function assertSettingsAccessibleNamesAndOverflow(): Promise<void> {
   assert.ok(confirmForgetButton);
   confirmForgetButton!.click();
   await settleMicrotasks();
-  const confirmForget = openTestModals.at(-1);
+  const confirmForget = tab.containerEl.querySelector<ProviderModalTestElement>(".echoink-settings-inline-confirm");
   assert.ok(confirmForget);
-  const acceptForgetButton = (confirmForget!.contentEl as unknown as ProviderModalTestElement)
+  const acceptForgetButton = confirmForget
     .querySelectorAll<ProviderModalTestElement>("button")
-    .find((button) => button.hasClass("mod-cta"));
-  assert.equal(acceptForgetButton?.textContent, "忘掉");
+    .find((button) => button.hasClass("settings-danger"));
+  assert.equal(acceptForgetButton?.textContent, "确认忘掉");
   acceptForgetButton!.click();
   await settleMicrotasks();
   assert.equal(forgetCalls.length, 1, "confirmed Review forget writes once");
@@ -10076,6 +10086,7 @@ async function assertProviderLimitOverrideRoundTrip(): Promise<void> {
   provider.apiKey = "fixture-limit-round-trip-key";
   const modelId = primaryProviderModel(provider).id;
   let savedDraft: ApiProviderConfig | undefined;
+  let connectionCalls = 0;
   const openModal = (
     draft: ApiProviderConfig,
     save: (next: ApiProviderConfig) => void
@@ -10088,7 +10099,7 @@ async function assertProviderLimitOverrideRoundTrip(): Promise<void> {
       copy: settingsCopy("en"),
       preflight: {
         listModels: async () => ({ status: "available", models: [] }),
-        testConnection: async () => ({ status: "available" })
+        testConnection: async () => { connectionCalls++; return { status: "available" }; }
       },
       save: async (next) => {
         save(structuredClone(next));
@@ -10102,6 +10113,25 @@ async function assertProviderLimitOverrideRoundTrip(): Promise<void> {
   const first = openModal(provider, (next) => {
     savedDraft = next;
   });
+  const limitKey = `model:${modelId}:contextWindow`;
+  const initialInput = providerModalElementByFocusKey(first, limitKey)!;
+  const details = initialInput.closest<HTMLDetailsElement>("details")!;
+  details.open = true;
+  for (const raw of ["1.5", "2000001", "invalid-number"]) {
+    const input = providerModalElementByFocusKey(first, limitKey)!;
+    input.value = raw; input.fireEvent("input");
+    providerModalElementByFocusKey(first, "save")?.click();
+    await flushProviderModalTasks();
+    const preserved = providerModalElementByFocusKey(first, limitKey)!;
+    assert.equal(savedDraft, undefined, "an invalid visible parameter cannot silently save the old value");
+    assert.equal(preserved.value, raw);
+    assert.equal(preserved.getAttribute("aria-invalid"), "true");
+    assert.equal(preserved.closest<HTMLDetailsElement>("details")?.open, true, "invalid parameters stay expanded after validation");
+    assert.equal(providerModalTestDocument.activeElement, preserved);
+    providerModalElementByFocusKey(first, "provider-test-connection")?.click();
+    await flushProviderModalTasks();
+    assert.equal(connectionCalls, 0, "invalid parameters block the real test-connection chain");
+  }
   for (const [key, value] of [
     ["contextWindow", "120000"],
     ["modelMaxTokens", "16000"],
@@ -10115,6 +10145,11 @@ async function assertProviderLimitOverrideRoundTrip(): Promise<void> {
     input.value = value;
     input.oninput?.(new Event("input"));
   }
+  const defaultControl = providerModalElementByFocusKey(first, `model-default:${modelId}`)!;
+  defaultControl.checked = true;
+  defaultControl.fireEvent("change");
+  assert.equal(providerModalElementByFocusKey(first, limitKey)?.closest<HTMLDetailsElement>("details")?.open, true,
+    "changing the default keeps an already expanded parameter section open");
   providerModalElementByFocusKey(first, "save")?.click();
   await flushProviderModalTasks();
   assert.ok(savedDraft);
@@ -12655,6 +12690,7 @@ if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "visual") {
   await assertReviewFolderInlineLifecycle();
 } else if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "layout-candidate") {
   await assertProviderPickerGroupingAndFiltering();
+  await assertProviderLimitOverrideRoundTrip();
   await assertProviderModelModalPreflightLifecycle();
   await assertProviderApiKeyEditLifecycle();
   await assertProviderModalModelAccessibleNameIncludesValue();

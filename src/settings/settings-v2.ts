@@ -109,15 +109,70 @@ export function addSettingsHelp(setting: Setting, summary: string, explanation: 
   });
   const panel = wrapper.createDiv({ cls: "echoink-settings-help-panel", text: explanation, attr: { id, role: "tooltip" } });
   panel.hidden = true;
-  wrapper.onmouseenter = () => { panel.hidden = false; };
-  wrapper.onmouseleave = () => { panel.hidden = true; };
-  button.onfocus = () => { panel.hidden = false; };
-  button.onblur = () => { panel.hidden = true; };
-  button.onclick = () => { panel.hidden = !panel.hidden; };
+  const view = wrapper.ownerDocument.defaultView;
+  let hideTimer: number | undefined;
+  const cancelHide = () => { if (hideTimer !== undefined) view?.clearTimeout(hideTimer); hideTimer = undefined; };
+  const hide = () => { cancelHide(); panel.hidden = true; };
+  const show = () => {
+    cancelHide(); panel.hidden = false;
+    panel.style.removeProperty("max-height");
+    panel.style.left = "0px"; panel.style.top = "22px";
+    const anchor = wrapper.getBoundingClientRect();
+    const root = wrapper.closest(".echoink-settings-demo")?.getBoundingClientRect();
+    const viewport = view?.visualViewport;
+    const header = wrapper.closest(".echoink-settings-demo")?.querySelector(".codex-settings-tabs-slot")?.getBoundingClientRect();
+    const top = Math.max((viewport?.offsetTop ?? 0) + 8, (root?.top ?? 0) + 8, (header?.bottom ?? 0) + 8);
+    const bottom = Math.min((viewport?.offsetTop ?? 0) + (viewport?.height ?? view?.innerHeight ?? 700) - 8, (root?.bottom ?? Infinity) - 8);
+    const left = Math.max(8, (root?.left ?? 0) + 8);
+    const right = Math.min((view?.innerWidth ?? 1000) - 8, (root?.right ?? Infinity) - 8);
+    panel.style.width = `${Math.max(0, Math.min(300, right - left))}px`;
+    const bounds = panel.getBoundingClientRect();
+    const below = Math.max(0, bottom - anchor.bottom - 9);
+    const above = Math.max(0, anchor.top - top - 9);
+    const upwards = bounds.height > below && above > below;
+    const height = Math.min(bounds.height, upwards ? above : below);
+    panel.style.maxHeight = `${upwards ? above : below}px`;
+    panel.style.left = `${Math.max(left, Math.min(anchor.left - 14, right - bounds.width)) - anchor.left}px`;
+    panel.style.top = `${upwards ? -height - 9 : anchor.height + 9}px`;
+  };
+  wrapper.onmouseenter = show;
+  wrapper.onmouseleave = () => { cancelHide(); hideTimer = view?.setTimeout(hide, 120); };
+  panel.onmouseenter = cancelHide;
+  button.onfocus = show;
+  button.onblur = hide;
+  button.onclick = show;
   wrapper.onkeydown = (event) => {
     if (event.key !== "Escape") return;
-    panel.hidden = true; event.preventDefault(); event.stopPropagation();
+    hide(); event.preventDefault(); event.stopPropagation();
   };
+}
+
+const inlineConfirmations = new WeakMap<HTMLElement, () => void>();
+
+export function showSettingsInlineConfirmation(container: HTMLElement, trigger: HTMLButtonElement, options: {
+  message: string; confirmLabel: string; cancelLabel: string; onConfirm: () => Promise<void>;
+}): void {
+  const root = container.closest<HTMLElement>(".echoink-settings-demo") ?? container;
+  inlineConfirmations.get(root)?.();
+  const panel = container.createDiv({ cls: "echoink-settings-inline-confirm review-confirm", attr: { role: "group", "aria-label": options.confirmLabel } });
+  panel.createEl("p", { text: options.message });
+  const actions = panel.createDiv({ cls: "settings-inline" });
+  const cancel = actions.createEl("button", { cls: "button", text: options.cancelLabel, attr: { type: "button" } });
+  const confirm = actions.createEl("button", { cls: "button settings-danger", text: options.confirmLabel, attr: { type: "button" } });
+  const close = () => { panel.remove(); if (inlineConfirmations.get(root) === close) inlineConfirmations.delete(root); trigger.setAttr("aria-expanded", "false"); };
+  inlineConfirmations.set(root, close);
+  trigger.setAttr("aria-expanded", "true");
+  cancel.onclick = () => { close(); trigger.focus({ preventScroll: true }); };
+  panel.onkeydown = (event) => {
+    if (event.key !== "Escape" || confirm.disabled) return;
+    event.preventDefault(); event.stopPropagation(); cancel.click();
+  };
+  confirm.onclick = () => {
+    if (confirm.disabled || !panel.isConnected) return;
+    confirm.disabled = true; cancel.disabled = true; trigger.disabled = true;
+    void options.onConfirm().finally(() => { close(); trigger.disabled = false; if (trigger.isConnected) trigger.focus({ preventScroll: true }); });
+  };
+  cancel.focus({ preventScroll: true });
 }
 
 export function createSettingsFeatureCard(

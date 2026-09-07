@@ -181,6 +181,18 @@ async function assertHomeCaptureAndPendingSearch(): Promise<void> {
   mutable.searchMatches = [{ path: "new.md" }];
   mutable.handleKeys(enter);
   assert.deepEqual(opened, ["new.md"], "Enter opens the matching completed query");
+  const options = [0, 1, 2].map((i) => ({ id: `option-${i}`, setAttribute: () => undefined, scrollIntoView: () => undefined }));
+  Object.assign(input, { setAttribute: () => undefined });
+  Object.assign(fields["search-results"] as object, { querySelectorAll: () => options });
+  mutable.searchMatches = options.map((option) => ({ path: option.id }));
+  mutable.searchIndex = -1;
+  mutable.handleKeys({ key: "ArrowUp", target: input, preventDefault: () => undefined });
+  assert.equal(mutable.searchIndex, 2, "first ArrowUp selects the last result");
+  mutable.handleKeys({ key: "Home", target: input, preventDefault: () => undefined });
+  assert.equal(mutable.searchIndex, 0);
+  mutable.selectSearchIndex(1, false);
+  mutable.handleKeys(enter);
+  assert.equal(opened.at(-1), "option-1", "Enter follows the pointer-selected result");
 }
 
 async function assertInboxAndSearch(): Promise<void> {
@@ -209,10 +221,13 @@ async function assertInboxAndSearch(): Promise<void> {
   assert.equal(bodies.get(created.path), "");
   assert.equal(bodies.get("inbox/未命名.md"), "preserve existing content");
   assert.equal(bodies.get("inbox/未命名 1.md"), "another creator");
-  const target = make("notes/meaning.md", "This phrase exists only in body content.");
+  const target = make("notes/meaning.md", `${"Unrelated introduction. ".repeat(15)}This phrase exists only in body content.`);
   const search = new HomeSearchService(app as never);
   const controller = new AbortController();
-  assert.equal((await search.search("only in body", controller.signal)).matches[0]?.path, target.path);
+  const found = (await search.search("only in body", controller.signal)).matches[0];
+  assert.equal(found?.path, target.path);
+  assert.match(found?.snippet ?? "", /This phrase exists only in body content/u);
+  assert.ok(found?.snippet.startsWith("…"), "the snippet is taken around the body match, not the note opening");
   const firstReads = reads;
   await search.search("body content", controller.signal);
   assert.equal(reads, firstReads, "unchanged note bodies are cached across input");

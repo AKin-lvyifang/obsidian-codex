@@ -102,7 +102,17 @@ export class ProviderModelModal extends Modal {
   private codexAuthUrl = "";
   private codexAuthError = "";
   private manualModelId = "";
+  private readonly expandedModels = new Set<string>();
+  private readonly numberDrafts = new Map<string, { modelId: string; raw: string; message: string }>();
   private readonly accessibilityId = `echoink-provider-model-${++providerModelModalInstance}`;
+  private readonly repositionOpenPickers = (event: Event): void => {
+    const target = event.target;
+    if (target instanceof (this.modalEl.ownerDocument.defaultView?.HTMLElement ?? HTMLElement) && target.closest(".codex-provider-combobox-menu")) return;
+    for (const picker of Array.from(this.modalEl.querySelectorAll<HTMLElement>(".codex-provider-combobox.is-open"))) {
+      const trigger = picker.querySelector<HTMLElement>(".codex-provider-combobox-trigger");
+      if (trigger) this.positionCombobox(picker, trigger);
+    }
+  };
   private readonly handleEscapeCapture = (event: KeyboardEvent): void => {
     if (event.key !== "Escape" || event.isComposing || event.keyCode === 229) return;
     const openPicker = this.modalEl.querySelector<HTMLElement>(
@@ -155,6 +165,9 @@ export class ProviderModelModal extends Modal {
       }
     });
     (this.modalEl.ownerDocument.defaultView ?? window).addEventListener("keydown", this.handleEscapeCapture, true);
+    const view = this.modalEl.ownerDocument.defaultView ?? window;
+    view.addEventListener("resize", this.repositionOpenPickers);
+    view.addEventListener("scroll", this.repositionOpenPickers, true);
     this.render();
     if (this.providerId === "openai-codex") {
       void this.loadCodexAuthStatus();
@@ -199,6 +212,9 @@ export class ProviderModelModal extends Modal {
     this.cancelCodexLogin();
     this.dismissProviderUrlTooltips();
     (this.modalEl.ownerDocument.defaultView ?? window).removeEventListener("keydown", this.handleEscapeCapture, true);
+    const view = this.modalEl.ownerDocument.defaultView ?? window;
+    view.removeEventListener("resize", this.repositionOpenPickers);
+    view.removeEventListener("scroll", this.repositionOpenPickers, true);
     this.preflight.reset();
     this.modalEl.onclick = null;
     this.liveRegionEl = null;
@@ -226,6 +242,10 @@ export class ProviderModelModal extends Modal {
   private render(): void {
     this.dismissProviderUrlTooltips();
     this.captureFocusIntent();
+    for (const details of Array.from(this.contentEl.querySelectorAll<HTMLDetailsElement>("details[data-model-advanced-key]"))) {
+      const key = details.dataset.modelAdvancedKey!;
+      if (details.open) this.expandedModels.add(key); else this.expandedModels.delete(key);
+    }
     const focusedTriggerId = this.focusedComboboxTriggerId();
     const providerId = this.providerId;
     this.modalEl.toggleClass("is-custom-provider", providerId === "custom");
@@ -315,15 +335,7 @@ export class ProviderModelModal extends Modal {
     save.disabled = this.saving || !this.codexSaveReady();
     save.onclick = () => {
       void (async () => {
-        const errors = this.validateForm();
-        if (Object.keys(errors).length) {
-          this.formErrors = errors;
-          const [field, message] = Object.entries(errors)[0] as [ProviderFormField, string];
-          this.announce(message);
-          this.render();
-          this.focusField(field);
-          return;
-        }
+        if (!this.validateAndFocusForm()) return;
         this.saving = true;
         save.disabled = true;
         save.textContent = this.options.copy.providers.saving;
@@ -576,6 +588,8 @@ export class ProviderModelModal extends Modal {
     }
     const replacement = createApiProviderConfig(providerId, this.draft.id);
     this.draft = { ...replacement, apiKey: "" };
+    this.numberDrafts.clear();
+    this.formErrors = {};
     this.apiKeyInput = "";
     this.preflight.reset();
     if (providerId === "openai-codex") {
@@ -1096,9 +1110,12 @@ export class ProviderModelModal extends Modal {
     model: ApiProviderModelConfig
   ): void {
     const advanced = container.createEl("details", {
-      cls: "codex-provider-model-advanced"
+      cls: "codex-provider-model-advanced",
+      attr: { "data-model-advanced-key": `${this.providerId}:${model.id}` }
     });
-    const summary = advanced.createEl("summary", { text: this.label("参数", "Parameters") });
+    advanced.open = this.expandedModels.has(`${this.providerId}:${model.id}`)
+      || Array.from(this.numberDrafts.values()).some((entry) => entry.modelId === model.id);
+    const summary = advanced.createEl("summary", { text: this.label("参数", "Parameters"), attr: { "data-modal-focus-key": `model:${model.id}:parameters` } });
     setIcon(summary.createSpan(), "chevron-down");
     const capabilities = advanced.createDiv({
       cls: "codex-provider-model-advanced-group is-capabilities"
@@ -1243,6 +1260,8 @@ export class ProviderModelModal extends Modal {
   ): void {
     const field = container.createDiv({ cls: "codex-provider-context-field" });
     const id = `${this.accessibilityId}-${model.id.replace(/[^A-Za-z0-9_-]/gu, "-")}-${key}`;
+    const focusKey = `model:${model.id}:${key}`;
+    const invalidDraft = this.numberDrafts.get(focusKey);
     field.createEl("label", { text: label, attr: { for: id } });
     const input = field.createEl("input", {
       cls: "codex-provider-modal-input",
@@ -1252,11 +1271,11 @@ export class ProviderModelModal extends Modal {
         min: String(min),
         max: String(max),
         step: "1",
-        value: model.limitsOverride?.[key] === undefined
+        value: invalidDraft ? invalidDraft.raw : model.limitsOverride?.[key] === undefined
           ? ""
           : String(model.limitsOverride[key]),
         placeholder: this.modelLimitPlaceholder(model[key]),
-        "data-modal-focus-key": `model:${model.id}:${key}`
+        "data-modal-focus-key": focusKey
       }
     });
     const hintId = `${id}-hint`;
@@ -1266,6 +1285,10 @@ export class ProviderModelModal extends Modal {
     });
     input.setAttr("aria-describedby", hintId);
     const updateHint = (): void => {
+      const invalid = this.numberDrafts.get(focusKey);
+      input.setAttr("aria-invalid", String(Boolean(invalid)));
+      hint.toggleClass("codex-provider-field-error", Boolean(invalid));
+      if (invalid) { hint.setText(invalid.message); return; }
       const formattedValue = this.formatModelLimit(model[key]);
       hint.setText(model.limitsOverride?.[key] === undefined
         ? this.label(
@@ -1279,8 +1302,19 @@ export class ProviderModelModal extends Modal {
     };
     updateHint();
     input.oninput = () => {
+      const raw = input.value.trim();
+      const value = Number(raw);
+      if (input.validity?.badInput || (raw && (!Number.isSafeInteger(value) || value < min || value > max))) {
+        this.numberDrafts.set(focusKey, { modelId: model.id, raw: input.value, message: this.label(`请输入 ${min.toLocaleString()}–${max.toLocaleString()} 之间的整数，或留空使用默认值。`, `Enter an integer from ${min.toLocaleString()} to ${max.toLocaleString()}, or leave blank for the default.`) });
+        updateHint(); this.invalidatePreflight(); return;
+      }
+      this.numberDrafts.delete(focusKey);
+      if (!this.firstInvalidNumberKey()) {
+        delete this.formErrors.model;
+        this.modalEl.querySelector(`#${this.errorId("model")}`)?.remove();
+      }
       const limitsOverride = { ...model.limitsOverride };
-      if (!input.value.trim()) {
+      if (!raw) {
         delete limitsOverride[key];
         applyApiProviderModelLimitsOverride(
           model,
@@ -1293,12 +1327,6 @@ export class ProviderModelModal extends Modal {
         this.invalidatePreflight();
         return;
       }
-      const value = Number(input.value);
-      if (
-        !Number.isSafeInteger(value)
-        || value < min
-        || value > max
-      ) return;
       limitsOverride[key] = value;
       applyApiProviderModelLimitsOverride(
         model,
@@ -1717,6 +1745,7 @@ export class ProviderModelModal extends Modal {
       this.draft.models.length === 0
       || !defaultModel
       || this.draft.models.some((model) => !isValidApiProviderModelConfig(model))
+      || this.firstInvalidNumberKey()
     ) {
       errors.model = this.options.copy.providers.invalidModel;
     }
@@ -1739,6 +1768,19 @@ export class ProviderModelModal extends Modal {
       }
     }
     return errors;
+  }
+
+  private firstInvalidNumberKey(): string | undefined {
+    return Array.from(this.numberDrafts.entries()).find(([, entry]) => this.draft.models.some((model) => model.id === entry.modelId))?.[0];
+  }
+
+  private validateAndFocusForm(): boolean {
+    const errors = this.validateForm();
+    if (!Object.keys(errors).length) return true;
+    this.formErrors = errors;
+    const [field, message] = Object.entries(errors)[0] as [ProviderFormField, string];
+    this.announce(message); this.render(); this.focusField(field);
+    return false;
   }
 
   private captureFocusIntent(): void {
@@ -1772,6 +1814,8 @@ export class ProviderModelModal extends Modal {
   }
 
   private focusField(field: ProviderFormField): void {
+    const numberKey = field === "model" ? this.firstInvalidNumberKey() : undefined;
+    if (numberKey) { this.restoreModalFocusKey(numberKey); return; }
     const target = this.modalEl.querySelector<HTMLElement>(`#${this.controlId(field)}`);
     const focusTarget = () => target?.focus({ preventScroll: true });
     focusTarget();
@@ -1846,9 +1890,12 @@ export class ProviderModelModal extends Modal {
     const view = this.modalEl.ownerDocument.defaultView ?? window;
     const viewport = view.visualViewport;
     const viewportTop = viewport?.offsetTop ?? 0;
-    const header = picker.closest(".echoink-settings-demo")?.querySelector(".settings-header")?.getBoundingClientRect();
-    const topLimit = Math.max(viewportTop + 8, header && header.top <= viewportTop + 1 ? header.bottom + 8 : 0);
-    const below = Math.max(0, viewportTop + (viewport?.height ?? view.innerHeight) - 8 - rect.bottom - 6);
+    const workspace = picker.closest(".echoink-settings-demo");
+    const header = workspace?.querySelector(".codex-settings-tabs-slot")?.getBoundingClientRect();
+    const topLimit = Math.max(viewportTop + 8, workspace?.getBoundingClientRect().top ?? 0, header ? header.bottom + 8 : 0);
+    const bottomLimit = viewportTop + (viewport?.height ?? view.innerHeight) - 8;
+    if (rect.bottom <= topLimit || rect.top >= bottomLimit) { this.closeOpenPickers(); return; }
+    const below = Math.max(0, bottomLimit - rect.bottom - 6);
     const above = Math.max(0, rect.top - topLimit - 6);
     const opensUpward = below < 260 && above > below;
     const available = opensUpward ? above : below;
@@ -1962,6 +2009,7 @@ export class ProviderModelModal extends Modal {
   }
 
   private async testConnection(): Promise<void> {
+    if (!this.validateAndFocusForm()) return;
     if (!this.canTestConnection()) return;
     await this.preflight.testConnection(this.providerPreflightDraft());
   }

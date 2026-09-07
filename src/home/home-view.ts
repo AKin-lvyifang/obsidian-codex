@@ -77,6 +77,13 @@ export class EchoInkHomeView extends ItemView {
       if ((e.target as HTMLElement).dataset.home === "search-input" && !(e as InputEvent).isComposing) this.scheduleSearch();
     });
     this.registerDomEvent(this.contentEl, "compositionend", () => this.scheduleSearch());
+    this.registerDomEvent(this.contentEl, "pointermove", (event) => {
+      const target = (event.target as HTMLElement).closest<HTMLElement>(".search-result");
+      if (target && this.searchOpen) this.selectSearchIndex(Number(target.dataset.searchIndex), false);
+    });
+    this.registerDomEvent(this.contentEl, "focusout", (event) => {
+      if (event.relatedTarget && !this.field("header-search").contains(event.relatedTarget as Node)) this.closeSearch(false);
+    });
     this.registerDomEvent(this.contentEl.ownerDocument, "pointerdown", (e) => {
       if (!this.field("header-search").contains(e.target as Node)) this.closeSearch(false);
     });
@@ -244,7 +251,12 @@ export class EchoInkHomeView extends ItemView {
     this.activityModal?.close();
     const modal = new Modal(this.app); this.activityModal = modal;
     modal.contentEl.addClass("echoink-home-activity-dialog");
-    modal.titleEl.setText(this.t(dayOnly ? "当天全部足迹" : "这一周留下的足迹", dayOnly ? "All activity for this day" : "This week's activity"));
+    modal.titleEl.setText(help ? this.t("留痕组件 · 七日书脊", "Activity · Seven days of book spines") : this.t(dayOnly ? "当天全部足迹" : "这一周留下的足迹", dayOnly ? "All activity for this day" : "This week's activity"));
+    if (help) {
+      modal.contentEl.createEl("h2", { text: this.t("留下了什么，比打了多少卡更有意思。", "What you leave behind matters more than a streak.") });
+      modal.contentEl.createEl("p", { text: this.t("每一本小书脊对应一次积累。绿色是新记录，浅绿是修改，暖色是重读。点一组书脊，上方就展开那天的具体笔记。", "Each spine represents one activity: green for a new note, light green for an edit, and warm tones for reopening a note. Select a day's spines to see its notes above.") });
+      modal.contentEl.createEl("p", { text: this.t("月历和它使用同一个日期筛选。不用追求连续天数，也不用把空白补满。", "The calendar uses the same date filter. There is no need to maintain a streak or fill every blank day.") });
+    }
     if (!help) {
       const events = this.events.filter((e) => dayOnly ? e.date === this.selectedDate : this.weekDates().includes(e.date));
       const notes = new Set(events.map((event) => event.path)).size;
@@ -260,6 +272,11 @@ export class EchoInkHomeView extends ItemView {
       }
     }
     modal.contentEl.createEl("p", { cls: "helper", text: this.t("同一天、同一笔记、同一种动作合并记录；重读指再次打开已打开过的笔记。开始记录前没有历史。", "Each action is counted once per note per day. Reopened means opening a note you have opened before. Earlier history is unavailable.") });
+    if (help) {
+      const actions = modal.contentEl.createDiv({ cls: "dialog-actions" });
+      const button = actions.createEl("button", { cls: "mod-cta", text: this.t("看看完整足迹", "View this week's activity"), attr: { type: "button" } });
+      button.onclick = () => this.showActivity(false);
+    }
     modal.open();
   }
   private openSearch(): void {
@@ -303,13 +320,13 @@ export class EchoInkHomeView extends ItemView {
       this.searchMatches = result.matches; this.searchIndex = -1;
       this.field("search-input").removeAttribute("aria-activedescendant");
       this.field("search-results-heading").setText(this.t(`找到 ${result.count} 篇笔记`, `${result.count} notes found`));
-      markup(this.field("search-results"), result.matches.map((r, i) => `<button class="search-result" id="${this.id}-option-${i}" role="option" tabindex="-1" aria-selected="false" data-note="${esc(r.path)}">${icon("file-text")}<span class="search-result-copy"><strong>${esc(r.title)}</strong><small>${esc(r.path)}</small><span>${esc(formatHomeRelativeTime(r.mtime, this.language))}</span></span>${icon("arrow-up-right")}</button>`).join(""));
+      markup(this.field("search-results"), result.matches.map((r, i) => `<button class="search-result" id="${this.id}-option-${i}" role="option" tabindex="-1" aria-selected="false" data-search-index="${i}" data-note="${esc(r.path)}">${icon("file-text")}<span class="search-result-copy"><strong>${esc(r.title)}</strong><small>${esc(r.snippet || r.path)}</small><span>${esc(r.path)} · ${esc(formatHomeRelativeTime(r.mtime, this.language))}</span></span>${icon("arrow-up-right")}</button>`).join(""));
       this.field("search-empty").hidden = result.count > 0;
       this.field("search-results-hint").setText(result.failed ? this.t(`${result.failed} 篇笔记读取失败`, `${result.failed} notes could not be read`) : this.t("↑ ↓ 选择 · Enter 打开 · 最多显示 6 项", "↑ ↓ Select · Enter Open · Up to 6 results"));
     } catch { if (!abort.signal.aborted) this.field("search-results-heading").setText(this.t("搜索失败，请重试", "Search failed. Try again.")); }
   }
   private handleKeys(event: KeyboardEvent): void {
-    if (event.isComposing) return;
+    if (event.isComposing || event.keyCode === 229) return;
     if ((event.metaKey || event.ctrlKey) && ["k", "j"].includes(event.key.toLowerCase())) {
       event.preventDefault(); event.stopPropagation();
       if (event.key.toLowerCase() === "k") this.openSearch(); else void this.capture().catch((error) => new Notice(errorMessage(error)));
@@ -318,14 +335,26 @@ export class EchoInkHomeView extends ItemView {
     if (!this.searchOpen) return;
     if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); this.closeSearch(true); return; }
     if ((event.target as HTMLElement).dataset.home !== "search-input") return;
-    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
       event.preventDefault(); if (!this.searchMatches.length) return;
-      this.searchIndex = (this.searchIndex + (event.key === "ArrowDown" ? 1 : -1) + this.searchMatches.length) % this.searchMatches.length;
-      const options = this.field("search-results").querySelectorAll<HTMLElement>("[role=option]");
-      options.forEach((el, i) => el.setAttribute("aria-selected", String(i === this.searchIndex)));
-      const option = options[this.searchIndex]; this.field("search-input").setAttribute("aria-activedescendant", option.id); option.scrollIntoView({ block: "nearest" });
+      const count = this.searchMatches.length;
+      const index = event.key === "Home" ? 0 : event.key === "End" ? count - 1
+        : this.searchIndex < 0 ? (event.key === "ArrowUp" ? count - 1 : 0)
+          : (this.searchIndex + (event.key === "ArrowDown" ? 1 : -1) + count) % count;
+      this.selectSearchIndex(index, true);
     }
     if (event.key === "Enter") { event.preventDefault(); if (this.searchResolvedQuery !== (this.field("search-input") as HTMLInputElement).value) return; const match = this.searchMatches[Math.max(0, this.searchIndex)]; if (match) { this.closeSearch(true); void this.openNote(match.path); } }
+  }
+
+  private selectSearchIndex(index: number, scroll: boolean): void {
+    if (!Number.isInteger(index) || index < 0 || index >= this.searchMatches.length) return;
+    this.searchIndex = index;
+    const options = this.field("search-results").querySelectorAll<HTMLElement>("[role=option]");
+    options.forEach((el, i) => el.setAttribute("aria-selected", String(i === index)));
+    const option = options[index];
+    if (!option) return;
+    this.field("search-input").setAttribute("aria-activedescendant", option.id);
+    if (scroll) option.scrollIntoView({ block: "nearest" });
   }
 
   private async openConversationAction(action: HomeConversationAction): Promise<void> {
