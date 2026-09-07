@@ -1607,7 +1607,7 @@ export class ProviderModelModal extends Modal {
       cls: "codex-provider-modal-input",
       attr: { id: protocolId, "data-modal-focus-key": "protocol" }
     }, (["openai-completions", "openai-responses", "anthropic-messages"] as const)
-      .map((item) => ({ value: item, label: this.options.copy.providers.protocolOptions[item] })), this.draft.apiProtocol).element;
+      .map((item) => ({ value: item, label: this.options.copy.providers.protocolOptions[item] })), this.draft.apiProtocol, this.app).element;
     this.applyFieldAccessibility(select, "protocol");
     select.onchange = () => {
       this.focusIntent = "protocol";

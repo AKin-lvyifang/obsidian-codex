@@ -689,7 +689,7 @@ export class CodexSettingTab extends PluginSettingTab {
       surface: "group"
     });
     const interfaceGroup = createSettingsGroup(interfaceSection);
-    applySettingsRow(new OriginSetting(interfaceGroup).setName(copy.general.settingsLanguage).setDesc(copy.general.settingsLanguageDesc).addOriginDropdown((dropdown) => {
+    applySettingsRow(new OriginSetting(interfaceGroup).setName(copy.general.settingsLanguage).setDesc(copy.general.settingsLanguageDesc).addOriginDropdown(this.app, (dropdown) => {
       dropdown.selectEl.setAttr("aria-label", copy.general.settingsLanguage);
       for (const language of SETTINGS_LANGUAGE_OPTIONS) dropdown.addOption(language, copy.general.languageOptions[language]);
       dropdown.setValue(this.plugin.settings.settingsLanguage);
@@ -1781,7 +1781,7 @@ export class CodexSettingTab extends PluginSettingTab {
       .setDesc(zh
         ? "普通聊天、/ask、/maintain 与选区翻译共用这个模型。"
         : "Chat, /ask, /maintain, and selection translation share this model.")
-      .addOriginDropdown((dropdown) => {
+      .addOriginDropdown(this.app, (dropdown) => {
         dropdown.selectEl.setAttr("aria-label", zh ? "EchoInk 当前模型" : "Current EchoInk model");
         if (availableTargets.length === 0) {
           dropdown.addOption("", this.plugin.settings.apiProviders.length === 0
@@ -2686,7 +2686,7 @@ export class CodexSettingTab extends PluginSettingTab {
   private addReviewRangeMode(container: HTMLElement): void {
     const copy = this.copy;
     const settings = this.plugin.settings.review;
-    this.decorateSetting(new OriginSetting(container).setName(copy.review.rangeMode).addOriginDropdown((dropdown) => {
+    this.decorateSetting(new OriginSetting(container).setName(copy.review.rangeMode).addOriginDropdown(this.app, (dropdown) => {
       dropdown.selectEl.setAttr("aria-label", copy.review.rangeMode);
       dropdown
         .addOption("previous-week", copy.review.rangeOptions["previous-week"])
@@ -2810,16 +2810,20 @@ export class CodexSettingTab extends PluginSettingTab {
       this.suppressSettingsTabFocusRestore = false;
       return;
     }
-    if (this.suppressSettingsTabFocusRestore) {
-      this.suppressSettingsTabFocusRestore = false;
-      return;
-    }
+    const restoreKeyboardFocus = !this.suppressSettingsTabFocusRestore;
+    this.suppressSettingsTabFocusRestore = false;
     const tabButton = activeButton as HTMLButtonElement;
     (this.containerEl.ownerDocument.defaultView ?? window).requestAnimationFrame(() => {
       if (!tabButton.isConnected) return;
-      tabButton.scrollIntoView({ block: "nearest", inline: "nearest" });
-      if (this.settingsTabFocusId !== activeTab) return;
-      tabButton.focus();
+      const bounds = tabButton.getBoundingClientRect();
+      const viewport = tabs.getBoundingClientRect();
+      // Pointer activation suppresses focus restoration, not active visibility.
+      // Scroll only this horizontal strip so the content page keeps its position.
+      if (bounds.left < viewport.left) tabs.scrollLeft += bounds.left - viewport.left;
+      else if (bounds.right > viewport.right) tabs.scrollLeft += bounds.right - viewport.right;
+      updateOverflowHint();
+      if (!restoreKeyboardFocus || this.settingsTabFocusId !== activeTab) return;
+      tabButton.focus({ preventScroll: true });
       (this.containerEl.ownerDocument.defaultView ?? window).requestAnimationFrame(() => {
         if (
           tabButton.isConnected

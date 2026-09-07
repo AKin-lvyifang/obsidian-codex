@@ -1116,7 +1116,7 @@
 .echoink-settings-demo .echoink-skill-editor-actions>button:last-child{margin-left:auto}
 .echoink-settings-demo .codex-mcp-form-card{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;border:1px solid var(--line);border-radius:10px;padding:21px 22px;background:var(--bg)}
 .echoink-settings-demo .codex-mcp-form-card>h3,.echoink-settings-demo .codex-mcp-credential-title,.echoink-settings-demo .codex-mcp-credential-description,.echoink-settings-demo .codex-mcp-credential-clear{grid-column:1/-1;margin:0}
-.echoink-settings-demo .codex-mcp-server-field{min-width:0;margin:0}
+.echoink-settings-demo .codex-mcp-server-field{min-width:0;margin:0;align-content:start;gap:9px}
 .echoink-settings-demo .codex-mcp-form-card.is-basic>.codex-mcp-server-field{grid-column:auto}
 .echoink-settings-demo .codex-mcp-form-card.is-connection{grid-template-columns:minmax(0,1fr)}
 .echoink-settings-demo .codex-mcp-form-card>.codex-mcp-server-field.is-wide{grid-column:1/-1}

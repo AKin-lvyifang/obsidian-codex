@@ -29,6 +29,7 @@ if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "origin-dom") {
       class Fixture { plugin={settings:{settingsLanguage:"en"}}; scheduleDisplay(){} announceSettingsStatus(){} ${method} }
       runOriginControlsDom(Fixture).catch(error=>{document.querySelector("#report").textContent=error.stack;document.querySelector("#report").dataset.result="failed";});`, resolveDir: rootDir, loader: "ts" },
     bundle: true, format: "esm", platform: "browser", define: { "process.env.NODE_ENV": '"development"' },
+    alias: { obsidian: path.join(rootDir, "src/tests/origin-obsidian-dom-shim.ts") },
     outfile: path.join(directory, "regression.js"), logLevel: "silent"
   });
   await writeFile(path.join(directory, "index.html"), '<!doctype html><meta charset="utf-8"><title>Origin controls regression</title><link rel="stylesheet" href="styles.css"><style>body{margin:0;padding:20px}:root{--font-text-size:16px}.modal.mod-settings{width:700px;max-width:100%;height:520px;margin:20px auto;overflow:hidden}.vertical-tab-content-container{height:100%}#fixture{max-width:656px}#report{white-space:pre-wrap;padding:20px;font:12px/1.8 monospace}.setting-item{display:flex}.echoink-settings-demo{padding:18px}</style><div class="modal mod-settings"><div class="vertical-tab-content-container"><div class="vertical-tab-content echoink-settings-host"><main id="fixture" class="echoink-settings-demo"></main></div></div></div><pre id="report">Running…</pre><script type="module" src="regression.js"></script>');
@@ -70,7 +71,7 @@ if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "archive-ime") {
     bundle: true, format: "esm", platform: "browser", outfile: path.join(directory, "regression.js"), logLevel: "silent",
     plugins: [{ name: "archive-native-dom-host", setup(build) {
       build.onResolve({ filter: /^obsidian$/ }, () => ({ path: "host", namespace: "archive-fixture" }));
-      build.onLoad({ filter: /.*/, namespace: "archive-fixture" }, () => ({ contents: "export function setIcon(){};export class Setting{}", loader: "js" }));
+      build.onLoad({ filter: /.*/, namespace: "archive-fixture" }, () => ({ contents: 'export function setIcon(){};export class Setting{};export {Scope} from "./src/tests/origin-obsidian-dom-shim";', resolveDir: rootDir, loader: "js" }));
     } }]
   });
   await writeFile(path.join(directory, "index.html"), '<!doctype html><meta charset="utf-8"><title>Archive search IME regression</title><main id="fixture" class="echoink-settings-demo"></main><pre id="report">Running native DOM regression…</pre><script type="module" src="regression.js"></script>');
@@ -92,7 +93,7 @@ if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "native-dom") {
       build.onResolve({ filter: /^obsidian$/ }, () => ({ path: "icons", namespace: "fixture" }));
       build.onResolve({ filter: /settings\/settings$/ }, () => ({ path: "ids", namespace: "fixture" }));
       build.onLoad({ filter: /.*/, namespace: "fixture" }, ({ path: name }) => ({
-        contents: name === "icons" ? "export function setIcon() {}" : "export const newId = () => crypto.randomUUID();", loader: "js"
+        contents: name === "icons" ? 'export function setIcon() {};export {Scope} from "./src/tests/origin-obsidian-dom-shim";' : "export const newId = () => crypto.randomUUID();", resolveDir: rootDir, loader: "js"
       }));
     } }]
   });

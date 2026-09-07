@@ -101,13 +101,12 @@ export class McpServerModal extends Modal {
       placeholder: this.label("例如：团队知识库", "For example: Team knowledge"),
       onInput: (value) => { this.name = value; }
     });
-    this.renderTextareaField(basic, {
+    this.renderTextField(basic, {
       key: "description",
       label: this.label("说明", "Description"),
       description: this.label("简要说明这个 Server 提供什么能力。", "Briefly describe what this server provides."),
       value: this.description,
       placeholder: this.label("可选", "Optional"),
-      rows: 2,
       onInput: (value) => { this.description = value; }
     });
 
@@ -121,7 +120,7 @@ export class McpServerModal extends Modal {
     const select = createOriginSelect(transportField, {
       cls: "codex-mcp-server-select",
       attr: { id: this.controlId("transport"), "data-mcp-modal-focus-key": "transport" }
-    }, [{ value: "http", label: "HTTP" }, { value: "stdio", label: "stdio" }], this.transport).element;
+    }, [{ value: "http", label: "HTTP" }, { value: "stdio", label: "stdio" }], this.transport, this.app).element;
     select.onchange = () => {
       this.transport = select.value === "stdio" ? "stdio" : "http";
       this.endpoint = "";

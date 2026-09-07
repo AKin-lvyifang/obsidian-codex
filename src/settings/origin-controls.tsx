@@ -1,6 +1,7 @@
 import { createPortal, flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import type { CSSProperties, ReactNode } from "react";
+import { Scope, type App } from "obsidian";
 import { Button } from "../ui/components/origin/button";
 import { Input } from "../ui/components/origin/input";
 import { Switch } from "../ui/components/origin/switch";
@@ -107,7 +108,7 @@ export function createOriginCheck(parent: HTMLElement, options: ElementOptions =
 
 export type OriginSelectElement = HTMLButtonElement & { value: string };
 export function createOriginSelect(parent: HTMLElement, options: ElementOptions,
-  choices: readonly { value: string; label: string; disabled?: boolean }[], initialValue = "") {
+  choices: readonly { value: string; label: string; disabled?: boolean }[], initialValue = "", app?: Pick<App, "keymap" | "scope">) {
   const island = createIsland(parent);
   let value = initialValue || choices[0]?.value || "";
   let disabled = false;
@@ -122,31 +123,37 @@ export function createOriginSelect(parent: HTMLElement, options: ElementOptions,
     const properties = ["--accent", "--accent-bg", "--line", "--bg", "--text", "--soft", "--secondary", "--font-text-size", "--font-interface"];
     popupTheme = Object.fromEntries(properties.map((name) => [name, computed.getPropertyValue(name)]).filter(([, value]) => value.trim())) as CSSProperties;
   };
-  const ownerWindow = parent.ownerDocument.defaultView!;
-  const clearEscapeListener = () => ownerWindow.removeEventListener("keydown", onWindowEscape, true);
+  const escapeScope = app ? new Scope(app.scope) : null;
+  let scopeActive = false;
+  const clearEscapeScope = () => {
+    if (!scopeActive || !app || !escapeScope) return;
+    app.keymap.popScope(escapeScope);
+    scopeActive = false;
+  };
   const closePopup = () => {
     setOpen(false);
     const trigger = island.element();
     if (trigger?.isConnected) trigger.focus({ preventScroll: true });
   };
-  const onWindowEscape = (event: KeyboardEvent) => {
-    if (!open || event.key !== "Escape") return;
-    event.preventDefault();
-    event.stopImmediatePropagation();
+  escapeScope?.register(null, "Escape", () => {
     closePopup();
-  };
+    return false;
+  });
   const setOpen = (next: boolean) => {
-    clearEscapeListener();
+    clearEscapeScope();
     open = next;
     if (next) {
       capturePopupTheme();
-      // A body portal bypasses the settings subtree. Intercept before the
-      // detached host's document capture handler can close its whole window.
-      if (parent.ownerDocument !== document) ownerWindow.addEventListener("keydown", onWindowEscape, true);
+      // Obsidian dispatches its window capture listener through the active
+      // Scope first. Match native popovers instead of racing that listener.
+      if (app && escapeScope) {
+        app.keymap.pushScope(escapeScope);
+        scopeActive = true;
+      }
     }
     render();
   };
-  island.onDispose(clearEscapeListener);
+  island.onDispose(clearEscapeScope);
   const emptyValue = "__echoink_empty_selection__";
   const render = () => island.render(<Select value={value || emptyValue} disabled={disabled} open={open} onOpenChange={setOpen} onValueChange={(next) => {
     value = next === emptyValue ? "" : next; render();

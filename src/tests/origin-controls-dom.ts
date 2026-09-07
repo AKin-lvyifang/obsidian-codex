@@ -1,4 +1,5 @@
 import { createOriginButton, createOriginCheck, createOriginInput, createOriginRadioGroup, createOriginSelect, createOriginSlider, createOriginSwitch, disposeOriginControls, type OriginCheckElement } from "../settings/origin-controls";
+import { createOriginSelectHostFixture } from "./origin-obsidian-dom-shim";
 
 type AsyncFixture = { runMcpToggleAction(toggle: OriginCheckElement, action: (checked: boolean) => Promise<void>): Promise<void> };
 const frame = () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
@@ -106,23 +107,23 @@ export async function runOriginControlsDom(Fixture: new () => AsyncFixture) {
     const iframe = document.createElement("iframe"); iframe.title = "Independent document"; main.append(iframe);
     await new Promise<void>((resolve) => { iframe.onload = () => resolve(); iframe.srcdoc = '<main class="echoink-settings-demo"></main>'; });
     const other = iframe.contentDocument!; const host = other.querySelector<HTMLElement>("main")!;
-    let hostEscapes = 0;
-    const hostEscape = (event: KeyboardEvent) => { if (event.key === "Escape") hostEscapes++; };
-    other.addEventListener("keydown", hostEscape, true);
+    const keyboardHost = createOriginSelectHostFixture(other.defaultView!);
     const toggle = createOriginSwitch(host); toggle.click();
-    const select = createOriginSelect(host, { attr: { "aria-label": "Independent select" } }, [{ value: "a", label: "A" }, { value: "b", label: "B" }], "a").element;
+    const select = createOriginSelect(host, { attr: { "aria-label": "Independent select" } }, [{ value: "a", label: "A" }, { value: "b", label: "B" }], "a", keyboardHost.app).element;
     select.focus(); key(select, "Enter"); await frame();
     assert(toggle.checked && other.querySelector('[data-slot=select-content]'), "control or portal used the wrong document");
+    assert(keyboardHost.depth === 1, "popup did not activate an Obsidian Scope");
     assert(other.activeElement?.getAttribute("role") === "option", "popup focus did not enter the owning document");
     key(other.activeElement as HTMLElement, "ArrowDown"); await frame();
     key(other.activeElement as HTMLElement, "Enter"); await frame();
     assert(select.value === "b", "owning document keyboard selection failed");
+    assert(keyboardHost.depth === 0, "selection left the popup Scope active");
     select.focus(); key(select, "Enter"); await frame();
     key(other.activeElement as HTMLElement, "Escape"); await frame();
     assert(!other.querySelector('[data-slot=select-content]') && other.activeElement === select, "owning document Escape/focus failed");
-    assert(hostEscapes === 0, "popup Escape reached the host document capture handler");
+    assert(keyboardHost.escapes === 0 && keyboardHost.depth === 0, "popup Escape closed the host or left its Scope active");
     key(select, "Escape");
-    assert(hostEscapes === 1, "closed popup still intercepted the host Escape");
+    assert(keyboardHost.escapes === 1, "closed popup still intercepted the host Escape");
     let selected = "a";
     const radios = createOriginRadioGroup(host, "a", "Default model", (value) => { selected = value; });
     const radioItems = ["a", "b", "c"].map((value) => {
@@ -154,8 +155,8 @@ export async function runOriginControlsDom(Fixture: new () => AsyncFixture) {
     disposeOriginControls(host);
     assert(!host.querySelector('[data-slot]') && !other.querySelector('[data-slot=select-content]'), "root cleanup left controls or popup");
     key(host, "Escape");
-    assert(hostEscapes === 2, "disposed popup left its window Escape listener");
-    other.removeEventListener("keydown", hostEscape, true);
+    assert(keyboardHost.escapes === 2 && keyboardHost.depth === 0, "disposed popup left its Obsidian Scope active");
+    keyboardHost.dispose();
     iframe.remove();
   });
   createOriginButton(section("Button"), { text: "Save", cls: "echoink-amicro-button mod-cta" });
