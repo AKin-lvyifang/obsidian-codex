@@ -10129,6 +10129,7 @@ async function assertProviderLimitOverrideRoundTrip(): Promise<void> {
     assert.equal(savedDraft, undefined, "an invalid visible parameter cannot silently save the old value");
     assert.equal(preserved.value, raw);
     assert.equal(preserved.getAttribute("aria-invalid"), "true");
+    assert.doesNotMatch(first.contentEl.textContent, /valid Model ID without spaces/u, "a parameter error must not be presented as an invalid manual Model ID");
     assert.equal(preserved.closest<HTMLDetailsElement>("details")?.open, true, "invalid parameters stay expanded after validation");
     assert.equal(providerModalTestDocument.activeElement, preserved);
     providerModalElementByFocusKey(first, "provider-test-connection")?.click();

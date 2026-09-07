@@ -1741,13 +1741,16 @@ export class ProviderModelModal extends Modal {
       errors.apiKey = this.options.copy.providers.missingKey;
     }
     const defaultModel = getDefaultApiProviderModel(this.draft);
+    const invalidNumberKey = this.firstInvalidNumberKey();
     if (
       this.draft.models.length === 0
       || !defaultModel
       || this.draft.models.some((model) => !isValidApiProviderModelConfig(model))
-      || this.firstInvalidNumberKey()
+      || invalidNumberKey
     ) {
-      errors.model = this.options.copy.providers.invalidModel;
+      errors.model = invalidNumberKey
+        ? this.numberDrafts.get(invalidNumberKey)!.message
+        : this.options.copy.providers.invalidModel;
     }
     if (this.providerId === "custom") {
       const endpoint = this.draft.baseUrl.trim();
