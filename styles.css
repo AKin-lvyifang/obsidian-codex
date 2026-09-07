@@ -20537,11 +20537,13 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
 .echoink-settings-demo .echoink-resource-detail .resources-editor-footer>*{margin:0;font-size:calc(var(--font-text-size,16px)*.625)}
 .echoink-settings-demo .echoink-resource-detail .echoink-skill-editor-actions{display:flex;justify-content:space-between;margin-top:20px}
 .echoink-settings-demo .echoink-resource-detail .resources-connection-summary{padding:13px 0 17px;min-width:0}
-.echoink-settings-demo .echoink-resource-detail .resources-connection-summary code{min-width:0;font-size:calc(var(--font-text-size,16px)*.6875)}
+.echoink-settings-demo .echoink-resource-detail .resources-connection-summary>.settings-badge{flex:none;white-space:nowrap}
+.echoink-settings-demo .echoink-resource-detail .resources-connection-summary code{flex:1;min-width:0;white-space:normal;overflow-wrap:anywhere;font-size:calc(var(--font-text-size,16px)*.6875)}
 .echoink-settings-demo .echoink-resource-detail .resources-connection-actions{display:block;padding-top:17px}
 .echoink-settings-demo .echoink-resource-detail .resources-connection-actions>.echoink-settings-inline-actions{display:flex;gap:10px;width:100%;flex-wrap:wrap}
 .echoink-settings-demo .echoink-resource-detail .resources-connection-actions .mod-warning{margin-left:auto}
-.echoink-settings-demo .echoink-resource-detail .codex-mcp-server-toggle-row,.echoink-settings-demo .echoink-resource-detail .codex-mcp-tool-policy-row{display:flex;align-items:center;gap:20px;padding:15px 0;margin:0;border:0;background:none;border-radius:0}
+.echoink-settings-demo .echoink-resource-detail .codex-mcp-server-toggle-row,.echoink-settings-demo .echoink-resource-detail .codex-mcp-tool-policy-row{display:flex;flex-direction:row;align-items:center;gap:20px;padding:15px 0;margin:0;border:0;background:none;border-radius:0}
+.echoink-settings-demo .echoink-resource-detail :is(.codex-mcp-server-toggle-copy,.codex-mcp-tool-policy-copy){flex:1;min-width:0}
 .echoink-settings-demo .echoink-resource-detail .codex-mcp-tool-policy-row+.codex-mcp-tool-policy-row{border-top:1px solid var(--line)}
 .echoink-settings-demo .echoink-resource-detail .codex-mcp-tool-policy-controls{display:flex;gap:20px;flex:none}
 .echoink-settings-demo .echoink-resource-detail .codex-mcp-tool-policy-toggle{display:flex;align-items:center;gap:8px;font-size:calc(var(--font-text-size,16px)*.625)}
@@ -20856,6 +20858,29 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
 .echoink-settings-demo .echoink-settings-navigation-value{flex-shrink:1;max-width:none;white-space:normal;overflow:visible;text-overflow:clip;overflow-wrap:anywhere}
 .echoink-settings-demo .init-folder-chip{cursor:help;border-radius:3px}
 .echoink-settings-demo .init-folder-chip:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.echoink-settings-demo .echoink-agent-profile-section{width:100%;max-width:none}
+.echoink-settings-demo :is(.echoink-agent-profile-field-value,.echoink-agent-profile-growth-note,.echoink-agent-profile-error,.echoink-picker-intro-text){max-width:none;text-wrap:wrap}
+.echoink-settings-demo :is(.echoink-agent-profile-content-title,.echoink-picker-intro-copy,.echoink-picker-row-desc,.echoink-memory-card-title){text-wrap:wrap}
+.echoink-settings-demo .echoink-memory-card-body{max-inline-size:none;max-width:none;text-wrap:wrap;white-space:pre-wrap}
+.echoink-settings-demo .echoink-knowledge-init-custom .init-assignments{margin:14px 0 12px;border:1px solid var(--line);border-radius:7px;overflow:hidden}
+.echoink-settings-demo .echoink-knowledge-init-custom :is(.init-assignment,.init-attachment){display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 12px;font-size:calc(var(--font-text-size,16px)*.6875);border:0}
+.echoink-settings-demo .echoink-knowledge-init-custom .init-assignments>div+div{border-top:1px solid var(--line)}
+.echoink-settings-demo .init-assignment-file{display:flex;align-items:center;gap:7px;min-width:0;flex:1;overflow-wrap:anywhere}
+.echoink-settings-demo .init-assignment-file>span:first-child{display:flex;flex:none;color:var(--muted)}
+.echoink-settings-demo .init-assignment-file svg{width:13px;height:13px}
+.echoink-settings-demo .echoink-knowledge-init-custom :is(.echoink-knowledge-init-assignment-target,.echoink-knowledge-init-batch-target){width:160px;max-width:100%;min-width:0;flex:none;font-size:calc(var(--font-text-size,16px)*.625)}
+.echoink-settings-demo .init-assignment-readonly{color:var(--muted);font-size:calc(var(--font-text-size,16px)*.625)}
+.echoink-settings-demo .init-assignment-empty{margin:0;padding:16px 12px;color:var(--secondary);font-size:calc(var(--font-text-size,16px)*.6875)}
+.echoink-settings-demo .init-assignment-batch{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px;margin:0 0 18px;font-size:calc(var(--font-text-size,16px)*.625);color:var(--secondary)}
+@container settings (max-width:600px){
+ .echoink-settings-demo .echoink-knowledge-init-custom :is(.init-assignment,.init-attachment){align-items:stretch;flex-direction:column;gap:8px}
+ .echoink-settings-demo .echoink-knowledge-init-custom .echoink-knowledge-init-assignment-target{width:100%}
+}
+@container settings (max-width:560px){
+ .echoink-settings-demo .echoink-resource-detail :is(.codex-mcp-server-toggle-row,.codex-mcp-tool-policy-row){flex-direction:column;align-items:stretch;gap:10px}
+ .echoink-settings-demo .echoink-resource-detail .codex-mcp-server-toggle-row>[data-slot=switch]{align-self:flex-start}
+ .echoink-settings-demo .echoink-resource-detail .codex-mcp-tool-policy-controls{width:100%;margin-left:0;justify-content:flex-start}
+}
 /* MIT Origin UI primitive styling, scoped to the actual library controls.
    EchoInk maps Origin's utility styles to the approved Demo tokens. No preflight. */
 .echoink-origin-control {

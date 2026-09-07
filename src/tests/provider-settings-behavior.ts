@@ -5902,8 +5902,8 @@ async function assertKnowledgeInitDefaultTabAndOneClickStart(): Promise<void> {
   assert.deepEqual(calls.map((call) => call.method), ["start:custom"]);
   const regeneratedPanel = knowledgeInitPanel(tab);
   assert.equal(
-    regeneratedPanel.querySelectorAll(".echoink-knowledge-init-dir-row").length,
-    10
+    regeneratedPanel.querySelectorAll(".init-assignment").length,
+    4
   );
 
   // 2. preview 已存在后，来回切换只替换同一 tabpanel 的主体，且不再产生调用。
@@ -5912,12 +5912,12 @@ async function assertKnowledgeInitDefaultTabAndOneClickStart(): Promise<void> {
   const callsBeforeSwitching = calls.length;
   regeneratedTabs[0].click();
   assert.equal(regeneratedPanel.querySelector('[role="tabpanel"]'), stableTabpanel);
-  assert.equal(regeneratedPanel.querySelectorAll(".echoink-knowledge-init-dir-row").length, 0);
+  assert.equal(regeneratedPanel.querySelectorAll(".init-assignment").length, 0);
   regeneratedTabs[1].click();
   assert.equal(regeneratedPanel.querySelector('[role="tabpanel"]'), stableTabpanel);
   assert.equal(
-    regeneratedPanel.querySelectorAll(".echoink-knowledge-init-dir-row").length,
-    10
+    regeneratedPanel.querySelectorAll(".init-assignment").length,
+    4
   );
   assert.equal(calls.length, callsBeforeSwitching);
 
@@ -5943,77 +5943,51 @@ async function assertKnowledgeInitDefaultTabAndOneClickStart(): Promise<void> {
 async function assertKnowledgeInitCustomTabDirectoriesAndAssignments(): Promise<void> {
   installProviderModalDomFixture();
   const state = { job: makeKnowledgeInitJobFixture() };
+  state.job.items.push(makeKnowledgeInitItemFixture("references/book.pdf", "raw"));
   const { plugin, calls } = createKnowledgeInitPluginFixture(state);
   const tab = await renderKnowledgeInitTab(plugin);
   const panel = knowledgeInitPanel(tab);
 
-  // 5. 页面重载后恢复自定义 Tab 与已有分配，且没有触发任何新调用。
   const tabs = panel.querySelectorAll('[role="tab"]');
   assert.equal(tabs[1].getAttribute("aria-selected"), "true");
   assert.equal(tabs[0].getAttribute("tabindex"), "-1");
   assert.deepEqual(calls, []);
+  const rows = panel.querySelectorAll<ProviderModalTestElement>(".init-assignment");
+  assert.equal(rows.length, 4, "custom assignments render real notes instead of empty directory rows");
+  const paths = rows.map(row => row.querySelector(".init-assignment-file")?.textContent);
+  assert.deepEqual(paths, ["notes/alpha.md", "notes/beta.md", "notes/gamma.md", "notes/delta.md"]);
+  const destinations = () => panel.querySelectorAll<ProviderModalTestElement>(".echoink-knowledge-init-assignment-target");
+  assert.deepEqual(destinations().map(control => control.value), ["wiki", "raw", "raw", "projects"]);
+  const attachment = panel.querySelector<ProviderModalTestElement>(".init-attachment")!;
+  assert.match(attachment.textContent, /references\/book.pdf/u);
+  assert.match(attachment.textContent, /Raw · 保留原始附件/u);
+  assert.equal(attachment.querySelector(".echoink-knowledge-init-assignment-target"), null);
+  assert.equal(destinations()[0].querySelectorAll("option").length, 9);
+  assert.equal(panel.querySelectorAll(".init-folder-chip").length, 10);
 
-  // 6. 十个目录全部展示；assets 标注附件目录且无「添加笔记」。
-  const rows = panel.querySelectorAll(".echoink-knowledge-init-dir-row");
-  assert.equal(rows.length, 10);
-  const expectedDirs = [
-    "Raw", "Wiki", "Projects", "Outputs", "Inbox",
-    "Journal", "Work", "Archive", "Templates"
-  ];
-  expectedDirs.forEach((label, index) => {
-    assert.equal(
-      rows[index].querySelector(".echoink-knowledge-init-dir-name")?.textContent,
-      label
-    );
-    assert.ok(rows[index].querySelector(".echoink-knowledge-init-dir-add"));
-    assert.equal(
-      rows[index].querySelector(".echoink-knowledge-init-dir-toggle")
-        ?.getAttribute("aria-expanded"),
-      "false"
-    );
-  });
-  const assetsRow = rows[9];
-  assert.ok(assetsRow.hasClass("is-assets"));
-  assert.equal(assetsRow.querySelector(".echoink-knowledge-init-dir-name")?.textContent, "assets");
-  assert.match(assetsRow.textContent, /附件目录/u);
-  assert.equal(assetsRow.querySelector(".echoink-knowledge-init-dir-add"), null);
-  assert.equal(assetsRow.querySelector(".echoink-knowledge-init-dir-toggle"), null);
-
-  // 8. 未指定笔记默认属于 raw：raw 行计数为 2。
-  assert.equal(
-    rows[0].querySelector(".echoink-knowledge-init-dir-count")?.textContent,
-    "2"
-  );
-
-  // 展开为缩进列表行；非 raw 笔记可移回 Raw。
-  const wikiToggle = rows[1].querySelector(".echoink-knowledge-init-dir-toggle");
-  wikiToggle.click();
-  // renderDirectoryList 会重建行 DOM，重新取引用再断言展开态。
-  const expandedRows = panel.querySelectorAll(".echoink-knowledge-init-dir-row");
-  const expandedToggle = expandedRows[1].querySelector(".echoink-knowledge-init-dir-toggle");
-  assert.equal(expandedToggle.getAttribute("aria-expanded"), "true");
-  const notePaths = panel.querySelectorAll(".echoink-knowledge-init-note-path");
-  assert.equal(notePaths.length, 1);
-  assert.equal(notePaths[0].textContent, "notes/alpha.md");
-  const remove = panel.querySelector(".echoink-knowledge-init-note-remove");
-  assert.ok(remove);
-  remove.click();
+  // Selecting a destination uses the existing assignment service and keeps the file focus.
+  const first = destinations()[0];
+  first.focus(); first.value = "raw"; first.fireEvent("change");
   await flushProviderModalTasks();
-  const assignCall = calls.find((call) => call.method === "assignMany");
-  assert.deepEqual(assignCall?.args, [
+  assert.deepEqual(calls.find(call => call.method === "assignMany")?.args, [
     { sourcePath: "notes/alpha.md", role: "raw" }
   ]);
+  assert.deepEqual(destinations().map(control => control.value), ["raw", "raw", "raw", "projects"]);
+  assert.equal(providerModalTestDocument.activeElement === destinations()[0], true);
+  assert.equal(destinations().every(control => !control.disabled), true, "saved assignments leave every destination editable");
+  destinations()[0].value = "wiki"; destinations()[0].fireEvent("change");
+  await flushProviderModalTasks();
+  assert.equal(destinations()[0].value, "wiki", "the same note can be assigned again without reopening settings");
+  assert.equal(state.job.items.find((item: any) => item.sourcePath === "references/book.pdf")?.role, "raw");
+  tab.hide();
+}
 
-  // 9. 同一笔记只有一个目标目录：alpha 移回 raw 后 wiki 计数为 0、raw 为 3。
-  const refreshedRows = panel.querySelectorAll(".echoink-knowledge-init-dir-row");
-  assert.equal(
-    refreshedRows[1].querySelector(".echoink-knowledge-init-dir-count")?.textContent,
-    "0"
-  );
-  assert.equal(
-    refreshedRows[0].querySelector(".echoink-knowledge-init-dir-count")?.textContent,
-    "3"
-  );
+function knowledgeInitBatchPicker(panel: ReturnType<typeof knowledgeInitPanel>, role: string): ProviderModalTestElement {
+  const target = panel.querySelector<ProviderModalTestElement>(".echoink-knowledge-init-batch-target")!;
+  target.value = role; target.fireEvent("change");
+  const picker = panel.querySelector<ProviderModalTestElement>(".echoink-knowledge-init-batch-picker")!;
+  assert.ok(picker);
+  return picker;
 }
 
 async function assertKnowledgeInitPausedMappingsHideTechnicalDetails(): Promise<void> {
@@ -6303,8 +6277,7 @@ async function assertKnowledgeInitNotePickerModalContract(): Promise<void> {
   };
   const tab = await renderKnowledgeInitTab(plugin);
   let panel = knowledgeInitPanel(tab);
-  let wikiRow = panel.querySelectorAll(".echoink-knowledge-init-dir-row")[1];
-  const add = wikiRow.querySelector<HTMLButtonElement>(".echoink-knowledge-init-dir-add");
+  const add = knowledgeInitBatchPicker(panel, "wiki");
   add.focus();
   add.click();
   await flushProviderModalTasks();
@@ -6419,14 +6392,12 @@ async function assertKnowledgeInitNotePickerModalContract(): Promise<void> {
   ]);
   assert.equal(openTestModals.length, 0);
   // 确认后目录列表原地重建，焦点回到重建后的 Wiki「添加笔记」按钮。
-  const rebuiltWikiAdd = panel.querySelectorAll(".echoink-knowledge-init-dir-row")[1]
-    .querySelector(".echoink-knowledge-init-dir-add");
+  const rebuiltWikiAdd = knowledgeInitBatchPicker(panel, "wiki");
   assert.equal(providerModalTestDocument.activeElement, rebuiltWikiAdd);
 
   // 12. Escape 取消零写入，焦点同样恢复。
   panel = knowledgeInitPanel(tab);
-  wikiRow = panel.querySelectorAll(".echoink-knowledge-init-dir-row")[1];
-  const addAgain = wikiRow.querySelector<HTMLButtonElement>(".echoink-knowledge-init-dir-add");
+  const addAgain = knowledgeInitBatchPicker(panel, "wiki");
   addAgain.focus();
   addAgain.click();
   await flushProviderModalTasks();
@@ -6446,8 +6417,7 @@ async function assertKnowledgeInitNotePickerModalContract(): Promise<void> {
     writesBeforeEscape,
     "Escape must not write assignments"
   );
-  const addAfterEscape = panel.querySelectorAll(".echoink-knowledge-init-dir-row")[1]
-    .querySelector(".echoink-knowledge-init-dir-add");
+  const addAfterEscape = knowledgeInitBatchPicker(panel, "wiki");
   assert.equal(providerModalTestDocument.activeElement === addAfterEscape, true);
 
   // Vault 真的没有可分配笔记时使用独立空状态；只有用户输入搜索且无结果
@@ -6718,8 +6688,7 @@ async function assertKnowledgeInitRawPickerSemantics(): Promise<void> {
   let panel = knowledgeInitPanel(tab);
 
   // Raw 行（第 0 行）按钮文案是「移回 Raw」而不是「添加笔记」。
-  const rawRow = panel.querySelectorAll(".echoink-knowledge-init-dir-row")[0];
-  const rawAdd = rawRow.querySelector<HTMLButtonElement>(".echoink-knowledge-init-dir-add");
+  const rawAdd = knowledgeInitBatchPicker(panel, "raw");
   assert.equal(rawAdd.textContent, "移回 Raw");
   assert.equal(rawAdd.getAttribute("aria-label"), "把其他目录的笔记移回 Raw");
   rawAdd.focus();
@@ -6758,8 +6727,7 @@ async function assertKnowledgeInitRawPickerSemantics(): Promise<void> {
   assert.equal(openTestModals.length, 0);
   // 焦点恢复到重建后的 Raw「移回 Raw」按钮。
   panel = knowledgeInitPanel(tab);
-  const rebuiltRawAdd = panel.querySelectorAll(".echoink-knowledge-init-dir-row")[0]
-    .querySelector(".echoink-knowledge-init-dir-add");
+  const rebuiltRawAdd = knowledgeInitBatchPicker(panel, "raw");
   assert.equal(providerModalTestDocument.activeElement, rebuiltRawAdd);
 
   // 提交失败：Modal 保持打开、内联错误、按钮可再次点击；重试成功后关闭。
@@ -12794,6 +12762,8 @@ if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "visual") {
   await assertKnowledgeInitPausedMappingsHideTechnicalDetails();
   await assertKnowledgeInitProgressAndCompletion();
   await assertKnowledgeInitStructureTruthAndRepair();
+  await assertKnowledgeInitNotePickerModalContract();
+  await assertKnowledgeInitRawPickerSemantics();
   await assertKnowledgeInitRecoveryAndActionErrorRendering();
   await assertKnowledgeSettingsDetailRetiresLegacyControls();
   console.log("PASS affected Knowledge initialization UI and local state lifecycles");
