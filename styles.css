@@ -19958,7 +19958,7 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
 
 
 /* Preserve the original filled SVGs and particle sizes inside the demo's global SVG reset. */
-.echoink-settings-demo .general-about-section .echoink-about-btn svg[fill="currentColor"]{fill:currentColor;stroke:none}
+.echoink-settings-demo .echoink-about-card .echoink-about-btn svg[fill="currentColor"]{fill:currentColor;stroke:none}
 .echoink-settings-demo .general-about-section .echoink-sparkle-p1 svg{width:8px;height:8px}
 .echoink-settings-demo .general-about-section .echoink-sparkle-p2 svg{width:6px;height:6px}
 .echoink-settings-demo .general-about-section .echoink-sparkle-icon-default svg,.echoink-settings-demo .general-about-section .echoink-sparkle-icon-hover svg,.echoink-settings-demo .general-about-section .echoink-about-morph-icon-wrap svg{width:16px;height:16px}
