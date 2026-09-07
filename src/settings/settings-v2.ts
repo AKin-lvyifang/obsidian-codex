@@ -34,9 +34,8 @@ export function createSettingsPage(
   const page = container.createDiv({
     cls: `echoink-settings-page${options.detail ? " is-detail" : ""}`
   });
-  const header = page.createDiv({ cls: "echoink-settings-page-header page-intro" });
   if (options.onBack) {
-    const back = header.createEl("button", {
+    const back = page.createEl("button", {
       cls: "echoink-settings-back settings-back text-button",
       attr: {
         type: "button",
@@ -44,10 +43,12 @@ export function createSettingsPage(
         "data-echoink-focus-key": "settings-detail:back"
       }
     });
-    setIcon(back, "chevron-left");
+    setIcon(back.createSpan(), "chevron-left");
+    back.createSpan({ text: options.backLabel ?? "Back" });
     applyAmicroButton(back, { variant: "tertiary" });
     back.onclick = options.onBack;
   }
+  const header = page.createDiv({ cls: "echoink-settings-page-header page-intro" });
   const heading = header.createDiv({ cls: "echoink-settings-page-heading" });
   heading.createEl("h2", {
     text: options.title,

@@ -283,14 +283,6 @@ export class MemoryCorrectionModal extends Modal {
       this.record.recallWhen
     );
 
-    this.previewEl = contentEl.createDiv({
-      cls: "echoink-memory-correction-card echoink-memory-correction-preview is-hidden",
-      attr: {
-        role: "region",
-        "aria-label": zh ? "修正后预览" : "Corrected preview"
-      }
-    });
-
     const editor = contentEl.createDiv({ cls: "echoink-memory-correction-editor" });
     const label = editor.createEl("label", {
       cls: "echoink-memory-correction-label",
@@ -308,6 +300,10 @@ export class MemoryCorrectionModal extends Modal {
     });
     label.setAttribute("for", "echoink-memory-correction-input");
     this.textarea.id = "echoink-memory-correction-input";
+    this.previewEl = contentEl.createDiv({
+      cls: "echoink-memory-correction-card echoink-memory-correction-preview is-hidden",
+      attr: { role: "region", "aria-label": zh ? "修正后预览" : "Corrected preview" }
+    });
 
     this.statusEl = contentEl.createDiv({
       cls: "echoink-memory-correction-status",

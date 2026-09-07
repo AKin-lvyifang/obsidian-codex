@@ -88,7 +88,9 @@ export class McpServerModal extends Modal {
       attr: { "aria-busy": String(this.saving) }
     });
 
-    this.renderTextField(form, {
+    const basic = form.createDiv({ cls: "codex-mcp-form-card is-basic" });
+    basic.createEl("h3", { text: this.label("基本信息", "Basic information") });
+    this.renderTextField(basic, {
       key: "name",
       label: this.label("名称", "Name"),
       description: this.label("显示在 Resources 和 Tool 卡中的 Server 名称。", "The server name shown in Resources and tool cards."),
@@ -96,7 +98,7 @@ export class McpServerModal extends Modal {
       placeholder: this.label("例如：团队知识库", "For example: Team knowledge"),
       onInput: (value) => { this.name = value; }
     });
-    this.renderTextareaField(form, {
+    this.renderTextareaField(basic, {
       key: "description",
       label: this.label("说明", "Description"),
       description: this.label("简要说明这个 Server 提供什么能力。", "Briefly describe what this server provides."),
@@ -107,11 +109,12 @@ export class McpServerModal extends Modal {
     });
 
     const transportField = this.createField(
-      form,
+      basic,
       this.label("连接方式", "Transport"),
       this.label("HTTP 连接远程或本地端点；stdio 启动本机命令。", "HTTP connects to an endpoint; stdio starts a local command."),
       "transport"
     );
+    transportField.addClass("is-wide");
     const select = transportField.createEl("select", {
       cls: "codex-mcp-server-select",
       attr: { id: this.controlId("transport"), "data-mcp-modal-focus-key": "transport" }
@@ -135,8 +138,10 @@ export class McpServerModal extends Modal {
       this.focus("endpoint");
     };
 
+    const connection = form.createDiv({ cls: "codex-mcp-form-card is-connection" });
+    connection.createEl("h3", { text: this.transport === "http" ? this.label("HTTP 连接", "HTTP connection") : this.label("本地进程", "Local process") });
     if (this.transport === "http") {
-      this.renderTextField(form, {
+      this.renderTextField(connection, {
         key: "endpoint",
         label: this.label("Server URL", "Server URL"),
         description: this.label("使用完整的 http(s) MCP 地址，不要在 URL 中放入用户名、密码或 Token。", "Use a complete http(s) MCP URL. Do not put credentials in the URL."),
@@ -144,7 +149,7 @@ export class McpServerModal extends Modal {
         placeholder: "https://mcp.example.com/mcp",
         onInput: (value) => { this.endpoint = value; }
       });
-      this.renderTextareaField(form, {
+      this.renderTextareaField(connection, {
         key: "public-values",
         label: this.label("普通 Headers", "Public headers"),
         description: this.label("每行 NAME=value。这里只放非敏感值；Token 请使用下方 Credential。", "One NAME=value per line. Put secrets in Credential below."),
@@ -154,7 +159,7 @@ export class McpServerModal extends Modal {
         onInput: (value) => { this.publicValues = value; }
       });
     } else {
-      this.renderTextField(form, {
+      this.renderTextField(connection, {
         key: "endpoint",
         label: this.label("启动命令", "Command"),
         description: this.label("输入可执行命令；参数单独逐行填写。", "Enter the executable command; put one argument on each line below."),
@@ -162,7 +167,7 @@ export class McpServerModal extends Modal {
         placeholder: "npx",
         onInput: (value) => { this.endpoint = value; }
       });
-      this.renderTextareaField(form, {
+      this.renderTextareaField(connection, {
         key: "args",
         label: this.label("参数", "Arguments"),
         description: this.label("每行一个参数，不经过 Shell 拼接。", "One argument per line; values are not joined through a shell."),
@@ -171,7 +176,7 @@ export class McpServerModal extends Modal {
         rows: 3,
         onInput: (value) => { this.args = value; }
       });
-      this.renderTextField(form, {
+      this.renderTextField(connection, {
         key: "cwd",
         label: this.label("工作目录", "Working directory"),
         description: this.label("可选。Server 进程的工作目录。", "Optional working directory for the server process."),
@@ -179,7 +184,7 @@ export class McpServerModal extends Modal {
         placeholder: this.label("可选", "Optional"),
         onInput: (value) => { this.cwd = value; }
       });
-      this.renderTextareaField(form, {
+      this.renderTextareaField(connection, {
         key: "public-values",
         label: this.label("普通环境变量", "Public environment variables"),
         description: this.label("每行 NAME=value。这里只放非敏感值；密钥请使用下方 Credential。", "One NAME=value per line. Put secrets in Credential below."),
@@ -190,7 +195,7 @@ export class McpServerModal extends Modal {
       });
     }
 
-    const credential = form.createDiv({ cls: "codex-mcp-credential-section" });
+    const credential = form.createDiv({ cls: "codex-mcp-credential-section codex-mcp-form-card" });
     credential.createDiv({
       cls: "codex-mcp-credential-title",
       text: this.label("Credential", "Credential")
@@ -230,6 +235,7 @@ export class McpServerModal extends Modal {
         : this.label("只在本次保存时写入 SecretStorage。", "Written to SecretStorage only when you save."),
       "credential-secret"
     );
+    secretField.addClass("is-wide");
     const secretInput = secretField.createEl("input", {
       cls: "codex-mcp-server-input",
       attr: {

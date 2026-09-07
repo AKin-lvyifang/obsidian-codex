@@ -281,8 +281,8 @@ export class ProviderModelModal extends Modal {
       if (apiProviderApiKeyRequired(providerId)) {
         this.renderApiKeyField(connection);
       }
-      this.renderModelSelectionField(form);
     }
+    this.renderModelSelectionField(form);
 
     const footer = this.contentEl.createDiv({ cls: "codex-provider-modal-footer" });
     const saveState = footer.createDiv({
@@ -1054,12 +1054,14 @@ export class ProviderModelModal extends Modal {
       this.clearFieldError("model", input);
     };
     const add = controls.createEl("button", {
-      text: this.label("添加", "Add"),
       attr: {
         type: "button",
         "data-modal-focus-key": "manual-model-add"
       }
     });
+    const addIcon = add.createSpan();
+    setIcon(addIcon, "plus");
+    add.createSpan({ text: this.label("添加", "Add") });
     add.onclick = () => {
       const modelId = this.manualModelId.trim();
       if (!isValidApiProviderModelId(modelId)) {
@@ -1522,9 +1524,10 @@ export class ProviderModelModal extends Modal {
   }
 
   private renderCustomForm(container: HTMLElement): void {
+    const fields = container.createDiv({ cls: "provider-connection-grid" });
     const endpointId = this.controlId("endpoint");
     const endpoint = this.createField(
-      container,
+      fields,
       this.label("接口地址", "Endpoint URL"),
       endpointId
     );
@@ -1548,9 +1551,8 @@ export class ProviderModelModal extends Modal {
     };
     this.renderFieldError(endpoint, "endpoint");
 
-    this.renderCustomProtocolField(container);
+    this.renderCustomProtocolField(fields);
     this.renderApiKeyField(container);
-    this.renderModelSelectionField(container);
   }
 
   private renderCustomProtocolField(container: HTMLElement): void {
@@ -1606,7 +1608,8 @@ export class ProviderModelModal extends Modal {
       cls: `codex-provider-custom-toggle${options.disabled ? " is-disabled" : ""}`
     });
     const input = control.createEl("input", {
-      attr: { type: "checkbox", "data-modal-focus-key": `toggle:${focusKey}` }
+      cls: "codex-resource-toggle",
+      attr: { type: "checkbox", role: "switch", "data-modal-focus-key": `toggle:${focusKey}` }
     });
     input.checked = checked;
     input.disabled = options.disabled === true;

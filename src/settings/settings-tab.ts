@@ -1,7 +1,7 @@
 import { renderSettingsKnowledgeDashboard } from "./knowledge-dashboard";
 import { BUILTIN_SKILLS } from "../harness/resources/builtin-skills";
 import { mountSettingsEditor } from "./inline-editor";
-import { Modal, Notice, PluginSettingTab, Setting, TFile, normalizePath, setIcon, setTooltip } from "obsidian";
+import { Modal, Notice, PluginSettingTab, Setting, TFile, type TFolder, normalizePath, setIcon, setTooltip } from "obsidian";
 import type CodexForObsidianPlugin from "../main";
 import { DeveloperModePanel } from "./developer-mode-panel";
 import type { PiConversationCatalogEntry } from "../harness/pi-native/contracts";
@@ -773,21 +773,25 @@ export class CodexSettingTab extends PluginSettingTab {
 
     addSettingsHelp(dreamToggle, zh ? "Obsidian 打开期间，定时整理 Memory，更新用户画像与 Agent 长期形成的处事方式。" : "While Obsidian is open, consolidate Memory and update the user profile and the Agent’s learned ways of working.", dreamToggle.descEl.textContent ?? "");
 
-    applySettingsRow(new Setting(memoryGroup)
+    let runsOutput: HTMLOutputElement | undefined;
+    const runsSetting = applySettingsRow(new Setting(memoryGroup)
       .setName(zh ? "每日整理次数" : "Runs per day")
       .setDesc(zh
-        ? `每天执行几次离线整理（1-6 次）。当前：${this.plugin.settings.memory.dreamRunsPerDay} 次/天，约每 ${Math.round(24 / this.plugin.settings.memory.dreamRunsPerDay)} 小时一次。`
-        : `How many consolidation runs per day (1-6). Current: ${this.plugin.settings.memory.dreamRunsPerDay}/day, ~every ${Math.round(24 / this.plugin.settings.memory.dreamRunsPerDay)} hours.`)
+        ? "每天执行几次离线整理（1–6 次）。"
+        : "Choose how many consolidation runs to schedule each day (1–6).")
       .addSlider((slider) => {
         slider.setLimits(1, 6, 1)
           .setValue(this.plugin.settings.memory.dreamRunsPerDay)
           .setDynamicTooltip()
           .onChange(async (value) => {
             this.plugin.settings.memory.dreamRunsPerDay = value;
+            runsOutput?.setText(zh ? `${value} 次/天` : `${value}/day`);
             await this.plugin.saveSettings();
             this.scheduleDisplay();
           });
       }));
+    runsSetting.controlEl.addClass("general-range");
+    runsOutput = runsSetting.controlEl.createEl("output", { text: zh ? `${this.plugin.settings.memory.dreamRunsPerDay} 次/天` : `${this.plugin.settings.memory.dreamRunsPerDay}/day` });
 
     this.renderFilePersonalizationSettings(page);
     this.renderDeveloperModeSettings(page);
@@ -832,9 +836,6 @@ export class CodexSettingTab extends PluginSettingTab {
     const zh = this.plugin.settings.settingsLanguage !== "en";
     const section = createSettingsSection(page, {
       title: zh ? "身份与用户画像" : "Identity and user profile",
-      description: zh
-        ? "Agent 画像由当前自我即时形成；用户画像由做梦与记忆修正自动维护。名称和头像可以随时修改，不影响人格或 Memory。"
-        : "The Agent profile is projected from its current self; the user profile is maintained by dreaming and memory corrections. Name and avatar can be changed anytime without affecting personality or Memory.",
       surface: "group"
     });
     const group = createSettingsGroup(section);
@@ -1088,14 +1089,6 @@ export class CodexSettingTab extends PluginSettingTab {
     const selectedTemplate = ready
       ? AGENT_TEMPLATES.find((template) => template.id === readyProfile.templateId) ?? null
       : null;
-    identitySide.createDiv({
-      cls: "echoink-agent-profile-personality",
-      text: ready
-        ? selectedTemplate
-          ? (zh ? selectedTemplate.labelZh : selectedTemplate.labelEn)
-          : (zh ? "尚未选择" : "Not selected")
-        : (zh ? "人格读取失败" : "Profile unavailable")
-    });
     const avatarEl = identitySide.createDiv({ cls: "echoink-agent-profile-avatar" });
     const avatarUrl = resolveAgentAvatarUrl(identity.avatar);
     if (avatarUrl) {
@@ -1112,12 +1105,19 @@ export class CodexSettingTab extends PluginSettingTab {
       setIcon(avatarEl, "bot");
     }
     const nameRow = identitySide.createDiv({ cls: "echoink-agent-profile-name-row" });
+    nameRow.createDiv({ cls: "echoink-agent-profile-name", text: identity.displayName });
+    identitySide.createDiv({
+      cls: "echoink-agent-profile-personality",
+      text: ready
+        ? selectedTemplate ? (zh ? selectedTemplate.labelZh : selectedTemplate.labelEn) : (zh ? "尚未选择" : "Not selected")
+        : (zh ? "人格读取失败" : "Profile unavailable")
+    });
     const editIdentityLabel = !selectedTemplateId
       ? (zh ? "选择风格并设置身份" : "Choose a style and set identity")
       : (zh ? "编辑 Agent 身份" : "Edit Agent identity");
     const editIdentityBtn = ready
-      ? nameRow.createEl("button", {
-          cls: "echoink-agent-identity-edit",
+      ? identitySide.createEl("button", {
+          cls: "echoink-agent-identity-edit text-button",
           attr: {
             type: "button",
             "aria-label": editIdentityLabel
@@ -1125,13 +1125,11 @@ export class CodexSettingTab extends PluginSettingTab {
         })
       : null;
     if (editIdentityBtn) {
-      renderAnimateIcon(editIdentityBtn, "user-round-pen");
       setTooltip(editIdentityBtn, editIdentityLabel, { placement: "top" });
+      const editIcon = editIdentityBtn.createSpan();
+      renderAnimateIcon(editIcon, "user-round-pen");
+      editIdentityBtn.createSpan({ text: selectedTemplateId ? (zh ? "编辑身份" : "Edit identity") : editIdentityLabel });
     }
-    nameRow.createDiv({
-      cls: "echoink-agent-profile-name",
-      text: identity.displayName
-    });
     if (ready && selectedTemplate?.preferredSkillIds.length) {
       const methods = identitySide.createDiv({ cls: "echoink-agent-profile-methods" });
       methods.createDiv({
@@ -1535,12 +1533,31 @@ export class CodexSettingTab extends PluginSettingTab {
       {
         onRefresh: () => void this.refreshKnowledgeSettingsDashboard(true),
         onOpenHistory: () => this.openSettingsDetail("knowledge-maintenance-history"),
+        onOpenRaw: () => void this.openKnowledgeRawFolder(),
         onToggleExpanded: () => {
           this.knowledgeDashboardExpanded = !this.knowledgeDashboardExpanded;
           this.renderKnowledgeSettingsDashboard();
         }
       }
     );
+  }
+
+  private async openKnowledgeRawFolder(): Promise<void> {
+    const zh = this.plugin.settings.settingsLanguage !== "en";
+    const folder = this.app.vault.getAbstractFileByPath("raw");
+    const leaf = this.app.workspace.getLeavesOfType("file-explorer")[0];
+    const view = leaf?.view as (typeof leaf.view & { revealInFolder?: (folder: TFolder) => void | Promise<void> }) | undefined;
+    if (!folder || folder instanceof TFile || !leaf || !view?.revealInFolder) {
+      new Notice(zh ? "请在文件列表中打开 Raw 目录。" : "Open the Raw folder in the file explorer.");
+      return;
+    }
+    try {
+      await view.revealInFolder(folder as TFolder);
+      await this.app.workspace.revealLeaf(leaf);
+      (this.app as unknown as { setting?: { close: () => void } }).setting?.close();
+    } catch {
+      new Notice(zh ? "Raw 目录未能打开，请从文件列表重试。" : "The Raw folder could not open. Retry from the file explorer.");
+    }
   }
 
   private async refreshKnowledgeSettingsDashboard(force = false): Promise<void> {
@@ -1606,51 +1623,29 @@ export class CodexSettingTab extends PluginSettingTab {
       backLabel: zh ? "返回知识库" : "Back to Knowledge",
       onBack: () => void this.closeSettingsDetail()
     });
-    const filterSection = createSettingsSection(page, {
-      title: zh ? "按日期筛选" : "Filter by date",
-      description: zh
-        ? "选择一个日期只查看当天的维护记录。"
-        : "Select one date to view maintenance records from that day only.",
-      surface: "group"
-    });
-    const filterGroup = createSettingsGroup(filterSection);
     const selectedDate = this.knowledgeMaintenanceHistoryDate;
-    applySettingsRow(new Setting(filterGroup)
-      .setName(zh ? "维护日志日期" : "Maintenance log date")
-      .setDesc(zh ? "未选择时显示全部记录。" : "Show all records when no date is selected.")
-      .addText((text) => {
-        text
-          .setValue(selectedDate)
-          .onChange((value) => {
-            this.knowledgeMaintenanceHistoryDate = value;
-            this.scheduleDisplay();
-          });
-        text.inputEl.type = "date";
-        text.inputEl.setAttr(
-          "aria-label",
-          zh ? "维护日志日期筛选" : "Maintenance log date filter"
-        );
-        text.inputEl.setAttr(
-          "data-echoink-focus-key",
-          "knowledge:maintenance-history:date"
-        );
-      })
-      .addButton((button) => {
-        const label = zh ? "清除日期筛选" : "Clear date filter";
-        button
-          .setButtonText(zh ? "清除" : "Clear")
-          .onClick(() => {
-            this.knowledgeMaintenanceHistoryDate = "";
-            this.settingsFocusIntent = "explicit:knowledge:maintenance-history:date";
-            this.scheduleDisplay();
-          });
-        button.buttonEl.disabled = !selectedDate;
-        button.buttonEl.setAttr("aria-label", label);
-        button.buttonEl.setAttr(
-          "data-echoink-focus-key",
-          "knowledge:maintenance-history:clear"
-        );
-      }));
+    const filter = page.createDiv({ cls: "history-filter" });
+    const filterLabel = zh ? "维护日志日期筛选" : "Maintenance log date filter";
+    filter.createSpan({ text: zh ? "按日期筛选" : "Filter by date" });
+    const date = filter.createEl("input", { attr: {
+      type: "date", "aria-label": filterLabel,
+      "data-echoink-focus-key": "knowledge:maintenance-history:date"
+    } });
+    date.value = selectedDate;
+    date.onchange = () => {
+      this.knowledgeMaintenanceHistoryDate = date.value;
+      this.scheduleDisplay();
+    };
+    const clear = filter.createEl("button", { cls: "text-button", text: zh ? "清除" : "Clear", attr: {
+      type: "button", "aria-label": zh ? "清除日期筛选" : "Clear date filter",
+      "data-echoink-focus-key": "knowledge:maintenance-history:clear"
+    } });
+    clear.disabled = !selectedDate;
+    clear.onclick = () => {
+      this.knowledgeMaintenanceHistoryDate = "";
+      this.settingsFocusIntent = "explicit:knowledge:maintenance-history:date";
+      this.scheduleDisplay();
+    };
     const section = createSettingsSection(page, {
       title: zh ? "全部记录" : "All records",
       description: zh
@@ -1909,10 +1904,7 @@ export class CodexSettingTab extends PluginSettingTab {
         cls: "echoink-knowledge-protocol-title",
         text: zh ? step.title : protocolEnglish[index][0]
       });
-      item.createDiv({
-        cls: "echoink-knowledge-protocol-description",
-        text: zh ? step.instruction : protocolEnglish[index][1]
-      });
+      item.setAttr("title", zh ? step.instruction : protocolEnglish[index][1]);
     }
 
     const preferenceSection = createSettingsSection(page, {
@@ -2095,7 +2087,7 @@ export class CodexSettingTab extends PluginSettingTab {
         ? "选择来源、统计周期和保存文件夹；生成结果只保留在所选目录。"
         : "Choose the source, date range, and destination folder. Generated files stay in that folder."
     );
-    const actions = summary.createDiv({ cls: "echoink-settings-feature-actions" });
+    const actions = summary.createDiv({ cls: "review-generation" });
     this.addReviewAction(actions, copy.review.generateAgent, "agent-chat");
     this.addReviewAction(actions, copy.review.generateKnowledge, "knowledge-base");
     const controls = createSettingsGroup(summary);
@@ -2392,8 +2384,9 @@ export class CodexSettingTab extends PluginSettingTab {
         this.scheduleDisplay();
       }
     });
-    const section = createSettingsSection(page, { surface: "group" });
+    const section = createSettingsSection(page, { surface: "flat" });
     const list = createSettingsCompactList(section);
+    list.addClass("echoink-memory-record-list");
     if (this.personalMemoryLoading) {
       createSettingsState(list, zh ? "正在读取当前 Memory…" : "Loading current Memory…");
       return;
@@ -2615,15 +2608,22 @@ export class CodexSettingTab extends PluginSettingTab {
 
   private addReviewAction(container: HTMLElement, label: string, kind: ReviewReportKind): void {
     const copy = this.copy;
+    const zh = this.plugin.settings.settingsLanguage !== "en";
     const button = container.createEl("button", {
-      cls: "codex-resource-tab",
-      text: label,
+      cls: "review-generate-card",
       attr: {
         type: "button",
         "aria-label": label,
         "data-echoink-focus-key": `review:${kind}:generate`
       }
     });
+    setIcon(button.createEl("i"), kind === "agent-chat" ? "message-circle" : "book-open");
+    const content = button.createDiv();
+    content.createEl("strong", { text: label });
+    content.createSpan({ text: kind === "agent-chat"
+      ? (zh ? "回看这一周的对话与协作" : "Review this week's conversations and collaboration")
+      : (zh ? "回看知识整理与积累" : "Review how your knowledge has grown") });
+    setIcon(button.createSpan({ cls: "review-generate-arrow" }), "arrow-up-right");
     button.onclick = async () => {
       const reportLabel = copy.review.reportLabels[kind];
       const accepted = await confirmModal(
@@ -3086,7 +3086,6 @@ export class CodexSettingTab extends PluginSettingTab {
           text: "Beta"
         });
       }
-      metadata.createSpan({ text: "·", attr: { "aria-hidden": "true" } });
       metadata.createSpan({
         cls: `codex-provider-credential-badge is-${credentialState}`,
         text: credentialState === "oauth-ready"
@@ -3568,8 +3567,7 @@ export class CodexSettingTab extends PluginSettingTab {
     const wrapper = page.createDiv({ cls: "codex-resource-manager" });
     const activeTab = this.plugin.settings.resourceManagementTab;
     const controls = wrapper.createDiv({ cls: "codex-resource-controls" });
-    const toolbar = controls.createDiv({ cls: "codex-resource-toolbar" });
-    const tabs = toolbar.createDiv({
+    const tabs = controls.createDiv({
       cls: "codex-resource-tabs",
       attr: {
         role: "tablist",
@@ -3577,6 +3575,7 @@ export class CodexSettingTab extends PluginSettingTab {
         "aria-orientation": "horizontal"
       }
     });
+    const toolbar = controls.createDiv({ cls: "codex-resource-toolbar" });
     let activeButton: HTMLButtonElement | null = null;
     RESOURCE_TABS.forEach((tab, index) => {
       const label = copy.resources.tabs[tab.id];
@@ -3722,6 +3721,26 @@ export class CodexSettingTab extends PluginSettingTab {
       resourceDisplayMeta(resource, this.plugin.settings.resources, this.plugin.settings.settingsLanguage),
       resource.description || (english ? "No description" : "暂无说明")
     );
+    if (resource.kind === "skill") {
+      const toggle = details.createEl("input", { cls: "codex-resource-toggle", attr: {
+        type: "checkbox", "aria-label": english ? `Enable ${resource.name}` : `启用 ${resource.name}`,
+        "data-echoink-focus-key": `resource:${resource.id}:enabled`
+      } });
+      toggle.checked = resource.enabled;
+      toggle.onchange = async () => {
+        toggle.disabled = true;
+        try {
+          await this.plugin.setEchoInkSkillResourceEnabled(resource.id, toggle.checked);
+          toggle.checked = this.plugin.settings.resources.catalog.find((item) => item.id === resource.id)?.enabled ?? false;
+          this.scheduleDisplay();
+        } catch {
+          toggle.checked = this.plugin.settings.resources.catalog.find((item) => item.id === resource.id)?.enabled ?? resource.enabled;
+          const message = english ? "The resource setting was not saved." : "资源开关未保存，请重试。";
+          new Notice(message);
+          this.announceSettingsStatus(message);
+        } finally { toggle.disabled = false; }
+      };
+    }
     const path = resource.contentPath ?? resource.configPath ?? "";
     if (path) {
       const pathButton = details.createEl("button", {
@@ -3941,6 +3960,7 @@ export class CodexSettingTab extends PluginSettingTab {
       }
     });
     textarea.value = editor.draftContent;
+    const characters = row.controlEl.createEl("output", { cls: "echoink-skill-character-count" });
     const status = row.controlEl.createDiv({
       cls: "echoink-knowledge-preference-status echoink-builtin-skill-status",
       attr: { role: "status", "aria-live": "polite" }
@@ -3950,7 +3970,7 @@ export class CodexSettingTab extends PluginSettingTab {
       attr: { role: "alert" }
     });
     const actions = row.controlEl.createDiv({
-      cls: "echoink-personalization-actions"
+      cls: "echoink-personalization-actions echoink-skill-editor-actions"
     });
     const restore = actions.createEl("button", {
       text: english ? "Restore EchoInk default" : "恢复 EchoInk 默认",
@@ -3971,6 +3991,7 @@ export class CodexSettingTab extends PluginSettingTab {
       const current = this.builtinSkillEditor;
       if (!current || current.resourceId !== resource.id || !current.snapshot) return;
       const dirty = current.draftContent !== current.snapshot.content;
+      characters.setText(english ? `${current.draftContent.length.toLocaleString("en-US")} characters` : `${current.draftContent.length.toLocaleString("zh-CN")} 字符`);
       const stateText = current.snapshot.fileStatus === "ready"
         ? current.snapshot.userModified
           ? (english ? "Customized" : "已自定义")

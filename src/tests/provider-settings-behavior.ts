@@ -2515,8 +2515,8 @@ async function assertSettingsAccessibleNamesAndOverflow(): Promise<void> {
   tab.display();
   for (const label of ["生成 Agent 周报", "生成知识库周报"]) {
     const button = Array.from(tab.containerEl.querySelectorAll("button"))
-      .find((candidate) => candidate.textContent === label);
-    assert.equal(button?.getAttribute("aria-label"), label);
+      .find((candidate) => candidate.getAttribute("aria-label") === label);
+    assert.ok(button?.querySelector("strong")?.textContent === label);
   }
   assertSettingControlAccessibleName(tab.containerEl, "输出目录", "input");
   assertSettingControlAccessibleName(tab.containerEl, "统计周期", "select");
@@ -10745,9 +10745,9 @@ async function assertAgentIdentityCardPlacementAndCopy(): Promise<void> {
   const editIdentity = profileCard.querySelector<ProviderModalTestElement>(
     ".echoink-agent-identity-edit"
   );
-  assert.ok(editIdentity, "the icon-only identity edit exists");
+  assert.ok(editIdentity, "the identity edit exists");
   assert.equal(editIdentity!.getAttribute("aria-label"), "编辑 Agent 身份");
-  assert.equal(editIdentity!.textContent.trim(), "", "the edit control is icon-only");
+  assert.equal(editIdentity!.textContent.trim(), "编辑身份", "the edit control has a visible label");
   assert.equal(
     editIdentity!.querySelector("svg")?.getAttribute("data-animateicons-icon"),
     "user-round-pen"
@@ -12630,6 +12630,20 @@ if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "visual") {
   await assertInlineEditorAsyncRetirement();
   await runSettingsWindowRefreshTest();
   console.log("PASS affected settings shell, Provider editor and inline lifecycle");
+} else if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "pages-candidate") {
+  await assertBuiltinSkillEditorLifecycle();
+  await assertSkillToggleNotCommittedRestoresAuthoritativeUi();
+  await assertMcpModalFieldAccessibility();
+  await assertSettingsAccessibleNamesAndOverflow();
+  await assertMcpPanelUsesTurnResourceTruth();
+  await assertKnowledgeSettingsDetailRetiresLegacyControls();
+  await assertMemoryCorrectionModalContract();
+  await assertReviewFolderInlineLifecycle();
+  await assertAgentIdentityCardPlacementAndCopy();
+  await assertIdentityEditSaveRefreshesSettingsAndPersonalization();
+  await assertFreshCustomModelDiscoveryLifecycle();
+  await assertProviderLimitOverrideRoundTrip();
+  console.log("PASS affected settings pages, editors and existing action lifecycles");
 } else if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "settings-window") {
   await runSettingsWindowRefreshTest();
   console.log("PASS detached settings refresh and cancellation with hidden main window");

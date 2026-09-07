@@ -10,7 +10,7 @@ import {
 export function renderSettingsKnowledgeDashboard(
   container: HTMLElement,
   state: KnowledgeDashboardRenderState,
-  actions: KnowledgeDashboardActions & { onOpenHistory: () => void }
+  actions: KnowledgeDashboardActions & { onOpenHistory: () => void; onOpenRaw: () => void }
 ): void {
   const zh = state.language !== "en";
   const t = (cn: string, en: string) => zh ? cn : en;
@@ -53,9 +53,20 @@ export function renderSettingsKnowledgeDashboard(
   const score = healthCard.createDiv({ cls: "health-score" });
   score.createEl("strong", { text: available ? String(health.score) : "—" });
   if (available) score.createSpan({ text: "/ 100" });
-  const explanation = container.createEl("details", { cls: "health-explanation" });
-  explanation.createEl("summary", { text: t("评分说明与检查范围", "Score and coverage") });
-  button(score, t("评分说明", "Score details"), "info", () => { explanation.open = !explanation.open; });
+  const explanation = container.createDiv({ cls: "health-explanation" });
+  explanation.hidden = true;
+  const explanationHeader = explanation.createDiv({ cls: "panel-heading" });
+  explanationHeader.createEl("h3", { text: t("评分说明与检查范围", "Score and coverage") });
+  const detailsButton = button(score, t("评分说明", "Score details"), "info", () => {
+    explanation.hidden = !explanation.hidden;
+    detailsButton.setAttr("aria-expanded", String(!explanation.hidden));
+  });
+  detailsButton.setAttr("aria-expanded", "false");
+  button(explanationHeader, t("关闭", "Close"), "x", () => {
+    explanation.hidden = true;
+    detailsButton.setAttr("aria-expanded", "false");
+    detailsButton.focus();
+  });
   if (available) {
     const meter = healthCard.createDiv({ cls: "health-meter", attr: { role: "meter", "aria-label": t("结构健康度", "Structural health"), "aria-valuenow": String(health.score), "aria-valuemin": "0", "aria-valuemax": "100" } });
     meter.createSpan().style.width = `${health.score}%`;
@@ -94,18 +105,40 @@ export function renderSettingsKnowledgeDashboard(
   const wiki = table(panels, t("Wiki 结构", "Wiki structure"), snapshot.wiki.fileCount, [t("分类", "Category"), t("数量", "Count"), t("占比", "Share"), t("今日新增", "Added today")]);
   for (const group of snapshot.wiki.groups) {
     const names: Record<string, string> = { 概念: "Concepts", 实体: "Entities", 主题: "Topics", 来源: "Sources", 其他: "Other" };
-    cells(wiki, [zh ? group.label : names[group.label] ?? group.path, String(group.totalCount), `${group.sharePercent}%`, group.todayCount ? `+${group.todayCount}` : "—"]);
+    const row = cells(wiki, [zh ? group.label : names[group.label] ?? group.path, String(group.totalCount), "", group.todayCount ? `+${group.todayCount}` : "—"]);
+    const share = (row.children[2] as HTMLElement).createDiv({ cls: "wiki-share" });
+    share.createSpan({ text: `${group.sharePercent}%` });
+    share.createDiv({ cls: "wiki-share-track", attr: { "aria-hidden": "true" } })
+      .createSpan().style.width = `${Math.max(0, Math.min(100, group.sharePercent))}%`;
   }
   wiki.parentElement?.parentElement?.createEl("p", { cls: "table-note", text: t("占比以 Wiki 一级分类目录内的文件为分母；入口页等根目录文件只计入总数。", "Shares use files inside first-level Wiki category folders. Root-level files such as index.md count toward the total only.") });
   const queues = table(panels, t("Raw / Inbox 状态", "Raw / Inbox status"), snapshot.raw.fileCount + snapshot.inbox.fileCount, [t("区域", "Area"), t("总数", "Total"), t("今日新增", "Added today"), t("待处理", "Pending"), t("待校准", "Calibration")]);
-  cells(queues, ["Raw", String(snapshot.raw.fileCount), String(snapshot.raw.todayCount), String(snapshot.raw.digestStatus.pending + snapshot.raw.digestStatus.changed), String(snapshot.raw.digestStatus.calibration)]);
+  const raw = cells(queues, ["Raw", String(snapshot.raw.fileCount), String(snapshot.raw.todayCount), "", ""]);
+  for (const [index, count] of [[3, snapshot.raw.digestStatus.pending + snapshot.raw.digestStatus.changed], [4, snapshot.raw.digestStatus.calibration]]) {
+    const open = (raw.children[index] as HTMLElement).createEl("button", { cls: "queue-count", text: String(count), attr: {
+      type: "button", title: t("在文件列表中打开 Raw 目录", "Open the Raw folder in the file explorer"),
+      "aria-label": t(`${index === 3 ? "待处理" : "待校准"} ${count} 项，打开 Raw 目录`, `${count} ${index === 3 ? "pending" : "needing calibration"}; open the Raw folder`)
+    } });
+    open.onclick = actions.onOpenRaw;
+  }
   cells(queues, ["Inbox", String(snapshot.inbox.fileCount), String(snapshot.inbox.todayCount), String(snapshot.inbox.fileCount), "—"]);
   panels.createEl("p", { cls: "settings-note", text: t("今日新增依据文件属性统计；待处理数量用于整理提示，不扣结构分。", "Added today uses file metadata. Pending counts are organization suggestions and do not reduce structural health.") });
-  const history = container.createEl("details", { cls: "history-panel", attr: { open: "" } });
-  history.createEl("summary", { text: t("全年体检记录", "Checks throughout the year") });
+  const history = container.createEl("section", { cls: "history-panel" });
+  const historyHeading = history.createDiv({ cls: "panel-heading" });
+  historyHeading.createEl("h3", { text: t("全年体检记录", "Checks throughout the year") });
   const year = new Date(snapshot.generatedAt).getFullYear();
+  historyHeading.createSpan({ cls: "history-period", text: t(`${year} 年 · ${snapshot.checkHeatmap.filter((day) => day.status !== "none").length} 天有体检记录`, `${year} · ${snapshot.checkHeatmap.filter((day) => day.status !== "none").length} days with checks`) });
+  const historyBody = history.createDiv();
+  const collapse = button(historyHeading, t("收起", "Collapse"), "chevron-up", () => {
+    historyBody.hidden = !historyBody.hidden;
+    collapse.setAttr("aria-expanded", String(!historyBody.hidden));
+    collapse.setAttr("aria-label", historyBody.hidden ? t("展开", "Expand") : t("收起", "Collapse"));
+    collapse.lastElementChild?.setText(historyBody.hidden ? t("展开", "Expand") : t("收起", "Collapse"));
+    setIcon(collapse.firstElementChild as HTMLElement, historyBody.hidden ? "chevron-down" : "chevron-up");
+  });
+  collapse.setAttr("aria-expanded", "true");
   const first = new Date(year, 0, 1, 12);
-  const grid = history.createDiv({ cls: "heatmap-scroll" }).createDiv({ cls: "heatmap" });
+  const grid = historyBody.createDiv({ cls: "heatmap-scroll" }).createDiv({ cls: "heatmap" });
   const week = (date: Date) => Math.floor((Math.round((date.getTime() - first.getTime()) / 86400000) + first.getDay()) / 7);
   for (let month = 0; month < 12; month++) {
     const date = new Date(year, month, 1, 12);
@@ -118,8 +151,8 @@ export function renderSettingsKnowledgeDashboard(
     const cell = grid.createSpan({ cls: `heatmap-cell is-${day.status}`, attr: { title: label, "aria-label": label } });
     cell.style.gridColumn = String(week(date) + 2); cell.style.gridRow = String(date.getDay() + 2);
   }
-  const footer = history.createDiv({ cls: "heatmap-footer" });
-  footer.createSpan({ text: t(`${year} 年 · ${snapshot.checkHeatmap.filter((day) => day.status !== "none").length} 天有体检记录`, `${year} · ${snapshot.checkHeatmap.filter((day) => day.status !== "none").length} days with checks`) });
+  const footer = historyBody.createDiv({ cls: "heatmap-footer" });
+
   const legend = footer.createDiv({ cls: "heatmap-legend" });
   for (const [cls, text] of [["", t("无记录", "No record")], ["success", t("成功", "Successful")], ["failure", t("失败", "Failed")]]) { const item = legend.createSpan(); item.createEl("b", { cls }); item.createSpan({ text }); }
   button(footer, t("查看维护日志", "Maintenance history"), "arrow-up-right", actions.onOpenHistory);
@@ -141,7 +174,8 @@ function table(container: HTMLElement, title: string, total: number, columns: st
   return table.createEl("tbody");
 }
 
-function cells(body: HTMLTableSectionElement, values: string[]): void {
+function cells(body: HTMLTableSectionElement, values: string[]): HTMLTableRowElement {
   const row = body.createEl("tr");
   values.forEach((value, index) => row.createEl(index ? "td" : "th", { text: value, attr: index ? undefined : { scope: "row" } }));
+  return row;
 }
