@@ -1346,7 +1346,7 @@ export class KnowledgeInitializationSection {
     this.renderStatusHeading(
       panel,
       "circle-check",
-      zh ? "知识库状态正常" : "Knowledge folders are ready",
+      zh ? "知识库目录已就绪" : "Knowledge folders are ready",
       "ready"
     );
     panel.createDiv({

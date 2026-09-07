@@ -3737,6 +3737,7 @@ export class CodexSettingTab extends PluginSettingTab {
       resourceDisplayMeta(resource, this.plugin.settings.resources, this.plugin.settings.settingsLanguage),
       resource.description || (english ? "No description" : "暂无说明")
     );
+    details.addClass("echoink-resource-status-card");
     if (resource.kind === "skill") {
       const toggle = details.createEl("input", { cls: "codex-resource-toggle", attr: {
         type: "checkbox", "aria-label": english ? `Enable ${resource.name}` : `启用 ${resource.name}`,
@@ -3760,14 +3761,14 @@ export class CodexSettingTab extends PluginSettingTab {
     const path = resource.contentPath ?? resource.configPath ?? "";
     if (path) {
       const pathButton = details.createEl("button", {
-        cls: "codex-copyable-value",
-        text: path,
+        cls: "codex-copyable-value resource-status-path",
         attr: {
           type: "button",
           "aria-label": english ? `Copy full path: ${path}` : `复制完整路径：${path}`,
           "data-echoink-focus-key": `resource:${resource.id}:path`
         }
       });
+      pathButton.createSpan({ cls: "resource-status-path-label", text: path });
       applyAmicroButton(pathButton, {
         variant: "tertiary",
         motion: "complete",

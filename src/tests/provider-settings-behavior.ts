@@ -6109,7 +6109,7 @@ async function assertKnowledgeInitProgressAndCompletion(): Promise<void> {
     "knowledge:onboarding",
     "an initialized knowledge base must still expose the tutorial anchor"
   );
-  assert.match(donePanel.textContent, /知识库状态正常/u);
+  assert.match(donePanel.textContent, /知识库目录已就绪/u);
   assert.ok(donePanel.querySelector(".echoink-knowledge-init-status-heading.is-init-ready"));
   assert.deepEqual(
     knowledgeInitButtons(donePanel).map((button) => button.textContent),
@@ -6137,7 +6137,7 @@ async function assertKnowledgeInitStructureTruthAndRepair(): Promise<void> {
     emptyPanel.querySelectorAll('[role="tab"]')[0]?.getAttribute("aria-selected"),
     "true"
   );
-  assert.doesNotMatch(emptyPanel.textContent, /知识库状态正常/u);
+  assert.doesNotMatch(emptyPanel.textContent, /知识库目录已就绪/u);
   emptyTab.hide();
 
   // 部分目录缺失：就地说明发生了什么、为什么影响使用、点击什么恢复。
@@ -6196,7 +6196,7 @@ async function assertKnowledgeInitStructureTruthAndRepair(): Promise<void> {
   await flushProviderModalTasks();
   partialTab.display();
   partialPanel = knowledgeInitPanel(partialTab);
-  assert.match(partialPanel.textContent, /知识库状态正常/u);
+  assert.match(partialPanel.textContent, /知识库目录已就绪/u);
   assert.ok(partialPanel.querySelector(".echoink-knowledge-init-status-heading.is-init-ready"));
   // 关闭后重新进入必须重新读 Vault，不能继续复用上次的 ready 快照。
   partialTab.hide();
@@ -6204,7 +6204,7 @@ async function assertKnowledgeInitStructureTruthAndRepair(): Promise<void> {
   partialTab.display();
   await settleKnowledgeInitTab(partialTab);
   assert.match(knowledgeInitPanel(partialTab).textContent, /初始化知识库/u);
-  assert.doesNotMatch(knowledgeInitPanel(partialTab).textContent, /知识库状态正常/u);
+  assert.doesNotMatch(knowledgeInitPanel(partialTab).textContent, /知识库目录已就绪/u);
   partialTab.hide();
 
   // 同名文件冲突必须保留原文件，并明确要求先重命名；不能伪装成可自动覆盖。
@@ -6420,7 +6420,7 @@ async function assertKnowledgeInitRecoveryAndActionErrorRendering(): Promise<voi
   installProviderModalDomFixture();
 
   // 1. settings 已 initialized + 新的 paused 作业（digest 与 Provider 一致）：
-  //    必须显示恢复界面，而不是「知识库状态正常」。
+  //    必须显示恢复界面，而不是「知识库目录已就绪」。
   const maskedState = {
     job: makeKnowledgeInitJobFixture({
       status: "paused",
@@ -6437,7 +6437,7 @@ async function assertKnowledgeInitRecoveryAndActionErrorRendering(): Promise<voi
   masked.settings.knowledgeBase.initialization.status = "initialized";
   const maskedTab = await renderKnowledgeInitTab(masked.plugin);
   const maskedPanel = knowledgeInitPanel(maskedTab);
-  assert.doesNotMatch(maskedPanel.textContent, /知识库状态正常/u,
+  assert.doesNotMatch(maskedPanel.textContent, /知识库目录已就绪/u,
     "a pending job must never be masked by the done panel");
   assert.match(maskedPanel.textContent, /初始化已暂停/u);
   assert.equal(maskedPanel.querySelector(".echoink-knowledge-init-cta")?.textContent, "继续初始化");
@@ -6451,7 +6451,7 @@ async function assertKnowledgeInitRecoveryAndActionErrorRendering(): Promise<voi
   const done = createKnowledgeInitPluginFixture(doneState);
   done.settings.knowledgeBase.initialization.status = "initialized";
   const doneTab = await renderKnowledgeInitTab(done.plugin);
-  assert.match(knowledgeInitPanel(doneTab).textContent, /知识库状态正常/u);
+  assert.match(knowledgeInitPanel(doneTab).textContent, /知识库目录已就绪/u);
   doneTab.hide();
 
   // 3. blocked_conflict：只有「重新检查冲突」+「重新选择方案」，

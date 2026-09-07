@@ -20699,4 +20699,17 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
 .echoink-settings-demo .echoink-settings-inline-editor :is(.echoink-agent-identity-footer,.echoink-memory-correction-actions,.codex-mcp-server-modal-footer,.codex-provider-modal-actions)>button{border:1px solid var(--line);background:var(--bg);color:var(--text)}
 .echoink-settings-demo .echoink-settings-inline-editor :is(.echoink-agent-identity-footer,.echoink-memory-correction-actions,.codex-mcp-server-modal-footer,.codex-provider-modal-actions)>button:is(.mod-cta,.is-primary){border-color:var(--accent);background:var(--accent);color:#fff}
 .echoink-settings-demo .echoink-settings-page .echoink-personalization-actions>button.echoink-settings-save-button:not(:disabled):hover{background:color-mix(in srgb,var(--accent) 88%,var(--text));border-color:var(--accent);color:#fff}
+
+.echoink-settings-demo .echoink-settings-feature-card.echoink-resource-status-card{border:0;border-radius:0;padding:0;background:none;gap:16px;align-items:center}
+.echoink-settings-demo .echoink-resource-status-card>.echoink-settings-feature-copy{flex:1 1 0;min-width:0}
+.echoink-settings-demo .echoink-resource-status-card>input.codex-resource-toggle{flex:0 0 36px;margin-left:auto}
+.echoink-settings-demo .echoink-resource-status-card>button.resource-status-path{display:flex;align-items:center;gap:10px;flex:0 0 100%;width:100%;min-width:0;max-width:100%;padding:13px 0 0;border:0;border-top:1px solid var(--line);border-radius:0;text-align:left;background:none}
+.echoink-settings-demo .resource-status-path-label{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-family:var(--font-monospace);font-size:calc(var(--font-text-size,16px)*.6875);color:var(--secondary)}
+
+@container settings (max-width:600px){
+ .echoink-settings-demo .echoink-agent-profile-card-header{align-items:flex-start;justify-content:flex-start;text-align:left}
+ .echoink-settings-demo .echoink-agent-profile-card-header>.echoink-agent-profile-heading-row{align-items:stretch;text-align:left;width:100%;flex-basis:100%}
+ .echoink-settings-demo .echoink-agent-profile-card-header .setting-item-info{align-self:stretch;text-align:left}
+ .echoink-settings-demo .echoink-agent-profile-card-header .setting-item-name{justify-content:flex-start}
+}
 /* ECHOINK_WORKSPACE_SETTINGS_END */
