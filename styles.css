@@ -20778,7 +20778,7 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
 /* The picker is an Obsidian modal in the owning window, outside settings. */
 .modal.echoink-knowledge-note-picker{display:flex;flex-direction:column;--bg:var(--background-primary);--text:var(--text-normal);--secondary:var(--text-muted);--muted:var(--text-faint);--line:var(--background-modifier-border);--soft:var(--background-secondary);--accent:var(--interactive-accent);--accent-bg:color-mix(in srgb,var(--accent) 12%,var(--bg));width:min(620px,calc(100vw - 32px));max-width:none;max-height:min(720px,calc(100dvh - 40px));padding:0;border:1px solid var(--line);border-radius:13px;color:var(--text);background:var(--bg);overflow:hidden;box-shadow:0 20px 80px #21192d30;font-family:var(--font-interface);font-size:calc(var(--font-text-size,16px)*.8125);line-height:1.55}
 .modal.echoink-knowledge-note-picker *{box-sizing:border-box}
-.modal.echoink-knowledge-note-picker>.modal-close-button{display:none}
+.modal.echoink-knowledge-note-picker .modal-close-button{display:none}
 .modal.echoink-knowledge-note-picker>.modal-content{display:flex;flex-direction:column;min-height:0;padding:0;margin:0;overflow:hidden}
 .modal.echoink-knowledge-note-picker .picker-heading{display:flex;align-items:center;gap:12px;padding:21px 22px 17px;flex:none}
 .modal.echoink-knowledge-note-picker .picker-heading>div{flex:1;min-width:0}

@@ -5,7 +5,7 @@ import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { App, TFile, openTestModals } from "obsidian";
+import { App, Modal, TFile, openTestModals } from "obsidian";
 import type {
   Api,
   AssistantMessage,
@@ -6307,8 +6307,18 @@ async function assertKnowledgeInitNotePickerModalContract(): Promise<void> {
   let panel = knowledgeInitPanel(tab);
   const add = knowledgeInitBatchPicker(panel, "wiki");
   add.focus();
-  add.click();
-  await flushProviderModalTasks();
+  const nativeOpen = Modal.prototype.open;
+  Modal.prototype.open = function () {
+    nativeOpen.call(this);
+    // Reproduce the observed host focus pass after onOpen, before open returns.
+    this.contentEl.querySelector<HTMLElement>(".picker-close")?.focus();
+  };
+  try {
+    add.click();
+    await flushProviderModalTasks();
+  } finally {
+    Modal.prototype.open = nativeOpen;
+  }
   const modal = openTestModals.at(-1);
   assert.ok(modal, "note picker modal opens");
 

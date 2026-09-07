@@ -83,6 +83,21 @@ export class KnowledgeNotePickerModal extends Modal {
   get wasConfirmed(): boolean { return this.confirmed; }
   get isSubmitting(): boolean { return this.submitting; }
 
+  open(): void {
+    super.open();
+    // Obsidian completes its initial focus after onOpen returns. Run after that
+    // lifecycle boundary, and cover its first layout pass without a timer.
+    const search = this.searchEl;
+    search?.focus({ preventScroll: true });
+    this.modalEl.ownerDocument.defaultView?.requestAnimationFrame(() => {
+      if (!search?.isConnected || this.searchEl !== search) return;
+      const active = this.modalEl.ownerDocument.activeElement;
+      if (active === this.closeEl || active === this.modalEl || active === this.modalEl.ownerDocument.body) {
+        search.focus({ preventScroll: true });
+      }
+    });
+  }
+
   onOpen(): void {
     const { zh, targetLabel, targetRole, triggerEl } = this.options;
     this.modalEl.addClass("echoink-knowledge-note-picker");
@@ -147,6 +162,7 @@ export class KnowledgeNotePickerModal extends Modal {
   }
 
   onClose(): void {
+    this.searchEl = null;
     disposeOriginControls(this.contentEl);
     if (this.keydownHandler) this.modalEl.removeEventListener("keydown", this.keydownHandler);
     this.keydownHandler = null;
