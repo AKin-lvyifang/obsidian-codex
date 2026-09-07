@@ -1033,6 +1033,14 @@ export class ProviderModelModal extends Modal {
     });
     this.renderModelCapabilityTags(capabilityTags, model);
     if (enabled) this.renderModelAdvancedSettings(row, actions, enabled);
+    else {
+      const placeholder = actions.createSpan({
+        cls: "codex-provider-model-parameters is-placeholder",
+        text: this.label("参数", "Parameters"),
+        attr: { "aria-hidden": "true" }
+      });
+      setIcon(placeholder.createSpan(), "chevron-down");
+    }
   }
 
   private setModelEnabled(modelId: string, enabled: boolean): void {

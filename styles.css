@@ -20470,6 +20470,7 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
 .echoink-settings-demo .codex-provider-model-advanced{padding:15px;background:var(--soft);border:1px solid var(--line);border-radius:8px;margin:14px 0 0;container-type:normal;min-width:0}
 .echoink-settings-demo .codex-provider-model-parameters{display:flex;gap:5px;align-items:center;margin:0;padding:0;min-height:0;height:auto;border:0;background:none;box-shadow:none;font-size:calc(var(--font-text-size,16px)*.625);font-weight:400;line-height:1.5;color:var(--secondary)}
 .echoink-settings-demo .codex-provider-model-parameters svg{width:12px;height:12px}
+.echoink-settings-demo .codex-provider-model-parameters.is-placeholder{visibility:hidden;pointer-events:none}
 .echoink-settings-demo .codex-provider-model-parameters[aria-expanded=true] svg{transform:rotate(180deg)}
 .echoink-settings-demo .codex-provider-model-manager .echoink-settings-page-description{max-width:920px}
 .echoink-settings-demo .codex-provider-model-modal .codex-provider-model-advanced-description{max-width:none}
