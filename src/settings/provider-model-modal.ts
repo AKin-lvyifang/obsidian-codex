@@ -104,7 +104,7 @@ export class ProviderModelModal extends Modal {
   private manualModelId = "";
   private readonly accessibilityId = `echoink-provider-model-${++providerModelModalInstance}`;
   private readonly handleEscapeCapture = (event: KeyboardEvent): void => {
-    if (event.key !== "Escape") return;
+    if (event.key !== "Escape" || event.isComposing || event.keyCode === 229) return;
     const openPicker = this.modalEl.querySelector<HTMLElement>(
       ".codex-provider-combobox.is-open"
     );
@@ -451,6 +451,9 @@ export class ProviderModelModal extends Modal {
       text: `${item.id} ${item.name} ${apiProviderPresetDisplayName(item.id, this.options.language)}`.toLowerCase()
     }));
     const empty = results.createDiv({ cls: "provider-picker-empty", text: this.label("没有匹配的提供商", "No matching providers"), attr: { role: "status" } });
+    const footer = menu.createDiv({ cls: "provider-picker-footer" });
+    footer.createSpan({ text: this.label("↑ ↓ 选择 · Enter 确认", "↑ ↓ Navigate · Enter Select") });
+    footer.createSpan({ text: this.label("Esc 收起", "Esc Close") });
     const applyProviderFilter = (query: string) => {
       menu.toggleClass("is-searching", Boolean(query));
       let count = 0;
@@ -467,30 +470,38 @@ export class ProviderModelModal extends Modal {
     for (const group of PROVIDER_PICKER_GROUPS) {
       const button = groups.createEl("button", { cls: "provider-group-button", attr: { type: "button", "aria-pressed": String(group.key === activeGroup) } });
       button.createSpan({ text: this.label(group.zh, group.en) });
-      setIcon(button.createSpan(), "chevron-right");
+      setIcon(button.createSpan({ cls: "provider-group-chevron" }), "chevron-right");
       groupButtons.set(group.key, button);
-      button.onclick = (event) => { event.stopPropagation(); activeGroup = group.key; applyProviderFilter(""); };
+      button.onclick = (event) => { event.stopPropagation(); activeGroup = group.key; search.value = ""; applyProviderFilter(""); this.positionCombobox(picker, trigger); };
       button.onkeydown = (event) => {
+        if (event.isComposing || event.keyCode === 229) return;
         const buttons = Array.from(groupButtons.values());
         const index = buttons.indexOf(button);
         if (event.key === "ArrowDown" || event.key === "ArrowUp") {
           event.preventDefault(); buttons[(index + (event.key === "ArrowDown" ? 1 : buttons.length - 1)) % buttons.length]?.focus();
         } else if (event.key === "ArrowRight") {
           event.preventDefault(); visibleComboboxOptions(options)[0]?.focus();
+        } else if (event.key === "Home" || event.key === "End") {
+          event.preventDefault(); buttons[event.key === "Home" ? 0 : buttons.length - 1]?.focus();
+        } else if (event.key === "ArrowLeft") {
+          event.preventDefault(); search.focus();
+        } else if (event.key === "Escape") {
+          event.preventDefault(); event.stopPropagation(); closePicker(true);
         }
       };
     }
 
     const resetProviderFilter = () => {
       search.value = "";
+      activeGroup = providerPickerGroupKey(selected);
       applyProviderFilter("");
     };
     const openPicker = (focusTarget: ComboboxFocusTarget) => {
       this.closeOpenPickers();
       picker.addClass("is-open");
       trigger.setAttr("aria-expanded", "true");
-      this.positionCombobox(picker, trigger);
       resetProviderFilter();
+      this.positionCombobox(picker, trigger);
       focusOpenCombobox(search, options, focusTarget);
     };
     const closePicker = (restoreFocus: boolean) => {
@@ -508,17 +519,21 @@ export class ProviderModelModal extends Modal {
       openPicker("search");
     };
     search.onclick = (event) => event.stopPropagation();
-    search.oninput = () => {
+    const filterSearch = () => {
       const query = search.value.trim().toLowerCase();
       applyProviderFilter(query);
+      this.positionCombobox(picker, trigger);
     };
+    search.oninput = (event) => { if (!(event as InputEvent).isComposing) filterSearch(); };
+    search.addEventListener("compositionend", filterSearch);
     bindComboboxKeyboard({
       picker,
       trigger,
       search,
       options,
       openPicker,
-      closePicker
+      closePicker,
+      focusGroups: () => groupButtons.get(activeGroup)?.focus()
     });
   }
 
@@ -1828,15 +1843,20 @@ export class ProviderModelModal extends Modal {
 
   private positionCombobox(picker: HTMLElement, trigger: HTMLElement): void {
     const rect = trigger.getBoundingClientRect();
-    const viewportPadding = 12;
-    const below = Math.max(0, (this.modalEl.ownerDocument.defaultView ?? window).innerHeight - rect.bottom - viewportPadding);
-    const above = Math.max(0, rect.top - viewportPadding);
-    const opensUpward = below < 220 && above > below;
+    const view = this.modalEl.ownerDocument.defaultView ?? window;
+    const viewport = view.visualViewport;
+    const viewportTop = viewport?.offsetTop ?? 0;
+    const header = picker.closest(".echoink-settings-demo")?.querySelector(".settings-header")?.getBoundingClientRect();
+    const topLimit = Math.max(viewportTop + 8, header && header.top <= viewportTop + 1 ? header.bottom + 8 : 0);
+    const below = Math.max(0, viewportTop + (viewport?.height ?? view.innerHeight) - 8 - rect.bottom - 6);
+    const above = Math.max(0, rect.top - topLimit - 6);
+    const opensUpward = below < 260 && above > below;
     const available = opensUpward ? above : below;
     picker.toggleClass("opens-upward", opensUpward);
+    picker.querySelector(".provider-picker-menu")?.toggleClass("is-height-constrained", available < 260);
     picker.style.setProperty(
       "--codex-combobox-max-height",
-      `${Math.max(96, Math.min(360, available))}px`
+      `${Math.floor(Math.min(400, available))}px`
     );
   }
 
@@ -1975,6 +1995,7 @@ interface ComboboxKeyboardBinding {
   readonly options: HTMLElement;
   readonly openPicker: (focusTarget: ComboboxFocusTarget) => void;
   readonly closePicker: (restoreFocus: boolean) => void;
+  readonly focusGroups?: () => void;
 }
 
 function visibleComboboxOptions(container: HTMLElement): HTMLButtonElement[] {
@@ -1991,7 +2012,7 @@ function focusOpenCombobox(
   focusTarget: ComboboxFocusTarget
 ): void {
   (search.ownerDocument.defaultView ?? window).requestAnimationFrame(() => {
-    if (!search.isConnected) return;
+    if (!search.isConnected || !search.closest(".codex-provider-combobox")?.hasClass("is-open")) return;
     if (focusTarget === "search") {
       search.focus();
       return;
@@ -2008,8 +2029,13 @@ function focusOpenCombobox(
 
 function bindComboboxKeyboard(binding: ComboboxKeyboardBinding): void {
   const { picker, trigger, search, options, openPicker, closePicker } = binding;
+  picker.addEventListener("focusout", (event) => {
+    const target = event.relatedTarget;
+    if (!target || !(target instanceof (picker.ownerDocument.defaultView?.Node ?? Node)) || !picker.contains(target)) closePicker(false);
+  });
 
   trigger.onkeydown = (event) => {
+    if (event.isComposing || event.keyCode === 229) return;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       event.stopPropagation();
@@ -2024,6 +2050,7 @@ function bindComboboxKeyboard(binding: ComboboxKeyboardBinding): void {
   };
 
   search.onkeydown = (event) => {
+    if (event.isComposing || event.keyCode === 229) return;
     const visible = visibleComboboxOptions(options);
     if (event.key === "Escape") {
       event.preventDefault();
@@ -2050,6 +2077,10 @@ function bindComboboxKeyboard(binding: ComboboxKeyboardBinding): void {
   };
 
   options.onkeydown = (event) => {
+    if (event.isComposing || event.keyCode === 229) return;
+    if (event.key === "ArrowLeft" && binding.focusGroups) {
+      event.preventDefault(); event.stopPropagation(); binding.focusGroups(); return;
+    }
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
@@ -2064,7 +2095,7 @@ function bindComboboxKeyboard(binding: ComboboxKeyboardBinding): void {
     ) return;
 
     const target = event.target;
-    if (!(target instanceof HTMLElement)) return;
+    if (!(target instanceof (options.ownerDocument.defaultView?.HTMLElement ?? HTMLElement))) return;
     const current = target.closest<HTMLButtonElement>(
       "button.codex-provider-combobox-option"
     );

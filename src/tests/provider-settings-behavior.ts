@@ -9806,6 +9806,28 @@ async function assertProviderPickerGroupingAndFiltering(): Promise<void> {
   assert.equal(picker.hasClass("is-open"), false);
   assert.equal(trigger.getAttribute("aria-expanded"), "false");
   assert.equal(providerModalTestDocument.activeElement, trigger);
+  trigger.click();
+  headings[0].click();
+  search.value = "codex";
+  search.fireEvent("input");
+  search.fireEvent("keydown", { key: "Escape", isComposing: true });
+  assert.equal(picker.hasClass("is-open"), true, "IME Escape must not close the picker");
+  search.fireEvent("keydown", { key: "Escape" });
+  trigger.fireEvent("keydown", { key: "ArrowDown" });
+  assert.equal(search.value, "");
+  assert.equal(headings[1].getAttribute("aria-pressed"), "true", "reopening restores the selected Provider category");
+  assert.equal(providerModalTestDocument.activeElement, selected);
+  assert.ok(picker.querySelector(".provider-picker-footer")?.textContent.includes("Enter"));
+  search.value = "codex";
+  search.fireEvent("input");
+  headings[1].click();
+  assert.equal(search.value, "", "choosing a category clears the cross-category query");
+  options.fireEvent("keydown", { key: "ArrowLeft", target: selected });
+  assert.equal(providerModalTestDocument.activeElement, headings[1]);
+  headings[1].fireEvent("keydown", { key: "End" });
+  assert.equal(providerModalTestDocument.activeElement, headings[3]);
+  headings[3].fireEvent("keydown", { key: "Escape" });
+  assert.equal(picker.hasClass("is-open"), false);
   modal.close();
   assert.equal(openTestModals.length, modalRegistryBaseline,
     "closing the grouped Provider Modal must release the fake Modal registry");

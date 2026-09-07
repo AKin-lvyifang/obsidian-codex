@@ -801,7 +801,6 @@ export class CodexSettingTab extends PluginSettingTab {
             this.plugin.settings.memory.dreamRunsPerDay = value;
             runsOutput?.setText(zh ? `${value} 次/天` : `${value}/day`);
             await this.plugin.saveSettings();
-            this.scheduleDisplay();
           });
       }));
     runsSetting.controlEl.addClass("general-range");
