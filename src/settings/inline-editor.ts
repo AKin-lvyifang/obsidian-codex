@@ -3,8 +3,9 @@ import { type Modal, setIcon } from "obsidian";
 /** Mount an existing form lifecycle inside Settings without opening another window. */
 export function mountSettingsEditor(modal: Modal, host: HTMLElement, backLabel: string, onBack: () => void): () => void {
   host.addClass("echoink-settings-inline-editor");
-  const back = host.createEl("button", { cls: "settings-back text-button", text: backLabel, attr: { type: "button" } });
+  const back = host.createEl("button", { cls: "settings-back text-button", attr: { type: "button" } });
   setIcon(back.createSpan(), "chevron-left");
+  back.createSpan({ text: backLabel });
   const surface = host.createDiv({ cls: "echoink-settings-inline-surface" });
   modal.containerEl = surface;
   modal.modalEl = surface;

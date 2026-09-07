@@ -242,21 +242,27 @@ export class ProviderModelModal extends Modal {
         cls: "codex-provider-beta-pill",
         text: "Beta"
       });
-    } else {
-      this.titleEl.createSpan({
-        cls: "codex-provider-protocol-pill",
-        text: protocolPill(this.draft.apiProtocol, this.zh)
-      });
     }
 
     this.contentEl.empty();
     this.contentEl.addClass("codex-provider-modal-content");
+    this.contentEl.createEl("p", {
+      cls: "codex-provider-editor-description",
+      text: this.label(
+        "先连接提供商，再选择模型。保存后会将这条配置设为当前选择。",
+        "Connect a provider, then choose models. Saving makes this configuration the current selection."
+      )
+    });
     const form = this.contentEl.createDiv({ cls: "codex-provider-modal-form" });
     form.setAttr("aria-busy", String(
       this.saving || this.preflight.state.status === "loading"
     ));
     const connection = form.createDiv({ cls: "settings-card provider-connection-card" });
-    connection.createDiv({ cls: "settings-card-header" }).createEl("h3", { text: this.label("连接设置", "Connection") });
+    const connectionHeader = connection.createDiv({ cls: "settings-card-header provider-connection-header" });
+    const connectionCopy = connectionHeader.createDiv();
+    connectionCopy.createEl("h3", { text: this.label("连接设置", "Connection") });
+    connectionCopy.createEl("p", { text: this.label("同一提供商的多套配置，可以用名称区分。", "Use names to distinguish configurations for the same provider.") });
+    connectionHeader.createSpan({ cls: "codex-provider-protocol-pill", text: protocolPill(this.draft.apiProtocol) });
     const connectionFields = connection.createDiv({ cls: "provider-connection-grid" });
     this.renderProviderPicker(connectionFields, providerId);
     this.renderProviderNameField(connectionFields);
@@ -264,6 +270,11 @@ export class ProviderModelModal extends Modal {
     if (providerId === "custom") {
       this.renderCustomForm(connection);
     } else {
+      if (providerId !== "openai-codex") {
+        const endpoint = connection.createDiv({ cls: "codex-provider-endpoint-summary" });
+        endpoint.createSpan({ text: this.label("接口地址", "Endpoint") });
+        endpoint.createEl("code", { text: this.draft.baseUrl });
+      }
       if (providerId === "openai-codex") {
         this.renderCodexOAuth(connection);
       }
@@ -279,6 +290,15 @@ export class ProviderModelModal extends Modal {
       attr: { "aria-live": "off" }
     });
     const actions = footer.createDiv({ cls: "codex-provider-modal-actions" });
+    if (providerId !== "openai-codex") {
+      const test = actions.createEl("button", {
+        text: this.options.copy.providers.testConnection,
+        attr: { type: "button", "data-modal-focus-key": "provider-test-connection" }
+      });
+      applyAmicroButton(test, { variant: "secondary" });
+      test.disabled = !this.canTestConnection() || this.preflight.state.status === "loading" || this.saving;
+      test.onclick = () => { this.focusIntent = "provider-test-connection"; void this.testConnection(); };
+    }
     const cancel = actions.createEl("button", {
       text: this.label("取消", "Cancel"),
       attr: { type: "button", "data-modal-focus-key": "cancel" }
@@ -900,12 +920,12 @@ export class ProviderModelModal extends Modal {
 
   private renderModelSelectionField(container: HTMLElement): void {
     const modelCard = container.createDiv({ cls: "settings-card provider-model-card" });
-    const field = this.createField(
-      modelCard,
-      this.label("已启用模型", "Enabled models"),
-      this.modelTriggerId
-    );
-    const actions = field.createDiv({ cls: "codex-provider-model-actions" });
+    const field = modelCard.createDiv({ cls: "codex-provider-modal-field" });
+    const header = field.createDiv({ cls: "settings-card-header provider-model-header" });
+    const copy = header.createDiv();
+    copy.createEl("h3", { text: this.label("已启用模型", "Enabled models") });
+    copy.createEl("p", { text: this.label("勾选可用模型，再指定一个默认模型。", "Enable available models and choose one as the default.") });
+    const actions = header.createDiv({ cls: "codex-provider-model-actions" });
     const discover = actions.createEl("button", {
       text: this.preflight.state.status === "idle"
         ? this.label("获取模型", "Get models")
@@ -915,6 +935,7 @@ export class ProviderModelModal extends Modal {
         "data-modal-focus-key": "model-discover"
       }
     });
+    applyAmicroButton(discover, { variant: "secondary", icon: "refresh-cw" });
     discover.id = this.modelTriggerId;
     discover.disabled = !this.canDiscoverModels()
       || this.preflight.state.status === "loading";
@@ -1060,9 +1081,8 @@ export class ProviderModelModal extends Modal {
     const advanced = container.createEl("details", {
       cls: "codex-provider-model-advanced"
     });
-    advanced.createEl("summary", {
-      text: this.label("高级设置", "Advanced settings")
-    });
+    const summary = advanced.createEl("summary", { text: this.label("参数", "Parameters") });
+    setIcon(summary.createSpan(), "chevron-down");
     const capabilities = advanced.createDiv({
       cls: "codex-provider-model-advanced-group is-capabilities"
     });
@@ -1383,23 +1403,6 @@ export class ProviderModelModal extends Modal {
         void this.discoverModels();
       };
     }
-    if (
-      this.canTestConnection()
-      && this.preflight.state.status !== "loading"
-    ) {
-      const test = statusRow.createEl("button", {
-        cls: "codex-provider-inline-retry",
-        text: this.options.copy.providers.testConnection,
-        attr: {
-          type: "button",
-          "data-modal-focus-key": "provider-test-connection"
-        }
-      });
-      test.onclick = () => {
-        this.focusIntent = "provider-test-connection";
-        void this.testConnection();
-      };
-    }
   }
 
   private refreshPreflightStatus(): void {
@@ -1421,6 +1424,8 @@ export class ProviderModelModal extends Modal {
       discover.disabled = !this.canDiscoverModels()
         || this.preflight.state.status === "loading";
     }
+    const test = this.contentEl.querySelector<HTMLButtonElement>('[data-modal-focus-key="provider-test-connection"]');
+    if (test) test.disabled = !this.canTestConnection() || this.preflight.state.status === "loading" || this.saving;
   }
 
   private modelChoices(): string[] {
@@ -1628,8 +1633,8 @@ export class ProviderModelModal extends Modal {
   }
 
   private updateProtocolPill(): void {
-    this.titleEl.querySelector<HTMLElement>(".codex-provider-protocol-pill")
-      ?.setText(protocolPill(this.draft.apiProtocol, this.zh));
+    this.contentEl.querySelector<HTMLElement>(".codex-provider-protocol-pill")
+      ?.setText(protocolPill(this.draft.apiProtocol));
   }
 
   private createField(container: HTMLElement, label: string, controlId: string): HTMLElement {
@@ -2096,11 +2101,11 @@ export function renderProviderIdentity(
   return container.createSpan({ cls: "codex-provider-option-name", text: name });
 }
 
-function protocolPill(protocol: ApiProviderProtocol, zh: boolean): string {
+function protocolPill(protocol: ApiProviderProtocol): string {
   if (protocol === "openai-codex-responses") return "Codex Responses";
   if (protocol === "anthropic-messages") return "Anthropic Messages API";
   if (protocol === "openai-responses") return "OpenAI Responses API";
-  return zh ? "OpenAI 兼容 API" : "OpenAI-compatible API";
+  return "OpenAI Chat Completions";
 }
 
 function unique(values: readonly string[]): string[] {

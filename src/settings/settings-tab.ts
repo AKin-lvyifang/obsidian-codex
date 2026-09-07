@@ -307,12 +307,14 @@ export class CodexSettingTab extends PluginSettingTab {
   private renderSettingsShell(): void {
     this.disconnectSettingsTabsResizeObserver();
     const { containerEl } = this;
-    containerEl.addClass("echoink-settings-demo");
+    containerEl.removeClass("echoink-settings-demo");
+    containerEl.addClass("echoink-settings-host");
     containerEl.empty();
-    this.settingsTitleEl = containerEl.createDiv({ cls: "codex-settings-title" });
-    this.settingsTabsEl = containerEl.createDiv({ cls: "codex-settings-tabs-slot" });
-    this.settingsBodyEl = containerEl.createDiv({ cls: "codex-settings-body" });
-    this.settingsStatusEl = containerEl.createDiv({
+    const workspace = containerEl.createDiv({ cls: "echoink-settings-demo" });
+    this.settingsTitleEl = workspace.createDiv({ cls: "codex-settings-title" });
+    this.settingsTabsEl = workspace.createDiv({ cls: "codex-settings-tabs-slot" });
+    this.settingsBodyEl = workspace.createDiv({ cls: "codex-settings-body" });
+    this.settingsStatusEl = workspace.createDiv({
       cls: "codex-settings-status",
       attr: {
         role: "status",
@@ -2962,10 +2964,10 @@ export class CodexSettingTab extends PluginSettingTab {
     const zh = this.plugin.settings.settingsLanguage !== "en";
     const label = (chinese: string, english: string) => zh ? chinese : english;
     const wrapper = createSettingsPage(container, {
-      title: label("模型", "Models"),
+      title: label("模型与提供商", "Models and providers"),
       description: label(
-        "添加并管理 EchoInk 使用的 Provider、OpenAI 授权和模型。",
-        "Add and manage the providers, OpenAI authorization, and models used by EchoInk."
+        "管理 EchoInk 使用的 Provider 和模型。每个 Provider 可启用多个模型，指定其中一个作为默认。",
+        "Manage EchoInk's providers and models. Enable multiple models per provider and choose one as the default."
       )
     });
     wrapper.addClass("codex-provider-model-manager");
@@ -2983,15 +2985,15 @@ export class CodexSettingTab extends PluginSettingTab {
     addCopy.createDiv({
       cls: "codex-provider-add-description",
       text: label(
-        "API Key 或 OpenAI OAuth 都直接保存在当前 Vault 的插件设置中。",
-        "API keys and OpenAI OAuth are stored directly in this Vault's plugin settings."
+        "当前模型用于后续对话。",
+        "The current model is used for subsequent conversations."
       )
     });
     const addButton = addSection.createEl("button", {
       cls: "codex-provider-add-button",
       attr: { type: "button", "data-echoink-focus-key": "providers:add" }
     });
-    applyAmicroButton(addButton, { variant: "secondary", motion: "slide", icon: "plus" });
+    applyAmicroButton(addButton, { variant: "primary", motion: "slide", icon: "plus" });
     addButton.createSpan({ text: label("添加模型", "Add model") });
     addButton.onclick = () => {
       this.openProviderModelModal(createApiProviderConfig(), false);
@@ -3016,12 +3018,10 @@ export class CodexSettingTab extends PluginSettingTab {
       );
       const defaultModel = getDefaultApiProviderModel(saved);
       const modelDisplayName = defaultModel
-        ? `${defaultModel.displayName}${saved.models.length > 1
-          ? ` + ${saved.models.length - 1}`
-          : ""}`
+        ? defaultModel.displayName
         : label("未设置模型", "No model set");
       const row = savedList.createDiv({
-        cls: `codex-provider-saved-row is-provider-${providerId}`
+        cls: `codex-provider-saved-row is-provider-${providerId}${saved.id === active?.id ? " is-current" : ""}`
       });
       const identity = row.createDiv({
         cls: "codex-provider-saved-identity",
@@ -3036,11 +3036,16 @@ export class CodexSettingTab extends PluginSettingTab {
       const savedCopy = identity.createDiv({
         cls: "codex-provider-saved-copy"
       });
-      savedCopy.createDiv({
-        cls: "codex-provider-saved-model",
-        text: modelDisplayName
-      });
-      const savedProvider = savedCopy.createDiv({
+      const modelHeading = savedCopy.createDiv({ cls: "codex-provider-saved-model" });
+      modelHeading.createEl("strong", { text: modelDisplayName });
+      if (saved.models.length > 1) {
+        modelHeading.createSpan({ cls: "codex-provider-model-count", text: `+ ${saved.models.length - 1}` });
+      }
+      if (saved.id === active?.id) {
+        modelHeading.createSpan({ cls: "codex-provider-active-badge", text: label("当前选择", "Current selection") });
+      }
+      const metadata = savedCopy.createEl("p", { cls: "codex-provider-saved-details" });
+      const savedProvider = metadata.createSpan({
         cls: "codex-provider-saved-provider",
         text: providerDisplayName,
         attr: {
@@ -3076,18 +3081,13 @@ export class CodexSettingTab extends PluginSettingTab {
             ? "ready"
             : "missing";
       if (providerId === "openai-codex") {
-        rowMeta.createSpan({
+        metadata.createSpan({
           cls: "codex-provider-beta-pill",
           text: "Beta"
         });
       }
-      if (saved.id === active?.id) {
-        rowMeta.createSpan({
-          cls: "codex-provider-active-badge",
-          text: label("当前选择", "Current selection")
-        });
-      }
-      rowMeta.createSpan({
+      metadata.createSpan({ text: "·", attr: { "aria-hidden": "true" } });
+      metadata.createSpan({
         cls: `codex-provider-credential-badge is-${credentialState}`,
         text: credentialState === "oauth-ready"
           ? label("OpenAI 已连接", "OpenAI connected")
@@ -3103,20 +3103,21 @@ export class CodexSettingTab extends PluginSettingTab {
         this.verifiedProviderConnections.get(saved.id)
         === providerConfigurationFingerprint(saved)
       ) {
-        rowMeta.createSpan({
+        metadata.createSpan({
           cls: "codex-provider-connection-badge is-connected",
           text: label("连接正常", "Connection verified")
         });
       }
       if (saved.id !== active?.id) {
-        const use = rowMeta.createEl("button", { text: label("设为当前", "Set as current"), attr: { type: "button", "data-echoink-focus-key": `provider:${saved.id}:activate` } });
+        const use = rowMeta.createEl("button", { cls: "text-button", text: label("设为当前", "Set as current"), attr: { type: "button", "data-echoink-focus-key": `provider:${saved.id}:activate` } });
         use.onclick = () => void this.runSettingsButtonAction(use, "providers", async () => {
           const result = await this.saveAndActivateProviderModel(saved, "", this.verifiedProviderConnections.get(saved.id) === providerConfigurationFingerprint(saved), saved);
           if (!result.saved) throw new Error(result.message ?? this.copy.providers.saveFailed);
         });
       }
       const edit = rowMeta.createEl("button", {
-        cls: "codex-provider-row-action",
+        cls: "codex-provider-row-action is-edit",
+        text: label("编辑", "Edit"),
         attr: {
           type: "button",
           title: label(`编辑 ${providerDisplayName} · ${modelDisplayName}`, `Edit ${providerDisplayName} · ${modelDisplayName}`),
@@ -3124,7 +3125,7 @@ export class CodexSettingTab extends PluginSettingTab {
           "data-echoink-focus-key": `provider:${saved.id}:edit`
         }
       });
-      setIcon(edit, "pencil");
+      applyAmicroButton(edit, { variant: "secondary" });
       edit.onclick = () => {
         this.openProviderModelModal(saved, true);
       };
@@ -3165,7 +3166,9 @@ export class CodexSettingTab extends PluginSettingTab {
   private openInlineEditor(editor: Modal, tab: VisibleSettingsTab, onBack?: () => void): void {
     this.inlineEditor?.dispose();
     const host = this.containerEl.ownerDocument.createElement("div");
-    const backLabel = this.plugin.settings.settingsLanguage === "en" ? "Back to settings" : "返回设置";
+    const backLabel = tab === "providers"
+      ? (this.plugin.settings.settingsLanguage === "en" ? "Back to saved models" : "返回已保存模型")
+      : (this.plugin.settings.settingsLanguage === "en" ? "Back to settings" : "返回设置");
     const dispose = mountSettingsEditor(editor, host, backLabel, () => {
       if (!this.settingsVisible || this.inlineEditor?.host !== host) return;
       this.inlineEditor = null;

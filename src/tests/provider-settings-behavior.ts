@@ -12621,6 +12621,15 @@ if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "visual") {
 } else if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "inline") {
   await assertInlineEditorAsyncRetirement();
   await assertReviewFolderInlineLifecycle();
+} else if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "layout-candidate") {
+  await assertProviderPickerGroupingAndFiltering();
+  await assertProviderModelModalPreflightLifecycle();
+  await assertProviderApiKeyEditLifecycle();
+  await assertProviderModalModelAccessibleNameIncludesValue();
+  await assertProviderModelModalCloseCancelsPendingPreflight();
+  await assertInlineEditorAsyncRetirement();
+  await runSettingsWindowRefreshTest();
+  console.log("PASS affected settings shell, Provider editor and inline lifecycle");
 } else if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "settings-window") {
   await runSettingsWindowRefreshTest();
   console.log("PASS detached settings refresh and cancellation with hidden main window");
