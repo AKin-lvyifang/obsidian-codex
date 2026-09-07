@@ -240,9 +240,11 @@ export class MemoryCorrectionModal extends Modal {
   private preview: Readonly<MemoryCorrectionModalPreview> | null = null;
   private textarea!: HTMLTextAreaElement;
   private previewEl!: HTMLElement;
+  private previewBodyEl!: HTMLElement;
   private statusEl!: HTMLElement;
   private correctButton!: HTMLButtonElement;
   private saveButton!: HTMLButtonElement;
+  private cancelButton!: HTMLButtonElement;
 
   constructor(
     app: App,
@@ -286,7 +288,8 @@ export class MemoryCorrectionModal extends Modal {
       this.record.recallWhen
     );
 
-    const editor = contentEl.createDiv({ cls: "echoink-memory-correction-editor" });
+    const editor = contentEl.createDiv({ cls: "echoink-memory-correction-card echoink-memory-correction-editor" });
+    editor.createDiv({ cls: "echoink-memory-correction-card-title", text: zh ? "你的修正" : "Your correction" });
     const label = editor.createEl("label", {
       cls: "echoink-memory-correction-label",
       text: zh ? "修正说明" : "Correction"
@@ -307,8 +310,9 @@ export class MemoryCorrectionModal extends Modal {
       cls: "echoink-memory-correction-card echoink-memory-correction-preview is-hidden",
       attr: { role: "region", "aria-label": zh ? "修正后预览" : "Corrected preview" }
     });
+    this.previewBodyEl = this.previewEl.createDiv();
 
-    this.statusEl = contentEl.createDiv({
+    this.statusEl = editor.createDiv({
       cls: "echoink-memory-correction-status",
       attr: {
         role: "status",
@@ -316,14 +320,18 @@ export class MemoryCorrectionModal extends Modal {
       }
     });
 
-    const actions = contentEl.createDiv({ cls: "echoink-memory-correction-actions" });
+    const actions = editor.createDiv({ cls: "echoink-memory-correction-actions" });
     this.correctButton = createOriginButton(actions, {
-      text: zh ? "修正" : "Correct",
+      cls: "mod-cta",
+      text: zh ? "生成预览" : "Generate preview",
       attr: { type: "button" }
     });
-    this.saveButton = createOriginButton(actions, {
+    const previewActions = this.previewEl.createDiv({ cls: "echoink-memory-correction-actions" });
+    this.cancelButton = createOriginButton(previewActions, { text: zh ? "取消" : "Cancel", attr: { type: "button" } });
+    this.cancelButton.onclick = () => { if (!this.saving) this.close(); };
+    this.saveButton = createOriginButton(previewActions, {
       cls: "mod-cta",
-      text: zh ? "保存" : "Save",
+      text: zh ? "确认保存" : "Confirm save",
       attr: { type: "button" }
     });
     this.textarea.oninput = () => {
@@ -456,6 +464,7 @@ export class MemoryCorrectionModal extends Modal {
     const zh = this.language !== "en";
     const generating = this.state === "generating";
     this.textarea.disabled = generating || this.saving;
+    this.cancelButton.disabled = this.saving;
     this.correctButton.disabled = this.saving
       || (!generating && !this.correction.trim());
     this.saveButton.disabled = this.saving
@@ -469,11 +478,11 @@ export class MemoryCorrectionModal extends Modal {
       });
       this.correctButton.createSpan({ text: zh ? "停止" : "Stop" });
     } else {
-      this.correctButton.setText(zh ? "修正" : "Correct");
+      this.correctButton.setText(this.preview ? (zh ? "重新生成预览" : "Regenerate preview") : (zh ? "生成预览" : "Generate preview"));
     }
     this.saveButton.setText(this.saving
       ? (zh ? "保存中…" : "Saving…")
-      : (zh ? "保存" : "Save"));
+      : (zh ? "确认保存" : "Confirm save"));
     this.modalEl.toggleClass("is-generating", generating);
     this.modalEl.toggleClass("is-saving", this.saving);
     this.renderPreview();
@@ -481,18 +490,18 @@ export class MemoryCorrectionModal extends Modal {
 
   private renderPreview(): void {
     const preview = this.preview;
-    this.previewEl.empty();
+    this.previewBodyEl.empty();
     this.previewEl.toggleClass("is-hidden", !preview);
     if (!preview) return;
     const zh = this.language !== "en";
-    this.previewEl.createDiv({
+    this.previewBodyEl.createDiv({
       cls: "echoink-memory-correction-card-title",
       text: zh ? "修正后预览" : "Corrected preview"
     });
-    this.addReadOnlyField(this.previewEl, zh ? "标题" : "Title", preview.title);
-    this.addReadOnlyField(this.previewEl, zh ? "正文" : "Content", preview.content);
+    this.addReadOnlyField(this.previewBodyEl, zh ? "标题" : "Title", preview.title);
+    this.addReadOnlyField(this.previewBodyEl, zh ? "正文" : "Content", preview.content);
     this.addReadOnlyField(
-      this.previewEl,
+      this.previewBodyEl,
       zh ? "何时可能想起" : "When it may be recalled",
       preview.recallWhen
     );

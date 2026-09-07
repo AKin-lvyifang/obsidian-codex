@@ -1531,6 +1531,13 @@ export class CodexSettingTab extends PluginSettingTab {
   }
 
   private mountKnowledgeDashboard(page: HTMLElement, zh: boolean): void {
+    if (!this.knowledgeInitSection?.showDashboard) {
+      this.knowledgeDashboardEl = null;
+      page.createEl("p", { cls: "init-awaiting", text: zh
+        ? "初始化后，这里会展示知识库状态与统计。"
+        : "Knowledge status and statistics will appear here after initialization." });
+      return;
+    }
     const section = createSettingsSection(page, {
       surface: "flat"
     });
@@ -1624,12 +1631,11 @@ export class CodexSettingTab extends PluginSettingTab {
   private renderKnowledgeMaintenanceHistory(page: HTMLElement, zh: boolean): void {
     const section = createSettingsSection(page, {
       title: zh ? "维护日志" : "Maintenance log",
-      description: zh
-        ? "查看每次知识维护的记录和报告明细。"
-        : "View every Knowledge maintenance record and its report details.",
-      surface: "group"
+      surface: "flat"
     });
+    section.addClass("standard-section");
     const group = createSettingsGroup(section);
+    group.addClass("settings-card");
     const count = this.plugin.settings.knowledgeBase.maintenanceHistory.length;
     createSettingsNavigationRow(group, {
       title: zh ? "维护日志" : "Maintenance log",
@@ -1655,6 +1661,7 @@ export class CodexSettingTab extends PluginSettingTab {
       backLabel: zh ? "返回知识库" : "Back to Knowledge",
       onBack: () => void this.closeSettingsDetail()
     });
+    page.addClass("echoink-maintenance-history-page");
     const selectedDate = this.knowledgeMaintenanceHistoryDate;
     const filter = page.createDiv({ cls: "history-filter" });
     const filterLabel = zh ? "维护日志日期筛选" : "Maintenance log date filter";
@@ -1678,28 +1685,20 @@ export class CodexSettingTab extends PluginSettingTab {
       this.settingsFocusIntent = "explicit:knowledge:maintenance-history:date";
       this.scheduleDisplay();
     };
-    const section = createSettingsSection(page, {
-      title: zh ? "全部记录" : "All records",
-      description: zh
-        ? "按最近一次维护优先显示。"
-        : "Newest maintenance runs appear first.",
-      surface: "group"
-    });
-    const group = createSettingsGroup(section);
+    const group = createSettingsGroup(page);
     const allEntries = [...this.plugin.settings.knowledgeBase.maintenanceHistory]
       .sort((left, right) => right.at - left.at || right.date.localeCompare(left.date));
     if (!allEntries.length) {
-      createSettingsState(group, zh ? "还没有知识库维护记录。" : "No Knowledge maintenance runs yet.");
+      filter.createSpan({ cls: "history-count", text: zh ? "0 条记录" : "0 records" });
+      this.renderHistoryEmpty(group, zh ? "还没有知识库维护记录" : "No Knowledge maintenance runs yet", zh ? "完成维护后，记录和报告会显示在这里。" : "Records and reports will appear here after maintenance.");
       return;
     }
     const entries = selectedDate
       ? allEntries.filter((entry) => entry.date === selectedDate)
       : allEntries;
+    filter.createSpan({ cls: "history-count", text: zh ? `${entries.length} 条记录` : `${entries.length} records` });
     if (!entries.length) {
-      createSettingsState(
-        group,
-        zh ? "所选日期没有维护记录。" : "No maintenance runs on the selected date."
-      );
+      this.renderHistoryEmpty(group, zh ? "所选日期没有维护记录" : "No maintenance runs on this date", zh ? "选择另一个日期，或清除筛选查看全部记录。" : "Choose another date or clear the filter to see all records.");
       return;
     }
     for (const entry of entries) {
@@ -1720,6 +1719,13 @@ export class CodexSettingTab extends PluginSettingTab {
       }
       applySettingsRow(row);
     }
+  }
+
+  private renderHistoryEmpty(container: HTMLElement, title: string, description: string): void {
+    const empty = container.createDiv({ cls: "settings-empty history-empty" });
+    setIcon(empty.createSpan({ cls: "history-empty-icon" }), "history");
+    empty.createEl("h3", { text: title });
+    empty.createEl("p", { text: description });
   }
 
   private async openKnowledgeMaintenanceReport(relativePath: string): Promise<void> {
@@ -1765,9 +1771,11 @@ export class CodexSettingTab extends PluginSettingTab {
 
     const runSection = createSettingsSection(page, {
       title: zh ? "模型" : "Model",
-      surface: "group"
+      surface: "flat"
     });
+    runSection.addClass("standard-section");
     const runGroup = createSettingsGroup(runSection);
+    runGroup.addClass("settings-card");
     const availableTargets = this.plugin.settings.apiProviders.flatMap(
       (provider) => apiProviderHasUsableCredential(
         provider,
@@ -1873,9 +1881,11 @@ export class CodexSettingTab extends PluginSettingTab {
 
     const management = createSettingsSection(page, {
       title: zh ? "管理" : "Management",
-      surface: "group"
+      surface: "flat"
     });
+    management.addClass("standard-section");
     const managementGroup = createSettingsGroup(management);
+    managementGroup.addClass("settings-card");
     createSettingsNavigationRow(managementGroup, {
       title: zh ? "知识提炼偏好" : "Knowledge refinement preferences",
       description: zh
@@ -2213,7 +2223,8 @@ export class CodexSettingTab extends PluginSettingTab {
     if (!this.archivedConversations && !this.archivedConversationsLoading && !this.archivedConversationsError) {
       void this.loadArchivedConversations();
     }
-    const search = createOriginInput(page, {
+    const toolbar = page.createDiv({ cls: "settings-toolbar review-archive-toolbar" });
+    const search = createOriginInput(toolbar, {
       cls: "echoink-review-archive-search settings-input",
       attr: {
         type: "search",
@@ -2256,9 +2267,10 @@ export class CodexSettingTab extends PluginSettingTab {
       !query || entry.title.toLocaleLowerCase("zh-CN").includes(query)
     );
     if (!entries.length) {
-      createSettingsState(list, query
-        ? (zh ? "没有匹配的已归档会话。" : "No archived conversations match.")
-        : (zh ? "暂无已归档会话。" : "No archived conversations."));
+      this.renderHistoryEmpty(list, query
+        ? (zh ? "没有匹配的已归档会话" : "No archived conversations match")
+        : (zh ? "暂无已归档会话" : "No archived conversations"),
+        query ? (zh ? "试试另一个关键词。" : "Try another keyword.") : (zh ? "归档后的会话会显示在这里。" : "Archived conversations will appear here."));
       return;
     }
     for (const entry of entries) {
@@ -2381,9 +2393,11 @@ export class CodexSettingTab extends PluginSettingTab {
       });
       return;
     }
+    const total = this.personalMemoryState.records.filter((record) => record.status === "current").length;
+    section.querySelector<HTMLElement>(".settings-card-header")?.createSpan({ cls: "settings-badge", text: zh ? `${total} 条记录` : `${total} records` });
     for (const category of PERSONAL_MEMORY_CORRECTION_CATEGORIES) {
       const count = this.currentPersonalMemoryRecords(category.id).length;
-      createSettingsNavigationRow(group, {
+      const row = createSettingsNavigationRow(group, {
         title: zh ? category.labelZh : category.labelEn,
         description: zh ? category.descriptionZh : category.descriptionEn,
         value: String(count),
@@ -2394,6 +2408,7 @@ export class CodexSettingTab extends PluginSettingTab {
           category: category.id
         })
       });
+      row.querySelector<HTMLElement>(".echoink-settings-navigation-value")?.addClass("settings-badge", "review-memory-count");
     }
   }
 
@@ -3651,6 +3666,16 @@ export class CodexSettingTab extends PluginSettingTab {
     refresh.disabled = this.resourceLoadingTab === this.plugin.settings.resourceManagementTab;
     refresh.onclick = () => void this.loadWorkspaceResources(true, this.plugin.settings.resourceManagementTab);
 
+    const english = this.plugin.settings.settingsLanguage === "en";
+    wrapper.createEl("p", {
+      cls: "settings-note resources-tab-hint",
+      text: activeTab === "plugins"
+        ? (english ? "Manage tool bundles available to EchoInk." : "管理可供 EchoInk 使用的工具包。")
+        : activeTab === "mcp"
+          ? (english ? "Connect external services and manage server and tool availability." : "连接外部服务，并管理 Server 与 Tool 的可用范围。")
+          : (english ? "Manage how the Agent approaches tasks. Enable or adjust instructions as needed." : "管理 Agent 处理问题的方式，按需要启用或调整指令。")
+    });
+
     const activeMeta = RESOURCE_TABS.find((tab) => tab.id === activeTab);
     const isLoading = this.resourceLoadingTab === activeTab;
     const loadError = this.resourceLoadErrors[activeTab] ?? "";
@@ -3718,58 +3743,61 @@ export class CodexSettingTab extends PluginSettingTab {
         void this.closeSettingsDetail();
       }
     });
+    page.addClass("echoink-resource-detail");
     this.renderSettingsActionError(page, "resources");
-    const status = createSettingsSection(page, {
-      title: english ? "Status" : "状态",
-      surface: "group"
-    });
-    const group = createSettingsGroup(status);
     const connectionStatus = resource.kind === "mcp-server"
       ? mcpConnectionStatus(resource, this.plugin.settings.resources)
       : "not-mcp";
-    const details = createSettingsFeatureCard(
-      group,
-      resourceDisplayMeta(resource, this.plugin.settings.resources, this.plugin.settings.settingsLanguage),
-      resource.description || (english ? "No description" : "暂无说明")
-    );
-    details.addClass("echoink-resource-status-card");
-    if (resource.kind === "skill") {
-      const toggle = createOriginSwitch(details, { cls: "codex-resource-toggle", attr: {
-        type: "checkbox", "aria-label": english ? `Enable ${resource.name}` : `启用 ${resource.name}`,
-        "data-echoink-focus-key": `resource:${resource.id}:enabled`
-      } });
-      toggle.checked = resource.enabled;
-      toggle.onchange = async () => {
-        toggle.disabled = true;
-        try {
-          await this.plugin.setEchoInkSkillResourceEnabled(resource.id, toggle.checked);
-          toggle.checked = this.plugin.settings.resources.catalog.find((item) => item.id === resource.id)?.enabled ?? false;
-          this.scheduleDisplay();
-        } catch {
-          toggle.checked = this.plugin.settings.resources.catalog.find((item) => item.id === resource.id)?.enabled ?? resource.enabled;
-          const message = english ? "The resource setting was not saved." : "资源开关未保存，请重试。";
-          new Notice(message);
-          this.announceSettingsStatus(message);
-        } finally { toggle.disabled = false; }
-      };
-    }
-    const path = resource.contentPath ?? resource.configPath ?? "";
-    if (path) {
-      const pathButton = createOriginButton(details, {
-        cls: "codex-copyable-value resource-status-path",
-        attr: {
-          type: "button",
-          "aria-label": english ? `Copy full path: ${path}` : `复制完整路径：${path}`,
-          "data-echoink-focus-key": `resource:${resource.id}:path`
-        }
+    if (resource.kind !== "mcp-server") {
+      const status = createSettingsSection(page, {
+        title: resource.name,
+        description: resourceDisplayMeta(resource, this.plugin.settings.resources, this.plugin.settings.settingsLanguage),
+        surface: "group"
       });
-      pathButton.createSpan({ cls: "resource-status-path-label", text: path });
-      applyAmicroButton(pathButton, {
-        variant: "tertiary",
-        motion: "complete",
-        icon: "copy"
-      });
-      pathButton.onclick = () => void this.copySettingsValue(path, pathButton);
+      status.addClass("resources-detail-status");
+      const statusActions = status.querySelector<HTMLElement>(".settings-card-header")!.createDiv({ cls: "resources-status-actions" });
+      statusActions.createSpan({ cls: `status ${resource.enabled ? "healthy" : "neutral"}`, text: resource.enabled
+        ? (english ? "Enabled" : "已启用") : (english ? "Disabled" : "已停用") });
+      if (resource.kind === "skill") {
+        const toggle = createOriginSwitch(statusActions, { cls: "codex-resource-toggle", attr: {
+          type: "checkbox", "aria-label": english ? `Enable ${resource.name}` : `启用 ${resource.name}`,
+          "data-echoink-focus-key": `resource:${resource.id}:enabled`
+        } });
+        toggle.checked = resource.enabled;
+        toggle.onchange = async () => {
+          toggle.disabled = true;
+          try {
+            await this.plugin.setEchoInkSkillResourceEnabled(resource.id, toggle.checked);
+            toggle.checked = this.plugin.settings.resources.catalog.find((item) => item.id === resource.id)?.enabled ?? false;
+            this.scheduleDisplay();
+          } catch {
+            toggle.checked = this.plugin.settings.resources.catalog.find((item) => item.id === resource.id)?.enabled ?? resource.enabled;
+            const message = english ? "The resource setting was not saved." : "资源开关未保存，请重试。";
+            new Notice(message);
+            this.announceSettingsStatus(message);
+          } finally { toggle.disabled = false; }
+        };
+      }
+      const path = resource.contentPath ?? resource.configPath ?? "";
+      if (path) {
+        const pathRow = status.createDiv({ cls: "resources-path" });
+        pathRow.createSpan({ text: english ? "File location" : "文件位置" });
+        const pathButton = createOriginButton(pathRow, {
+          cls: "codex-copyable-value resource-status-path",
+          attr: {
+            type: "button",
+            "aria-label": english ? `Copy full path: ${path}` : `复制完整路径：${path}`,
+            "data-echoink-focus-key": `resource:${resource.id}:path`
+          }
+        });
+        pathButton.createSpan({ cls: "resource-status-path-label", text: path });
+        applyAmicroButton(pathButton, {
+          variant: "tertiary",
+          motion: "complete",
+          icon: "copy"
+        });
+        pathButton.onclick = () => void this.copySettingsValue(path, pathButton);
+      }
     }
     const builtinSkillId = builtinSkillIdForResource(resource);
     if (builtinSkillId) {
@@ -3777,16 +3805,6 @@ export class CodexSettingTab extends PluginSettingTab {
     }
     if (resource.kind === "mcp-server") {
       const connection = resolveMcpConnectionRecord(resource, this.plugin.settings.resources);
-      const diagnostic = connection?.diagnostic;
-      if (diagnostic) {
-        createSettingsState(
-          group,
-          english
-            ? `${mcpDiagnosticLabel(diagnostic.code, true)}: ${diagnostic.message}`
-            : `${mcpDiagnosticLabel(diagnostic.code, false)}：${diagnostic.message}`,
-          "error"
-        );
-      }
       const actions = createSettingsSection(page, {
         title: english ? "Connection" : "连接",
         description: english
@@ -3794,15 +3812,29 @@ export class CodexSettingTab extends PluginSettingTab {
           : "先补全传输配置，再验证 EchoInk 可以调用的工具。",
         surface: "group"
       });
+      actions.addClass("echoink-resource-connection");
+      actions.querySelector<HTMLElement>(".settings-card-header")!.createSpan({
+        cls: `status ${connectionStatus === "verified" ? "healthy" : "neutral"}`,
+        text: mcpConnectionStatusLabel(connectionStatus, this.plugin.settings.settingsLanguage)
+      });
       const actionGroup = createSettingsGroup(actions);
-      if (connection) {
-        createSettingsFeatureCard(
+      const diagnostic = connection?.diagnostic;
+      if (diagnostic) {
+        createSettingsState(
           actionGroup,
-          mcpConnectionSummary(connection, english),
-          mcpCredentialConfigured(connection)
-            ? (english ? "Credential saved securely; the secret is not displayed." : "Credential 已安全保存，Secret 不会回显。")
-            : (english ? "No credential is configured." : "尚未配置 Credential。")
+          english
+            ? `${mcpDiagnosticLabel(diagnostic.code, true)}: ${diagnostic.message}`
+            : `${mcpDiagnosticLabel(diagnostic.code, false)}：${diagnostic.message}`,
+          "error"
         );
+      }
+      if (connection) {
+        const summary = actionGroup.createDiv({ cls: "resources-connection-summary" });
+        summary.createSpan({ cls: "settings-badge", text: connection.transport === "http" ? "HTTP" : "stdio" });
+        summary.createEl("code", { text: mcpConnectionSummary(connection, english).replace(/^(HTTP|stdio) · /u, "") });
+        actionGroup.createEl("p", { cls: "settings-note resources-credential-note", text: mcpCredentialConfigured(connection)
+          ? (english ? "Credential saved securely; the secret is not displayed." : "Credential 已安全保存，Secret 不会回显。")
+          : (english ? "No credential is configured." : "尚未配置 Credential。") });
         this.renderMcpSettingsToggle(actionGroup, {
           title: english ? "Enable server" : "启用 Server",
           description: english
@@ -3822,7 +3854,7 @@ export class CodexSettingTab extends PluginSettingTab {
           action: async (trusted) => await this.plugin.setEchoInkMcpServerTrusted(resource.id, trusted)
         });
       }
-      const row = actionGroup.createDiv({ cls: "echoink-settings-action-row" });
+      const row = actionGroup.createDiv({ cls: "echoink-settings-action-row resources-connection-actions" });
       this.renderMcpConnectionActions(row, resource, connectionStatus);
 
       const toolsSection = createSettingsSection(page, {
@@ -3832,15 +3864,14 @@ export class CodexSettingTab extends PluginSettingTab {
           : "逐个启用并信任发现到的 Tool。只读 Tool 直调；有副作用 Tool 始终经过审批与 Receipt。",
         surface: "group"
       });
+      toolsSection.addClass("echoink-resource-tools");
+      toolsSection.querySelector<HTMLElement>(".settings-card-header")!.createSpan({ cls: "settings-badge", text: english
+        ? `${connection?.tools.length ?? 0} tools` : `${connection?.tools.length ?? 0} 个工具` });
       const toolsGroup = createSettingsGroup(toolsSection);
       if (!connection?.tools.length) {
-        createSettingsState(
-          toolsGroup,
-          english
-            ? "No verified tool list yet. Test the connection to discover tools."
-            : "尚无已验证的 Tool 清单。请测试连接以完成发现。",
-          "neutral"
-        );
+        this.renderResourceEmpty(toolsGroup,
+          english ? "No verified tools yet" : "尚无已验证的 Tool 清单",
+          english ? "Complete the configuration and test the connection to discover tools." : "补全配置并测试连接后，会展示发现到的工具。", "blocks");
       } else {
         for (const tool of connection.tools) {
           const policy = mcpToolPolicy(connection, tool);
@@ -3973,11 +4004,12 @@ export class CodexSettingTab extends PluginSettingTab {
       }
     });
     textarea.value = editor.draftContent;
-    const characters = row.controlEl.createEl("output", { cls: "echoink-skill-character-count" });
-    const status = row.controlEl.createDiv({
+    const footer = row.controlEl.createDiv({ cls: "resources-editor-footer" });
+    const status = footer.createDiv({
       cls: "echoink-knowledge-preference-status echoink-builtin-skill-status",
       attr: { role: "status", "aria-live": "polite" }
     });
+    const characters = footer.createEl("output", { cls: "echoink-skill-character-count" });
     const error = row.controlEl.createDiv({
       cls: "codex-settings-inline-error echoink-builtin-skill-error",
       attr: { role: "alert" }
@@ -4153,12 +4185,12 @@ export class CodexSettingTab extends PluginSettingTab {
     action: (checked: boolean) => Promise<void>;
   }): void {
     const label = container.createEl("label", { cls: "codex-mcp-tool-policy-toggle" });
+    label.createSpan({ text: options.label });
     const toggle = createOriginSwitch(label, {
       attr: { type: "checkbox", "data-echoink-focus-key": options.focusKey }
     });
     toggle.checked = options.checked;
     toggle.onchange = () => void this.runMcpToggleAction(toggle, options.action);
-    label.createSpan({ text: options.label });
   }
 
   private async runMcpToggleAction(
@@ -4267,7 +4299,7 @@ export class CodexSettingTab extends PluginSettingTab {
     const enabled = Number(summary?.dataset.resourceEnabled ?? 0);
     if (summary) {
       const label = this.copy.resources.tabs[tab];
-      summary.setText(resourceSummaryText(
+      summary.querySelector<HTMLElement>(".codex-resource-summary-count")?.setText(resourceSummaryText(
         this.plugin.settings.settingsLanguage,
         label,
         enabled,
@@ -4278,7 +4310,7 @@ export class CodexSettingTab extends PluginSettingTab {
     }
     if (summary) this.announceSettingsStatus(summary.textContent ?? "");
     const empty = body.querySelector<HTMLElement>("[data-resource-search-empty]");
-    empty?.toggleClass("is-hidden", !query.trim() || visible > 0);
+    if (empty) empty.hidden = !query.trim() || visible > 0;
   }
 
   private currentEchoInkResourceCatalog(snapshot: WorkspaceResourceSnapshot | null = this.resourceSnapshot): EchoInkResource[] {
@@ -4326,20 +4358,26 @@ export class CodexSettingTab extends PluginSettingTab {
     );
     if (!resources.length) {
       const emptyText = activeTab === "plugins" ? copy.resources.noPlugins : activeTab === "mcp" ? copy.resources.noMcp : copy.resources.noSkills;
-      createSettingsState(
-        container,
-        `${emptyText} ${resourceEmptyNextStep(activeTab, this.plugin.settings.settingsLanguage)}`,
-        "neutral"
-      );
+      this.renderResourceEmpty(container, emptyText, resourceEmptyNextStep(activeTab, this.plugin.settings.settingsLanguage), "layers");
       return;
     }
-    if (!filtered.length) {
-      const emptyText = activeTab === "plugins" ? copy.resources.noPluginMatches : activeTab === "mcp" ? copy.resources.noMcpMatches : copy.resources.noSkillMatches;
-      createSettingsState(container, emptyText, "neutral")
-        .setAttr("data-resource-search-empty", "true");
-    }
+    const emptyText = activeTab === "plugins" ? copy.resources.noPluginMatches : activeTab === "mcp" ? copy.resources.noMcpMatches : copy.resources.noSkillMatches;
+    const empty = this.renderResourceEmpty(container, emptyText,
+      this.plugin.settings.settingsLanguage === "en" ? "Try another keyword from the resource name or description." : "试试资源名称或描述中的另一个关键词。", "search");
+    empty.setAttr("data-resource-search-empty", "true");
+    empty.hidden = filtered.length > 0;
+    const clear = createOriginButton(empty, { cls: "text-button", text: copy.resources.clearSearch });
+    clear.onclick = () => this.containerEl.querySelector<HTMLButtonElement>(".codex-resource-search-clear")?.click();
     const visibleKeys = new Set(filtered.map((row) => row.key));
     for (const row of rows) this.renderResourceRow(container, row.resource, visibleKeys.has(row.key), row);
+  }
+
+  private renderResourceEmpty(container: HTMLElement, title: string, description: string, icon: string): HTMLElement {
+    const empty = container.createDiv({ cls: "settings-empty resources-empty" });
+    setIcon(empty.createSpan({ cls: "resources-empty-icon" }), icon);
+    empty.createEl("h3", { text: title });
+    empty.createEl("p", { text: description });
+    return empty;
   }
 
   private renderResourceSummary(
@@ -4353,22 +4391,18 @@ export class CodexSettingTab extends PluginSettingTab {
   ): void {
     const copy = this.copy;
     const searching = Boolean(query.trim());
-    container.createDiv({
-      cls: "codex-resource-summary",
-      text: resourceSummaryText(
-        this.plugin.settings.settingsLanguage,
-        label,
-        enabled,
-        total,
-        visible,
-        searching
-      ),
+    const summary = container.createDiv({
+      cls: "codex-resource-summary resources-list-heading",
       attr: {
         "data-resource-summary": "true",
         "data-resource-total": String(total),
         "data-resource-enabled": String(enabled)
       }
     });
+    summary.createSpan({ cls: "codex-resource-summary-count", text: resourceSummaryText(
+      this.plugin.settings.settingsLanguage, label, enabled, total, visible, searching
+    ) });
+    summary.createSpan({ text: this.plugin.settings.settingsLanguage === "en" ? "Enabled" : "启用" });
     if (error) {
       createSettingsState(
         container,
@@ -4490,7 +4524,7 @@ export class CodexSettingTab extends PluginSettingTab {
     const visible = rows.filter((row) => !row.hasClass("is-search-hidden")).length;
     summary.dataset.resourceEnabled = String(enabled);
     const activeTab = this.plugin.settings.resourceManagementTab;
-    summary.setText(resourceSummaryText(
+    summary.querySelector<HTMLElement>(".codex-resource-summary-count")?.setText(resourceSummaryText(
       this.plugin.settings.settingsLanguage,
       this.copy.resources.tabs[activeTab],
       enabled,

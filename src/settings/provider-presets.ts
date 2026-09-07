@@ -120,7 +120,7 @@ export const API_PROVIDER_PRESETS: readonly ApiProviderPreset[] =
     }),
     preset({
       id: "anthropic",
-      name: "Anthropic / Anthropic",
+      name: "Claude Code",
       group: "provider",
       runtimeProviderId: "anthropic",
       baseUrl: "https://api.anthropic.com",
@@ -295,6 +295,10 @@ export function apiProviderConfiguredNameOverride(
     apiProviderPresetDisplayName(providerId, "zh-CN"),
     apiProviderPresetDisplayName(providerId, "en")
   ]);
+  if (providerId === "anthropic") {
+    presetNames.add("Anthropic");
+    presetNames.add("Anthropic / Anthropic");
+  }
   return !configured || presetNames.has(configured) ? "" : configured;
 }
 

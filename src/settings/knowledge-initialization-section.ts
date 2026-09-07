@@ -73,6 +73,7 @@ interface KnowledgeInitProgressRefs {
   readonly percentEl: HTMLElement;
   readonly stepEl: HTMLElement;
   readonly countEl: HTMLElement;
+  readonly stepsEl?: HTMLElement;
 }
 
 /**
@@ -118,6 +119,13 @@ export class KnowledgeInitializationSection {
     private readonly openProviderSettings: () => void | Promise<void>
   ) {}
 
+  get showDashboard(): boolean {
+    return this.loaded && this.structure !== null
+      && this.structure.state !== "uninitialized"
+      && !this.reselecting
+      && (!this.job || this.job.status === "initialized");
+  }
+
   dispose(): void {
     if (this.pollTimer !== null) {
       window.clearTimeout(this.pollTimer);
@@ -144,7 +152,6 @@ export class KnowledgeInitializationSection {
     this.progressRefs = null;
     this.actionErrorEl = null;
     const section = createSettingsSection(page, {
-      title: zh ? "知识库管理" : "Knowledge management",
       surface: "flat"
     });
     const panel = section.createDiv({
@@ -358,6 +365,7 @@ export class KnowledgeInitializationSection {
       cls: "echoink-knowledge-init-percent",
       text: `${data.percent}%`
     });
+    panel.querySelector<HTMLElement>(".echoink-knowledge-init-status-heading")?.appendChild(percentEl);
     const stepEl = rootEl.createDiv({
       cls: "echoink-knowledge-init-step",
       text: data.step
@@ -381,10 +389,12 @@ export class KnowledgeInitializationSection {
 
   private renderTabsPanel(panel: HTMLElement): void {
     const zh = this.zh;
-    panel.createDiv({
-      cls: "echoink-knowledge-init-heading",
-      text: zh ? "初始化知识库" : "Initialize your knowledge base"
-    });
+    panel.addClass("init-setup");
+    const header = panel.createDiv({ cls: "settings-card-header" });
+    const copy = header.createDiv();
+    copy.createEl("h3", { text: zh ? "让现有笔记成为知识库" : "Turn your notes into a knowledge base" });
+    copy.createEl("p", { text: zh ? "先安放原始资料，再提炼为可以持续积累的 Wiki。" : "Organize source material, then distill it into a growing Wiki." });
+    header.createSpan({ cls: "settings-badge", text: zh ? "待初始化" : "Ready to initialize" });
     const tablist = panel.createDiv({
       cls: "echoink-knowledge-init-tabs",
       attr: {
@@ -467,46 +477,25 @@ export class KnowledgeInitializationSection {
 
   private renderRecommendedBody(body: HTMLElement): void {
     const zh = this.zh;
-    body.createDiv({
-      cls: "echoink-knowledge-init-copy",
+    body.createEl("p", {
+      cls: "echoink-knowledge-init-copy init-plan-description",
       text: zh
-        ? "默认方案采用 Karpathy（卡帕西）的分层知识库管理方法。EchoInk 会先整理目录，再用 AI 把原始笔记提炼成便于长期使用的 Wiki。"
-        : "The default plan follows Karpathy-style layered knowledge management. EchoInk first organizes the folder structure, then uses AI to distill original notes into a durable Wiki."
+        ? "现有笔记与附件原样归入 Raw，保留原文和相对路径。Markdown 笔记由 AI 每批最多 20 篇提炼到 Wiki，没有可提炼内容时跳过。"
+        : "Existing notes and attachments move into Raw unchanged, preserving their relative paths. AI distills Markdown into Wiki in batches of up to 20, skipping files with nothing to extract."
     });
-    body.createDiv({
-      cls: "echoink-knowledge-init-plan-lead",
-      text: zh ? "初始化会创建这些目录：" : "Initialization creates these folders:"
+    const route = body.createDiv({ cls: "init-route" });
+    const stops = [
+      ["files", zh ? "现有笔记与附件" : "Notes and attachments"],
+      ["folders", zh ? "Raw · 原始资料" : "Raw · source material"],
+      ["book-text", zh ? "Wiki · 提炼后的知识" : "Wiki · distilled knowledge"]
+    ];
+    stops.forEach(([icon, label], index) => {
+      if (index) setIcon(route.createSpan({ cls: "init-route-arrow" }), "arrow-right");
+      const stop = route.createSpan({ cls: index === 2 ? "init-route-destination" : "" });
+      setIcon(stop.createSpan(), icon); stop.createSpan({ text: label });
     });
-    const folderList = body.createEl("dl", {
-      cls: "echoink-knowledge-init-folder-purposes"
-    });
-    for (const directory of KNOWLEDGE_INIT_DIRECTORIES) {
-      const row = folderList.createDiv({ cls: "echoink-knowledge-init-folder-purpose" });
-      row.createEl("dt", { text: directory.labelEn });
-      row.createEl("dd", {
-        text: zh ? directory.descriptionZh : directory.descriptionEn
-      });
-    }
-    const assetsRow = folderList.createDiv({ cls: "echoink-knowledge-init-folder-purpose" });
-    assetsRow.createEl("dt", { text: "Assets" });
-    assetsRow.createEl("dd", {
-      text: zh
-        ? "知识库后续使用的图片、PDF 等附件"
-        : "Images, PDFs, and other attachments used by the knowledge base"
-    });
-    body.createDiv({
-      cls: "echoink-knowledge-init-plan-copy",
-      text: zh
-        ? "现有的普通文件（包括 Markdown、图片和 PDF）会原样归入 Raw，并保留原来的相对路径。EchoInk 不会改写原文。随后，AI 最多每 20 篇 Markdown 分批提炼 Wiki；没有可提炼内容时会直接跳过。"
-        : "Existing files, including Markdown, images, and PDFs, move into Raw unchanged while keeping their relative paths. EchoInk does not rewrite the source files. AI then distills Markdown into Wiki in batches of up to 20 and simply skips files with nothing useful to extract."
-    });
-    body.createDiv({
-      cls: "echoink-knowledge-init-plan-confirm",
-      text: zh
-        ? "确认无误后，点击“开始初始化”。"
-        : "When this looks right, select “Start initialization”."
-    });
-    const actions = body.createDiv({ cls: "echoink-knowledge-init-actions" });
+    this.renderFolderChips(body);
+    const actions = this.renderInitializationFooter(body);
     const cta = actions.createEl("button", {
       cls: "mod-cta echoink-knowledge-init-cta",
       text: zh ? "开始初始化" : "Start initialization",
@@ -515,6 +504,31 @@ export class KnowledgeInitializationSection {
     applyAmicroButton(cta, { variant: "primary", motion: "complete" });
     cta.disabled = this.busy;
     cta.onclick = () => void this.startRecommended();
+  }
+
+  private renderFolderChips(body: HTMLElement): void {
+    const folders = body.createDiv({ cls: "init-folders" });
+    folders.createSpan({ text: this.zh ? "将建立的目录" : "Folders to create" });
+    const chips = folders.createDiv();
+    for (const directory of KNOWLEDGE_INIT_DIRECTORIES) {
+      const chip = chips.createSpan({ attr: { title: this.zh ? directory.descriptionZh : directory.descriptionEn } });
+      setIcon(chip.createSpan(), "folders"); chip.createSpan({ text: directory.labelEn });
+    }
+    const assets = chips.createSpan({ attr: { title: this.zh ? "知识库后续使用的图片、PDF 等附件" : "Images, PDFs, and other knowledge-base attachments" } });
+    setIcon(assets.createSpan(), "folders"); assets.createSpan({ text: "Assets" });
+  }
+
+  private renderInitializationFooter(body: HTMLElement): HTMLElement {
+    const footer = body.createDiv({ cls: "init-bottom" });
+    const items = this.job?.items;
+    const markdown = items?.filter((item) => isKnowledgeInitializationMarkdownPath(item.sourcePath)).length ?? 0;
+    const copy = footer.createSpan({ text: items
+      ? (this.zh ? `${markdown} 篇 Markdown · ${items.length - markdown} 个其他文件` : `${markdown} Markdown · ${items.length - markdown} other files`)
+      : (this.zh ? "开始时将扫描现有资料" : "Existing material is scanned when you start") });
+    const model = this.currentProviderSnapshot()?.model;
+    copy.createSpan({ text: model ? (this.zh ? `当前模型：${model}` : `Current model: ${model}`)
+      : (this.zh ? "提炼知识需要可用模型" : "Knowledge extraction requires an available model") });
+    return footer.createDiv({ cls: "echoink-knowledge-init-actions" });
   }
 
   private async startRecommended(): Promise<void> {
@@ -567,7 +581,8 @@ export class KnowledgeInitializationSection {
     }
     this.dirListEl = body.createDiv({ cls: "echoink-knowledge-init-dirs" });
     this.renderDirectoryList();
-    const actions = body.createDiv({ cls: "echoink-knowledge-init-actions" });
+    this.renderFolderChips(body);
+    const actions = this.renderInitializationFooter(body);
     const cta = actions.createEl("button", {
       cls: "mod-cta echoink-knowledge-init-cta",
       text: zh ? "开始初始化" : "Start initialization",
@@ -878,6 +893,7 @@ export class KnowledgeInitializationSection {
     progress: Readonly<KnowledgeBaseStructureRepairProgress>
   ): void {
     const zh = this.zh;
+    panel.addClass("init-progress");
     this.renderStatusHeading(
       panel,
       "loader-circle",
@@ -929,7 +945,10 @@ export class KnowledgeInitializationSection {
       step,
       ariaLabel: zh ? "初始化进度" : "Initialization progress"
     });
-    const actions = panel.createDiv({ cls: "echoink-knowledge-init-actions" });
+    const stepsEl = panel.createEl("ol", { cls: "echoink-knowledge-init-steps" });
+    this.renderProgressSteps(stepsEl, progress.stage);
+    this.progressRefs = { ...this.progressRefs, stepsEl };
+    const actions = this.renderInitializationFooter(panel);
     const pause = actions.createEl("button", {
       cls: "echoink-knowledge-init-secondary",
       text: zh ? "暂停初始化" : "Pause initialization",
@@ -974,7 +993,21 @@ export class KnowledgeInitializationSection {
     refs.stepEl.setText(progressStepLabel(progress.stage, this.zh));
     refs.countEl.setText(progress.total > 0 ? `${progress.completed} / ${progress.total}` : "");
     refs.statusEl.setText(progressStatusSentence(progress.stage, progress, this.zh));
+    if (refs.stepsEl) this.renderProgressSteps(refs.stepsEl, progress.stage);
     return true;
+  }
+
+  private renderProgressSteps(container: HTMLElement, stage: KnowledgeInitializationProgressStage): void {
+    container.empty();
+    const stages: KnowledgeInitializationProgressStage[] = ["directories", "moving", "extracting", "guide", "done"];
+    const active = stages.indexOf(stage);
+    [this.zh ? "建立目录" : "Create folders", this.zh ? "安放资料" : "Place sources", this.zh ? "提炼知识" : "Distill knowledge", this.zh ? "生成索引" : "Create indexes"].forEach((label, index) => {
+      const complete = active > index;
+      const item = container.createEl("li", { cls: complete ? "complete" : "", attr: active === index ? { "aria-current": "step" } : undefined });
+      const marker = item.createEl("b");
+      if (complete) setIcon(marker, "check"); else marker.setText(String(index + 1));
+      item.createSpan({ text: label });
+    });
   }
 
   private schedulePoll(): void {
@@ -1343,19 +1376,15 @@ export class KnowledgeInitializationSection {
 
   private renderDonePanel(panel: HTMLElement): void {
     const zh = this.zh;
-    this.renderStatusHeading(
-      panel,
-      "circle-check",
-      zh ? "知识库目录已就绪" : "Knowledge folders are ready",
-      "ready"
-    );
-    panel.createDiv({
-      cls: "echoink-knowledge-init-copy",
-      text: zh
-        ? "固定目录完整，EchoInk 可以正常整理原始笔记、Wiki 和附件。"
-        : "The fixed folder structure is complete, so EchoInk can organize original notes, Wiki content, and attachments."
-    });
-    const actions = panel.createDiv({ cls: "echoink-knowledge-init-actions" });
+    panel.addClass("initialization", "is-ready");
+    const icon = panel.createSpan({ cls: "ready-icon", attr: { "aria-hidden": "true" } });
+    setIcon(icon, "check");
+    const copy = panel.createDiv({ cls: "echoink-init-ready-copy" });
+    copy.createEl("h3", { text: zh ? "知识库目录已就绪" : "Knowledge folders are ready" });
+    copy.createEl("p", { text: zh
+      ? "固定目录完整，EchoInk 可以正常整理原始笔记、Wiki 和附件。"
+      : "The fixed folder structure is complete, so EchoInk can organize original notes, Wiki content, and attachments." });
+    const actions = panel.createDiv({ cls: "echoink-knowledge-init-actions init-actions" });
     const open = actions.createEl("button", {
       cls: "mod-cta echoink-knowledge-init-cta",
       text: zh ? "打开 Wiki 首页" : "Open Wiki home",

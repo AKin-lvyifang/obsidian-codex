@@ -669,9 +669,9 @@ async function assertMemoryCorrectionModalContract(): Promise<void> {
   assert.ok(textarea);
   assert.equal(textarea.getAttribute("rows"), "7");
   const correct = Array.from(modal.contentEl.querySelectorAll("button"))
-    .find((button) => button.textContent === "修正");
+    .find((button) => button.textContent === "生成预览");
   const saveButton = Array.from(modal.contentEl.querySelectorAll("button"))
-    .find((button) => button.textContent === "保存");
+    .find((button) => button.textContent === "确认保存");
   assert.ok(correct);
   assert.ok(saveButton);
   assert.equal(correct.disabled, true);
@@ -691,7 +691,7 @@ async function assertMemoryCorrectionModalContract(): Promise<void> {
   assert.equal(generationSignals[0]?.aborted, true);
   assert.equal(textarea.value, "第一行纠正\n第二行补充");
   assert.equal(textarea.disabled, false);
-  assert.equal(correct.textContent, "修正");
+  assert.equal(correct.textContent, "生成预览");
   generations[0]!.resolve({
     title: "迟到标题",
     content: "迟到内容",
@@ -774,7 +774,7 @@ async function assertMemoryCorrectionModalContract(): Promise<void> {
     'textarea[aria-label="修正说明"]'
   );
   const closeCorrect = Array.from(cancelledModal.contentEl.querySelectorAll("button"))
-    .find((button) => button.textContent === "修正");
+    .find((button) => button.textContent === "生成预览");
   assert.ok(closeTextarea);
   assert.ok(closeCorrect);
   closeTextarea.value = "关闭时停止";
@@ -1096,6 +1096,24 @@ async function assertSkillToggleNotCommittedRestoresAuthoritativeUi(): Promise<v
     `[data-echoink-focus-key="resource:${skill.id}:enabled"]`
   );
   assert.ok(toggle);
+  const search = tab.containerEl.querySelector<ProviderModalTestElement>(".codex-resource-search-input")!;
+  const empty = tab.containerEl.querySelector<ProviderModalTestElement>("[data-resource-search-empty]")!;
+  const summary = tab.containerEl.querySelector<ProviderModalTestElement>("[data-resource-summary]")!;
+  const enabledColumn = summary.children[1];
+  assert.ok(empty);
+  assert.equal(empty.hidden, true);
+  search.focus(); search.value = "absent-resource"; search.oninput?.();
+  const filters = tab as unknown as { applyResourceSearchFilter(tab: string): void; clearResourceSearchDebounceTimer(): void; updateResourceSummaryCounts(): void };
+  filters.clearResourceSearchDebounceTimer(); filters.applyResourceSearchFilter("skills");
+  assert.equal(empty.hidden, false);
+  assert.equal(search.ownerDocument.activeElement, search);
+  filters.updateResourceSummaryCounts();
+  assert.equal(summary.children[1], enabledColumn);
+  tab.containerEl.querySelector<ProviderModalTestElement>(".codex-resource-search-clear")!.click();
+  assert.equal(empty.hidden, true);
+  assert.equal(search.value, "");
+  assert.equal(search.ownerDocument.activeElement, search);
+  assert.equal(summary.children[1], enabledColumn);
   const row = toggle.closest<ProviderModalTestElement>(".codex-resource-row");
   assert.ok(row);
   assert.equal(toggle.checked, false);
@@ -2415,6 +2433,8 @@ async function assertSettingsAccessibleNamesAndOverflow(): Promise<void> {
       maintenanceRecoveryStatus: { state: "ready" as const, message: "" },
       getDashboardSnapshot: async () => dashboardSnapshot
     }),
+    getEchoInkKnowledgeBaseStructure: async () =>
+      makeKnowledgeBaseStructureFixture("ready"),
     listPiConversations: async () => [],
     setPiConversationStatus: async () => undefined,
     getCodexView: () => null
@@ -2475,6 +2495,11 @@ async function assertSettingsAccessibleNamesAndOverflow(): Promise<void> {
     ),
     "Custom"
   );
+  for (const language of ["zh-CN", "en"] as const) {
+    assert.equal(apiProviderConfiguredDisplayName("anthropic", "Anthropic / Anthropic", language), "Claude Code");
+    assert.equal(apiProviderConfiguredDisplayName("anthropic", "Anthropic", language), "Claude Code");
+    assert.equal(apiProviderConfiguredDisplayName("anthropic", "My private Claude", language), "My private Claude");
+  }
   settings.settingsLanguage = "en";
   tab.display();
   assert.equal(savedProviderName(provider.id), "DeepSeek");
@@ -5496,7 +5521,7 @@ async function assertKnowledgeSettingsDetailRetiresLegacyControls(): Promise<voi
   // 文案，也让后续点击能正常触发 scheduleDisplay。
   tab.display();
   assert.match(tab.containerEl.textContent, /知识库管理/u);
-  assert.match(tab.containerEl.textContent, /初始化知识库/u);
+  assert.match(tab.containerEl.textContent, /让现有笔记成为知识库/u);
   assert.match(tab.containerEl.textContent, /\/ask 先查知识库/u);
   assert.match(tab.containerEl.textContent, /是否写入由会话底部的工作区选项和你的要求决定/u);
   assert.match(tab.containerEl.textContent, /知识提炼偏好/u);
@@ -5800,6 +5825,8 @@ async function assertKnowledgeInitDefaultTabAndOneClickStart(): Promise<void> {
   const { plugin, calls } = createKnowledgeInitPluginFixture(state);
   const tab = await renderKnowledgeInitTab(plugin);
   const panel = knowledgeInitPanel(tab);
+  assert.equal(tab.containerEl.querySelector(".settings-knowledge-dashboard"), null);
+  assert.ok(tab.containerEl.querySelector(".init-awaiting"));
   assert.equal(
     panel.getAttribute("data-echoink-focus-key"),
     "knowledge:onboarding",
@@ -5821,18 +5848,14 @@ async function assertKnowledgeInitDefaultTabAndOneClickStart(): Promise<void> {
   assert.ok(tabpanel);
   assert.equal(tabpanel.getAttribute("aria-labelledby"), defaultTab.getAttribute("id"));
 
-  // 默认方案内容：直接用用户能理解的顺序说清楚方法、十个目录、
-  // 原笔记保护与 AI 分批提炼；不再藏在「方案说明」折叠区。
-  assert.match(panel.textContent, /Karpathy（卡帕西）/u);
-  assert.match(panel.textContent, /现有的普通文件/u);
-  assert.match(panel.textContent, /Markdown、图片和 PDF/u);
-  assert.match(panel.textContent, /Raw/u);
-  assert.match(panel.textContent, /AI/u);
+  // 默认方案保留真实文件、相对路径和分批提炼语义；十个目录以紧凑 chips 展示。
+  assert.match(panel.textContent, /原样归入 Raw/u);
+  assert.match(panel.textContent, /保留原文和相对路径/u);
+  assert.match(panel.textContent, /Markdown/u);
+  assert.match(panel.textContent, /AI 每批最多 20 篇/u);
   assert.match(panel.textContent, /Wiki/u);
-  assert.match(panel.textContent, /不会改写原文/u);
-  assert.match(panel.textContent, /没有可提炼内容时会直接跳过/u);
-  assert.match(panel.textContent, /确认无误后/u);
-  assert.equal(panel.querySelectorAll(".echoink-knowledge-init-folder-purpose").length, 10);
+  assert.match(panel.textContent, /没有可提炼内容时跳过/u);
+  assert.equal(panel.querySelector(".init-folders")?.querySelector("div")?.children.length, 10);
   assert.equal(panel.querySelector(".echoink-knowledge-init-plan-details"), null);
   assert.doesNotMatch(panel.textContent, /一次点击|体系外的 Markdown/u);
   assert.equal(panel.querySelectorAll(".mod-cta").length, 1);
@@ -6114,13 +6137,15 @@ async function assertKnowledgeInitProgressAndCompletion(): Promise<void> {
   done.settings.knowledgeBase.initialization.status = "initialized";
   const doneTab = await renderKnowledgeInitTab(done.plugin);
   const donePanel = knowledgeInitPanel(doneTab);
+  assert.ok(doneTab.containerEl.querySelector(".settings-knowledge-dashboard"));
+  assert.equal(doneTab.containerEl.querySelector(".init-awaiting"), null);
   assert.equal(
     donePanel.getAttribute("data-echoink-focus-key"),
     "knowledge:onboarding",
     "an initialized knowledge base must still expose the tutorial anchor"
   );
   assert.match(donePanel.textContent, /知识库目录已就绪/u);
-  assert.ok(donePanel.querySelector(".echoink-knowledge-init-status-heading.is-init-ready"));
+  assert.ok(donePanel.hasClass("is-ready"));
   assert.deepEqual(
     knowledgeInitButtons(donePanel).map((button) => button.textContent),
     ["打开 Wiki 首页", "整理新增笔记", "补齐日记与模板设置"]
@@ -6141,7 +6166,7 @@ async function assertKnowledgeInitStructureTruthAndRepair(): Promise<void> {
   empty.settings.knowledgeBase.initialization.status = "initialized";
   const emptyTab = await renderKnowledgeInitTab(empty.plugin);
   const emptyPanel = knowledgeInitPanel(emptyTab);
-  assert.match(emptyPanel.textContent, /初始化知识库/u);
+  assert.match(emptyPanel.textContent, /让现有笔记成为知识库/u);
   assert.equal(emptyPanel.querySelectorAll('[role="tab"]').length, 2);
   assert.equal(
     emptyPanel.querySelectorAll('[role="tab"]')[0]?.getAttribute("aria-selected"),
@@ -6207,13 +6232,13 @@ async function assertKnowledgeInitStructureTruthAndRepair(): Promise<void> {
   partialTab.display();
   partialPanel = knowledgeInitPanel(partialTab);
   assert.match(partialPanel.textContent, /知识库目录已就绪/u);
-  assert.ok(partialPanel.querySelector(".echoink-knowledge-init-status-heading.is-init-ready"));
+  assert.ok(partialPanel.hasClass("is-ready"));
   // 关闭后重新进入必须重新读 Vault，不能继续复用上次的 ready 快照。
   partialTab.hide();
   partialState.structure = makeKnowledgeBaseStructureFixture("uninitialized");
   partialTab.display();
   await settleKnowledgeInitTab(partialTab);
-  assert.match(knowledgeInitPanel(partialTab).textContent, /初始化知识库/u);
+  assert.match(knowledgeInitPanel(partialTab).textContent, /让现有笔记成为知识库/u);
   assert.doesNotMatch(knowledgeInitPanel(partialTab).textContent, /知识库目录已就绪/u);
   partialTab.hide();
 
@@ -12741,6 +12766,15 @@ if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "visual") {
   await assertFreshCustomModelDiscoveryLifecycle();
   await assertProviderLimitOverrideRoundTrip();
   console.log("PASS affected settings pages, editors and existing action lifecycles");
+} else if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "knowledge-ui-candidate") {
+  await assertKnowledgeInitDefaultTabAndOneClickStart();
+  await assertKnowledgeInitCustomTabDirectoriesAndAssignments();
+  await assertKnowledgeInitPausedMappingsHideTechnicalDetails();
+  await assertKnowledgeInitProgressAndCompletion();
+  await assertKnowledgeInitStructureTruthAndRepair();
+  await assertKnowledgeInitRecoveryAndActionErrorRendering();
+  await assertKnowledgeSettingsDetailRetiresLegacyControls();
+  console.log("PASS affected Knowledge initialization UI and local state lifecycles");
 } else if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "settings-window") {
   await runSettingsWindowRefreshTest();
   console.log("PASS detached settings refresh and cancellation with hidden main window");
