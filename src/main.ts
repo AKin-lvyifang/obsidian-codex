@@ -402,6 +402,7 @@ export default class CodexForObsidianPlugin extends Plugin {
     const zh = this.settings.settingsLanguage !== "en";
     const copy = onboardingCoachmarkCopy(step, zh);
     this.onboardingWorkspaceCoachmark = mountEchoInkOnboardingCoachmark({
+      app: this.app,
       anchor,
       stepClass: step,
       stepLabel: copy.step,

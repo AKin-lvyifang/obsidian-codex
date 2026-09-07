@@ -1,4 +1,4 @@
-import { setIcon } from "obsidian";
+import { Scope, setIcon, type App } from "obsidian";
 import {
   renderAnimatedSettingsTabIcon,
   type AnimatedSettingsTabIconName
@@ -6,6 +6,7 @@ import {
 import type { EchoInkOnboardingStep } from "../settings/onboarding";
 
 export interface EchoInkOnboardingCoachmarkOptions {
+  readonly app?: Pick<App, "keymap" | "scope">;
   readonly anchor: HTMLElement;
   readonly highlightAnchor?: HTMLElement;
   readonly stepClass: string;
@@ -166,11 +167,28 @@ export function mountEchoInkOnboardingCoachmark(
     event.stopImmediatePropagation();
     void run(dismiss);
   };
+  // Obsidian 1.13.7 handles keys at window capture through a per-window
+  // Scope stack, before document listeners. Use that same stack, as our Origin
+  // Select does. pushScope targets activeWindow; a background settings render
+  // waits for its owning window to focus instead of claiming another window.
+  let escapeScope: Scope | null = null;
+  const activateEscapeScope = () => {
+    if (destroyed || escapeScope || !options.app?.keymap || !ownerDocument.hasFocus()) return;
+    escapeScope = new Scope(options.app.scope);
+    escapeScope.register(null, "Escape", (event) => {
+      onKeyDown(event);
+      return false;
+    });
+    options.app.keymap.pushScope(escapeScope);
+  };
   const frames: number[] = [];
   const destroy = (restoreFocus = false) => {
     if (destroyed) return;
     destroyed = true;
     observer?.disconnect();
+    ownerWindow.removeEventListener("focus", activateEscapeScope);
+    if (escapeScope) options.app?.keymap.popScope(escapeScope);
+    escapeScope = null;
     frames.forEach(frame => ownerWindow.cancelAnimationFrame(frame));
     ownerWindow.removeEventListener("resize", position);
     ownerDocument.removeEventListener("scroll", position, true);
@@ -186,6 +204,7 @@ export function mountEchoInkOnboardingCoachmark(
   if (spotlight) observer?.observe(highlightAnchor);
   observer?.observe(coachmark);
   ownerWindow.addEventListener("resize", position);
+  ownerWindow.addEventListener("focus", activateEscapeScope);
   ownerDocument.addEventListener("scroll", position, true);
   ownerDocument.addEventListener("keydown", onKeyDown, true);
   // Settings restores scroll after render; settle two layout frames before
@@ -202,6 +221,7 @@ export function mountEchoInkOnboardingCoachmark(
   }));
   if (options.initialFocus === "anchor") anchor.focus({ preventScroll: true });
   else (action ?? coachmark).focus({ preventScroll: true });
+  activateEscapeScope();
   return Object.freeze({ element: coachmark, destroy });
 }
 

@@ -33,6 +33,7 @@ export function createOriginSelectHostFixture(ownerWindow: Window) {
   ownerWindow.addEventListener("keydown", onKey, true);
   return {
     app: { keymap, scope: base } as unknown as Pick<App, "keymap" | "scope">,
+    dispatch(event: KeyboardEvent) { onKey(event); },
     get depth() { return stack.length; },
     get escapes() { return escapes; },
     dispose() { ownerWindow.removeEventListener("keydown", onKey, true); }

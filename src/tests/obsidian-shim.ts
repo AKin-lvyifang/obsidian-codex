@@ -1,3 +1,4 @@
+export { Scope } from "./origin-obsidian-dom-shim";
 export { default as moment } from "moment";
 
 const testGlobal = globalThis as unknown as { window?: Window };

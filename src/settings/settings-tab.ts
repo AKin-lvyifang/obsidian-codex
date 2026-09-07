@@ -607,15 +607,15 @@ export class CodexSettingTab extends PluginSettingTab {
     const focusAnchor = step === "knowledge"
       ? highlightAnchor.querySelector<HTMLElement>('button[aria-selected="true"]') ?? anchor
       : anchor;
-    const settingsDocument = anchor.ownerDocument;
-    if (!this.onboardingRestoreFocusEl?.isConnected) {
-      const active = settingsDocument.activeElement;
-      this.onboardingRestoreFocusEl = active instanceof (this.containerEl.ownerDocument.defaultView?.HTMLElement ?? HTMLElement) ? active : null;
-    }
+    // A body/container captured when settings opens is connected but cannot
+    // restore useful focus. Always return to this step's real product target.
+    if (step === "knowledge" && focusAnchor === anchor) anchor.setAttr("tabindex", "-1");
+    this.onboardingRestoreFocusEl = focusAnchor;
     this.clearOnboardingCoachmark(false);
     const zh = this.plugin.settings.settingsLanguage !== "en";
     const copy = onboardingCoachmarkCopy(step, zh);
     const handle = mountEchoInkOnboardingCoachmark({
+      app: this.app,
       anchor: focusAnchor,
       highlightAnchor,
       stepClass: step,
@@ -695,6 +695,7 @@ export class CodexSettingTab extends PluginSettingTab {
       (this.app as unknown as { setting?: { close: () => void } }).setting?.close();
     };
     this.onboardingCoachmarkHandle = mountEchoInkOnboardingCoachmark({
+      app: this.app,
       anchor,
       stepClass: "complete",
       stepLabel: "",

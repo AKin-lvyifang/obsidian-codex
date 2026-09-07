@@ -1,3 +1,4 @@
+import { createOriginSelectHostFixture } from "./origin-obsidian-dom-shim";
 import { buildKnowledgeBaseDashboardSnapshot } from "../knowledge-base/dashboard";
 import { mountSettingsEditor } from "../settings/inline-editor";
 import * as assert from "node:assert/strict";
@@ -5149,7 +5150,7 @@ async function assertOnboardingCoachmarkAccessibilityContract(): Promise<void> {
     assert.equal(anchor.hasClass("is-echoink-onboarding-target"), true);
     assert.equal(anchor.scrollIntoViewCalls, 3);
     mutable.clearOnboardingCoachmark(true);
-    assert.equal(providerModalTestDocument.activeElement, restoreFocus);
+    assert.equal(providerModalTestDocument.activeElement, anchor);
     assert.equal(anchor.hasClass("is-echoink-onboarding-target"), false);
   }
 
@@ -5214,7 +5215,7 @@ async function assertOnboardingCoachmarkAccessibilityContract(): Promise<void> {
   mutable.clearOnboardingCoachmark(false);
 
   tab.containerEl.empty();
-  tab.containerEl.createEl("button", {
+  const escapeAnchor = tab.containerEl.createEl("button", {
     attr: { "data-echoink-focus-key": "providers:add" }
   });
   restoreFocus.focus();
@@ -5226,7 +5227,7 @@ async function assertOnboardingCoachmarkAccessibilityContract(): Promise<void> {
     providerModalTestDocument.body.querySelector(".echoink-onboarding-coachmark"),
     null
   );
-  assert.equal(providerModalTestDocument.activeElement, restoreFocus);
+  assert.equal(providerModalTestDocument.activeElement, escapeAnchor);
 
   // The shared mount also supports a simple caller without optional navigation.
   // Production callers above supply the persistent dismissal callback.
@@ -5365,7 +5366,13 @@ async function assertOnboardingNavigationPersistence(): Promise<void> {
   let rejectSave!: (reason: Error) => void;
   let dismissAttempts = 0;
   let reported = 0;
+  const host = createOriginSelectHostFixture(providerModalTestDocument.defaultView as never);
+  const hostEscape = () => host.dispatch({
+    key: "Escape", preventDefault() {}, stopPropagation() {}, stopImmediatePropagation() {}
+  } as unknown as KeyboardEvent);
   const guide = mountEchoInkOnboardingCoachmark({
+    app: host.app,
+    restoreFocusEl: anchor as never,
     anchor: anchor as never, stepClass: "provider", stepLabel: "03 / 05",
     title: "Connect a model", description: "Guide", actionLabel: "Next",
     dismissLabel: "Skip guide", onAction: () => undefined,
@@ -5376,8 +5383,10 @@ async function assertOnboardingNavigationPersistence(): Promise<void> {
     onActionError: () => { reported += 1; }
   });
   const close = (guide.element as unknown as ProviderModalTestElement).querySelector<ProviderModalTestElement>(".echoink-onboarding-dismiss")!;
-  close.click();
-  providerModalTestDocument.fireEvent("keydown", { key: "Escape" });
+  assert.equal(host.depth, 1, "guide owns the window keyboard scope");
+  hostEscape();
+  hostEscape();
+  assert.equal(host.escapes, 0, "early host capture must not close settings");
   assert.equal(dismissAttempts, 1);
   assert.equal(close.disabled, true);
   rejectSave(new Error("save failed"));
@@ -5385,9 +5394,16 @@ async function assertOnboardingNavigationPersistence(): Promise<void> {
   assert.equal(reported, 1);
   assert.equal(close.disabled, false);
   assert.equal(guide.element.isConnected, true);
-  close.click();
+  assert.equal(host.depth, 1, "failed saves retain the Escape handler for retry");
+  hostEscape();
   await flushProviderModalTasks();
   assert.equal(guide.element.isConnected, false);
+  assert.equal(host.depth, 0, "destroy restores the host window scope");
+  assert.equal(host.escapes, 0);
+  assert.equal(providerModalTestDocument.activeElement, anchor);
+  hostEscape();
+  assert.equal(host.escapes, 1, "after dismissal the host handles its own Escape again");
+  host.dispose();
   assert.equal(providerModalTestDocument.body.querySelector(".echoink-onboarding-spotlight"), null);
   console.log("PASS onboarding: persisted back/jump/skip/complete/replay, rollback and retry");
 }
@@ -12257,6 +12273,7 @@ class ProviderModalTestMouseEvent {
 }
 
 class ProviderModalTestDocument {
+  hasFocus(): boolean { return true; }
   activeElement: ProviderModalTestElement | null = null;
   readonly defaultView = {
     MouseEvent: ProviderModalTestMouseEvent,
