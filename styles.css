@@ -20616,6 +20616,8 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
 /* Page structures use their existing controls and the single native scrollport. */
 .echoink-settings-demo .echoink-settings-inline-editor>.settings-back,.echoink-settings-demo .echoink-settings-page>.settings-back{margin:23px 0 2px}
 .echoink-settings-demo .echoink-settings-page>.settings-back+.page-intro{margin-top:14px}
+.echoink-settings-demo .echoink-settings-page>.settings-back{width:auto;max-width:100%;height:auto;min-height:30px;flex:0 0 auto;justify-content:flex-start;gap:6px;padding:6px 0;text-align:left;white-space:normal}
+.echoink-settings-demo .echoink-settings-page>.settings-back>span{min-width:0;overflow-wrap:anywhere}
 .echoink-settings-demo .echoink-settings-page-heading,.echoink-settings-demo .codex-provider-add-copy{width:100%;text-align:left}
 .echoink-settings-demo .codex-provider-add-copy{flex:1;min-width:0}
 .echoink-settings-demo .codex-provider-add-section{align-items:flex-start}
@@ -20631,7 +20633,8 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
 .echoink-settings-demo .codex-resource-tab.is-active:after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:2px;border-radius:2px;background:var(--accent)}
 .echoink-settings-demo .general-range{display:flex;align-items:center;gap:12px}
 .echoink-settings-demo .general-range output{white-space:nowrap;color:var(--secondary);font-size:calc(var(--font-text-size,16px)*.6875)}
-.echoink-settings-demo .echoink-agent-profile-identity>.echoink-agent-identity-edit{display:inline-flex;justify-content:center;align-items:center;gap:6px;width:auto;height:auto;min-height:30px;margin:10px 0 15px;padding:6px 9px;white-space:normal}
+.echoink-settings-demo .echoink-agent-profile-identity>.echoink-agent-identity-edit{flex:0 0 auto;max-width:100%;display:inline-flex;justify-content:center;align-items:center;gap:6px;width:auto;height:auto;min-height:30px;margin:10px 0 15px;padding:6px 9px;white-space:normal}
+.echoink-settings-demo .echoink-agent-identity-edit>span{min-width:0;overflow-wrap:anywhere}
 .echoink-settings-demo .review-generation{flex-basis:100%;min-width:0;margin:0;align-items:stretch}
 .echoink-settings-demo .review-generate-card{height:auto;min-width:0;white-space:normal;text-align:left;box-shadow:none}
 .echoink-settings-demo .review-generate-card>div{flex:1;min-width:0}
@@ -20673,4 +20676,27 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
  .echoink-settings-demo .provider-model-header{flex-wrap:wrap}
  .echoink-settings-demo .provider-model-header .codex-provider-model-actions{margin-left:auto}
 }
+
+.echoink-settings-demo :is(.echoink-agent-identity-footer,.echoink-memory-correction-actions,.echoink-personalization-actions,.codex-mcp-server-modal-footer,.codex-provider-modal-actions){display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.echoink-settings-demo :is(.echoink-agent-identity-footer,.echoink-memory-correction-actions,.echoink-personalization-actions,.codex-mcp-server-modal-footer,.codex-provider-modal-actions)>button{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-width:0;height:auto;min-height:34px;padding:8px 13px;line-height:1.4;border-radius:6px;white-space:normal}
+
+.echoink-settings-demo :is(.setting-item-control,.echoink-settings-feature-actions,.echoink-knowledge-init-actions,.codex-resource-toolbar-actions,.echoink-settings-inline-actions)>button{height:auto;min-height:34px;padding:8px 13px;line-height:1.4;white-space:normal}
+.echoink-settings-demo .echoink-knowledge-init-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.echoink-settings-demo .echoink-settings-page .echoink-personalization-actions{width:100%;justify-content:space-between;gap:12px}
+.echoink-settings-demo .echoink-settings-page .echoink-personalization-actions>button{border:1px solid var(--line);background:var(--bg);color:var(--text)}
+.echoink-settings-demo .echoink-settings-page .echoink-personalization-actions>button.echoink-settings-save-button{margin-left:auto;border-color:var(--accent);background:var(--accent);color:#fff}
+.echoink-settings-demo .echoink-settings-page .echoink-personalization-actions>button:disabled{opacity:.5;cursor:default;box-shadow:none}
+
+.echoink-settings-demo input.echoink-review-archive-search{display:block;width:100%;max-width:none;margin:0 0 18px}
+.echoink-settings-demo .echoink-review-archives-page .echoink-settings-compact-list{padding:0;border:0;background:none;overflow:visible}
+.echoink-settings-demo .echoink-review-archives-page .echoink-settings-compact-row{flex-direction:row;align-items:center;justify-content:space-between;flex-wrap:wrap}
+.echoink-settings-demo .echoink-review-archives-page .echoink-settings-compact-copy{flex:1 1 220px;align-self:stretch;min-width:0;width:auto;text-align:left}
+.echoink-settings-demo .echoink-review-archives-page .echoink-settings-compact-actions{flex:0 0 auto;width:auto;margin-left:auto;justify-content:flex-end;flex-wrap:wrap}
+.echoink-settings-demo .echoink-review-archives-page .echoink-settings-compact-actions>button{height:auto;padding:8px 13px;line-height:1.4;white-space:normal}
+.echoink-settings-demo .echoink-settings-inline-content>h2{font-size:calc(var(--font-text-size,16px)*1.3125);font-weight:600;line-height:1.4;margin:14px 0 7px;padding:0}
+.echoink-settings-demo .echoink-memory-correction-intro{font-size:calc(var(--font-text-size,16px)*.75);line-height:1.9;color:var(--secondary);margin:7px 0 21px}
+
+.echoink-settings-demo .echoink-settings-inline-editor :is(.echoink-agent-identity-footer,.echoink-memory-correction-actions,.codex-mcp-server-modal-footer,.codex-provider-modal-actions)>button{border:1px solid var(--line);background:var(--bg);color:var(--text)}
+.echoink-settings-demo .echoink-settings-inline-editor :is(.echoink-agent-identity-footer,.echoink-memory-correction-actions,.codex-mcp-server-modal-footer,.codex-provider-modal-actions)>button:is(.mod-cta,.is-primary){border-color:var(--accent);background:var(--accent);color:#fff}
+.echoink-settings-demo .echoink-settings-page .echoink-personalization-actions>button.echoink-settings-save-button:not(:disabled):hover{background:color-mix(in srgb,var(--accent) 88%,var(--text));border-color:var(--accent);color:#fff}
 /* ECHOINK_WORKSPACE_SETTINGS_END */

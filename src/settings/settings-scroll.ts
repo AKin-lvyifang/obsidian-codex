@@ -31,7 +31,7 @@ export function restoreSettingsScrollSnapshot(snapshot: SettingsScrollSnapshotEn
     }
   };
   restore();
-  if (typeof window !== "undefined") window.requestAnimationFrame?.(restore);
+  snapshot[0]?.element.ownerDocument.defaultView?.requestAnimationFrame(restore);
 }
 
 function hasScrollableState(element: HTMLElement): boolean {

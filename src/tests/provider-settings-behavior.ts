@@ -2845,9 +2845,11 @@ async function assertSettingsAccessibleNamesAndOverflow(): Promise<void> {
   );
   assert.match(tab.containerEl.textContent, /部分完成/u);
   assert.match(tab.containerEl.textContent, /1 项待处理/u);
+  Object.assign(tab.containerEl, { scrollTop: 900, scrollHeight: 2400, clientHeight: 500 });
   maintenanceNavigation.focus();
   maintenanceNavigation.click();
   await settleMicrotasks();
+  assert.equal(tab.containerEl.scrollTop, 0, "opening a detail starts at the native scroll root's top");
   const backToKnowledge = tab.containerEl.querySelector<ProviderModalTestElement>(
     '[data-echoink-focus-key="settings-detail:back"]'
   );
@@ -2881,12 +2883,14 @@ async function assertSettingsAccessibleNamesAndOverflow(): Promise<void> {
   await settleMicrotasks();
   assert.deepEqual(openedReports, [maintenanceReportPath]);
 
+  tab.containerEl.scrollTop = 320;
   maintenanceDate.value = "2026-08-24";
   maintenanceDate.onchange?.();
   // The fixture runs requestAnimationFrame synchronously, so clear its
   // scheduled-frame sentinel before observing the rerendered filter state.
   tab.display();
   await settleMicrotasks();
+  assert.equal(tab.containerEl.scrollTop, 320, "same-page filtering preserves the native scroll position");
   assert.match(tab.containerEl.textContent, new RegExp(previousMaintenanceReportPath, "u"));
   assert.doesNotMatch(tab.containerEl.textContent, new RegExp(maintenanceReportPath, "u"));
 
@@ -2929,8 +2933,10 @@ async function assertSettingsAccessibleNamesAndOverflow(): Promise<void> {
     '[data-echoink-focus-key="settings-detail:back"]'
   );
   assert.ok(currentBackToKnowledge);
+  tab.containerEl.scrollTop = 620;
   currentBackToKnowledge.click();
   await settleMicrotasks();
+  assert.equal(tab.containerEl.scrollTop, 0, "back navigation does not inherit the detail's scroll position");
   const restoredMaintenanceNavigation = tab.containerEl.querySelector<ProviderModalTestElement>(
     '[data-echoink-focus-key="knowledge:maintenance-history"]'
   );
@@ -11894,9 +11900,13 @@ async function assertReviewFolderInlineLifecycle(): Promise<void> {
   const tab = new CodexSettingTab(plugin as never);
   const mutable = tab as any;
   tab.display();
+  Object.assign(tab.containerEl, { scrollTop: 900, scrollHeight: 2400, clientHeight: 500 });
   const cancelled = mutable.chooseReviewOutputFolder();
+  assert.equal(tab.containerEl.scrollTop, 0, "entering an inline editor resets the native scroll root");
+  tab.containerEl.scrollTop = 540;
   tab.containerEl.querySelector<HTMLButtonElement>(".settings-back")!.click();
   await cancelled;
+  assert.equal(tab.containerEl.scrollTop, 0, "closing an inline editor resets the native scroll root");
   assert.equal(saves, 0);
   assert.equal(settings.review.outputDir, "outputs");
   const selected = mutable.chooseReviewOutputFolder();

@@ -224,6 +224,8 @@ export class CodexSettingTab extends PluginSettingTab {
   private archivedConversationBusyId = "";
   private settingsTabsResizeObserver: ResizeObserver | null = null;
   private lastRenderedSettingsTab: VisibleSettingsTab | null = null;
+  private renderedSettingsLocation = "";
+  private renderedInlineHost: HTMLElement | null = null;
   private settingsTabIconAnimation: Readonly<{
     tabId: VisibleSettingsTab;
     startedAtMs: number;
@@ -385,6 +387,18 @@ export class CodexSettingTab extends PluginSettingTab {
         this.renderGeneralSettings(bodyEl);
       }
     } finally {
+      const tab = visibleSettingsTab(this.plugin.settings.settingsTab);
+      const location = JSON.stringify([tab, this.settingsDetail,
+        tab === "resources" ? this.plugin.settings.resourceManagementTab : null]);
+      const inlineHost = this.inlineEditor?.host ?? null;
+      if (location !== this.renderedSettingsLocation || inlineHost !== this.renderedInlineHost) {
+        // A new page starts at its heading; background refreshes keep their position.
+        const rootScroll = settingsScrollSnapshot.find((entry) => entry.element === this.containerEl);
+        if (rootScroll) { rootScroll.top = 0; rootScroll.left = 0; }
+        else settingsScrollSnapshot.unshift({ element: this.containerEl, top: 0, left: 0 });
+      }
+      this.renderedSettingsLocation = location;
+      this.renderedInlineHost = inlineHost;
       restoreSettingsScrollSnapshot(settingsScrollSnapshot);
       this.restoreSettingsFocusIntent();
       if (this.plugin.consumeKnowledgeDashboardFocus?.()) {
@@ -1988,6 +2002,7 @@ export class CodexSettingTab extends PluginSettingTab {
       }
     });
     const save = actions.createEl("button", {
+      cls: "echoink-settings-save-button",
       text: zh ? "保存" : "Save",
       attr: {
         type: "button",
@@ -2178,11 +2193,12 @@ export class CodexSettingTab extends PluginSettingTab {
       backLabel: zh ? "返回复盘" : "Back to Review",
       onBack: () => void this.closeSettingsDetail()
     });
+    page.addClass("echoink-review-archives-page");
     if (!this.archivedConversations && !this.archivedConversationsLoading && !this.archivedConversationsError) {
       void this.loadArchivedConversations();
     }
     const search = page.createEl("input", {
-      cls: "codex-session-search-input echoink-review-archive-search",
+      cls: "echoink-review-archive-search settings-input",
       attr: {
         type: "search",
         placeholder: zh ? "搜索已归档会话" : "Search archived conversations",
@@ -3980,6 +3996,7 @@ export class CodexSettingTab extends PluginSettingTab {
       }
     });
     const save = actions.createEl("button", {
+      cls: "echoink-settings-save-button",
       text: english ? "Save" : "保存",
       attr: {
         type: "button",
