@@ -546,176 +546,176 @@
 /* settings-motion.css */
 /* AnimateIcons native CSS adaptation. Source and MIT notice: settings-motion.js.
    First five timelines reuse EchoInk's existing settings adapter. */
-.echoink-settings-demo .settings-motion-icon{display:inline-flex;align-items:center;justify-content:center;flex:0 0 14px;width:14px;height:14px;vertical-align:middle;pointer-events:none}
-.echoink-settings-demo .settings-motion-icon svg{display:block;width:100%;height:100%;overflow:visible;stroke-width:2}
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon{display:inline-flex;align-items:center;justify-content:center;flex:0 0 14px;width:14px;height:14px;vertical-align:middle;pointer-events:none}
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon svg{display:block;width:100%;height:100%;overflow:visible;stroke-width:2}
 /* Native-DOM ports of the matching Animate Icons Lucide layers (MIT).
    Each selected icon replays its source component's part-by-part timeline. */
-.echoink-settings-demo .settings-motion-icon [data-part] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon [data-part] {
   transform-box: fill-box;
 }
 
-.echoink-settings-demo .settings-motion-icon [data-part="settings-motion"],
-.echoink-settings-demo .settings-motion-icon [data-part="key-motion"],
-.echoink-settings-demo .settings-motion-icon [data-part="book-body"],
-.echoink-settings-demo .settings-motion-icon [data-part="clipboard-body"],
-.echoink-settings-demo .settings-motion-icon [data-part="clipboard-clip"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon [data-part="settings-motion"],
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon [data-part="key-motion"],
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon [data-part="book-body"],
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon [data-part="clipboard-body"],
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon [data-part="clipboard-clip"] {
   transform-origin: center;
 }
 
-.echoink-settings-demo .settings-motion-icon [data-part="settings-gear-draw"],
-.echoink-settings-demo .settings-motion-icon [data-part="settings-core-draw"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon [data-part="settings-gear-draw"],
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon [data-part="settings-core-draw"] {
   stroke-dasharray: 1;
   stroke-dashoffset: 1;
 }
 
-.echoink-settings-demo .settings-motion-icon [data-part="settings-core-draw"],
-.echoink-settings-demo .settings-motion-icon [data-part="settings-spark"],
-.echoink-settings-demo .settings-motion-icon [data-part="key-head"],
-.echoink-settings-demo .settings-motion-icon [data-part="layout-box"],
-.echoink-settings-demo .settings-motion-icon [data-part="clipboard-check"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon [data-part="settings-core-draw"],
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon [data-part="settings-spark"],
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon [data-part="key-head"],
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon [data-part="layout-box"],
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon [data-part="clipboard-check"] {
   transform-origin: center;
 }
 
-.echoink-settings-demo .settings-motion-icon [data-part="settings-spark"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon [data-part="settings-spark"] {
   opacity: 0;
   transform: scale(0.6);
 }
 
-.echoink-settings-demo .settings-motion-icon [data-part="layout-line"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon [data-part="layout-line"] {
   transform-origin: left center;
 }
 
-.echoink-settings-demo .settings-motion-icon [data-part="book-spine"],
-.echoink-settings-demo .settings-motion-icon [data-part="book-check"],
-.echoink-settings-demo .settings-motion-icon [data-part="clipboard-check"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon [data-part="book-spine"],
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon [data-part="book-check"],
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon [data-part="clipboard-check"] {
   stroke-dasharray: 1;
   stroke-dashoffset: 0;
 }
 
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="settings-motion"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="settings-motion"] {
   animation: echoink-settings-demo-settings-motion-settings-motion 900ms ease-in-out both;
   animation-delay: var(--settings-motion-delay, 0ms);
 }
 
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="settings-gear-draw"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="settings-gear-draw"] {
   animation: echoink-settings-demo-settings-motion-settings-gear-draw 700ms ease-in-out both;
   animation-delay: calc(var(--settings-motion-delay, 0ms) + 60ms);
 }
 
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="settings-core-draw"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="settings-core-draw"] {
   animation: echoink-settings-demo-settings-motion-settings-core-draw 600ms ease-in-out both;
   animation-delay: calc(var(--settings-motion-delay, 0ms) + 260ms);
 }
 
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="settings-spark"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="settings-spark"] {
   animation: echoink-settings-demo-settings-motion-settings-spark 350ms ease-out both;
 }
 
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="settings-spark"][data-index="0"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="settings-spark"][data-index="0"] {
   animation-delay: calc(var(--settings-motion-delay, 0ms) + 180ms);
 }
 
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="settings-spark"][data-index="1"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="settings-spark"][data-index="1"] {
   animation-delay: calc(var(--settings-motion-delay, 0ms) + 260ms);
 }
 
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="settings-spark"][data-index="2"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="settings-spark"][data-index="2"] {
   animation-delay: calc(var(--settings-motion-delay, 0ms) + 340ms);
 }
 
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="settings-spark"][data-index="3"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="settings-spark"][data-index="3"] {
   animation-delay: calc(var(--settings-motion-delay, 0ms) + 420ms);
 }
 
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="settings-spark"][data-index="4"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="settings-spark"][data-index="4"] {
   animation-delay: calc(var(--settings-motion-delay, 0ms) + 500ms);
 }
 
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="key-motion"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="key-motion"] {
   animation: echoink-settings-demo-settings-motion-key-motion 700ms ease-in-out both;
   animation-delay: var(--settings-motion-delay, 0ms);
 }
 
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="key-path"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="key-path"] {
   animation: echoink-settings-demo-settings-motion-key-path 800ms ease-in-out both;
   animation-delay: var(--settings-motion-delay, 0ms);
 }
 
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="key-head"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="key-head"] {
   animation: echoink-settings-demo-settings-motion-key-head 600ms ease-in-out both;
   animation-delay: calc(var(--settings-motion-delay, 0ms) + 450ms);
 }
 
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="key-bite"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="key-bite"] {
   animation: echoink-settings-demo-settings-motion-key-bite 450ms ease-in-out both;
   animation-delay: calc(var(--settings-motion-delay, 0ms) + 550ms);
 }
 
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="layout-box"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="layout-box"] {
   animation: echoink-settings-demo-settings-motion-layout-box 350ms ease-out both;
 }
 
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="layout-box"][data-index="0"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="layout-box"][data-index="0"] {
   animation-delay: var(--settings-motion-delay, 0ms);
 }
 
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="layout-box"][data-index="1"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="layout-box"][data-index="1"] {
   animation-delay: calc(var(--settings-motion-delay, 0ms) + 80ms);
 }
 
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="layout-line"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="layout-line"] {
   animation: echoink-settings-demo-settings-motion-layout-line 300ms ease-out both;
 }
 
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="layout-line"][data-index="0"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="layout-line"][data-index="0"] {
   animation-delay: calc(var(--settings-motion-delay, 0ms) + 150ms);
 }
 
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="layout-line"][data-index="1"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="layout-line"][data-index="1"] {
   animation-delay: calc(var(--settings-motion-delay, 0ms) + 220ms);
 }
 
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="layout-line"][data-index="2"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="layout-line"][data-index="2"] {
   animation-delay: calc(var(--settings-motion-delay, 0ms) + 290ms);
 }
 
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="layout-line"][data-index="3"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="layout-line"][data-index="3"] {
   animation-delay: calc(var(--settings-motion-delay, 0ms) + 360ms);
 }
 
-.echoink-settings-demo .settings-motion-icon.is-animating[data-animated-icon="book-open-check"] svg {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating[data-animated-icon="book-open-check"] svg {
   transform-box: fill-box;
   transform-origin: center;
   animation: echoink-settings-demo-settings-motion-book-motion 900ms ease-in-out both;
   animation-delay: var(--settings-motion-delay, 0ms);
 }
 
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="book-spine"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="book-spine"] {
   animation: echoink-settings-demo-settings-motion-book-spine 600ms ease-in-out both;
   animation-delay: var(--settings-motion-delay, 0ms);
 }
 
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="book-body"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="book-body"] {
   animation: echoink-settings-demo-settings-motion-book-body 800ms ease-out both;
   animation-delay: calc(var(--settings-motion-delay, 0ms) + 150ms);
 }
 
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="book-check"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="book-check"] {
   animation: echoink-settings-demo-settings-motion-book-check 700ms ease-out both;
   animation-delay: calc(var(--settings-motion-delay, 0ms) + 250ms);
 }
 
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="clipboard-body"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="clipboard-body"] {
   animation: echoink-settings-demo-settings-motion-clipboard-body 1s ease-in-out both;
   animation-delay: var(--settings-motion-delay, 0ms);
 }
 
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="clipboard-clip"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="clipboard-clip"] {
   animation: echoink-settings-demo-settings-motion-clipboard-clip 1s ease-in-out both;
   animation-delay: calc(var(--settings-motion-delay, 0ms) + 200ms);
 }
 
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="clipboard-check"] {
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="clipboard-check"] {
   animation: echoink-settings-demo-settings-motion-clipboard-check 550ms ease-out both;
   animation-delay: calc(var(--settings-motion-delay, 0ms) + 350ms);
 }
@@ -815,18 +815,18 @@
 }
 
 
-.echoink-settings-demo .settings-motion-icon [data-part="package-line"],.echoink-settings-demo .settings-motion-icon [data-part="blocks-body"]{stroke-dasharray:1;stroke-dashoffset:0}
-.echoink-settings-demo .settings-motion-icon [data-part="blocks-square"],.echoink-settings-demo .settings-motion-icon [data-part="sparkles-star"],.echoink-settings-demo .settings-motion-icon [data-part="sparkles-cross"],.echoink-settings-demo .settings-motion-icon [data-part="sparkles-dot"]{transform-origin:center}
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="package-line"]{animation:echoink-settings-demo-settings-motion-package-line 500ms cubic-bezier(.16,1,.3,1) both}
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="package-line"][data-index="1"]{animation-delay:80ms}
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="package-line"][data-index="2"]{animation-delay:160ms}
-.echoink-settings-demo .settings-motion-icon.is-animating[data-animated-icon="blocks"] svg{transform-origin:center;animation:echoink-settings-demo-settings-motion-blocks 1s ease-in-out both}
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="blocks-body"]{animation:echoink-settings-demo-echoink-settings-demo-settings-motion-blocks-body 800ms ease-in-out both}
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="blocks-square"]{animation:echoink-settings-demo-echoink-settings-demo-settings-motion-blocks-square 1s ease-in-out both}
-.echoink-settings-demo .settings-motion-icon.is-animating[data-animated-icon="sparkles"] svg{transform-origin:center;animation:echoink-settings-demo-settings-motion-sparkles 850ms cubic-bezier(.22,1,.36,1) both}
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="sparkles-star"]{animation:echoink-settings-demo-echoink-settings-demo-settings-motion-sparkles-star 700ms ease-out 50ms both}
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="sparkles-cross"]{animation:echoink-settings-demo-echoink-settings-demo-settings-motion-sparkles-cross 550ms ease-out 160ms both}
-.echoink-settings-demo .settings-motion-icon.is-animating [data-part="sparkles-dot"]{animation:echoink-settings-demo-echoink-settings-demo-settings-motion-sparkles-dot 500ms ease-out 280ms both}
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon [data-part="package-line"],:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon [data-part="blocks-body"]{stroke-dasharray:1;stroke-dashoffset:0}
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon [data-part="blocks-square"],:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon [data-part="sparkles-star"],:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon [data-part="sparkles-cross"],:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon [data-part="sparkles-dot"]{transform-origin:center}
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="package-line"]{animation:echoink-settings-demo-settings-motion-package-line 500ms cubic-bezier(.16,1,.3,1) both}
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="package-line"][data-index="1"]{animation-delay:80ms}
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="package-line"][data-index="2"]{animation-delay:160ms}
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating[data-animated-icon="blocks"] svg{transform-origin:center;animation:echoink-settings-demo-settings-motion-blocks 1s ease-in-out both}
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="blocks-body"]{animation:echoink-settings-demo-echoink-settings-demo-settings-motion-blocks-body 800ms ease-in-out both}
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="blocks-square"]{animation:echoink-settings-demo-echoink-settings-demo-settings-motion-blocks-square 1s ease-in-out both}
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating[data-animated-icon="sparkles"] svg{transform-origin:center;animation:echoink-settings-demo-settings-motion-sparkles 850ms cubic-bezier(.22,1,.36,1) both}
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="sparkles-star"]{animation:echoink-settings-demo-echoink-settings-demo-settings-motion-sparkles-star 700ms ease-out 50ms both}
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="sparkles-cross"]{animation:echoink-settings-demo-echoink-settings-demo-settings-motion-sparkles-cross 550ms ease-out 160ms both}
+:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon.is-animating [data-part="sparkles-dot"]{animation:echoink-settings-demo-echoink-settings-demo-settings-motion-sparkles-dot 500ms ease-out 280ms both}
 @keyframes echoink-settings-demo-settings-motion-package-line{from{stroke-dashoffset:1;opacity:0}to{stroke-dashoffset:0;opacity:1}}
 @keyframes echoink-settings-demo-settings-motion-blocks{0%,100%{transform:rotate(0) scale(1)}33%{transform:rotate(-2deg) scale(1.05)}66%{transform:rotate(2deg) scale(.95)}}
 @keyframes echoink-settings-demo-settings-motion-blocks-body{from{stroke-dashoffset:1;opacity:.5}to{stroke-dashoffset:0;opacity:1}}
@@ -835,7 +835,7 @@
 @keyframes echoink-settings-demo-settings-motion-sparkles-star{0%{opacity:.6;transform:scale(.7)}60%{opacity:1;transform:scale(1.15)}100%{opacity:1;transform:scale(1)}}
 @keyframes echoink-settings-demo-settings-motion-sparkles-cross{from{opacity:0;transform:rotate(-45deg) scale(.4)}to{opacity:1;transform:rotate(0) scale(1)}}
 @keyframes echoink-settings-demo-settings-motion-sparkles-dot{from{opacity:0;transform:translateY(4px) scale(.4)}to{opacity:1;transform:translateY(0) scale(1)}}
-@media(prefers-reduced-motion:reduce){.echoink-settings-demo .settings-motion-icon,.echoink-settings-demo .settings-motion-icon *{animation:none!important;transition:none!important}}
+@media(prefers-reduced-motion:reduce){:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon,:is(.echoink-settings-demo, .echoink-onboarding-coachmark) .settings-motion-icon *{animation:none!important;transition:none!important}}
 
 
 /* Native Obsidian component adapters. Only the settings container is affected. */
@@ -1430,3 +1430,5 @@
  .echoink-settings-demo .echoink-resource-detail .codex-mcp-tool-policy-row{flex-direction:column;align-items:stretch;gap:10px}
  .echoink-settings-demo .echoink-resource-detail .codex-mcp-tool-policy-controls{width:auto;margin-left:auto;align-self:flex-end;justify-content:flex-end}
 }
+
+.echoink-onboarding-step-icon .settings-motion-icon{width:18px;height:18px;flex-basis:18px}

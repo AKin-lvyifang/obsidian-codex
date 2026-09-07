@@ -5000,11 +5000,11 @@ function assertOnboardingTruthContract(): void {
 function assertFiveStepOnboardingEntrypoints(): void {
   installProviderModalDomFixture();
   const expected = [
-    ["sidebar", "第 1 步，共 5 步", "打开 Agent 侧栏"],
-    ["settings", "第 2 步，共 5 步", "进入 EchoInk 设置"],
-    ["provider", "第 3 步，共 5 步", "连接一个模型"],
-    ["knowledge", "第 4 步，共 5 步", "建立知识库"],
-    ["personality", "第 5 步，共 5 步", "选择 Agent 风格"]
+    ["sidebar", "认识 EchoInk · 01 / 05", "先认识你的 Agent"],
+    ["settings", "认识 EchoInk · 02 / 05", "让 EchoInk 适合你"],
+    ["provider", "认识 EchoInk · 03 / 05", "连接一个模型"],
+    ["knowledge", "认识 EchoInk · 04 / 05", "给笔记一个归处"],
+    ["personality", "认识 EchoInk · 05 / 05", "选择一种相处方式"]
   ] as const;
   for (const [step, stepLabel, title] of expected) {
     const copy = onboardingCoachmarkCopy(step, true);
@@ -5013,10 +5013,10 @@ function assertFiveStepOnboardingEntrypoints(): void {
     assert.doesNotMatch(copy.description, /本教程|配置完整|可恢复的预览|Memory 学习|稍后/u);
   }
   assert.equal(onboardingCoachmarkCopy("sidebar", true).action, "打开 EchoInk");
-  assert.equal(onboardingCoachmarkCopy("settings", true).action, "打开设置");
+  assert.equal(onboardingCoachmarkCopy("settings", true).action, "进入设置");
   assert.equal(onboardingCoachmarkCopy("provider", true).action, "下一步");
   assert.equal(onboardingCoachmarkCopy("knowledge", true).action, "下一步");
-  assert.equal(onboardingCoachmarkCopy("personality", true).action, "完成");
+  assert.equal(onboardingCoachmarkCopy("personality", true).action, "开始积累");
 
   const root = providerModalTestDocument.createElement("div");
   let settingsCalls = 0;
@@ -5040,13 +5040,6 @@ function assertFiveStepOnboardingEntrypoints(): void {
   assert.match(mainSource, /MutationObserver/u);
   assert.match(mainSource, /actionLabel:\s*copy\.action/u);
   assert.match(mainSource, /await this\.activateHomeAndSidebar\(\)/u);
-  assert.doesNotMatch(
-    mainSource.slice(
-      mainSource.indexOf("private async showEchoInkOnboardingWorkspaceCoachmark"),
-      mainSource.indexOf("private findEchoInkOnboardingSettingsAnchor")
-    ),
-    /稍后设置|Set up later|dismissLabel/u
-  );
   console.log("PASS settings: onboarding starts from ribbon and sidebar settings gear");
 }
 
@@ -5118,8 +5111,8 @@ async function assertOnboardingCoachmarkAccessibilityContract(): Promise<void> {
 
   for (const fixture of [
     { step: "provider" as const, key: "providers:add", label: "连接一个模型", action: "下一步" },
-    { step: "knowledge" as const, key: "knowledge:onboarding", label: "建立知识库", action: "下一步" },
-    { step: "personality" as const, key: "general:personality-template", label: "选择 Agent 风格", action: "完成" }
+    { step: "knowledge" as const, key: "knowledge:onboarding", label: "给笔记一个归处", action: "下一步" },
+    { step: "personality" as const, key: "general:personality-template", label: "选择一种相处方式", action: "开始积累" }
   ]) {
     tab.containerEl.empty();
     const anchor = tab.containerEl.createEl("button", {
@@ -5139,19 +5132,20 @@ async function assertOnboardingCoachmarkAccessibilityContract(): Promise<void> {
       coachmark.querySelector("button.echoink-onboarding-action")?.textContent,
       fixture.action
     );
-    assert.equal(coachmark.querySelectorAll("button").length, 1);
+    assert.equal(coachmark.querySelectorAll("button").length, 8);
+    assert.equal(coachmark.querySelectorAll('[aria-current="step"]').length, 1);
     const action = coachmark.querySelector("button.echoink-onboarding-action");
     assert.equal(action?.getAttribute("aria-label"), fixture.action);
     assert.equal(
       action?.querySelector(".echoink-onboarding-action-icon")?.getAttribute("data-echoink-icon"),
-      "arrow-right"
+      fixture.step === "personality" ? "check" : "arrow-right"
     );
     assert.equal(action?.querySelectorAll(".echoink-onboarding-action-icon").length, 1);
     assert.equal(
-      action?.querySelector(".echoink-onboarding-action-label")?.getAttribute("data-label"),
+      action?.querySelector(".echoink-onboarding-action-label")?.textContent,
       fixture.action
     );
-    assert.equal(providerModalTestDocument.activeElement, coachmark);
+    assert.equal(providerModalTestDocument.activeElement, action);
     assert.equal(anchor.hasClass("is-echoink-onboarding-target"), true);
     assert.equal(anchor.scrollIntoViewCalls, 3);
     mutable.clearOnboardingCoachmark(true);
@@ -5213,10 +5207,11 @@ async function assertOnboardingCoachmarkAccessibilityContract(): Promise<void> {
   assert.deepEqual(advanceCalls, ["provider", "knowledge", "personality"]);
   assert.equal(settings.setup.completedAt, 203);
   assert.equal(settings.setup.tutorialStep, "sidebar");
-  assert.equal(
-    providerModalTestDocument.body.querySelector(".echoink-onboarding-coachmark"),
-    null
-  );
+  const completion = providerModalTestDocument.body.querySelector(".echoink-onboarding-coachmark.is-complete");
+  assert.ok(completion);
+  assert.equal(completion.querySelectorAll("button").length, 2);
+  assert.equal(providerModalTestDocument.body.querySelector(".echoink-onboarding-spotlight"), null);
+  mutable.clearOnboardingCoachmark(false);
 
   tab.containerEl.empty();
   tab.containerEl.createEl("button", {
@@ -5226,15 +5221,15 @@ async function assertOnboardingCoachmarkAccessibilityContract(): Promise<void> {
   mutable.renderOnboardingCoachmark("provider");
   providerModalTestDocument.fireEvent("keydown", { key: "Escape" });
   await flushProviderModalTasks();
-  assert.equal(dismissCalls, 0);
+  assert.equal(dismissCalls, 1);
   assert.equal(
     providerModalTestDocument.body.querySelector(".echoink-onboarding-coachmark"),
     null
   );
   assert.equal(providerModalTestDocument.activeElement, restoreFocus);
 
-  // 前两步是必须经过的导航动作：只提供主按钮；Escape 只临时关闭提示，
-  // 不调用持久化 dismiss，也不会把教程标记为完成。
+  // The shared mount also supports a simple caller without optional navigation.
+  // Production callers above supply the persistent dismissal callback.
   const mandatoryAnchor = providerModalTestDocument.createElement("button");
   providerModalTestDocument.body.appendChild(mandatoryAnchor);
   let mandatoryActionCalls = 0;
@@ -5283,10 +5278,118 @@ async function assertOnboardingCoachmarkAccessibilityContract(): Promise<void> {
   const css = readFileSync("styles.css", "utf8");
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.echoink-onboarding-coachmark\s*\{[\s\S]*?animation:\s*none/u);
   assert.doesNotMatch(css, /\.echoink-onboarding-coachmark \.echoink-onboarding-action\s*\{\s*width:\s*100%;/u);
-  assert.match(css, /\.echoink-onboarding-action-label-window\s*\{[^}]*height:\s*18px;[^}]*overflow:\s*hidden/u);
-  assert.match(css, /\.echoink-onboarding-action-label::after\s*\{[^}]*content:\s*attr\(data-label\)/u);
-  assert.match(css, /\.echoink-onboarding-action:is\(:hover, :focus-visible\) \.echoink-onboarding-action-icon\s*\{[^}]*rotate\(45deg\)/u);
-  assert.match(css, /\.echoink-onboarding-action:is\(:hover, :focus-visible\) \.echoink-onboarding-action-label\s*\{[^}]*translateY\(-18px\)/u);
+
+}
+
+async function assertOnboardingNavigationPersistence(): Promise<void> {
+  installProviderModalDomFixture();
+  const plugin: any = Object.create(CodexForObsidianPlugin.prototype);
+  plugin.settings = structuredClone(DEFAULT_SETTINGS);
+  plugin.onboardingRequested = true;
+  let failSave = false;
+  let saves = 0;
+  plugin.saveSettings = async () => { saves += 1; if (failSave) throw new Error("save failed"); };
+  const productConfiguration = structuredClone({
+    providers: plugin.settings.apiProviders, knowledge: plugin.settings.knowledgeBase
+  });
+  await plugin.selectEchoInkOnboardingStep("sidebar", "personality");
+  assert.equal(plugin.getEchoInkOnboardingStep(), "personality");
+  assert.equal(plugin.settings.setup.completedAt, 0, "jumping is not completion");
+  assert.equal(await plugin.selectEchoInkOnboardingStep("sidebar", "knowledge"), false);
+  assert.equal(saves, 1, "stale controls do not save or advance again");
+  const before = { ...plugin.settings.setup };
+  failSave = true;
+  await assert.rejects(plugin.selectEchoInkOnboardingStep("personality", "provider"), /save failed/);
+  assert.deepEqual(plugin.settings.setup, before);
+  await assert.rejects(plugin.advanceEchoInkOnboarding("personality"), /save failed/);
+  assert.deepEqual(plugin.settings.setup, before);
+  assert.equal(plugin.isEchoInkOnboardingRequested(), true);
+  await assert.rejects(plugin.dismissEchoInkOnboarding(), /save failed/);
+  assert.deepEqual(plugin.settings.setup, before);
+  assert.equal(plugin.isEchoInkOnboardingRequested(), true);
+  failSave = false;
+  await plugin.advanceEchoInkOnboarding("personality");
+  assert.equal(plugin.isEchoInkOnboardingRequested(), false);
+  assert.equal(plugin.settings.setup.dismissedVersion, ECHOINK_ONBOARDING_VERSION);
+  const completed = { ...plugin.settings.setup };
+  failSave = true;
+  await assert.rejects(plugin.restartEchoInkOnboarding(), /save failed/);
+  assert.deepEqual(plugin.settings.setup, completed);
+  assert.equal(plugin.isEchoInkOnboardingRequested(), false);
+  failSave = false;
+  await plugin.restartEchoInkOnboarding();
+  assert.equal(plugin.getEchoInkOnboardingStep(), "sidebar");
+  assert.equal(plugin.isEchoInkOnboardingRequested(), true);
+  assert.deepEqual({ providers: plugin.settings.apiProviders, knowledge: plugin.settings.knowledgeBase }, productConfiguration);
+
+  // Exercise the settings callbacks, including the real cursor persistence
+  // method; only the host window opening/closing is recorded by this fixture.
+  const routes: string[] = [];
+  const app = new App();
+  (app as any).setting = { close: () => routes.push("close-settings") };
+  plugin.app = app;
+  plugin.register = () => undefined;
+  plugin.manifest = { id: "codex-echoink" };
+  plugin.openPendingEchoInkOnboarding = async () => { routes.push(plugin.getEchoInkOnboardingStep()); };
+  plugin.activateHomeAndSidebar = async () => { routes.push("workspace"); };
+  const tab = new CodexSettingTab(plugin);
+  const mutable = tab as any;
+  mutable.scheduleDisplay = () => undefined;
+  mutable.activateSettingsTab = async (name: string) => { plugin.settings.settingsTab = name; routes.push(name); };
+  const anchor = tab.containerEl.createEl("button", { attr: { "data-echoink-focus-key": "providers:add" } });
+  anchor.focus();
+  plugin.settings.setup.tutorialStep = "provider";
+  mutable.renderOnboardingCoachmark("provider");
+  providerModalTestDocument.body.querySelector<ProviderModalTestElement>(".echoink-onboarding-previous")!.click();
+  await flushProviderModalTasks();
+  assert.deepEqual(routes, ["close-settings", "settings"]);
+  assert.equal(plugin.getEchoInkOnboardingStep(), "settings");
+  plugin.settings.setup.tutorialStep = "provider";
+  mutable.renderOnboardingCoachmark("provider");
+  const progress = providerModalTestDocument.body.querySelector<ProviderModalTestElement>(".echoink-onboarding-progress")!;
+  progress.querySelectorAll<ProviderModalTestElement>("button")[4].click();
+  await flushProviderModalTasks();
+  assert.equal(plugin.getEchoInkOnboardingStep(), "personality");
+  assert.equal(routes.at(-1), "general");
+  mutable.showOnboardingCompletion();
+  providerModalTestDocument.body.querySelector<ProviderModalTestElement>(".echoink-onboarding-previous")!.click();
+  await flushProviderModalTasks();
+  assert.equal(plugin.getEchoInkOnboardingStep(), "sidebar");
+  assert.equal(routes.at(-1), "sidebar");
+  mutable.showOnboardingCompletion();
+  providerModalTestDocument.body.querySelector<ProviderModalTestElement>(".echoink-onboarding-action")!.click();
+  await flushProviderModalTasks();
+  assert.deepEqual(routes.slice(-2), ["workspace", "close-settings"]);
+
+  // A failed dismissal stays visible, blocks concurrent clicks, and can retry.
+  let rejectSave!: (reason: Error) => void;
+  let dismissAttempts = 0;
+  let reported = 0;
+  const guide = mountEchoInkOnboardingCoachmark({
+    anchor: anchor as never, stepClass: "provider", stepLabel: "03 / 05",
+    title: "Connect a model", description: "Guide", actionLabel: "Next",
+    dismissLabel: "Skip guide", onAction: () => undefined,
+    onDismiss: async () => {
+      dismissAttempts += 1;
+      if (dismissAttempts === 1) await new Promise<void>((_, reject) => { rejectSave = reject; });
+    },
+    onActionError: () => { reported += 1; }
+  });
+  const close = (guide.element as unknown as ProviderModalTestElement).querySelector<ProviderModalTestElement>(".echoink-onboarding-dismiss")!;
+  close.click();
+  providerModalTestDocument.fireEvent("keydown", { key: "Escape" });
+  assert.equal(dismissAttempts, 1);
+  assert.equal(close.disabled, true);
+  rejectSave(new Error("save failed"));
+  await flushProviderModalTasks();
+  assert.equal(reported, 1);
+  assert.equal(close.disabled, false);
+  assert.equal(guide.element.isConnected, true);
+  close.click();
+  await flushProviderModalTasks();
+  assert.equal(guide.element.isConnected, false);
+  assert.equal(providerModalTestDocument.body.querySelector(".echoink-onboarding-spotlight"), null);
+  console.log("PASS onboarding: persisted back/jump/skip/complete/replay, rollback and retry");
 }
 
 async function assertOnboardingDoesNotLockSettingsNavigation(): Promise<void> {
@@ -12212,6 +12315,7 @@ class ProviderModalTestDocument {
     const synthetic = {
       preventDefault: () => undefined,
       stopPropagation: () => undefined,
+      stopImmediatePropagation: () => undefined,
       ...event
     };
     for (const listener of this.eventListeners.get(type) ?? []) listener(synthetic);
@@ -12716,6 +12820,13 @@ async function writeSettingsVisualFixtures(): Promise<void> {
 
 if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "visual") {
   await writeSettingsVisualFixtures();
+} else if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "onboarding-candidate") {
+  assertOnboardingTruthContract();
+  assertFiveStepOnboardingEntrypoints();
+  await assertOnboardingCoachmarkAccessibilityContract();
+  await assertOnboardingDoesNotLockSettingsNavigation();
+  await assertOnboardingNavigationPersistence();
+  console.log("PASS affected onboarding navigation, completion, persistence and window lifecycle");
 } else if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "inline") {
   await assertInlineEditorAsyncRetirement();
   await assertReviewFolderInlineLifecycle();

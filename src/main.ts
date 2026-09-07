@@ -132,6 +132,8 @@ import {
   onboardingCoachmarkCopy,
   prepareEchoInkOnboardingTutorial,
   shouldAutoStartEchoInkOnboarding,
+  selectEchoInkOnboardingStep,
+  ECHOINK_ONBOARDING_STEPS,
   type EchoInkOnboardingStep
 } from "./settings/onboarding";
 import {
@@ -354,6 +356,34 @@ export default class CodexForObsidianPlugin extends Plugin {
     }
     return result.nextStep;
   }
+  async selectEchoInkOnboardingStep(
+    expectedStep: EchoInkOnboardingStep,
+    nextStep: EchoInkOnboardingStep
+  ): Promise<boolean> {
+    if (!this.onboardingRequested) return false;
+    const previousSetup = { ...this.settings.setup };
+    if (!selectEchoInkOnboardingStep(this.settings.setup, expectedStep, nextStep)) return false;
+    try {
+      await this.saveSettings(true);
+    } catch (error) {
+      Object.assign(this.settings.setup, previousSetup);
+      throw error;
+    }
+    return true;
+  }
+  async restartEchoInkOnboarding(): Promise<void> {
+    const previousRequested = this.onboardingRequested;
+    const previousSetup = { ...this.settings.setup };
+    prepareEchoInkOnboardingTutorial(this.settings.setup, { forceRestart: true });
+    this.onboardingRequested = true;
+    try {
+      await this.saveSettings(true);
+    } catch (error) {
+      this.onboardingRequested = previousRequested;
+      Object.assign(this.settings.setup, previousSetup);
+      throw error;
+    }
+  }
   private async showEchoInkOnboardingWorkspaceCoachmark(
     step: "sidebar" | "settings"
   ): Promise<void> {
@@ -378,7 +408,27 @@ export default class CodexForObsidianPlugin extends Plugin {
       title: copy.title,
       description: copy.description,
       actionLabel: copy.action,
-      initialFocus: "anchor",
+      tip: copy.tip,
+      icon: copy.icon,
+      tone: copy.tone,
+      steps: copy.steps,
+      progressLabel: copy.progressLabel,
+      previousLabel: copy.previousLabel,
+      dismissLabel: copy.dismissLabel,
+      restoreFocusEl: anchor,
+      onDismiss: async () => {
+        await this.dismissEchoInkOnboarding();
+        this.clearEchoInkOnboardingWorkspaceCoachmark(true);
+      },
+      onPrevious: step === "sidebar" ? undefined : async () => {
+        const previous = ECHOINK_ONBOARDING_STEPS[ECHOINK_ONBOARDING_STEPS.indexOf(step) - 1];
+        if (await this.selectEchoInkOnboardingStep(step, previous)) await this.openPendingEchoInkOnboarding();
+      },
+      onStep: async (nextStep) => {
+        if (!await this.selectEchoInkOnboardingStep(step, nextStep)) return;
+        this.clearEchoInkOnboardingWorkspaceCoachmark(false);
+        await this.openPendingEchoInkOnboarding();
+      },
       onAction: async () => {
         if (step === "sidebar") {
           await this.activateHomeAndSidebar();

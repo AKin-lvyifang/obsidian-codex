@@ -131,6 +131,8 @@ import {
 import {
   echoInkOnboardingTab,
   onboardingCoachmarkCopy,
+  onboardingCompletionCopy,
+  ECHOINK_ONBOARDING_STEPS,
   type EchoInkOnboardingStep
 } from "./onboarding";
 import { openExternalInElectron } from "../core/electron";
@@ -597,8 +599,16 @@ export class CodexSettingTab extends PluginSettingTab {
       this.clearOnboardingCoachmark(false);
       return;
     }
+    const highlightAnchor = step === "personality"
+      ? anchor.closest<HTMLElement>(".echoink-agent-profile-card-header") ?? anchor
+      : step === "knowledge"
+        ? anchor.querySelector<HTMLElement>(".echoink-knowledge-init-tabs") ?? anchor
+        : anchor;
+    const focusAnchor = step === "knowledge"
+      ? highlightAnchor.querySelector<HTMLElement>('button[aria-selected="true"]') ?? anchor
+      : anchor;
     const settingsDocument = anchor.ownerDocument;
-    if (!this.onboardingRestoreFocusEl) {
+    if (!this.onboardingRestoreFocusEl?.isConnected) {
       const active = settingsDocument.activeElement;
       this.onboardingRestoreFocusEl = active instanceof (this.containerEl.ownerDocument.defaultView?.HTMLElement ?? HTMLElement) ? active : null;
     }
@@ -606,13 +616,29 @@ export class CodexSettingTab extends PluginSettingTab {
     const zh = this.plugin.settings.settingsLanguage !== "en";
     const copy = onboardingCoachmarkCopy(step, zh);
     const handle = mountEchoInkOnboardingCoachmark({
-      anchor,
+      anchor: focusAnchor,
+      highlightAnchor,
       stepClass: step,
       stepLabel: copy.step,
       title: copy.title,
       description: copy.description,
       actionLabel: copy.action,
+      tip: copy.tip,
+      icon: copy.icon,
+      tone: copy.tone,
+      steps: copy.steps,
+      progressLabel: copy.progressLabel,
+      previousLabel: copy.previousLabel,
+      dismissLabel: copy.dismissLabel,
       restoreFocusEl: this.onboardingRestoreFocusEl,
+      onDismiss: async () => {
+        await this.plugin.dismissEchoInkOnboarding();
+        this.clearOnboardingCoachmark(true);
+      },
+      onPrevious: async () => {
+        await this.selectOnboardingTutorialStep(step, ECHOINK_ONBOARDING_STEPS[ECHOINK_ONBOARDING_STEPS.indexOf(step) - 1]);
+      },
+      onStep: async (nextStep) => { await this.selectOnboardingTutorialStep(step, nextStep); },
       onAction: async () => {
         await this.advanceOnboardingTutorial(step);
       },
@@ -630,11 +656,24 @@ export class CodexSettingTab extends PluginSettingTab {
       this.onboardingRestoreFocusEl = this.containerEl.querySelector<HTMLElement>(
         '[data-echoink-focus-key="general:personality-template"]'
       ) ?? this.onboardingRestoreFocusEl;
-      this.clearOnboardingCoachmark(true);
+      this.showOnboardingCompletion();
       return;
     }
+    await this.showOnboardingTutorialStep(nextStep);
+  }
+
+  private async selectOnboardingTutorialStep(step: EchoInkOnboardingStep, nextStep: EchoInkOnboardingStep): Promise<void> {
+    if (await this.plugin.selectEchoInkOnboardingStep(step, nextStep)) await this.showOnboardingTutorialStep(nextStep);
+  }
+
+  private async showOnboardingTutorialStep(nextStep: EchoInkOnboardingStep): Promise<void> {
     this.clearOnboardingCoachmark(false);
     this.onboardingRestoreFocusEl = null;
+    if (nextStep === "sidebar" || nextStep === "settings") {
+      (this.app as unknown as { setting?: { close: () => void } }).setting?.close();
+      await this.plugin.openPendingEchoInkOnboarding();
+      return;
+    }
     await this.activateSettingsTab(
       echoInkOnboardingTab(nextStep),
       false
@@ -642,6 +681,38 @@ export class CodexSettingTab extends PluginSettingTab {
     if (this.plugin.settings.settingsTab === echoInkOnboardingTab(nextStep)) {
       this.scheduleDisplay();
     }
+  }
+
+  private showOnboardingCompletion(): void {
+    const anchor = this.onboardingRestoreFocusEl ?? this.containerEl;
+    this.clearOnboardingCoachmark(false);
+    const zh = this.plugin.settings.settingsLanguage !== "en";
+    const backToWorkspace = async () => {
+      // Opening the workspace first keeps this card retryable if navigation
+      // fails. Close the host only after the requested destination is ready.
+      await this.plugin.activateHomeAndSidebar();
+      this.clearOnboardingCoachmark(false);
+      (this.app as unknown as { setting?: { close: () => void } }).setting?.close();
+    };
+    this.onboardingCoachmarkHandle = mountEchoInkOnboardingCoachmark({
+      anchor,
+      stepClass: "complete",
+      stepLabel: "",
+      complete: true,
+      tone: "green",
+      ...onboardingCompletionCopy(zh),
+      restoreFocusEl: anchor,
+      onPrevious: async () => {
+        await this.plugin.restartEchoInkOnboarding();
+        await this.showOnboardingTutorialStep("sidebar");
+      },
+      onAction: backToWorkspace,
+      onDismiss: backToWorkspace,
+      onActionError: (error) => {
+        console.error("EchoInk onboarding completion action failed", error);
+        new Notice(zh ? "操作未完成，请重试。" : "The action did not finish. Try again.");
+      }
+    });
   }
 
   private clearOnboardingCoachmark(restoreFocus: boolean): void {
