@@ -968,8 +968,10 @@
 .echoink-settings-demo .codex-resource-manager .codex-resource-tabs{margin:24px 0 20px;gap:22px}
 .echoink-settings-demo .codex-resource-manager .codex-resource-tabs>button.codex-resource-tab{padding:0 2px 12px;min-height:0;background:none;border:0;border-radius:0;font-size:calc(var(--font-text-size,16px)*.75);box-shadow:none;line-height:1.5}
 .echoink-settings-demo .codex-resource-manager .codex-resource-tab.is-active:after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:2px;background:var(--accent);border-radius:2px}
-.echoink-settings-demo .codex-resource-manager .codex-resource-toolbar{display:flex;justify-content:space-between;gap:16px}
+.echoink-settings-demo .codex-resource-manager .codex-resource-toolbar{display:flex;justify-content:space-between;gap:16px;margin:0}
 .echoink-settings-demo .codex-resource-manager{gap:0}
+.echoink-settings-demo .codex-resource-manager .codex-resource-controls{gap:0}
+.echoink-settings-demo .codex-resource-manager>.resources-tab-hint{margin:14px 0 17px}
 .echoink-settings-demo .codex-resource-manager .codex-resource-search{max-width:365px;min-width:0;flex:1}
 .echoink-settings-demo .codex-resource-manager .codex-resource-body{padding:0;overflow:hidden;border-radius:var(--radius)}
 .echoink-settings-demo .codex-resource-manager .codex-resource-summary{padding:11px 19px;background:var(--soft);border-bottom:1px solid var(--line);font-size:calc(var(--font-text-size,16px)*.625)}
