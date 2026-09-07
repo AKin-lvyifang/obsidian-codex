@@ -106,6 +106,9 @@ export async function runOriginControlsDom(Fixture: new () => AsyncFixture) {
     const iframe = document.createElement("iframe"); iframe.title = "Independent document"; main.append(iframe);
     await new Promise<void>((resolve) => { iframe.onload = () => resolve(); iframe.srcdoc = '<main class="echoink-settings-demo"></main>'; });
     const other = iframe.contentDocument!; const host = other.querySelector<HTMLElement>("main")!;
+    let hostEscapes = 0;
+    const hostEscape = (event: KeyboardEvent) => { if (event.key === "Escape") hostEscapes++; };
+    other.addEventListener("keydown", hostEscape, true);
     const toggle = createOriginSwitch(host); toggle.click();
     const select = createOriginSelect(host, { attr: { "aria-label": "Independent select" } }, [{ value: "a", label: "A" }, { value: "b", label: "B" }], "a").element;
     select.focus(); key(select, "Enter"); await frame();
@@ -117,6 +120,9 @@ export async function runOriginControlsDom(Fixture: new () => AsyncFixture) {
     select.focus(); key(select, "Enter"); await frame();
     key(other.activeElement as HTMLElement, "Escape"); await frame();
     assert(!other.querySelector('[data-slot=select-content]') && other.activeElement === select, "owning document Escape/focus failed");
+    assert(hostEscapes === 0, "popup Escape reached the host document capture handler");
+    key(select, "Escape");
+    assert(hostEscapes === 1, "closed popup still intercepted the host Escape");
     let selected = "a";
     const radios = createOriginRadioGroup(host, "a", "Default model", (value) => { selected = value; });
     const radioItems = ["a", "b", "c"].map((value) => {
@@ -144,8 +150,12 @@ export async function runOriginControlsDom(Fixture: new () => AsyncFixture) {
       assert(key(radioItems[0], "ArrowDown", { [modifier]: true }), "radio group intercepted a modified key"); await frame();
       assert(selected === "a" && other.activeElement === radioItems[0], "modified radio key changed default model or focus");
     }
+    select.focus(); key(select, "Enter"); await frame();
     disposeOriginControls(host);
     assert(!host.querySelector('[data-slot]') && !other.querySelector('[data-slot=select-content]'), "root cleanup left controls or popup");
+    key(host, "Escape");
+    assert(hostEscapes === 2, "disposed popup left its window Escape listener");
+    other.removeEventListener("keydown", hostEscape, true);
     iframe.remove();
   });
   createOriginButton(section("Button"), { text: "Save", cls: "echoink-amicro-button mod-cta" });

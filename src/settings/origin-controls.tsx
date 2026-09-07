@@ -10,7 +10,7 @@ import { RadioGroup, RadioGroupItem } from "../ui/components/origin/radio-group"
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "../ui/components/origin/select";
 
 type ElementOptions = { cls?: string; text?: string; attr?: Record<string, string | number | boolean>; type?: string; value?: string };
-type Island = { root: Root; element: HTMLElement | null; document: Document; disposed: boolean };
+type Island = { root: Root; element: HTMLElement | null; document: Document; disposed: boolean; cleanup?: () => void };
 const islands = new Set<Island>();
 const windowCleanup = new Map<Document, () => void>();
 
@@ -29,6 +29,7 @@ function createIsland(parent: HTMLElement) {
   return {
     ref: (element: HTMLElement | null) => { island.element = element; },
     render: (node: ReactNode) => { if (!island.disposed) flushSync(() => island.root.render(createPortal(node, parent))); },
+    onDispose: (cleanup: () => void) => { island.cleanup = cleanup; },
     element: () => island.element!
   };
 }
@@ -39,6 +40,7 @@ export function disposeOriginControls(container: HTMLElement): void {
     if (island.document !== container.ownerDocument || !island.element || !container.contains(island.element)) continue;
     islands.delete(island);
     island.disposed = true;
+    island.cleanup?.();
     island.root.unmount();
   }
   const document = container.ownerDocument;
@@ -120,8 +122,33 @@ export function createOriginSelect(parent: HTMLElement, options: ElementOptions,
     const properties = ["--accent", "--accent-bg", "--line", "--bg", "--text", "--soft", "--secondary", "--font-text-size", "--font-interface"];
     popupTheme = Object.fromEntries(properties.map((name) => [name, computed.getPropertyValue(name)]).filter(([, value]) => value.trim())) as CSSProperties;
   };
+  const ownerWindow = parent.ownerDocument.defaultView!;
+  const clearEscapeListener = () => ownerWindow.removeEventListener("keydown", onWindowEscape, true);
+  const closePopup = () => {
+    setOpen(false);
+    const trigger = island.element();
+    if (trigger?.isConnected) trigger.focus({ preventScroll: true });
+  };
+  const onWindowEscape = (event: KeyboardEvent) => {
+    if (!open || event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    closePopup();
+  };
+  const setOpen = (next: boolean) => {
+    clearEscapeListener();
+    open = next;
+    if (next) {
+      capturePopupTheme();
+      // A body portal bypasses the settings subtree. Intercept before the
+      // detached host's document capture handler can close its whole window.
+      if (parent.ownerDocument !== document) ownerWindow.addEventListener("keydown", onWindowEscape, true);
+    }
+    render();
+  };
+  island.onDispose(clearEscapeListener);
   const emptyValue = "__echoink_empty_selection__";
-  const render = () => island.render(<Select value={value || emptyValue} disabled={disabled} open={open} onOpenChange={(next) => { open = next; if (next) capturePopupTheme(); render(); }} onValueChange={(next) => {
+  const render = () => island.render(<Select value={value || emptyValue} disabled={disabled} open={open} onOpenChange={setOpen} onValueChange={(next) => {
     value = next === emptyValue ? "" : next; render();
     const element = island.element();
     element.dispatchEvent(new (element.ownerDocument.defaultView!.Event)("change", { bubbles: true }));
@@ -149,7 +176,7 @@ export function createOriginSelect(parent: HTMLElement, options: ElementOptions,
         options[index]?.focus();
         options[index]?.scrollIntoView({ block: "nearest" });
       }}
-      onEscapeKeyDown={(event) => { event.preventDefault(); event.stopPropagation(); open = false; render(); }}>
+      onEscapeKeyDown={(event) => { event.preventDefault(); event.stopPropagation(); closePopup(); }}>
       {items.map((item) => <SelectItem className="echoink-origin-control" key={item.value} value={item.value || emptyValue} disabled={item.disabled}>{item.label}</SelectItem>)}
     </SelectContent>
   </Select>);
