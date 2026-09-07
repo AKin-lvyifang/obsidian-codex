@@ -103,11 +103,16 @@ export function addSettingsHelp(setting: Setting, summary: string, explanation: 
   const name = setting.nameEl.textContent ?? "";
   const helpLabel = /[\u4e00-\u9fff]/u.test(name) ? `${name}说明` : `${name} information`;
   const wrapper = setting.nameEl.createSpan({ cls: "echoink-settings-help" });
-  const id = `echoink-settings-help-${++settingsHelpSequence}`;
   const button = wrapper.createEl("button", {
     cls: "echoink-settings-help-trigger", text: "?",
-    attr: { type: "button", "aria-label": helpLabel, "aria-describedby": id }
+    attr: { type: "button", "aria-label": helpLabel }
   });
+  attachSettingsTooltip(button, explanation, wrapper);
+}
+
+export function attachSettingsTooltip(trigger: HTMLElement, explanation: string, wrapper = trigger): void {
+  const id = `echoink-settings-help-${++settingsHelpSequence}`;
+  trigger.setAttr("aria-describedby", id);
   const panel = wrapper.createDiv({ cls: "echoink-settings-help-panel", text: explanation, attr: { id, role: "tooltip" } });
   panel.hidden = true;
   const view = wrapper.ownerDocument.defaultView;
@@ -158,9 +163,9 @@ export function addSettingsHelp(setting: Setting, summary: string, explanation: 
   wrapper.onmouseleave = scheduleHide;
   panel.onmouseenter = cancelHide;
   panel.onmouseleave = scheduleHide;
-  button.onfocus = show;
-  button.onblur = hide;
-  button.onclick = show;
+  trigger.onfocus = show;
+  trigger.onblur = hide;
+  trigger.onclick = show;
   wrapper.onkeydown = (event) => {
     if (event.key !== "Escape") return;
     hide(); event.preventDefault(); event.stopPropagation();

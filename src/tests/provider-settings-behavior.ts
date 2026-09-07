@@ -5856,6 +5856,28 @@ async function assertKnowledgeInitDefaultTabAndOneClickStart(): Promise<void> {
   assert.match(panel.textContent, /Wiki/u);
   assert.match(panel.textContent, /没有可提炼内容时跳过/u);
   assert.equal(panel.querySelector(".init-folders")?.querySelector("div")?.children.length, 10);
+  const folderChips = panel.querySelectorAll<ProviderModalTestElement>(".init-folder-chip");
+  assert.equal(folderChips.length, 10);
+  for (const chip of folderChips) {
+    assert.equal(chip.getAttribute("tabindex"), "0");
+    const tooltip = chip.querySelector<ProviderModalTestElement>('[role="tooltip"]');
+    assert.equal(chip.getAttribute("aria-describedby"), tooltip?.id);
+    assert.equal(tooltip?.hidden, true);
+  }
+  const rawChip = folderChips[0];
+  const rawTooltip = rawChip.querySelector<ProviderModalTestElement>('[role="tooltip"]')!;
+  assert.equal(rawTooltip.textContent, "现有原始文件和后续待提炼资料");
+  rawChip.fireEvent("mouseenter");
+  assert.equal(rawTooltip.hidden, false);
+  assert.equal(rawTooltip.parentElement?.hasClass("echoink-settings-demo"), true);
+  assert.equal(panel.contains(rawTooltip), false, "the existing tooltip escapes the directory row's clipping context");
+  rawChip.fireEvent("keydown", { key: "Escape" });
+  assert.equal(rawTooltip.hidden, true);
+  rawChip.fireEvent("focus");
+  assert.equal(rawTooltip.hidden, false, "keyboard focus reveals the same directory explanation");
+  rawChip.fireEvent("blur");
+  assert.equal(rawTooltip.hidden, true);
+  assert.equal(folderChips[9].querySelector('[role="tooltip"]')?.textContent, "知识库后续使用的图片、PDF 等附件");
   assert.equal(panel.querySelector(".echoink-knowledge-init-plan-details"), null);
   assert.doesNotMatch(panel.textContent, /一次点击|体系外的 Markdown/u);
   assert.equal(panel.querySelectorAll(".mod-cta").length, 1);

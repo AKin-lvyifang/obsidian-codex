@@ -26,7 +26,7 @@ import {
   getActiveApiProviderModel,
   validateApiProvider
 } from "./settings";
-import { createSettingsSection, createSettingsState } from "./settings-v2";
+import { attachSettingsTooltip, createSettingsSection, createSettingsState } from "./settings-v2";
 import { KnowledgeNotePickerModal } from "./knowledge-note-picker-modal";
 import {
   applyAmicroButton,
@@ -510,12 +510,17 @@ export class KnowledgeInitializationSection {
     const folders = body.createDiv({ cls: "init-folders" });
     folders.createSpan({ text: this.zh ? "将建立的目录" : "Folders to create" });
     const chips = folders.createDiv();
+    const addChip = (name: string, description: string, role: string) => {
+      const chip = chips.createSpan({ cls: "init-folder-chip", attr: {
+        tabindex: "0", "data-echoink-focus-key": `knowledge:init-folder:${role}`
+      } });
+      setIcon(chip.createSpan(), "folders"); chip.createSpan({ text: name });
+      attachSettingsTooltip(chip, description);
+    };
     for (const directory of KNOWLEDGE_INIT_DIRECTORIES) {
-      const chip = chips.createSpan({ attr: { title: this.zh ? directory.descriptionZh : directory.descriptionEn } });
-      setIcon(chip.createSpan(), "folders"); chip.createSpan({ text: directory.labelEn });
+      addChip(directory.labelEn, this.zh ? directory.descriptionZh : directory.descriptionEn, directory.role);
     }
-    const assets = chips.createSpan({ attr: { title: this.zh ? "知识库后续使用的图片、PDF 等附件" : "Images, PDFs, and other knowledge-base attachments" } });
-    setIcon(assets.createSpan(), "folders"); assets.createSpan({ text: "Assets" });
+    addChip("Assets", this.zh ? "知识库后续使用的图片、PDF 等附件" : "Images, PDFs, and other attachments used by the knowledge base", "assets");
   }
 
   private renderInitializationFooter(body: HTMLElement): HTMLElement {
