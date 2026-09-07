@@ -44,6 +44,11 @@ export async function runOriginControlsDom(Fixture: new () => AsyncFixture) {
     const label = document.createElement("label"); label.textContent = "Choose model "; section("Checkbox").append(label);
     const check = createOriginCheck(label, { attr: { "aria-label": "Choose model" } });
     label.click(); await frame(); assert(check.checked, "label did not activate checkbox");
+    check.checked = false; check.indeterminate = true;
+    assert(check.getAttribute("aria-checked") === "mixed" && check.dataset.state === "indeterminate", "partial selection did not reach the real checkbox");
+    assert(Boolean(check.querySelector("[data-slot=checkbox-indicator] svg")), "partial selection indicator is missing");
+    label.click(); await frame();
+    assert(check.checked && !check.indeterminate && check.getAttribute("aria-checked") === "true", "selecting a mixed checkbox did not select all");
   });
   await run("one radio Root, arrow navigation, disabled item", async () => {
     let selected = "a";

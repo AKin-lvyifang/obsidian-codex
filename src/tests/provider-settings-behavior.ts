@@ -1133,7 +1133,7 @@ async function assertSkillToggleNotCommittedRestoresAuthoritativeUi(): Promise<v
 }
 
 function writeSettingsStyleFixture(root: HTMLElement, state: string): void {
-  if (!["resource-style-candidate", "knowledge-style-candidate"].includes(process.env.ECHOINK_PROVIDER_SETTINGS_CASE ?? "")) return;
+  if (!["resource-style-candidate", "knowledge-style-candidate", "directory-style-candidate", "spacing-candidate"].includes(process.env.ECHOINK_PROVIDER_SETTINGS_CASE ?? "")) return;
   const escape = (value: string) => value.replace(/&/gu, "&amp;").replace(/</gu, "&lt;").replace(/"/gu, "&quot;");
   const serialize = (element: any): string => {
     const attributes = new Map<string, string>(element.attributeValues);
@@ -1141,6 +1141,7 @@ function writeSettingsStyleFixture(root: HTMLElement, state: string): void {
     for (const [name, value] of Object.entries(element.dataset)) attributes.set(`data-${name.replace(/[A-Z]/gu, letter => `-${letter.toLowerCase()}`)}`, String(value));
     if (element.hidden) attributes.set("hidden", "");
     if (element.disabled) attributes.set("disabled", "");
+    if (element.checked) attributes.set("checked", "");
     if (element.value) attributes.set("value", element.value);
     return `<${element.localName} ${[...attributes].map(([name, value]) => `${name}="${escape(value)}"`).join(" ")}>${escape(element.ownTextContent)}${element.children.map(serialize).join("")}</${element.localName}>`;
   };
@@ -2468,6 +2469,20 @@ async function assertSettingsAccessibleNamesAndOverflow(): Promise<void> {
   tabs.scrollWidth = 500;
   providerModalResizeObservers.at(-1)?.notify();
   assert.equal(tabs.parentElement?.hasClass("can-scroll-right"), true);
+  const activeTabButton = tabs.querySelector<ProviderModalTestElement>('[aria-selected="true"]')!;
+  const originalTabsRect = tabs.getBoundingClientRect;
+  const originalActiveRect = activeTabButton.getBoundingClientRect;
+  tabs.getBoundingClientRect = () => ({ left: 0, right: 200 } as DOMRect);
+  activeTabButton.getBoundingClientRect = () => ({ left: 215, right: 290 } as DOMRect);
+  tab.containerEl.scrollTop = 180;
+  const focusBeforeResize = providerModalTestDocument.activeElement;
+  providerModalResizeObservers.at(-1)?.notify();
+  assert.equal(tabs.scrollLeft, 90, "shrinking reveals the active tab within the horizontal strip");
+  assert.equal(tab.containerEl.scrollTop, 180, "tab resize must not move page content");
+  assert.equal(providerModalTestDocument.activeElement, focusBeforeResize);
+  tabs.getBoundingClientRect = originalTabsRect;
+  activeTabButton.getBoundingClientRect = originalActiveRect;
+
   const identity = tab.containerEl.querySelector(
     ".codex-provider-saved-identity"
   );
@@ -5921,8 +5936,8 @@ async function assertKnowledgeInitDefaultTabAndOneClickStart(): Promise<void> {
   assert.deepEqual(calls.map((call) => call.method), ["start:custom"]);
   const regeneratedPanel = knowledgeInitPanel(tab);
   assert.equal(
-    regeneratedPanel.querySelectorAll(".init-assignment").length,
-    4
+    regeneratedPanel.querySelectorAll(".directory-row").length,
+    9
   );
 
   // 2. preview 已存在后，来回切换只替换同一 tabpanel 的主体，且不再产生调用。
@@ -5931,12 +5946,12 @@ async function assertKnowledgeInitDefaultTabAndOneClickStart(): Promise<void> {
   const callsBeforeSwitching = calls.length;
   regeneratedTabs[0].click();
   assert.equal(regeneratedPanel.querySelector('[role="tabpanel"]'), stableTabpanel);
-  assert.equal(regeneratedPanel.querySelectorAll(".init-assignment").length, 0);
+  assert.equal(regeneratedPanel.querySelectorAll(".directory-row").length, 0);
   regeneratedTabs[1].click();
   assert.equal(regeneratedPanel.querySelector('[role="tabpanel"]'), stableTabpanel);
   assert.equal(
-    regeneratedPanel.querySelectorAll(".init-assignment").length,
-    4
+    regeneratedPanel.querySelectorAll(".directory-row").length,
+    9
   );
   assert.equal(calls.length, callsBeforeSwitching);
 
@@ -5971,40 +5986,33 @@ async function assertKnowledgeInitCustomTabDirectoriesAndAssignments(): Promise<
   assert.equal(tabs[1].getAttribute("aria-selected"), "true");
   assert.equal(tabs[0].getAttribute("tabindex"), "-1");
   assert.deepEqual(calls, []);
-  const rows = panel.querySelectorAll<ProviderModalTestElement>(".init-assignment");
-  assert.equal(rows.length, 4, "custom assignments render real notes instead of empty directory rows");
-  const paths = rows.map(row => row.querySelector(".init-assignment-file")?.textContent);
-  assert.deepEqual(paths, ["notes/alpha.md", "notes/beta.md", "notes/gamma.md", "notes/delta.md"]);
-  const destinations = () => panel.querySelectorAll<ProviderModalTestElement>(".echoink-knowledge-init-assignment-target");
-  assert.deepEqual(destinations().map(control => control.value), ["wiki", "raw", "raw", "projects"]);
-  const attachment = panel.querySelector<ProviderModalTestElement>(".init-attachment")!;
-  assert.match(attachment.textContent, /references\/book.pdf/u);
-  assert.match(attachment.textContent, /Raw · 保留原始附件/u);
-  assert.equal(attachment.querySelector(".echoink-knowledge-init-assignment-target"), null);
-  assert.equal(destinations()[0].querySelectorAll("option").length, 9);
-  assert.equal(panel.querySelectorAll(".init-folder-chip").length, 10);
-
-  // Selecting a destination uses the existing assignment service and keeps the file focus.
-  const first = destinations()[0];
-  first.focus(); first.value = "raw"; first.fireEvent("change");
+  const rows = panel.querySelectorAll<ProviderModalTestElement>(".directory-row");
+  assert.equal(rows.length, 9);
+  const counts = () => panel.querySelectorAll<ProviderModalTestElement>(".directory-count").map(element => element.textContent);
+  assert.deepEqual(counts(), ["2", "1", "1", "0", "0", "0", "0", "0", "0"]);
+  assert.match(panel.querySelector(".directory-attachments")?.textContent ?? "", /Assets/u);
+  assert.equal(panel.querySelector(".init-folder-chip"), null, "directory rows replace the duplicated chip list");
+  assert.equal(panel.querySelector(".init-assignment"), null);
+  assert.match(panel.querySelector(".init-bottom")?.textContent ?? "", /4 篇 Markdown · 1 个其他文件/u);
+  const wikiToggle = panel.querySelector<ProviderModalTestElement>('[data-directory-toggle="wiki"]')!;
+  wikiToggle.click();
+  assert.equal(wikiToggle.getAttribute("aria-expanded"), "true");
+  assert.equal(panel.querySelector<ProviderModalTestElement>('#echoink-directory-wiki')?.hidden, false);
+  writeSettingsStyleFixture(tab.containerEl, "directory-custom");
+  const remove = panel.querySelectorAll<ProviderModalTestElement>("[data-directory-remove]")
+    .find(button => button.getAttribute("data-directory-remove") === "notes/alpha.md")!;
+  remove.click();
   await flushProviderModalTasks();
-  assert.deepEqual(calls.find(call => call.method === "assignMany")?.args, [
-    { sourcePath: "notes/alpha.md", role: "raw" }
-  ]);
-  assert.deepEqual(destinations().map(control => control.value), ["raw", "raw", "raw", "projects"]);
-  assert.equal(providerModalTestDocument.activeElement === destinations()[0], true);
-  assert.equal(destinations().every(control => !control.disabled), true, "saved assignments leave every destination editable");
-  destinations()[0].value = "wiki"; destinations()[0].fireEvent("change");
-  await flushProviderModalTasks();
-  assert.equal(destinations()[0].value, "wiki", "the same note can be assigned again without reopening settings");
+  assert.deepEqual(calls.find(call => call.method === "assignMany")?.args, [{ sourcePath: "notes/alpha.md", role: "raw" }]);
+  assert.deepEqual(counts(), ["3", "0", "1", "0", "0", "0", "0", "0", "0"]);
+  assert.equal(panel.querySelector('[data-directory-toggle="wiki"]')?.getAttribute("aria-expanded"), "true");
   assert.equal(state.job.items.find((item: any) => item.sourcePath === "references/book.pdf")?.role, "raw");
+  assert.equal(calls.some(call => call.method === "confirm"), false, "assigning/removing only changes the preview");
   tab.hide();
 }
 
 function knowledgeInitBatchPicker(panel: ReturnType<typeof knowledgeInitPanel>, role: string): ProviderModalTestElement {
-  const target = panel.querySelector<ProviderModalTestElement>(".echoink-knowledge-init-batch-target")!;
-  target.value = role; target.fireEvent("change");
-  const picker = panel.querySelector<ProviderModalTestElement>(".echoink-knowledge-init-batch-picker")!;
+  const picker = panel.querySelector<ProviderModalTestElement>(`[data-directory-add="${role}"]`)!;
   assert.ok(picker);
   return picker;
 }
@@ -6304,103 +6312,54 @@ async function assertKnowledgeInitNotePickerModalContract(): Promise<void> {
   const modal = openTestModals.at(-1);
   assert.ok(modal, "note picker modal opens");
 
-  // 13. 打开后焦点在搜索框；当前目录笔记默认勾选；其他目录显示当前归属。
-  const search = modal.contentEl.querySelector<HTMLInputElement>(
-    ".echoink-knowledge-note-picker-search"
-  );
-  assert.ok(search);
+  // Only candidates outside the destination are offered; selection starts empty.
+  const search = modal.contentEl.querySelector<HTMLInputElement>(".echoink-knowledge-note-picker-search")!;
   assert.equal(providerModalTestDocument.activeElement, search);
-  assert.equal(
-    modal.contentEl.querySelectorAll(".echoink-knowledge-note-picker-row").length,
-    6
-  );
-  const defaultPaths = modal.contentEl
-    .querySelectorAll(".echoink-knowledge-note-picker-path")
-    .map((element) => element.textContent);
-  assert.deepEqual(defaultPaths, [
-    "notes/2.md",
-    "notes/10.md",
-    "notes/alpha.md",
-    "notes/beta.md",
-    "notes/delta.md",
-    "notes/gamma.md"
+  const rows = () => modal.contentEl.querySelectorAll<HTMLLabelElement>(".echoink-knowledge-note-picker-row");
+  assert.deepEqual(rows().map(row => row.getAttribute("data-note-path")), [
+    "notes/2.md", "notes/10.md", "notes/beta.md", "notes/delta.md", "notes/gamma.md"
   ]);
-  assert.equal(modal.contentEl.querySelector(".echoink-knowledge-note-picker-empty"), null);
-  const checkboxes = modal.contentEl.querySelectorAll<HTMLInputElement>(
-    ".echoink-knowledge-note-picker-checkbox"
-  );
-  assert.deepEqual(
-    checkboxes.map((checkbox) => checkbox.checked),
-    [false, false, true, false, false, false]
-  );
-  assert.doesNotMatch(modal.contentEl.textContent, /当前：|将移动到|将移回/u);
-  assert.equal(
-    modal.contentEl.querySelector(".echoink-knowledge-note-picker-confirm")?.textContent,
-    "选好了（1）"
-  );
-
-  // 13. 搜索过滤但保留勾选状态。
-  search.value = "gamma";
-  search.fireEvent("input");
-  assert.equal(
-    modal.contentEl.querySelectorAll(".echoink-knowledge-note-picker-row").length,
-    1
-  );
-  search.value = "";
-  search.fireEvent("input");
-  const checkboxesAfterFilter = modal.contentEl.querySelectorAll<HTMLInputElement>(
-    ".echoink-knowledge-note-picker-checkbox"
-  );
-  assert.equal(checkboxesAfterFilter.length, 6);
-  assert.equal(checkboxesAfterFilter[2].checked, true);
-
-  search.value = "does-not-exist";
-  search.fireEvent("input");
-  assert.match(
-    modal.contentEl.querySelector(".echoink-knowledge-note-picker-empty")?.textContent ?? "",
-    /没有匹配的笔记/u
-  );
-  search.value = "";
-  search.fireEvent("input");
-
-  // 整行 label 与 checkbox 同一点击区域；复选框是每行最右侧元素。
-  const selectableRows = modal.contentEl.querySelectorAll<HTMLLabelElement>(
-    ".echoink-knowledge-note-picker-row:not(.is-readonly)"
-  );
-  for (const row of selectableRows) {
-    const checkbox = row.querySelector(".echoink-knowledge-note-picker-checkbox");
-    assert.equal(checkbox?.parentElement?.tagName.toLowerCase(), "label");
-    assert.equal(row.children.at(-1) === checkbox, true);
+  const confirm = modal.contentEl.querySelector<HTMLInputElement>(".echoink-knowledge-note-picker-confirm")!;
+  assert.equal(confirm.disabled, true);
+  assert.equal(confirm.textContent, "添加到 Wiki（0）");
+  const selectAll = modal.contentEl.querySelector<HTMLInputElement>(".picker-select-visible")!;
+  const checkboxFor = (path: string) => rows().find(row => row.getAttribute("data-note-path") === path)
+    ?.querySelector<HTMLInputElement>(".echoink-knowledge-note-picker-checkbox")!;
+  // Select a filtered result, then another search. The earlier choice survives.
+  search.value = "beta"; search.fireEvent("input");
+  selectAll.checked = true; selectAll.fireEvent("change");
+  search.value = "delta"; search.fireEvent("input");
+  assert.equal(selectAll.checked, false);
+  checkboxFor("notes/delta.md").checked = true;
+  checkboxFor("notes/delta.md").fireEvent("change");
+  search.value = ""; search.fireEvent("input");
+  assert.equal(selectAll.indeterminate, true);
+  assert.equal(checkboxFor("notes/beta.md").checked, true);
+  assert.equal(checkboxFor("notes/delta.md").checked, true);
+  assert.equal(confirm.textContent, "添加到 Wiki（2）");
+  const writesBeforeFilter = calls.filter(call => call.method === "assignMany").length;
+  search.value = "does-not-exist"; search.fireEvent("input");
+  assert.match(modal.contentEl.querySelector(".echoink-knowledge-note-picker-empty")?.textContent ?? "", /没有匹配的笔记/u);
+  assert.equal(selectAll.disabled, true);
+  assert.equal(confirm.textContent, "添加到 Wiki（2）");
+  search.value = "notes/"; search.fireEvent("input");
+  assert.equal(rows().length, 5, "folder paths are searchable");
+  assert.equal(calls.filter(call => call.method === "assignMany").length, writesBeforeFilter);
+  for (const row of rows()) {
+    assert.equal(row.children[0]?.hasClass("echoink-knowledge-note-picker-checkbox"), true);
+    assert.ok(row.querySelector(".echoink-knowledge-note-picker-badge"));
   }
-
-  // 勾选 beta 与 delta → 计数更新。
-  const checkboxFor = (sourcePath: string): HTMLInputElement => {
-    const row = modal.contentEl.querySelectorAll<HTMLLabelElement>(
-      ".echoink-knowledge-note-picker-row"
-    ).find((candidate) => candidate.textContent.includes(sourcePath));
-    const checkbox = row?.querySelector<HTMLInputElement>(
-      ".echoink-knowledge-note-picker-checkbox"
-    );
-    assert.ok(checkbox, `expected checkbox for ${sourcePath}`);
-    return checkbox;
-  };
-  for (const sourcePath of ["notes/beta.md", "notes/delta.md"]) {
-    const checkbox = checkboxFor(sourcePath);
-    checkbox.checked = true;
-    checkbox.fireEvent("change");
-  }
-  assert.doesNotMatch(modal.contentEl.textContent, /当前：|将移动到|将移回/u);
-  assert.equal(
-    modal.contentEl.querySelector(".echoink-knowledge-note-picker-confirm")?.textContent,
-    "选好了（3）"
-  );
-
-  // 13/21. 焦点约束：Shift+Tab 从搜索框循环到确认按钮。
+  // Mirror the host classes omitted by the lightweight Modal stub for CSS inspection.
+  modal.modalEl.addClass("modal");
+  modal.contentEl.addClass("modal-content");
+  modal.titleEl.addClass("modal-title");
+  writeSettingsStyleFixture(modal.modalEl, "directory-picker");
+  // Focus follows the modal's visual order and wraps inside it.
+  search.focus();
   modal.modalEl.fireEvent("keydown", { key: "Tab", shiftKey: true });
-  assert.equal(
-    providerModalTestDocument.activeElement,
-    modal.contentEl.querySelector(".echoink-knowledge-note-picker-confirm")
-  );
+  assert.equal(providerModalTestDocument.activeElement, modal.contentEl.querySelector(".picker-close"));
+  modal.modalEl.fireEvent("keydown", { key: "Tab", shiftKey: true });
+  assert.equal(providerModalTestDocument.activeElement, confirm);
 
   // 确认后一次性批量写入，焦点恢复到触发按钮。
   modal.contentEl.querySelector(".echoink-knowledge-note-picker-confirm")?.click();
@@ -6450,7 +6409,7 @@ async function assertKnowledgeInitNotePickerModalContract(): Promise<void> {
     onConfirm: async () => undefined
   });
   emptyModal.open();
-  assert.match(emptyModal.contentEl.textContent, /还没有可分配的 Markdown 笔记/u);
+  assert.match(emptyModal.contentEl.textContent, /没有其他可分配的 Markdown 笔记/u);
   assert.doesNotMatch(emptyModal.contentEl.textContent, /没有匹配的笔记/u);
   emptyModal.close();
 }
@@ -6718,10 +6677,8 @@ async function assertKnowledgeInitRawPickerSemantics(): Promise<void> {
   assert.ok(modal, "raw picker modal opens");
   assert.match(modal.titleEl.textContent, /移回 Raw/u);
 
-  // 已在 Raw 的笔记（beta/gamma）只读；其他笔记（alpha/delta）可勾选，无预勾选。
-  assert.match(modal.contentEl.textContent, /已在 Raw/u);
-  const readonlyRows = modal.contentEl.querySelectorAll(".echoink-knowledge-note-picker-row.is-readonly");
-  assert.equal(readonlyRows.length, 2);
+  // Raw only offers other directories' notes; existing Raw assignments cannot change.
+  assert.doesNotMatch(modal.contentEl.textContent, /beta.md|gamma.md/u);
   const checkboxes = modal.contentEl.querySelectorAll<HTMLInputElement>(
     ".echoink-knowledge-note-picker-checkbox"
   );
@@ -12787,6 +12744,14 @@ if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "visual") {
   await assertKnowledgeInitRecoveryAndActionErrorRendering();
   await assertKnowledgeSettingsDetailRetiresLegacyControls();
   console.log("PASS affected Knowledge initialization UI and local state lifecycles");
+} else if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "spacing-candidate") {
+  await assertSettingsAccessibleNamesAndOverflow();
+  await assertSkillToggleNotCommittedRestoresAuthoritativeUi();
+  console.log("PASS settings resize/focus and resource list behavior; style fixtures written");
+} else if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "directory-style-candidate") {
+  await assertKnowledgeInitCustomTabDirectoriesAndAssignments();
+  await assertKnowledgeInitNotePickerModalContract();
+  console.log("PASS directory assignment and picker lifecycles; style fixtures written");
 } else if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "resource-style-candidate") {
   await assertSkillToggleNotCommittedRestoresAuthoritativeUi();
   console.log("PASS resource filter action lifecycle; browser style fixtures written to .tmp/settings-style-*.html");

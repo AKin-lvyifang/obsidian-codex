@@ -28,7 +28,7 @@ import {
 } from "./settings";
 import { attachSettingsTooltip, createSettingsSection, createSettingsState } from "./settings-v2";
 import { KnowledgeNotePickerModal } from "./knowledge-note-picker-modal";
-import { createOriginButton, createOriginSelect, disposeOriginControls, type OriginSelectElement } from "./origin-controls";
+import { createOriginButton, disposeOriginControls } from "./origin-controls";
 import {
   applyAmicroButton,
   applyParticleButton,
@@ -107,9 +107,8 @@ export class KnowledgeInitializationSection {
   };
   private tabBodyEl: HTMLElement | null = null;
   private assignmentsEl: HTMLElement | null = null;
-  private batchTargetRole: KnowledgeInitDirectoryRole = "wiki";
-  private batchPickerButton: HTMLButtonElement | null = null;
-  private assignmentControls = new Map<string, OriginSelectElement>();
+  private expandedDirectories = new Set<KnowledgeInitDirectoryRole>();
+  private directoryButtons = new Map<KnowledgeInitDirectoryRole, HTMLButtonElement>();
   private progressRefs: KnowledgeInitProgressRefs | null = null;
 
   constructor(
@@ -470,8 +469,7 @@ export class KnowledgeInitializationSection {
     disposeOriginControls(body);
     body.empty();
     this.assignmentsEl = null;
-    this.batchPickerButton = null;
-    this.assignmentControls.clear();
+    this.directoryButtons.clear();
     if (this.selectedTab === "recommended") this.renderRecommendedBody(body);
     else this.renderCustomBody(body);
   }
@@ -587,9 +585,8 @@ export class KnowledgeInitializationSection {
           : `${conflicts} files already have content at their target paths; resolve these conflicts first.`
       });
     }
-    this.assignmentsEl = body.createDiv({ cls: "echoink-knowledge-init-custom" });
+    this.assignmentsEl = body.createDiv({ cls: "echoink-knowledge-init-custom directory-planner" });
     this.renderAssignments();
-    this.renderFolderChips(body);
     const actions = this.renderInitializationFooter(body);
     const cta = actions.createEl("button", {
       cls: "mod-cta echoink-knowledge-init-cta",
@@ -633,7 +630,7 @@ export class KnowledgeInitializationSection {
     });
   }
 
-  // --------------------------------------------------------- file assignments
+  // ---------------------------------------------------- directory assignments
 
   private renderAssignments(): void {
     const container = this.assignmentsEl;
@@ -642,136 +639,139 @@ export class KnowledgeInitializationSection {
     const zh = this.zh;
     disposeOriginControls(container);
     container.empty();
-    this.assignmentControls.clear();
+    this.directoryButtons.clear();
     const descriptions = zh
       ? ["原始资料", "长期知识", "项目资料", "生成结果", "待分类", "日记与复盘", "工作资料", "归档", "笔记模板"]
       : ["Source material", "Knowledge", "Project material", "Generated results", "Unsorted", "Journals and reviews", "Work material", "Archive", "Note templates"];
-    const choices = KNOWLEDGE_INIT_DIRECTORIES.map((directory, index) => ({
-      value: directory.role, label: `${directory.labelEn} · ${descriptions[index]}`
-    }));
-    const list = container.createDiv({ cls: "init-assignments" });
-    if (!job.items.length) {
-      list.createEl("p", { cls: "init-assignment-empty", text: zh
-        ? "还没有可分配的文件。" : "No files to assign yet." });
-    }
-    for (const item of job.items) {
-      const markdown = isKnowledgeInitializationMarkdownPath(item.sourcePath);
-      const row = list.createDiv({ cls: markdown ? "init-assignment" : "init-attachment" });
-      const file = row.createSpan({ cls: "init-assignment-file" });
-      setIcon(file.createSpan({ attr: { "aria-hidden": "true" } }), "file-text");
-      file.createSpan({ text: item.sourcePath });
-      if (markdown && item.role !== "keep") {
-        const select = createOriginSelect(row, {
-          cls: "echoink-knowledge-init-assignment-target", attr: {
-            "aria-label": zh ? `${item.sourcePath}的归处` : `Destination for ${item.sourcePath}`,
-            "data-echoink-focus-key": `knowledge:init-assignment:${item.sourcePath}`
-          }
-        }, choices, item.role, this.plugin.app).element;
-        this.assignmentControls.set(item.sourcePath, select);
-        select.disabled = this.busy;
-        select.onchange = () => {
-          const role = select.value;
-          if (!isKnowledgeInitializationRole(role) || role === "keep" || role === item.role) return;
-          if (this.busy) { select.value = item.role; return; }
-          void this.applyAssignments([{ sourcePath: item.sourcePath, role }], item.sourcePath);
-        };
-      } else {
-        row.createSpan({ cls: "init-assignment-readonly", text: item.role === "keep"
-          ? (zh ? "保留原位置" : "Keep in place")
-          : `${this.dirLabel(item.role)} · ${zh ? "保留原始附件" : "Keep original attachment"}` });
-      }
-    }
-    const batch = container.createDiv({ cls: "init-assignment-batch" });
-    batch.createSpan({ text: zh ? "批量分配到" : "Assign multiple notes to" });
-    const target = createOriginSelect(batch, {
-      cls: "echoink-knowledge-init-batch-target", attr: {
-        "aria-label": zh ? "批量分配目标目录" : "Destination for multiple notes",
-        "data-echoink-focus-key": "knowledge:init-batch-target"
-      }
-    }, choices, this.batchTargetRole, this.plugin.app).element;
-    target.disabled = this.busy;
-    const picker = createOriginButton(batch, {
-      cls: "echoink-knowledge-init-batch-picker", attr: {
-        type: "button", "data-echoink-focus-key": "knowledge:init-batch-picker"
+    const notes = job.items.filter(item => isKnowledgeInitializationMarkdownPath(item.sourcePath));
+    const list = container.createDiv({ cls: "directory-plan" });
+    const heading = list.createDiv({ cls: "directory-plan-heading", attr: { "aria-hidden": "true" } });
+    for (const label of zh ? ["目录", "已分配", "操作"] : ["Folder", "Assigned", "Actions"]) heading.createSpan({ text: label });
+    KNOWLEDGE_INIT_DIRECTORIES.forEach((directory, index) => {
+      const role = directory.role;
+      const assigned = notes.filter(note => note.role === role);
+      const description = zh ? directory.descriptionZh : directory.descriptionEn;
+      const section = list.createEl("section", { cls: "directory-item" });
+      const row = section.createDiv({ cls: "directory-row" });
+      const toggle = row.createEl("button", { cls: "directory-reveal", attr: {
+        type: "button", "data-directory-toggle": role,
+        "aria-expanded": String(this.expandedDirectories.has(role)),
+        "aria-controls": `echoink-directory-${role}`
+      } });
+      setIcon(toggle.createSpan({ cls: "directory-chevron", attr: { "aria-hidden": "true" } }), "chevron-right");
+      setIcon(toggle.createSpan({ cls: "directory-icon", attr: { "aria-hidden": "true" } }), "folders");
+      const name = toggle.createSpan({ cls: "directory-name", text: directory.labelEn });
+      name.createEl("small", { text: descriptions[index] });
+      attachSettingsTooltip(toggle, description);
+      const count = row.createSpan({ cls: "directory-count", text: String(assigned.length), attr: {
+        "aria-label": zh ? `${directory.labelEn} 已分配 ${assigned.length} 篇` : `${assigned.length} notes assigned to ${directory.labelEn}`
+      } });
+      count.setAttr("data-directory-count", role);
+      const add = createOriginButton(row, { cls: "button directory-add", attr: {
+        type: "button", "data-directory-add": role,
+        "data-echoink-focus-key": `knowledge:init-add:${role}`,
+        "aria-label": role === "raw"
+          ? (zh ? "把其他目录的笔记移回 Raw" : "Move notes back to Raw")
+          : (zh ? `添加笔记到 ${directory.labelEn}` : `Add notes to ${directory.labelEn}`)
+      } });
+      setIcon(add.createSpan({ attr: { "aria-hidden": "true" } }), role === "raw" ? "history" : "plus");
+      add.createSpan({ text: role === "raw" ? (zh ? "移回 Raw" : "Move to Raw") : (zh ? "添加笔记" : "Add notes") });
+      add.disabled = this.busy;
+      add.onclick = () => void this.openNotePicker(role, add);
+      this.directoryButtons.set(role, add);
+      const assignedList = section.createDiv({ cls: "directory-notes", attr: { id: `echoink-directory-${role}` } });
+      assignedList.hidden = !this.expandedDirectories.has(role);
+      // Expand in place: keep pointer/keyboard focus and the other lists' scroll positions.
+      toggle.onclick = () => {
+        assignedList.hidden = !assignedList.hidden;
+        if (assignedList.hidden) this.expandedDirectories.delete(role);
+        else this.expandedDirectories.add(role);
+        toggle.setAttr("aria-expanded", String(!assignedList.hidden));
+      };
+      assignedList.createEl("p", { cls: "directory-purpose", text: description });
+      if (!assigned.length) assignedList.createEl("p", { cls: "directory-none", text: zh
+        ? (role === "raw" ? "还没有归入 Raw 的笔记。" : "还没有分配笔记，点击右侧「添加笔记」。")
+        : (role === "raw" ? "No notes are assigned to Raw yet." : "No notes assigned yet. Use Add notes to choose some.") });
+      for (const note of assigned) {
+        const noteRow = assignedList.createDiv();
+        setIcon(noteRow.createSpan({ cls: "directory-file-icon", attr: { "aria-hidden": "true" } }), "file-text");
+        noteRow.createSpan({ cls: "directory-note-path", text: note.sourcePath });
+        if (role !== "raw") {
+          const remove = noteRow.createEl("button", { cls: "icon-button", attr: {
+            type: "button", "data-directory-remove": note.sourcePath,
+            "aria-label": zh ? `将 ${note.sourcePath} 移回 Raw` : `Move ${note.sourcePath} back to Raw`
+          } });
+          setIcon(remove, "x");
+          remove.disabled = this.busy;
+          remove.onclick = () => void this.applyAssignments([{ sourcePath: note.sourcePath, role: "raw" }], role);
+        }
       }
     });
-    this.batchPickerButton = picker;
-    const updatePickerLabel = () => {
-      picker.setText(this.batchTargetRole === "raw"
-        ? (zh ? "移回 Raw" : "Move back to Raw") : (zh ? "选择笔记" : "Choose notes"));
-      picker.setAttr("aria-label", this.batchTargetRole === "raw"
-        ? (zh ? "把其他目录的笔记移回 Raw" : "Move notes back to Raw")
-        : (zh ? `添加笔记到 ${this.dirLabel(this.batchTargetRole)}` : `Add notes to ${this.dirLabel(this.batchTargetRole)}`));
-    };
-    updatePickerLabel();
-    picker.disabled = this.busy;
-    target.onchange = () => {
-      if (!isKnowledgeInitializationRole(target.value) || target.value === "keep") return;
-      this.batchTargetRole = target.value;
-      updatePickerLabel();
-    };
-    picker.onclick = () => void this.openNotePicker(this.batchTargetRole, picker);
+    const attachments = list.createDiv({ cls: "directory-attachments" });
+    setIcon(attachments.createSpan({ attr: { "aria-hidden": "true" } }), "folders");
+    attachments.createEl("strong", { text: "Assets" });
+    attachments.createSpan({ text: zh ? "附件目录" : "Attachments" });
+    const help = attachments.createEl("button", { cls: "settings-help", text: "?", attr: {
+      type: "button", "aria-label": zh ? "附件如何安放" : "How attachments are organized"
+    } });
+    attachSettingsTooltip(help, zh
+      ? "普通附件会随原始笔记归入 Raw，保留相对路径。Assets 用于后续生成或导入的附件。"
+      : "Ordinary attachments stay with original notes in Raw, preserving relative paths. Assets holds attachments generated or imported later.");
+    const summary = container.createDiv({ cls: "directory-summary" });
+    setIcon(summary.createSpan({ attr: { "aria-hidden": "true" } }), "circle-help");
+    summary.createSpan({ text: zh
+      ? "未分配的笔记留在 Raw；这里只调整预览，开始初始化后才整理文件。"
+      : "Unassigned notes stay in Raw. These changes only update the preview; files are organized when you start initialization." });
+    const kept = notes.filter(note => note.role === "keep").length;
+    if (kept) container.createEl("p", { cls: "directory-summary", text: zh
+      ? `${kept} 篇笔记按已有计划保留原位置。` : `${kept} notes keep their original locations under the existing plan.` });
   }
 
-  private async openNotePicker(
-    role: KnowledgeInitDirectoryRole,
-    triggerEl: HTMLElement
-  ): Promise<void> {
-    // 每次打开都重新读取当前 Vault，并恢复用户已明确做过的分配。这样用户
-    // 在旧 preview 之后新建的笔记也会立刻出现在列表里；此步骤只更新预览，
-    // 不移动文件，也不调用 Provider。
+  private async openNotePicker(role: KnowledgeInitDirectoryRole, triggerEl: HTMLElement): Promise<void> {
+    // Rescan through the existing preview service; preserve earlier assignments.
+    // Neither scanning nor choosing notes moves files or calls a Provider.
     if (!await this.rebuildCustomPreviewPreservingAssignments()) return;
-    if (this.assignmentsEl?.isConnected) this.renderAssignments();
+    if (!this.pageEl?.isConnected || this.selectedTab !== "custom") return;
+    if (this.assignmentsEl?.isConnected) this.renderTabBody();
     const job = this.job;
     if (!job) return;
-    const notes = job.items
-      .filter((item) =>
-        item.role !== "keep"
-        && isKnowledgeInitializationMarkdownPath(item.sourcePath)
-      )
-      .map((item) => ({ sourcePath: item.sourcePath, role: item.role }));
     const modal = new KnowledgeNotePickerModal(this.plugin.app, {
-      zh: this.zh,
-      targetRole: role,
-      targetLabel: this.dirLabel(role),
-      notes,
-      triggerEl,
-      // 列表提交后重建，统一恢复到当前批量选择入口。
-      restoreFocus: () => this.focusBatchPicker(),
-      onConfirm: (assignments) => this.applyAssignments(assignments, undefined, true)
+      zh: this.zh, targetRole: role, targetLabel: this.dirLabel(role),
+      notes: job.items.filter(item => item.role !== "keep" && isKnowledgeInitializationMarkdownPath(item.sourcePath))
+        .map(item => ({ sourcePath: item.sourcePath, role: item.role })),
+      triggerEl: this.directoryButtons.get(role) ?? triggerEl,
+      restoreFocus: () => this.focusDirectoryButton(role),
+      onConfirm: assignments => this.applyAssignments(assignments, role, true)
     });
     modal.open();
   }
 
-  private focusBatchPicker(): void {
-    const button = this.batchPickerButton;
-    if (button?.isConnected) button.focus();
+  private focusDirectoryButton(role: KnowledgeInitDirectoryRole): void {
+    const button = this.directoryButtons.get(role);
+    if (button?.isConnected) button.focus({ preventScroll: true });
   }
 
   private async applyAssignments(
     assignments: readonly KnowledgeInitializationAssignment[],
-    focusSourcePath?: string,
+    focusRole: KnowledgeInitDirectoryRole,
     rethrow = false
   ): Promise<void> {
     if (this.busy || assignments.length === 0) return;
     this.busy = true;
     this.clearActionError();
-    for (const control of this.assignmentControls.values()) control.disabled = true;
-    if (this.batchPickerButton) this.batchPickerButton.disabled = true;
+    this.assignmentsEl?.querySelectorAll<HTMLButtonElement>("button").forEach(button => { button.disabled = true; });
     try {
       this.job = await this.plugin.assignManyEchoInkKnowledgeInitializationNotes(assignments);
       this.loaded = true;
-      // 只刷新分配区域，继续使用服务返回的权威分配，并恢复当前文件焦点。
       this.busy = false;
       if (this.assignmentsEl?.isConnected) {
         this.renderAssignments();
-        if (focusSourcePath) this.assignmentControls.get(focusSourcePath)?.focus();
+        this.focusDirectoryButton(focusRole);
       } else this.scheduleRender();
     } catch (error) {
       this.recordActionError(error);
       await this.reloadAfterActionError();
       this.scheduleRender();
-      // Modal 路径：把错误抛回，让 Modal 保持打开并显示自己的内联错误。
       if (rethrow) throw error;
     } finally {
       this.busy = false;

@@ -1,5 +1,5 @@
-import { createOriginInput, createOriginButton, createOriginCheck, disposeOriginControls } from "./origin-controls";
-import { Modal, type App } from "obsidian";
+import { createOriginInput, createOriginButton, createOriginCheck, disposeOriginControls, type OriginCheckElement } from "./origin-controls";
+import { Modal, setIcon, type App } from "obsidian";
 import type {
   KnowledgeInitializationAssignment,
   KnowledgeInitializationRole
@@ -51,295 +51,219 @@ export function sortKnowledgeNotePickerNotes(
   });
 }
 
-/**
- * 知识库初始化的多选笔记 Modal：
- * - 真实 checkbox 多选，整行 label 与 checkbox 同一点击区域；
- * - 勾选过程只在内存中更新，确认（选好了）才一次性回传；
- * - 取消或 Escape 零写入；关闭后焦点恢复到触发按钮；
- * - 提交期间防重复提交；onConfirm 抛错时保持打开并显示内联错误。
- *
- * targetRole === "raw" 时语义为「把其他目录的笔记移回 Raw」：
- * 已在 Raw 的笔记显示为不可编辑的「已在 Raw」，不允许取消勾选后
- * 确认时再静默分配回 Raw。
- */
+/** Local selection draft. Only confirmation submits preview assignments. */
 export class KnowledgeNotePickerModal extends Modal {
   private readonly notes: readonly KnowledgeNotePickerNote[];
   private readonly checked = new Set<string>();
   private query = "";
   private searchEl: HTMLInputElement | null = null;
   private listEl: HTMLElement | null = null;
+  private selectVisibleEl: OriginCheckElement | null = null;
+  private resultCountEl: HTMLElement | null = null;
+  private selectedCountEl: HTMLElement | null = null;
+  private clearEl: HTMLButtonElement | null = null;
   private confirmEl: HTMLButtonElement | null = null;
   private cancelEl: HTMLButtonElement | null = null;
+  private closeEl: HTMLButtonElement | null = null;
   private errorEl: HTMLElement | null = null;
   private confirmed = false;
   private submitting = false;
   private keydownHandler: ((event: KeyboardEvent) => void) | null = null;
 
-  constructor(
-    app: App,
-    private readonly options: KnowledgeNotePickerOptions
-  ) {
+  constructor(app: App, private readonly options: KnowledgeNotePickerOptions) {
     super(app);
-    this.notes = Object.freeze(sortKnowledgeNotePickerNotes(options.notes));
-    // Raw 目标是「移回 Raw」：没有预勾选；其他目录预勾选当前已在该目录的笔记。
-    if (options.targetRole !== "raw") {
-      for (const note of this.notes) {
-        if (note.role === options.targetRole) this.checked.add(note.sourcePath);
-      }
-    }
+    // Existing assignments are viewed/removed in the directory, never unchecked
+    // implicitly in an Add dialog. Raw uses the same candidate-only semantics.
+    this.notes = Object.freeze(sortKnowledgeNotePickerNotes(options.notes.filter(note =>
+      note.role !== options.targetRole && note.role !== "keep"
+    )));
   }
 
-  get selectedCount(): number {
-    return this.checked.size;
-  }
-
-  /** 测试与调用方可读取：onConfirm 成功后才为 true。 */
-  get wasConfirmed(): boolean {
-    return this.confirmed;
-  }
-
-  get isSubmitting(): boolean {
-    return this.submitting;
-  }
+  get selectedCount(): number { return this.checked.size; }
+  get wasConfirmed(): boolean { return this.confirmed; }
+  get isSubmitting(): boolean { return this.submitting; }
 
   onOpen(): void {
-    const { zh, targetLabel, targetRole } = this.options;
+    const { zh, targetLabel, targetRole, triggerEl } = this.options;
     this.modalEl.addClass("echoink-knowledge-note-picker");
-    this.titleEl.setText(
-      targetRole === "raw"
-        ? (zh ? "移回 Raw" : "Move notes back to Raw")
-        : (zh ? `添加笔记到 ${targetLabel}` : `Add notes to ${targetLabel}`)
-    );
+    // Modal lives outside settings; inherit that window's effective theme/scale.
+    const source = triggerEl?.closest<HTMLElement>(".echoink-settings-demo");
+    const computed = source?.ownerDocument.defaultView?.getComputedStyle?.(source);
+    for (const name of ["--bg", "--text", "--secondary", "--muted", "--line", "--soft", "--accent", "--accent-bg", "--font-text-size"]) {
+      const value = computed?.getPropertyValue?.(name);
+      if (value?.trim()) this.modalEl.style.setProperty(name, value);
+    }
+    this.titleEl.setText(targetRole === "raw"
+      ? (zh ? "移回 Raw" : "Move notes back to Raw")
+      : (zh ? `添加笔记到 ${targetLabel}` : `Add notes to ${targetLabel}`));
+    const heading = this.contentEl.createDiv({ cls: "picker-heading" });
+    setIcon(heading.createSpan({ cls: "picker-folder-icon", attr: { "aria-hidden": "true" } }), "folders");
+    const headingCopy = heading.createDiv();
+    headingCopy.appendChild(this.titleEl);
+    headingCopy.createEl("p", { text: zh ? "可以跨搜索结果多选，选好后一起确认。" : "Select across search results, then confirm your choices together." });
+    this.closeEl = heading.createEl("button", { cls: "picker-close", attr: { type: "button", "aria-label": zh ? "关闭" : "Close" } });
+    setIcon(this.closeEl, "x");
+    this.closeEl.onclick = () => { if (!this.submitting) this.close(); };
     const body = this.contentEl.createDiv({ cls: "echoink-knowledge-note-picker-body" });
-    this.searchEl = createOriginInput(body, {
-      cls: "echoink-knowledge-note-picker-search",
-      attr: {
-        type: "search",
-        placeholder: zh ? "搜索 Vault 中的 Markdown" : "Search Markdown in the Vault",
-        "aria-label": zh ? "搜索可分配的笔记" : "Search assignable notes"
+    const searchWrap = body.createDiv({ cls: "picker-search" });
+    setIcon(searchWrap.createSpan({ attr: { "aria-hidden": "true" } }), "search");
+    this.searchEl = createOriginInput(searchWrap, { cls: "echoink-knowledge-note-picker-search", attr: {
+      type: "search", placeholder: zh ? "搜索笔记标题或路径…" : "Search note title or path…",
+      "aria-label": zh ? "搜索笔记标题或路径" : "Search note title or path", autocomplete: "off"
+    } });
+    this.searchEl.oninput = () => { this.query = this.searchEl?.value ?? ""; this.renderList(); };
+    const listHeading = body.createDiv({ cls: "picker-list-heading" });
+    const selectLabel = listHeading.createEl("label");
+    this.selectVisibleEl = createOriginCheck(selectLabel, { cls: "picker-select-visible" });
+    selectLabel.createSpan({ text: zh ? "全选当前结果" : "Select all results" });
+    this.selectVisibleEl.onchange = () => {
+      for (const note of this.visibleNotes()) {
+        if (this.selectVisibleEl?.checked) this.checked.add(note.sourcePath);
+        else this.checked.delete(note.sourcePath);
       }
-    });
-    this.searchEl.oninput = () => {
-      this.query = this.searchEl?.value ?? "";
       this.renderList();
     };
-    this.listEl = body.createDiv({
-      cls: "echoink-knowledge-note-picker-list",
-      attr: { role: "group", "aria-label": zh ? "可分配的笔记" : "Assignable notes" }
-    });
-    this.renderList();
+    this.resultCountEl = listHeading.createSpan({ cls: "picker-result-count" });
+    this.listEl = body.createDiv({ cls: "echoink-knowledge-note-picker-list", attr: {
+      role: "group", "aria-label": zh ? "可分配的笔记" : "Assignable notes"
+    } });
+    this.errorEl = this.contentEl.createDiv({ cls: "echoink-knowledge-note-picker-error", attr: { role: "alert", "aria-live": "assertive" } });
     const footer = this.contentEl.createDiv({ cls: "echoink-knowledge-note-picker-footer" });
-    this.errorEl = footer.createDiv({
-      cls: "echoink-knowledge-note-picker-error",
-      attr: { role: "alert", "aria-live": "assertive" }
-    });
-    this.cancelEl = createOriginButton(footer, {
-      cls: "echoink-knowledge-note-picker-cancel",
-      text: zh ? "取消" : "Cancel",
-      attr: { type: "button" }
-    });
+    const selection = footer.createDiv({ cls: "picker-selection" });
+    this.selectedCountEl = selection.createEl("strong", { attr: { role: "status", "aria-live": "polite" } });
+    this.clearEl = selection.createEl("button", { cls: "picker-clear", text: zh ? "清空" : "Clear", attr: { type: "button" } });
+    this.clearEl.onclick = () => { this.checked.clear(); this.renderList(); };
+    const actions = footer.createDiv({ cls: "picker-actions" });
+    this.cancelEl = createOriginButton(actions, { cls: "echoink-knowledge-note-picker-cancel", text: zh ? "取消" : "Cancel", attr: { type: "button" } });
     applyAmicroButton(this.cancelEl, { variant: "secondary" });
-    this.cancelEl.onclick = () => this.close();
-    this.confirmEl = createOriginButton(footer, {
-      cls: "mod-cta echoink-knowledge-note-picker-confirm",
-      text: this.confirmLabel(),
-      attr: { type: "button" }
-    });
+    this.cancelEl.onclick = () => { if (!this.submitting) this.close(); };
+    this.confirmEl = createOriginButton(actions, { cls: "mod-cta echoink-knowledge-note-picker-confirm", attr: { type: "button" } });
     applyAmicroButton(this.confirmEl, { variant: "primary", motion: "complete" });
     this.confirmEl.onclick = () => void this.confirm();
-    this.keydownHandler = (event) => this.handleKeydown(event);
+    this.renderList();
+    this.keydownHandler = event => this.handleKeydown(event);
     this.modalEl.addEventListener("keydown", this.keydownHandler);
     this.searchEl.focus();
   }
 
   onClose(): void {
     disposeOriginControls(this.contentEl);
-    if (this.keydownHandler) {
-      this.modalEl.removeEventListener("keydown", this.keydownHandler);
-      this.keydownHandler = null;
-    }
-    // 取消 / Escape / 提交成功 / 提交失败后再取消：统一走稳定的焦点恢复。
-    this.restoreTriggerFocus();
-  }
-
-  private restoreTriggerFocus(): void {
-    if (this.options.restoreFocus) {
-      this.options.restoreFocus();
-      return;
-    }
-    const trigger = this.options.triggerEl;
-    if (trigger && trigger.isConnected) trigger.focus();
+    if (this.keydownHandler) this.modalEl.removeEventListener("keydown", this.keydownHandler);
+    this.keydownHandler = null;
+    if (this.options.restoreFocus) this.options.restoreFocus();
+    else if (this.options.triggerEl?.isConnected) this.options.triggerEl.focus();
   }
 
   private confirmLabel(): string {
-    const { zh, targetRole } = this.options;
-    if (targetRole === "raw") {
-      return zh ? `移回 Raw（${this.checked.size}）` : `Move to Raw (${this.checked.size})`;
-    }
-    return zh
-      ? `选好了（${this.checked.size}）`
-      : `Done (${this.checked.size})`;
+    const { zh, targetRole, targetLabel } = this.options;
+    return targetRole === "raw"
+      ? (zh ? `移回 Raw（${this.checked.size}）` : `Move to Raw (${this.checked.size})`)
+      : (zh ? `添加到 ${targetLabel}（${this.checked.size}）` : `Add to ${targetLabel} (${this.checked.size})`);
+  }
+
+  private visibleNotes(): readonly KnowledgeNotePickerNote[] {
+    const query = this.query.trim().toLocaleLowerCase();
+    return this.notes.filter(note => !query || note.sourcePath.toLocaleLowerCase().includes(query));
   }
 
   private renderList(): void {
     const list = this.listEl;
     if (!list) return;
-    const { zh, targetRole } = this.options;
-    const rawTarget = targetRole === "raw";
+    const { zh } = this.options;
+    const scrollTop = list.scrollTop;
     disposeOriginControls(list);
     list.empty();
-    const query = this.query.trim().toLocaleLowerCase();
-    const visible = this.notes.filter((note) =>
-      !query || note.sourcePath.toLocaleLowerCase().includes(query)
-    );
-    if (visible.length === 0) {
-      list.createDiv({
-        cls: "echoink-knowledge-note-picker-empty",
-        text: query
-          ? (zh ? "没有匹配的笔记。" : "No matching notes.")
-          : (zh
-              ? "Vault 中还没有可分配的 Markdown 笔记。"
-              : "There are no assignable Markdown notes in this Vault yet.")
-      });
-      return;
+    const visible = this.visibleNotes();
+    if (!visible.length) {
+      const empty = list.createDiv({ cls: "echoink-knowledge-note-picker-empty" });
+      setIcon(empty.createSpan({ attr: { "aria-hidden": "true" } }), "search");
+      empty.createEl("h3", { text: this.query.trim()
+        ? (zh ? "没有匹配的笔记" : "No matching notes")
+        : (zh ? "没有可添加的笔记" : "No notes to add") });
+      empty.createEl("p", { text: this.query.trim()
+        ? (zh ? "试试其他关键词，已选内容会保留。" : "Try another search. Your selections are kept.")
+        : (zh ? "当前预览中没有其他可分配的 Markdown 笔记。" : "There are no other assignable Markdown notes in this preview.") });
     }
     for (const note of visible) {
-      // Raw 目标：已在 Raw 的笔记只读展示，不参与勾选，避免「取消勾选后
-      // 确认时又静默分配回 Raw」的无效交互。
-      if (rawTarget && note.role === "raw") {
-        const readonlyRow = list.createDiv({
-          cls: "echoink-knowledge-note-picker-row is-readonly"
-        });
-        const readonlyCopy = readonlyRow.createDiv({ cls: "echoink-knowledge-note-picker-copy" });
-        readonlyCopy.createDiv({
-          cls: "echoink-knowledge-note-picker-path",
-          text: note.sourcePath,
-          attr: { title: note.sourcePath }
-        });
-        readonlyCopy.createDiv({
-          cls: "echoink-knowledge-note-picker-badge",
-          text: zh ? "已在 Raw" : "Already in Raw"
-        });
-        continue;
-      }
-      const row = list.createEl("label", { cls: "echoink-knowledge-note-picker-row" });
-      const copy = row.createDiv({ cls: "echoink-knowledge-note-picker-copy" });
-      copy.createDiv({
-        cls: "echoink-knowledge-note-picker-path",
-        text: note.sourcePath,
-        attr: { title: note.sourcePath }
-      });
-      const checkbox = createOriginCheck(row, {
-        cls: "echoink-knowledge-note-picker-checkbox",
-        attr: { type: "checkbox" }
-      });
+      const row = list.createEl("label", { cls: "echoink-knowledge-note-picker-row", attr: { "data-note-path": note.sourcePath } });
+      row.toggleClass("is-selected", this.checked.has(note.sourcePath));
+      const checkbox = createOriginCheck(row, { cls: "echoink-knowledge-note-picker-checkbox" });
       checkbox.checked = this.checked.has(note.sourcePath);
+      checkbox.disabled = this.submitting;
+      const icon = row.createSpan({ cls: "picker-note-icon", attr: { "aria-hidden": "true" } });
+      setIcon(icon, "file-text");
+      const copy = row.createDiv({ cls: "echoink-knowledge-note-picker-copy" });
+      const slash = note.sourcePath.lastIndexOf("/");
+      copy.createEl("strong", { text: note.sourcePath.slice(slash + 1), cls: "picker-note-title" });
+      copy.createEl("small", { cls: "echoink-knowledge-note-picker-path", text: slash < 0 ? (zh ? "根目录" : "Root folder") : note.sourcePath.slice(0, slash) });
+      row.createSpan({ cls: "echoink-knowledge-note-picker-badge", text: note.role.charAt(0).toUpperCase() + note.role.slice(1) });
       checkbox.onchange = () => {
         if (checkbox.checked) this.checked.add(note.sourcePath);
         else this.checked.delete(note.sourcePath);
-        if (this.confirmEl && !this.submitting) this.confirmEl.setText(this.confirmLabel());
+        row.toggleClass("is-selected", checkbox.checked);
+        this.updateSelection();
       };
     }
+    list.scrollTop = scrollTop;
+    this.updateSelection();
   }
 
-  private collectAssignments(): KnowledgeInitializationAssignment[] {
-    const { targetRole } = this.options;
-    const assignments: KnowledgeInitializationAssignment[] = [];
-    for (const note of this.notes) {
-      const isChecked = this.checked.has(note.sourcePath);
-      if (targetRole === "raw") {
-        // 移回 Raw：只有被勾选且当前不在 Raw 的笔记产生写入。
-        if (isChecked && note.role !== "raw") {
-          assignments.push({ sourcePath: note.sourcePath, role: "raw" });
-        }
-        continue;
-      }
-      if (isChecked && note.role !== targetRole) {
-        assignments.push({ sourcePath: note.sourcePath, role: targetRole });
-      } else if (!isChecked && note.role === targetRole) {
-        // 从当前目录取消勾选 → 回到默认 raw。
-        assignments.push({ sourcePath: note.sourcePath, role: "raw" });
-      }
+  private updateSelection(): void {
+    const { zh } = this.options;
+    const visible = this.visibleNotes();
+    if (this.selectVisibleEl) {
+      const selected = visible.filter(note => this.checked.has(note.sourcePath)).length;
+      this.selectVisibleEl.checked = visible.length > 0 && selected === visible.length;
+      this.selectVisibleEl.indeterminate = selected > 0 && selected < visible.length;
+      this.selectVisibleEl.disabled = this.submitting || !visible.length;
     }
-    return assignments;
-  }
-
-  private setSubmitting(submitting: boolean): void {
-    this.submitting = submitting;
+    this.resultCountEl?.setText(zh ? `${visible.length} 篇可选笔记` : `${visible.length} available notes`);
+    this.selectedCountEl?.setText(zh ? `已选择 ${this.checked.size} 篇` : `${this.checked.size} selected`);
+    if (this.clearEl) this.clearEl.disabled = this.submitting || !this.checked.size;
     if (this.confirmEl) {
-      this.confirmEl.disabled = submitting;
-      this.confirmEl.setText(
-        submitting
-          ? (this.options.zh ? "正在保存…" : "Saving…")
-          : this.confirmLabel()
-      );
+      this.confirmEl.disabled = this.submitting || !this.checked.size;
+      this.confirmEl.setText(this.submitting ? (zh ? "正在保存…" : "Saving…") : this.confirmLabel());
     }
-    if (this.cancelEl) this.cancelEl.disabled = submitting;
   }
 
-  private showError(message: string): void {
-    if (!this.errorEl) return;
-    this.errorEl.setText(message);
-  }
-
-  private clearError(): void {
-    this.errorEl?.setText("");
+  private setSubmitting(value: boolean): void {
+    this.submitting = value;
+    for (const control of [this.searchEl, this.cancelEl, this.closeEl]) if (control) control.disabled = value;
+    this.listEl?.querySelectorAll<HTMLButtonElement>(".echoink-knowledge-note-picker-checkbox").forEach(control => { control.disabled = value; });
+    this.updateSelection();
   }
 
   private async confirm(): Promise<void> {
-    if (this.confirmed || this.submitting) return;
-    const assignments = this.collectAssignments();
+    if (this.confirmed || this.submitting || !this.checked.size) return;
+    const assignments = this.notes.filter(note => this.checked.has(note.sourcePath))
+      .map(note => ({ sourcePath: note.sourcePath, role: this.options.targetRole }));
     this.setSubmitting(true);
-    this.clearError();
+    this.errorEl?.setText("");
     try {
-      if (assignments.length > 0) await this.options.onConfirm(Object.freeze(assignments));
-      // 只有 onConfirm 成功后才允许关闭；失败时 confirmed 保持 false。
+      await this.options.onConfirm(Object.freeze(assignments));
       this.confirmed = true;
       this.close();
-    } catch (error) {
-      // 保持 Modal 打开、恢复按钮、显示内联错误，允许再次点击。
+    } catch {
       this.setSubmitting(false);
-      this.showError(
-        this.options.zh
-          ? "没有保存成功，请再试一次。"
-          : "Changes weren't saved. Try again."
-      );
+      this.errorEl?.setText(this.options.zh ? "没有保存成功，请再试一次。" : "Changes weren't saved. Try again.");
     }
   }
 
-  /** Tab 在 Modal 内循环，Escape 关闭（零写入）。 */
   private handleKeydown(event: KeyboardEvent): void {
     if (event.key === "Escape") {
       event.preventDefault();
-      if (this.submitting) return;
-      this.close();
+      event.stopPropagation();
+      if (!this.submitting) this.close();
       return;
     }
     if (event.key !== "Tab") return;
-    const focusables = this.focusables();
-    if (focusables.length === 0) return;
-    const active = this.modalEl.ownerDocument?.activeElement ?? null;
-    const index = focusables.indexOf(active as HTMLElement);
-    const shift = event.shiftKey;
-    let next: HTMLElement;
-    if (index === -1) next = focusables[0];
-    else if (shift) next = focusables[(index - 1 + focusables.length) % focusables.length];
-    else next = focusables[(index + 1) % focusables.length];
+    // Match visual/DOM order, including native close and select-all controls.
+    const focusables = Array.from(this.contentEl.querySelectorAll<HTMLElement>("button, input"))
+      .filter(element => !(element as HTMLInputElement).disabled && element.getAttribute("tabindex") !== "-1");
+    if (!focusables.length) return;
+    const index = focusables.indexOf(this.modalEl.ownerDocument.activeElement as HTMLElement);
+    const next = index < 0 ? 0 : (index + (event.shiftKey ? -1 : 1) + focusables.length) % focusables.length;
     event.preventDefault();
-    next.focus();
-  }
-
-  private focusables(): HTMLElement[] {
-    const list = this.listEl;
-    const focusables: HTMLElement[] = [];
-    if (this.searchEl) focusables.push(this.searchEl);
-    if (list) {
-      list.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')
-        .forEach((checkbox) => focusables.push(checkbox));
-    }
-    const cancel = this.modalEl.querySelector(".echoink-knowledge-note-picker-cancel");
-    if (cancel) focusables.push(cancel as HTMLElement);
-    if (this.confirmEl) focusables.push(this.confirmEl);
-    return focusables;
+    focusables[next].focus();
   }
 }

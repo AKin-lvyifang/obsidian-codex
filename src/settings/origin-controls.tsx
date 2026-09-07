@@ -79,7 +79,7 @@ export function createOriginButton(parent: HTMLElement, options: ElementOptions 
   return element;
 }
 
-export type OriginCheckElement = HTMLButtonElement & { checked: boolean };
+export type OriginCheckElement = HTMLButtonElement & { checked: boolean; indeterminate: boolean };
 
 export function createOriginSwitch(parent: HTMLElement, options: ElementOptions = {}) {
   return createOriginCheck(parent, options, "switch");
@@ -89,18 +89,22 @@ export function createOriginSwitch(parent: HTMLElement, options: ElementOptions 
 export function createOriginCheck(parent: HTMLElement, options: ElementOptions = {}, kind: "switch" | "checkbox" = "checkbox"): OriginCheckElement {
   const island = createIsland(parent);
   let checked = false;
+  let indeterminate = false;
   let disabled = false;
-  const Control = kind === "switch" ? Switch : Checkbox;
-  const render = () => island.render(<Control ref={island.ref} className="echoink-origin-control" checked={checked} disabled={disabled}
-    onCheckedChange={(value) => {
-      checked = value === true;
-      render();
-      const element = island.element();
-      element.dispatchEvent(new (element.ownerDocument.defaultView!.Event)("change", { bubbles: true }));
-    }} />);
+  const onCheckedChange = (value: boolean | "indeterminate") => {
+    checked = value === true;
+    indeterminate = value === "indeterminate";
+    render();
+    const element = island.element();
+    element.dispatchEvent(new (element.ownerDocument.defaultView!.Event)("change", { bubbles: true }));
+  };
+  const render = () => island.render(kind === "switch"
+    ? <Switch ref={island.ref} className="echoink-origin-control" checked={checked} disabled={disabled} onCheckedChange={onCheckedChange} />
+    : <Checkbox ref={island.ref} className="echoink-origin-control" checked={indeterminate ? "indeterminate" : checked} disabled={disabled} onCheckedChange={onCheckedChange} />);
   render();
   const element = island.element() as OriginCheckElement;
   Object.defineProperty(element, "checked", { get: () => checked, set: (value: boolean) => { checked = Boolean(value); render(); } });
+  Object.defineProperty(element, "indeterminate", { get: () => indeterminate, set: (value: boolean) => { indeterminate = kind === "checkbox" && Boolean(value); render(); } });
   Object.defineProperty(element, "disabled", { get: () => disabled, set: (value: boolean) => { disabled = Boolean(value); render(); } });
   decorate(element, { ...options, attr: Object.fromEntries(Object.entries(options.attr ?? {}).filter(([key]) => key !== "type" && key !== "role")) });
   return element;

@@ -29,7 +29,7 @@
   border-radius:4px;background:var(--origin-bg);box-shadow:none;vertical-align:middle;cursor:pointer;
 }
 :is(.echoink-settings-demo,.modal) .echoink-origin-control[data-slot=radio-group-item] {border-radius:50%}
-:is(.echoink-settings-demo,.modal) .echoink-origin-control:is([data-slot=checkbox],[data-slot=radio-group-item])[data-state=checked] {
+:is(.echoink-settings-demo,.modal) .echoink-origin-control:is([data-slot=checkbox],[data-slot=radio-group-item]):is([data-state=checked],[data-state=indeterminate]) {
   background:var(--origin-accent);border-color:var(--origin-accent);color:#fff;
 }
 .echoink-origin-control:is([data-slot=checkbox],[data-slot=radio-group-item])>span {display:grid;place-items:center}

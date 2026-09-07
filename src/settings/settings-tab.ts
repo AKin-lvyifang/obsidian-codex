@@ -2739,6 +2739,15 @@ export class CodexSettingTab extends PluginSettingTab {
         "aria-orientation": "horizontal"
       }
     });
+    let activeButton: HTMLButtonElement | null = null;
+    const keepActiveTabVisible = () => {
+      if (!activeButton?.isConnected) return;
+      const bounds = activeButton.getBoundingClientRect();
+      const viewport = tabs.getBoundingClientRect();
+      // Only adjust the strip; never scroll or focus the page on resize.
+      if (bounds.left < viewport.left) tabs.scrollLeft += bounds.left - viewport.left;
+      else if (bounds.right > viewport.right) tabs.scrollLeft += bounds.right - viewport.right;
+    };
     const updateOverflowHint = () => {
       const maxScrollLeft = Math.max(0, tabs.scrollWidth - tabs.clientWidth);
       container.toggleClass("can-scroll-left", tabs.scrollLeft > 1);
@@ -2746,11 +2755,14 @@ export class CodexSettingTab extends PluginSettingTab {
     };
     tabs.onscroll = updateOverflowHint;
     this.disconnectSettingsTabsResizeObserver();
-    if (typeof ResizeObserver !== "undefined") {
-      this.settingsTabsResizeObserver = new ResizeObserver(updateOverflowHint);
+    const TabResizeObserver = container.ownerDocument.defaultView?.ResizeObserver;
+    if (TabResizeObserver) {
+      this.settingsTabsResizeObserver = new TabResizeObserver(() => {
+        keepActiveTabVisible();
+        updateOverflowHint();
+      });
       this.settingsTabsResizeObserver.observe(tabs);
     }
-    let activeButton: HTMLButtonElement | null = null;
     const now = Date.now();
     if (
       this.lastRenderedSettingsTab !== null
@@ -2830,12 +2842,7 @@ export class CodexSettingTab extends PluginSettingTab {
     const tabButton = activeButton as HTMLButtonElement;
     (this.containerEl.ownerDocument.defaultView ?? window).requestAnimationFrame(() => {
       if (!tabButton.isConnected) return;
-      const bounds = tabButton.getBoundingClientRect();
-      const viewport = tabs.getBoundingClientRect();
-      // Pointer activation suppresses focus restoration, not active visibility.
-      // Scroll only this horizontal strip so the content page keeps its position.
-      if (bounds.left < viewport.left) tabs.scrollLeft += bounds.left - viewport.left;
-      else if (bounds.right > viewport.right) tabs.scrollLeft += bounds.right - viewport.right;
+      keepActiveTabVisible();
       updateOverflowHint();
       if (!restoreKeyboardFocus || this.settingsTabFocusId !== activeTab) return;
       tabButton.focus({ preventScroll: true });
@@ -3589,6 +3596,7 @@ export class CodexSettingTab extends PluginSettingTab {
       headingId: RESOURCE_TITLE_ID,
       description: copy.resources.note
     });
+    page.addClass("echoink-resources-page");
     this.renderSettingsActionError(page, "resources");
     const wrapper = page.createDiv({ cls: "codex-resource-manager" });
     const activeTab = this.plugin.settings.resourceManagementTab;
