@@ -188,8 +188,10 @@ async function assertHomeCaptureAndPendingSearch(): Promise<void> {
   mutable.searchIndex = -1;
   mutable.handleKeys({ key: "ArrowUp", target: input, preventDefault: () => undefined });
   assert.equal(mutable.searchIndex, 2, "first ArrowUp selects the last result");
-  mutable.handleKeys({ key: "Home", target: input, preventDefault: () => undefined });
-  assert.equal(mutable.searchIndex, 0);
+  let preventedCaret = false;
+  mutable.handleKeys({ key: "Home", target: input, preventDefault: () => { preventedCaret = true; } });
+  assert.equal(preventedCaret, false, "Home remains native text-caret navigation in the search input");
+  assert.equal(mutable.searchIndex, 2);
   mutable.selectSearchIndex(1, false);
   mutable.handleKeys(enter);
   assert.equal(opened.at(-1), "option-1", "Enter follows the pointer-selected result");

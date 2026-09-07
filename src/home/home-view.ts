@@ -335,11 +335,10 @@ export class EchoInkHomeView extends ItemView {
     if (!this.searchOpen) return;
     if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); this.closeSearch(true); return; }
     if ((event.target as HTMLElement).dataset.home !== "search-input") return;
-    if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault(); if (!this.searchMatches.length) return;
       const count = this.searchMatches.length;
-      const index = event.key === "Home" ? 0 : event.key === "End" ? count - 1
-        : this.searchIndex < 0 ? (event.key === "ArrowUp" ? count - 1 : 0)
+      const index = this.searchIndex < 0 ? (event.key === "ArrowUp" ? count - 1 : 0)
           : (this.searchIndex + (event.key === "ArrowDown" ? 1 : -1) + count) % count;
       this.selectSearchIndex(index, true);
     }

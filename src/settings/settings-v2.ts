@@ -111,8 +111,15 @@ export function addSettingsHelp(setting: Setting, summary: string, explanation: 
   panel.hidden = true;
   const view = wrapper.ownerDocument.defaultView;
   let hideTimer: number | undefined;
+  let detachObserver: MutationObserver | undefined;
   const cancelHide = () => { if (hideTimer !== undefined) view?.clearTimeout(hideTimer); hideTimer = undefined; };
-  const hide = () => { cancelHide(); panel.hidden = true; };
+  const hide = () => {
+    cancelHide(); panel.hidden = true;
+    view?.removeEventListener("scroll", hideOnScroll, true);
+    view?.removeEventListener("resize", hide);
+    detachObserver?.disconnect(); detachObserver = undefined;
+  };
+  const hideOnScroll = (event: Event) => { if (!panel.contains(event.target as Node)) hide(); };
   const show = () => {
     cancelHide(); panel.hidden = false;
     panel.style.removeProperty("max-height");
@@ -134,6 +141,12 @@ export function addSettingsHelp(setting: Setting, summary: string, explanation: 
     panel.style.maxHeight = `${upwards ? above : below}px`;
     panel.style.left = `${Math.max(left, Math.min(anchor.left - 14, right - bounds.width)) - anchor.left}px`;
     panel.style.top = `${upwards ? -height - 9 : anchor.height + 9}px`;
+    view?.addEventListener("scroll", hideOnScroll, true);
+    view?.addEventListener("resize", hide);
+    if (!detachObserver && view?.MutationObserver) {
+      detachObserver = new view.MutationObserver(() => { if (!wrapper.isConnected) hide(); });
+      detachObserver.observe(wrapper.ownerDocument.documentElement, { childList: true, subtree: true });
+    }
   };
   wrapper.onmouseenter = show;
   wrapper.onmouseleave = () => { cancelHide(); hideTimer = view?.setTimeout(hide, 120); };
