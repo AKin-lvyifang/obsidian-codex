@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import esbuild from "esbuild";
@@ -15,6 +15,46 @@ const obsidianShimPath = path.join(
 );
 
 await mkdir(outputDir, { recursive: true });
+if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "archive-ime") {
+  const ts = await import("typescript");
+  const source = await readFile(path.join(rootDir, "src/settings/settings-tab.ts"), "utf8");
+  const ast = ts.createSourceFile("settings-tab.ts", source, ts.ScriptTarget.Latest, true);
+  const declaration = ast.statements.find((node) => ts.isClassDeclaration(node) && node.name?.text === "CodexSettingTab");
+  const method = (name) => {
+    const member = declaration?.members.find((node) => ts.isMethodDeclaration(node) && node.name.getText(ast) === name);
+    if (!member) throw new Error(`Production method missing: ${name}`);
+    return member.getText(ast);
+  };
+  const directory = path.join(outputDir, "archive-ime");
+  await mkdir(directory, { recursive: true });
+  await esbuild.build({
+    stdin: { contents: `
+      import {createSettingsPage,createSettingsSection,createSettingsCompactList,createSettingsState,showSettingsInlineConfirmation} from "./src/settings/settings-v2";
+      import {runArchiveSearchImeRegression} from "./src/tests/archive-search-ime";
+      class ArchiveFixture {
+        plugin={settings:{settingsLanguage:"zh-CN"}}; settingsVisible=true; displayFrame=null; displayFrameWindow=null;
+        archivedConversationQuery=""; archivedConversationBusyId=""; archivedConversationsLoading=false; archivedConversationsError="";
+        archivedConversations=[{conversationId:"test-1",title:"中文归档会话",updatedAt:1},{conversationId:"test-2",title:"English archive",updatedAt:1}];
+        renders=0; constructor(public containerEl:HTMLElement){}
+        // The shell adapter only empties the body and routes back to archives,
+        // as renderSettingsContent does. Both event handling and frame scheduling
+        // below are copied verbatim from the current production AST at build time.
+        renderSettingsContent(){this.renders++;this.containerEl.empty();this.renderArchivedConversationSettings(this.containerEl);}
+        ${method("renderArchivedConversationSettings")}
+        ${method("scheduleDisplay")}
+      }
+      runArchiveSearchImeRegression(ArchiveFixture).catch(error=>{document.querySelector("#report").textContent=String(error);document.querySelector("#report").dataset.result="error";});
+    `, resolveDir: rootDir, loader: "ts" },
+    bundle: true, format: "esm", platform: "browser", outfile: path.join(directory, "regression.js"), logLevel: "silent",
+    plugins: [{ name: "archive-native-dom-host", setup(build) {
+      build.onResolve({ filter: /^obsidian$/ }, () => ({ path: "host", namespace: "archive-fixture" }));
+      build.onLoad({ filter: /.*/, namespace: "archive-fixture" }, () => ({ contents: "export function setIcon(){};export class Setting{}", loader: "js" }));
+    } }]
+  });
+  await writeFile(path.join(directory, "index.html"), '<!doctype html><meta charset="utf-8"><title>Archive search IME regression</title><main id="fixture" class="echoink-settings-demo"></main><pre id="report">Running native DOM regression…</pre><script type="module" src="regression.js"></script>');
+  console.log(`Open ${path.join(directory, "index.html")}; #report[data-result=passed] is the browser result.`);
+  process.exit(0);
+}
 if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "native-dom") {
   const directory = path.join(outputDir, "settings-native-dom");
   await mkdir(directory, { recursive: true });

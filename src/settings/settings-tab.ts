@@ -2218,11 +2218,15 @@ export class CodexSettingTab extends PluginSettingTab {
       }
     });
     search.value = this.archivedConversationQuery;
-    search.oninput = () => {
+    let composing = false;
+    const updateQuery = () => {
       this.archivedConversationQuery = search.value;
       this.settingsFocusIntent = "explicit:review:archives:search";
       this.scheduleDisplay();
     };
+    search.addEventListener("compositionstart", () => { composing = true; });
+    search.addEventListener("compositionend", () => { composing = false; updateQuery(); });
+    search.oninput = (event) => { if (!composing && !(event as InputEvent).isComposing) updateQuery(); };
 
     const section = createSettingsSection(page, {
       title: zh
