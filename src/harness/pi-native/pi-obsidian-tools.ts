@@ -58,7 +58,7 @@ export function normalizeObsidianCliRequest(args: Record<string, unknown>): Obsi
   }
   if ((command === "read" && !args.path) || (command === "search" && !args.query)
     || (args.limit !== undefined && (!Number.isSafeInteger(args.limit) || Number(args.limit) < 1 || Number(args.limit) > 20))
-    || (args.ext !== undefined && !["md", "base", "canvas"].includes(String(args.ext)))) {
+    || (args.ext !== undefined && (typeof args.ext !== "string" || !["md", "base", "canvas"].includes(args.ext)))) {
     throw new Error("obsidian_invalid_request");
   }
   return args as unknown as ObsidianCliRequest;

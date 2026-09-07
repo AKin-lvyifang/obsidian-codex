@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://github.com/AKin-lvyifang/codex-echoink/releases/latest">
-    <img width="1024" alt="EchoInk Agent 2.1.0 release artwork" src="assets/releases/echoink-agent-2.1.0-release.png">
+    <img width="1024" alt="EchoInk Agent 2.2.0 release artwork" src="assets/releases/echoink-agent-2.2.0-release.png">
   </a>
 </p>
 
@@ -9,7 +9,7 @@
 <p align="center">Manage your Obsidian knowledge while your personal agent grows to understand you better.</p>
 
 <p align="center">
-  <a href="#whats-new-in-210">What's New</a> ·
+  <a href="#whats-new-in-220">What's New</a> ·
   <a href="#features">Features</a> ·
   <a href="#installation">Installation</a> ·
   <a href="#quick-start">Quick Start</a> ·
@@ -21,24 +21,28 @@
 <p align="center">
   <a href="https://github.com/AKin-lvyifang/codex-echoink/releases/latest">
     <img src="https://img.shields.io/badge/platform-Obsidian_Desktop-7C3AED?style=flat-square&logo=obsidian&logoColor=white" alt="Platform: Obsidian Desktop">
-    <img src="https://img.shields.io/badge/version-2.1.0-0EA5E9?style=flat-square" alt="Version 2.1.0">
+    <img src="https://img.shields.io/badge/version-2.2.0-0EA5E9?style=flat-square" alt="Version 2.2.0">
     <img src="https://img.shields.io/badge/license-MIT-10B981?style=flat-square" alt="MIT License">
   </a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/AKin-lvyifang/codex-echoink/releases/tag/2.1.0"><strong>Download 2.1.0</strong></a>
+  <a href="https://github.com/AKin-lvyifang/codex-echoink/releases/tag/2.2.0"><strong>Download 2.2.0</strong></a>
 </p>
 
 EchoInk Agent is a personal knowledge agent for Obsidian. It keeps conversations going, organizes and maintains the current vault, stores useful long-term context as visible and correctable memory, and gradually develops its own way of working with you. No Codex CLI installation is required. Connect a supported model service to get started.
 
-## What's new in 2.1.0
+## What's new in 2.2.0
 
-- **An Agent with an identity that grows:** Choose from eight starting styles, 15 built-in avatars, or a custom SVG avatar. Long-term memory can update during ordinary conversations, while scheduled offline organization gradually builds a user profile and learned working habits.
-- **Bring source material straight into chat:** Add images, PDF, Word, Markdown, and HTML files, or mention Markdown notes from the current vault with `@`.
-- **A clearer working process:** Expand live reasoning and keep tool progress, approval requests, task plans, file changes, and turn sources together.
-- **More complete Provider and model setup:** OpenAI Codex browser sign-in Beta, separate Qwen API and Token Plan entries, multiple Provider instances, multiple enabled models, and reasoning controls matched to model capabilities.
-- **More reliable conversations:** Fixed cases where short follow-ups could keep reasoning, repeat an answer, or show a failure after the answer had completed. Failed or interrupted output no longer affects later turns.
+A place to pick up where you left off. The new workspace brings recent notes, quick capture, weekly activity, and a calendar together, connecting writing, revisiting, and the next thought.
+
+- **Pick up a thought:** Open a recent note in a native tab, search within the homepage, or use Quick note to create a blank Inbox note.
+- **See your accumulation:** Follow weekly activity or a calendar date back to a note. Tracking starts when enabled; earlier activity is not backfilled.
+- **Give knowledge a home:** Six cards connect Wiki, finished work, projects, ideas, journals, and review. Knowledge cards open the index note's local graph; Journal offers templates, and Review starts a fresh Agent conversation.
+- **Clearer settings and organization:** Five tabs and their detail pages share controls, spacing, and responsive layouts. The structure score uses actual vault state; custom initialization lets you search and select notes by destination, then confirm before organizing.
+- **Keep working while a conversation finishes:** With the chat view open, switch conversations and return when an unread indicator appears. English now covers the workspace and chat sidebar, and the redesigned guide points to the actual controls.
+
+Read the [2.2.0 update and usage notes](https://github.com/AKin-lvyifang/codex-echoink/releases/tag/2.2.0). The cover uses illustrative homepage content; actual data comes from your vault.
 
 ## Features
 
@@ -52,7 +56,7 @@ EchoInk Agent is a personal knowledge agent for Obsidian. It keeps conversations
 
 ### Agent identity and long-term growth
 
-- The updated five-step guide helps you choose an Agent style, name, and avatar. Names can be up to 24 characters; choose one of 15 built-in avatars or upload an SVG.
+- The updated five-step guide points to the Agent profile, where General settings let you choose a style, name, and avatar. Names can be up to 24 characters; choose one of 15 built-in avatars or upload an SVG.
 - Long-term memory is enabled by default. The Agent can add or update information worth keeping during ordinary conversations without requiring a repeated “remember this” instruction.
 - **Offline memory organization (Dreaming)** runs three times per day by default and can be set from one to six. It connects related experiences and gradually updates the Agent profile, user profile, and learned working habits.
 - Open **Settings → EchoInk Agent → General → Long-term memory / Identity and user profile** to view profiles, change the schedule, or choose another starting style. Changing the Agent's name or avatar does not reset its style or memory.
@@ -77,11 +81,11 @@ EchoInk Agent is a personal knowledge agent for Obsidian. It keeps conversations
 
 ### Vault knowledge maintenance
 
-- `/ask` performs read-only questions against the current knowledge base and shows the sources used for the turn.
+- `/ask` focuses on knowledge-base questions and shows the sources used for the turn.
 - `/maintain` refines Raw notes, writes reusable knowledge to Wiki or Projects, and verifies the result by reading it back.
 - Maintenance binds to the current target revision. If a note changes while generation is running, EchoInk refuses to overwrite the newer content.
-- Only an explicit `/maintain` can write. Natural-language chat such as “organize this” remains ordinary chat.
-- Knowledge setup shows a preview before organizing anything. Missing standard folders can be restored without moving, deleting, or rewriting existing notes.
+- Writing depends on your workspace permissions and your request. `/ask` and `/maintain` do not grant or remove file access; ordinary chat can also save a journal when you explicitly ask.
+- Choose Default plan to organize existing material into Raw, or Custom plan to review and adjust note assignments first. Organization starts when you select Start initialization. Missing standard folders can also be restored without moving, deleting, or rewriting existing notes.
 
 ### Visible, correctable long-term memory
 
@@ -108,7 +112,7 @@ If EchoInk Agent is available in the Obsidian Community Plugins directory:
 
 ### Manual installation
 
-1. Download `main.js`, `manifest.json`, and `styles.css` from the [2.1.0 Release](https://github.com/AKin-lvyifang/codex-echoink/releases/tag/2.1.0).
+1. Download `main.js`, `manifest.json`, and `styles.css` from the [2.2.0 Release](https://github.com/AKin-lvyifang/codex-echoink/releases/tag/2.2.0).
 2. Create this directory inside your vault:
 
 ```text
@@ -118,16 +122,16 @@ If EchoInk Agent is available in the Obsidian Community Plugins directory:
 3. Place the three files in that directory.
 4. Restart Obsidian and enable `EchoInk Agent` under Community plugins.
 
-> **Sync note:** `main.js` in 2.1.0 is about 12.64 MiB, above the 5 MiB per-file limit of Obsidian Sync Standard. Local installation and Community downloads still work, but install or update EchoInk Agent separately on each device, or use a sync method that supports larger files.
+> **Sync note:** `main.js` in 2.2.0 is about 8.71 MiB, above the 5 MiB per-file limit of Obsidian Sync Standard. Local installation and Community downloads still work, but install or update EchoInk Agent separately on each device, or use a sync method that supports larger files.
 
 ## Quick start
 
-The first launch of 2.1.0 shows a one-time, clickable guide that can be dismissed:
+On first use, the five-step guide points to these controls. Go back, jump between steps, or dismiss it at any time:
 
-1. Select the robot icon in Obsidian's left ribbon to open EchoInk Agent.
+1. Select the feather icon in Obsidian's left ribbon to open the workspace and EchoInk Agent sidebar.
 2. Select the gear in the upper-right corner of the EchoInk sidebar to open settings.
 3. Connect a model service under **API Provider**.
-4. Choose the recommended or custom plan under **Knowledge**, then confirm the preview.
+4. Under **Knowledge**, choose Default plan or Custom plan. Review custom assignments before selecting Start initialization.
 5. Choose the Agent's starting style, name, and avatar under **General**.
 
 Create a conversation when setup is complete. Before the first ordinary chat turn, use the folder control in the composer to choose a local workspace. Use `/ask` for Knowledge questions and `/maintain` for refinement. Use the composer's `+` menu or `@` when a turn needs images, documents, note context, or Plan mode.
@@ -147,12 +151,12 @@ Attachments belong to the current input. Remove a card before sending to cancel 
 
 ## Configure Providers and models
 
-Open **Settings → EchoInk Agent → API Provider → Add API Provider**:
+Open **Settings → EchoInk Agent → API Provider → Add model**:
 
 - For an API-key Provider, choose the service, enter its API URL and API key, discover or add models, enable the models you need, and choose a default.
-- For **OpenAI Codex Beta**, open the **Sign in** group, choose the entry, and select **Sign in with OpenAI**. If the browser cannot return automatically, paste the callback URL or authorization code into the settings dialog and select **Complete authorization**.
+- For **OpenAI Codex Beta**, open the **Account sign-in** group, choose the entry, and select **Sign in with OpenAI**. If the browser cannot return automatically, paste the callback URL or authorization code into the settings dialog and select **Complete authorization**.
 - Qwen API and Qwen Token Plan are separate entries. Choose the one that matches your account.
-- To disconnect OpenAI Codex Beta, select **Sign out** in the same Provider dialog.
+- To disconnect OpenAI Codex Beta, select **Log out** in the same Provider dialog.
 
 ## Knowledge maintenance
 
@@ -176,11 +180,11 @@ Open **Settings → EchoInk Agent → Review**:
 
 ## Upgrade notes
 
-### Upgrading from 2.0.3
+### Upgrading from 2.1.0 or 2.0.3
 
 - Upgrade in place without rebuilding conversations, Knowledge, or long-term memory. Saved Provider and model settings are upgraded automatically.
-- 2.1.0 does not rewrite content already stored in old conversations. If an older conversation already contains repeated answers or failed turns, create a new conversation after upgrading.
-- A one-time updated five-step guide appears on first launch. Complete or dismiss it, or restart it later from settings.
+- 2.2.0 does not rewrite content already stored in old conversations. If an older conversation already contains repeated answers or failed turns, create a new conversation after upgrading.
+- Users who completed the guide may not see it again after upgrading. To replay it, disable and re-enable EchoInk in Community plugins; the completion screen also offers Replay.
 
 ### Upgrading from 1.x
 

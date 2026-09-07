@@ -1090,17 +1090,23 @@ export default class CodexForObsidianPlugin extends Plugin {
       // No Provider Runtime is started here; the next Chat builds it lazily.
       try {
         if (stopped && !this.piLocalData) {
-          const next = await PiLocalDataService.create(this);
-          try {
-            this.cognitiveSystem = await this.createCognitiveSystem(next);
-            this.piLocalData = next;
-          } catch (error) { await next.dispose(); throw error; }
+          await this.recreateDeveloperMemoryReferences();
         }
       } finally {
         this.developerMemoryChanging = false;
         this.productActivity.endSwitch();
         this.getCodexView()?.refreshPersonalizationUi();
       }
+    }
+  }
+  private async recreateDeveloperMemoryReferences(): Promise<void> {
+    const next = await PiLocalDataService.create(this);
+    try {
+      this.cognitiveSystem = await this.createCognitiveSystem(next);
+      this.piLocalData = next;
+    } catch (error) {
+      await next.dispose();
+      throw error;
     }
   }
   async suspendPiProductionRuntime(): Promise<void> {

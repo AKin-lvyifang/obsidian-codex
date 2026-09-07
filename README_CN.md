@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://github.com/AKin-lvyifang/codex-echoink/releases/latest">
-    <img width="1024" alt="EchoInk Agent 2.1.0 发布图" src="assets/releases/echoink-agent-2.1.0-release.png">
+    <img width="1024" alt="EchoInk Agent 2.2.0 发布图" src="assets/releases/echoink-agent-2.2.0-release.png">
   </a>
 </p>
 
@@ -9,7 +9,7 @@
 <p align="center">管理你的 Obsidian 知识，也在每次使用中更懂你。</p>
 
 <p align="center">
-  <a href="#210-亮点">2.1.0 亮点</a> ·
+  <a href="#220-亮点">2.2.0 亮点</a> ·
   <a href="#主要功能">主要功能</a> ·
   <a href="#安装">安装</a> ·
   <a href="#快速开始">快速开始</a> ·
@@ -21,24 +21,28 @@
 <p align="center">
   <a href="https://github.com/AKin-lvyifang/codex-echoink/releases/latest">
     <img src="https://img.shields.io/badge/platform-Obsidian_Desktop-7C3AED?style=flat-square&logo=obsidian&logoColor=white" alt="平台：Obsidian 桌面端">
-    <img src="https://img.shields.io/badge/version-2.1.0-0EA5E9?style=flat-square" alt="版本 2.1.0">
+    <img src="https://img.shields.io/badge/version-2.2.0-0EA5E9?style=flat-square" alt="版本 2.2.0">
     <img src="https://img.shields.io/badge/license-MIT-10B981?style=flat-square" alt="MIT 开源许可证">
   </a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/AKin-lvyifang/codex-echoink/releases/tag/2.1.0"><strong>下载 2.1.0</strong></a>
+  <a href="https://github.com/AKin-lvyifang/codex-echoink/releases/tag/2.2.0"><strong>下载 2.2.0</strong></a>
 </p>
 
 EchoInk Agent 是一个运行在 Obsidian 中的个人知识 Agent。它能持续对话，整理和维护当前 Vault，把长期有用的信息保存为可查看、可修正的记忆，并随着使用逐渐形成自己的工作方式。无需安装 Codex CLI；连接一个支持的模型服务后即可开始使用。
 
-## 2.1.0 亮点
+## 2.2.0 亮点
 
-- **有名字、会成长的 Agent：** 从 8 种起始风格和 15 个内置头像中选择，也可以上传 SVG 头像。长期记忆会在普通对话中自主更新，离线记忆整理会逐步形成用户画像和长期相处习惯。
-- **材料直接进入对话：** 支持图片、PDF、Word、Markdown、HTML，并可用 `@` 提及当前 Vault 的 Markdown 笔记。
-- **过程更容易看懂：** 实时展开思考，集中查看工具进度、授权请求、任务计划、文件变化和本轮来源。
-- **Provider 与模型设置更完整：** 新增 OpenAI Codex 浏览器登录 Beta，区分通义千问 API 与 Token Plan，并支持多 Provider 实例、多模型启用和按模型能力显示深度思考选项。
-- **对话更稳定：** 修复部分场景下短句追问反复思考、重复回答，或回答完成后仍提示失败的问题；失败或中断的输出不再影响后续对话。
+每次回来，都有一个继续的地方。新版首页把最近笔记、快速记录、本周足迹和日历放在同一张工作台上，让写下、回看和继续思考自然接起来。
+
+- **打开就能接着写：** 点击最近笔记回到原生笔记标签；用首页内联搜索查找内容，或用“快速记录”在 Inbox 新建空白笔记。
+- **看见自己的积累：** 从本周足迹或日历回到某一天，再打开当时的笔记。活动从启用记录后开始积累，不补造旧历史。
+- **让知识各有归处：** 六张卡片连接 Wiki、成果、项目、灵感、日记与复盘。知识卡打开入口笔记的局部图谱；Journal 选模板，Review 开启新的 Agent 复盘对话。
+- **设置更清楚，也更从容：** 五个设置页和详情页统一控件、间距与响应式布局。知识库结构评分有实际依据，自定义初始化支持按目录搜索、多选笔记，确认后才执行整理。
+- **工作不用排成一条队：** 对话栏保持打开时，可切换会话继续工作，原会话完成会显示未读提示。英文覆盖首页与对话栏，新版五步引导直接指向实际入口。
+
+查看 [2.2.0 更新介绍与用法](https://github.com/AKin-lvyifang/codex-echoink/releases/tag/2.2.0)。头图使用首页示意内容，实际数据来自你的 Vault。
 
 ## 主要功能
 
@@ -52,7 +56,7 @@ EchoInk Agent 是一个运行在 Obsidian 中的个人知识 Agent。它能持�
 
 ### Agent 身份与长期成长
 
-- 新版五步引导会带你选择 Agent 风格、名称和头像。名称最多 24 个字符；头像可使用 15 个内置选项或自定义 SVG。
+- 新版五步引导会带你找到 Agent 画像入口，可在基础设置中选择风格、名称和头像。名称最多 24 个字符；头像可使用 15 个内置选项或自定义 SVG。
 - 长期记忆默认开启。Agent 可以在普通对话中新增或更新值得长期保留的信息，不需要每次手动要求“记住”。
 - **离线记忆整理（做梦）** 默认每天运行 3 次，可设为 1–6 次。它会连接相关经历，并逐步更新 Agent 画像、用户画像和长期相处习惯。
 - 在 **设置 → EchoInk Agent → 基础设置 → 长期记忆 / 身份与用户画像** 中查看画像、调整频率或更换起始风格。修改名称和头像不会重置人格或记忆。
@@ -77,11 +81,11 @@ EchoInk Agent 是一个运行在 Obsidian 中的个人知识 Agent。它能持�
 
 ### Vault 知识维护
 
-- `/ask` 对当前知识库进行只读提问，并显示本轮使用的知识来源。
+- `/ask` 优先围绕当前知识库回答，并显示本轮使用的知识来源。
 - `/maintain` 提炼 Raw 笔记，把可复用内容写入 Wiki 或 Projects，再回读确认结果。
 - 维护开始前会锁定目标版本；生成期间笔记发生变化时，本轮不会覆盖新内容。
-- 只有显式执行 `/maintain` 才能写入。普通聊天中出现“整理一下”等自然语言不会自动触发维护。
-- 知识库初始化先显示整理预览，再由你确认执行。缺少固定目录时可以只补目录，不移动、删除或重写已有笔记。
+- 是否写入由工作区读写设置和你的要求决定，`/ask` 与 `/maintain` 不授予或收回文件权限；普通对话也可以按你的明确要求保存日记。
+- 初始化可选默认方案，将现有资料整理到 Raw；也可选自定义方案，先查看并调整笔记分配。点击“开始初始化”后才执行整理。缺少固定目录时可以只补目录，不移动、删除或重写已有笔记。
 
 ### 可查看、可修正的长期记忆
 
@@ -108,7 +112,7 @@ EchoInk Agent 是一个运行在 Obsidian 中的个人知识 Agent。它能持�
 
 ### 手动安装
 
-1. 从 [2.1.0 Release](https://github.com/AKin-lvyifang/codex-echoink/releases/tag/2.1.0) 下载 `main.js`、`manifest.json` 和 `styles.css`。
+1. 从 [2.2.0 Release](https://github.com/AKin-lvyifang/codex-echoink/releases/tag/2.2.0) 下载 `main.js`、`manifest.json` 和 `styles.css`。
 2. 在 Vault 中创建目录：
 
 ```text
@@ -118,16 +122,16 @@ EchoInk Agent 是一个运行在 Obsidian 中的个人知识 Agent。它能持�
 3. 将三个文件放入该目录。
 4. 重启 Obsidian，在第三方插件中启用 `EchoInk Agent`。
 
-> **同步说明：** 2.1.0 的 `main.js` 约为 12.64 MiB，超过 Obsidian Sync Standard 的 5 MiB 单文件上限。本地安装和社区下载不受影响，但需要在每台设备上分别安装或更新，或使用支持更大文件的同步方式。
+> **同步说明：** 2.2.0 的 `main.js` 约为 8.71 MiB，超过 Obsidian Sync Standard 的 5 MiB 单文件上限。本地安装和社区下载不受影响，但需要在每台设备上分别安装或更新，或使用支持更大文件的同步方式。
 
 ## 快速开始
 
-首次打开 2.1.0 时会显示一次可点击、可关闭的五步引导：
+首次使用时，五步引导会带你找到下面这些入口；可以返回、跳步或随时退出：
 
-1. 点击 Obsidian 左侧栏的机器人图标，打开 EchoInk Agent。
+1. 点击 Obsidian 左侧栏的羽毛图标，打开首页和 EchoInk Agent 侧栏。
 2. 点击 EchoInk 侧栏右上角的齿轮，进入设置。
 3. 在 **API Provider** 中连接一个模型服务。
-4. 在 **知识库** 中选择默认或自定义方案，确认预览后建立知识库。
+4. 在 **知识库管理** 中选择默认或自定义方案；自定义方案可先调整笔记分配，再点击“开始初始化”。
 5. 在 **基础设置** 中选择 Agent 的起始风格、名称和头像。
 
 完成后即可新建会话。普通会话第一次发送前，需要用输入区的文件夹按钮选择一个本机工作区。输入 `/ask` 查询知识库，输入 `/maintain` 提炼笔记；需要图片、文档、笔记背景或计划模式时，使用输入区 `+` 或 `@`。
@@ -147,7 +151,7 @@ EchoInk Agent 是一个运行在 Obsidian 中的个人知识 Agent。它能持�
 
 ## 配置 Provider 与模型
 
-打开 **设置 → EchoInk Agent → API Provider → 新增 API Provider**：
+打开 **设置 → EchoInk Agent → API Provider → 添加模型**：
 
 - 使用 API Key 时，选择对应 Provider，填写 API URL、API Key，获取或添加模型，勾选需要启用的模型并指定默认模型。
 - 使用 **OpenAI Codex Beta** 时，进入 **登录账户** 分组，选择该入口并点击 **使用 OpenAI 登录**。浏览器没有自动返回时，把回调地址或授权码粘贴回设置弹窗，然后点击 **完成授权**。
@@ -176,11 +180,11 @@ EchoInk Agent 是一个运行在 Obsidian 中的个人知识 Agent。它能持�
 
 ## 升级说明
 
-### 从 2.0.3 升级
+### 从 2.1.0 或 2.0.3 升级
 
 - 可直接覆盖升级，无需重建会话、知识库或长期记忆；已保存的 Provider 与模型配置会自动升级。
-- 2.1.0 不会改写旧会话中已经保存的内容。如果某个旧会话已经留下重复回答或失败记录，升级后建议新建会话继续。
-- 首次打开会显示一次新版五步引导，可以完成、关闭，或以后从设置重新开始。
+- 2.2.0 不会改写旧会话中已经保存的内容。如果某个旧会话已经留下重复回答或失败记录，升级后建议新建会话继续。
+- 已完成引导的旧用户不一定会在升级后再次看到引导；需要重看时，在 Obsidian 社区插件中禁用再启用 EchoInk，完成页也支持“再看一遍”。
 
 ### 从 1.x 升级
 

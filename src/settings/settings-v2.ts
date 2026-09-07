@@ -133,7 +133,7 @@ export function attachSettingsTooltip(trigger: HTMLElement, explanation: string,
     surface.appendChild(panel);
     cancelHide(); panel.hidden = false;
     panel.style.removeProperty("max-height");
-    panel.style.left = "0px"; panel.style.top = "22px";
+    panel.style.removeProperty("left"); panel.style.removeProperty("top");
     const anchor = wrapper.getBoundingClientRect();
     const root = surface.getBoundingClientRect();
     const viewport = view?.visualViewport;

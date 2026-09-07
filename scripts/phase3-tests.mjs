@@ -74,6 +74,11 @@ await esbuild.build({
   plugins: [{
     name: "knowledge-test-shims",
     setup(build) {
+      // Node business fixtures retain the real action handlers while using
+      // the shared DOM adapter; Origin/Radix rendering has browser coverage.
+      build.onResolve({ filter: /(?:^|\/)origin-controls$/ }, () => ({
+        path: path.join(rootDir, "src/tests/origin-controls-shim.ts")
+      }));
       build.onResolve({ filter: /^obsidian$/ }, () => ({
         path: obsidianShimPath
       }));

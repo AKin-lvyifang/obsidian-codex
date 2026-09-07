@@ -157,7 +157,7 @@ export function renderSettingsKnowledgeDashboard(
   }
   for (const [weekday, cn, en] of [[1, "一", "Mon"], [3, "三", "Wed"], [5, "五", "Fri"]] as const) {
     const label = grid.createSpan({ cls: "heatmap-weekday", text: t(cn, en) });
-    label.style.gridColumn = "1"; label.style.gridRow = String(weekday + 2);
+    label.style.gridRow = String(weekday + 2);
   }
   for (const day of snapshot.checkHeatmap) {
     const date = new Date(`${day.date}T12:00:00`);

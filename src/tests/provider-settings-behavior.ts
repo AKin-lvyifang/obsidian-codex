@@ -2097,7 +2097,7 @@ function assertProviderBadgeReflowCssContract(): void {
   )?.[0] ?? "";
   assert.match(narrowSettingsRule, /\.echoink-settings-row \.setting-item-control\s*\{[^}]*width:\s*100%;[^}]*max-width:\s*100%;/u);
   assert.match(narrowSettingsRule, /\.echoink-settings-row \.setting-item-control > select\s*\{[^}]*min-width:\s*0;[^}]*max-width:\s*100%;/u);
-  assert.match(narrowSettingsRule, /\.echoink-settings-row \.setting-item-control > button\s*\{[^}]*max-width:\s*100%;[^}]*white-space:\s*normal;[^}]*overflow-wrap:\s*anywhere;/u);
+  assert.match(narrowSettingsRule, /\.echoink-settings-row \.setting-item-control > button:not\(:where\(\[data-slot=switch\],\[data-slot=checkbox\],\[data-slot=radio-group-item\],\[data-slot=select-trigger\]\)\)\s*\{[^}]*max-width:\s*100%;[^}]*white-space:\s*normal;[^}]*overflow-wrap:\s*anywhere;/u);
   assert.match(narrowSettingsRule, /\.echoink-settings-navigation-value\s*\{[^}]*min-width:\s*0;[^}]*max-width:\s*100%;[^}]*white-space:\s*normal;[^}]*overflow-wrap:\s*anywhere;/u);
 }
 
@@ -8916,12 +8916,19 @@ function assertCustomProtocolContract(): void {
   });
   modal.open();
 
+  const form = modal.contentEl.querySelector<HTMLElement>(".codex-provider-modal-form");
+  const connectionCard = form?.querySelector<HTMLElement>(".provider-connection-card");
+  const modelCard = form?.querySelector<HTMLElement>(".provider-model-card");
+  assert.ok(form && connectionCard && modelCard);
   const labels = Array.from(
-    modal.contentEl.querySelectorAll<HTMLElement>("[data-provider-field-label]")
+    connectionCard.querySelectorAll<HTMLElement>("[data-provider-field-label]")
   ).map((element) => element.textContent ?? "");
+  assert.ok(labels.includes("Endpoint URL") && labels.includes("API protocol") && labels.includes("API Key"));
   assert.ok(labels.indexOf("Endpoint URL") < labels.indexOf("API protocol"));
   assert.ok(labels.indexOf("API protocol") < labels.indexOf("API Key"));
-  assert.ok(labels.indexOf("API Key") < labels.indexOf("Enabled models"));
+  const cards = Array.from(form.children);
+  assert.ok(cards.indexOf(connectionCard) >= 0 && cards.indexOf(connectionCard) < cards.indexOf(modelCard));
+  assert.equal(modelCard.querySelector("h3")?.textContent, "Enabled models");
   assert.doesNotMatch(modal.contentEl.textContent, /Custom protocol/u);
 
   const select = modal.contentEl.querySelector<HTMLSelectElement>(
@@ -10021,6 +10028,7 @@ async function assertOpenAICodexModalLifecycle(): Promise<void> {
   );
   const openedUrls: string[] = [];
   let modelListCalls = 0;
+  let logoutCalls = 0;
   const modal = new ProviderModelModal({
     app: new App(),
     draft: provider,
@@ -10035,10 +10043,9 @@ async function assertOpenAICodexModalLifecycle(): Promise<void> {
           models: provider.models.map((model) => model.id)
         };
       },
-      testConnection: async () => ({
-        status: "failed",
-        failure: "auth"
-      })
+      testConnection: async () => {
+        assert.fail("Codex OAuth must not expose an API-key connection test");
+      }
     },
     codexOAuth: {
       status: async () => ({ state: "disconnected" }),
@@ -10064,7 +10071,7 @@ async function assertOpenAICodexModalLifecycle(): Promise<void> {
         assert.equal(code, "fixture-authorization-code");
         return { state: "connected" };
       },
-      logout: async () => undefined
+      logout: async () => { logoutCalls += 1; }
     },
     save: async () => ({ saved: true })
   });
@@ -10079,6 +10086,7 @@ async function assertOpenAICodexModalLifecycle(): Promise<void> {
     null
   );
   assert.match(modal.contentEl.textContent, /GPT-5\.6 Sol/u);
+  assert.equal(providerModalElementByFocusKey(modal, "save")?.disabled, true);
 
   const login = Array.from(modal.contentEl.querySelectorAll("button"))
     .find((button) => button.textContent === "Sign in with OpenAI");
@@ -10100,19 +10108,52 @@ async function assertOpenAICodexModalLifecycle(): Promise<void> {
   await flushProviderModalTasks();
   assert.equal(modelListCalls, 0, "OAuth completion must not request models");
   assert.match(modal.contentEl.textContent, /OpenAI Codex is connected/u);
-  assert.ok(Array.from(modal.contentEl.querySelectorAll("button"))
-    .some((button) => button.textContent === "Log out"));
-  const testConnection = Array.from(
-    modal.contentEl.querySelectorAll("button")
-  ).find((button) => button.textContent === "Test connection");
-  assert.ok(testConnection);
-  testConnection.click();
+  assert.equal(providerModalElementByFocusKey(modal, "save")?.disabled, false);
+  assert.equal(providerModalElementByFocusKey(modal, "provider-test-connection"), null);
+  const logout = providerModalElementByFocusKey(modal, "codex-oauth-logout");
+  assert.ok(logout);
+  logout.click();
+  await flushProviderModalTasks();
+  assert.equal(logoutCalls, 1);
+  assert.ok(providerModalElementByFocusKey(modal, "codex-oauth-login"));
+  assert.equal(providerModalElementByFocusKey(modal, "save")?.disabled, true);
+  assert.equal(modelListCalls, 0, "OAuth login and logout must not request models");
+  modal.close();
+
+  let expiredSaveCalls = 0;
+  const expiredModal = new ProviderModelModal({
+    app: new App(),
+    draft: provider,
+    editing: true,
+    language: "en",
+    copy: settingsCopy("en"),
+    preflight: {
+      listModels: async () => { assert.fail("Opening expired OAuth must not request models"); },
+      testConnection: async () => { assert.fail("Saving expired OAuth must not test the connection"); }
+    },
+    codexOAuth: {
+      status: async () => ({ state: "expired" }),
+      openExternal: async () => true,
+      login: async () => { assert.fail("Refreshable OAuth must not require a new sign-in"); },
+      logout: async () => undefined
+    },
+    save: async () => { expiredSaveCalls += 1; return { saved: true }; }
+  });
+  expiredModal.open();
   await flushProviderModalTasks();
   assert.match(
-    modal.contentEl.textContent,
-    /OpenAI Codex authorization expired\. Sign in again\./u
+    expiredModal.contentEl.textContent,
+    /Connected; authorization refreshes safely on the next request\./u
   );
-  modal.close();
+  assert.ok(providerModalElementByFocusKey(expiredModal, "codex-oauth-logout"));
+  assert.equal(providerModalElementByFocusKey(expiredModal, "codex-oauth-login"), null);
+  const save = providerModalElementByFocusKey(expiredModal, "save");
+  assert.ok(save);
+  assert.equal(save.disabled, false);
+  save.click();
+  await flushProviderModalTasks();
+  assert.equal(expiredSaveCalls, 1);
+  expiredModal.close();
 }
 
 async function assertFreshCustomModelDiscoveryLifecycle(): Promise<void> {

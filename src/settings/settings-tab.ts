@@ -914,7 +914,7 @@ export class CodexSettingTab extends PluginSettingTab {
       }));
     if (!access.enabled) return;
     const panelEl = group.createDiv({ cls: "echoink-developer-panel" });
-    const panel = new DeveloperModePanel(panelEl, this.plugin.getDeveloperModeService(), zh,
+    const panel: DeveloperModePanel = new DeveloperModePanel(panelEl, this.plugin.getDeveloperModeService(), zh,
       () => this.settingsVisible && this.developerPanel === panel
         && this.plugin.settings.settingsLanguage === language
         && visibleSettingsTab(this.plugin.settings.settingsTab) === "general",
@@ -1796,7 +1796,7 @@ export class CodexSettingTab extends PluginSettingTab {
   private renderHistoryEmpty(container: HTMLElement, title: string, description: string): void {
     const empty = container.createDiv({ cls: "settings-empty history-empty" });
     setIcon(empty.createSpan({ cls: "history-empty-icon" }), "history");
-    empty.createEl("h3", { text: title });
+    empty.createDiv({ cls: "settings-empty-title", text: title, attr: { role: "heading", "aria-level": "3" } });
     empty.createEl("p", { text: description });
   }
 
@@ -4455,7 +4455,7 @@ export class CodexSettingTab extends PluginSettingTab {
   private renderResourceEmpty(container: HTMLElement, title: string, description: string, icon: string): HTMLElement {
     const empty = container.createDiv({ cls: "settings-empty resources-empty" });
     setIcon(empty.createSpan({ cls: "resources-empty-icon" }), icon);
-    empty.createEl("h3", { text: title });
+    empty.createDiv({ cls: "settings-empty-title", text: title, attr: { role: "heading", "aria-level": "3" } });
     empty.createEl("p", { text: description });
     return empty;
   }
