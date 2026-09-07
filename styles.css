@@ -20611,7 +20611,12 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
 .echoink-settings-demo .echoink-knowledge-init-panel.initialization>.echoink-init-ready-copy{flex:1;min-width:0}
 .echoink-settings-demo .echoink-init-ready-copy h3{font-size:calc(var(--font-text-size,16px)*.8125);font-weight:500;margin:0 0 5px}
 .echoink-settings-demo .echoink-init-ready-copy p{font-size:calc(var(--font-text-size,16px)*.6875);color:var(--secondary);line-height:1.85;margin:0}
-.echoink-settings-demo .echoink-knowledge-init-panel.initialization>.init-actions{display:flex;flex-direction:column;align-items:flex-end;gap:8px;margin:0;flex:none;max-width:42%}
+.echoink-settings-demo .echoink-knowledge-init-panel.initialization>.init-actions{display:flex;flex-direction:row;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:8px 14px;margin:0;flex:none;max-width:42%}
+.echoink-settings-demo .echoink-knowledge-init-panel.initialization>.init-actions>button{font-size:calc(var(--font-text-size,16px)*.625);white-space:normal;text-align:left}
+.echoink-settings-demo .echoink-knowledge-init-panel.initialization>.init-actions>.button{padding:7px 10px;min-height:30px;border:1px solid var(--line);background:var(--bg);color:var(--text)}
+.echoink-settings-demo .echoink-knowledge-init-panel.initialization>.init-actions>.text-button{padding:0;min-height:26px;border:0;background:none;box-shadow:none;color:var(--secondary)}
+.echoink-settings-demo .echoink-knowledge-init-panel.initialization>.init-actions>button>span:has(svg){display:flex;flex:none}
+.echoink-settings-demo .echoink-knowledge-init-panel.initialization>.init-actions svg{width:13px;height:13px}
 .echoink-settings-demo .echoink-knowledge-init-panel .settings-card-header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:18px}
 .echoink-settings-demo .echoink-knowledge-init-panel .settings-card-header p{font-size:calc(var(--font-text-size,16px)*.6875);color:var(--secondary);line-height:1.8;margin:5px 0 0}
 .echoink-settings-demo .echoink-knowledge-init-panel .init-route{display:flex;align-items:center;gap:14px;padding:18px 0 22px}
@@ -20884,6 +20889,9 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
 .echoink-settings-demo .echoink-resource-detail .codex-mcp-server-toggle-row{flex-direction:row;flex-wrap:nowrap}
 .echoink-settings-demo .echoink-resource-detail .codex-mcp-server-toggle-row>[data-slot=switch]{flex:none}
 .echoink-settings-demo .echoink-resource-detail .codex-mcp-tool-policy-controls{width:auto}
+.echoink-settings-demo .echoink-settings-navigation-row[data-echoink-focus-key^="review:memory:"]{flex-direction:row;flex-wrap:nowrap;align-items:center;justify-content:space-between;text-align:left;gap:14px}
+.echoink-settings-demo .echoink-settings-navigation-row[data-echoink-focus-key^="review:memory:"]>.echoink-settings-navigation-copy{flex:1;min-width:0;width:auto;align-self:stretch;text-align:left}
+.echoink-settings-demo .echoink-settings-navigation-row[data-echoink-focus-key^="review:memory:"]>.echoink-settings-navigation-trailing{flex:none;width:auto;max-width:none;align-self:center;justify-content:flex-end}
 @container settings (max-width:520px){
  .echoink-settings-demo .echoink-resource-detail .codex-mcp-tool-policy-row{flex-direction:column;align-items:stretch;gap:10px}
  .echoink-settings-demo .echoink-resource-detail .codex-mcp-tool-policy-controls{width:auto;margin-left:auto;align-self:flex-end;justify-content:flex-end}

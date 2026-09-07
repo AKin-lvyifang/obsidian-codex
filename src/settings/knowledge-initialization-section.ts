@@ -1375,20 +1375,22 @@ export class KnowledgeInitializationSection {
       ? "固定目录完整，EchoInk 可以正常整理原始笔记、Wiki 和附件。"
       : "The fixed folder structure is complete, so EchoInk can organize original notes, Wiki content, and attachments." });
     const actions = panel.createDiv({ cls: "echoink-knowledge-init-actions init-actions" });
-    const open = actions.createEl("button", {
-      cls: "mod-cta echoink-knowledge-init-cta",
+    const open = createOriginButton(actions, {
+      cls: "button echoink-init-ready-open",
       text: zh ? "打开 Wiki 首页" : "Open Wiki home",
       attr: { type: "button" }
     });
+    setIcon(open.createSpan({ attr: { "aria-hidden": "true" } }), "arrow-up-right");
     open.onclick = () => void this.openFile("wiki/index.md");
-    const maintain = actions.createEl("button", {
-      cls: "echoink-knowledge-init-secondary",
+    const maintain = createOriginButton(actions, {
+      cls: "text-button",
       text: zh ? "整理新增笔记" : "Maintain new notes",
       attr: { type: "button" }
     });
+    setIcon(maintain.createSpan({ attr: { "aria-hidden": "true" } }), "arrow-right");
     maintain.onclick = () => void this.startRecommended();
-    const journal = actions.createEl("button", {
-      cls: "echoink-knowledge-init-secondary",
+    const journal = createOriginButton(actions, {
+      cls: "text-button",
       text: zh ? "补齐日记与模板设置" : "Complete journal and template setup",
       attr: { type: "button" }
     });
