@@ -244,9 +244,9 @@ export class ProviderModelModal extends Modal {
   private render(): void {
     this.dismissProviderUrlTooltips();
     this.captureFocusIntent();
-    for (const details of Array.from(this.contentEl.querySelectorAll<HTMLDetailsElement>("details[data-model-advanced-key]"))) {
-      const key = details.dataset.modelAdvancedKey!;
-      if (details.open) this.expandedModels.add(key); else this.expandedModels.delete(key);
+    for (const panel of Array.from(this.contentEl.querySelectorAll<HTMLElement>("[data-model-advanced-key]"))) {
+      const key = panel.dataset.modelAdvancedKey!;
+      if (!panel.hidden) this.expandedModels.add(key); else this.expandedModels.delete(key);
     }
     const focusedTriggerId = this.focusedComboboxTriggerId();
     const providerId = this.providerId;
@@ -1018,7 +1018,8 @@ export class ProviderModelModal extends Modal {
       this.setModelEnabled(modelId, checkbox.checked);
     };
     enabledLabel.createSpan({ text: model.displayName || model.id });
-    const defaultLabel = selection.createEl("label", {
+    const actions = selection.createDiv({ cls: "codex-provider-model-choice-actions" });
+    const defaultLabel = actions.createEl("label", {
       cls: "codex-provider-model-choice-default"
     });
     const radio = group.addItem(defaultLabel, modelId, !enabled);
@@ -1031,7 +1032,7 @@ export class ProviderModelModal extends Modal {
       cls: `codex-provider-model-capabilities is-${model.metadataSource}`
     });
     this.renderModelCapabilityTags(capabilityTags, model);
-    if (enabled) this.renderModelAdvancedSettings(row, enabled);
+    if (enabled) this.renderModelAdvancedSettings(row, actions, enabled);
   }
 
   private setModelEnabled(modelId: string, enabled: boolean): void {
@@ -1102,16 +1103,28 @@ export class ProviderModelModal extends Modal {
 
   private renderModelAdvancedSettings(
     container: HTMLElement,
+    actions: HTMLElement,
     model: ApiProviderModelConfig
   ): void {
-    const advanced = container.createEl("details", {
+    const modelKey = `${this.providerId}:${model.id}`;
+    const panelId = `${this.accessibilityId}-${encodeURIComponent(model.id)}-parameters`;
+    const advanced = container.createDiv({
       cls: "codex-provider-model-advanced",
-      attr: { "data-model-advanced-key": `${this.providerId}:${model.id}` }
+      attr: { id: panelId, "data-model-advanced-key": modelKey }
     });
-    advanced.open = this.expandedModels.has(`${this.providerId}:${model.id}`)
-      || Array.from(this.numberDrafts.values()).some((entry) => entry.modelId === model.id);
-    const summary = advanced.createEl("summary", { text: this.label("参数", "Parameters"), attr: { "data-modal-focus-key": `model:${model.id}:parameters` } });
-    setIcon(summary.createSpan(), "chevron-down");
+    advanced.hidden = !(this.expandedModels.has(modelKey)
+      || Array.from(this.numberDrafts.values()).some((entry) => entry.modelId === model.id));
+    const toggle = createOriginButton(actions, {
+      cls: "codex-provider-model-parameters text-button",
+      text: this.label("参数", "Parameters"),
+      attr: { "data-modal-focus-key": `model:${model.id}:parameters`, "aria-controls": panelId, "aria-expanded": String(!advanced.hidden) }
+    });
+    setIcon(toggle.createSpan(), "chevron-down");
+    toggle.onclick = () => {
+      advanced.hidden = !advanced.hidden;
+      toggle.setAttr("aria-expanded", String(!advanced.hidden));
+      if (advanced.hidden) this.expandedModels.delete(modelKey); else this.expandedModels.add(modelKey);
+    };
     const capabilities = advanced.createDiv({
       cls: "codex-provider-model-advanced-group is-capabilities"
     });

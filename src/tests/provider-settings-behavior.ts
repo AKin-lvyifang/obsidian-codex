@@ -10118,8 +10118,13 @@ async function assertProviderLimitOverrideRoundTrip(): Promise<void> {
   });
   const limitKey = `model:${modelId}:contextWindow`;
   const initialInput = providerModalElementByFocusKey(first, limitKey)!;
-  const details = initialInput.closest<HTMLDetailsElement>("details")!;
-  details.open = true;
+  const panel = initialInput.closest<HTMLElement>("[data-model-advanced-key]")!;
+  const parametersKey = `model:${modelId}:parameters`;
+  const initialToggle = providerModalElementByFocusKey(first, parametersKey)!;
+  assert.equal(panel.hidden, true);
+  initialToggle.click();
+  assert.equal(panel.hidden, false);
+  assert.equal(initialToggle.getAttribute("aria-expanded"), "true");
   for (const raw of ["1.5", "2000001", "invalid-number"]) {
     const input = providerModalElementByFocusKey(first, limitKey)!;
     input.value = raw; input.fireEvent("input");
@@ -10130,7 +10135,7 @@ async function assertProviderLimitOverrideRoundTrip(): Promise<void> {
     assert.equal(preserved.value, raw);
     assert.equal(preserved.getAttribute("aria-invalid"), "true");
     assert.doesNotMatch(first.contentEl.textContent, /valid Model ID without spaces/u, "a parameter error must not be presented as an invalid manual Model ID");
-    assert.equal(preserved.closest<HTMLDetailsElement>("details")?.open, true, "invalid parameters stay expanded after validation");
+    assert.equal(preserved.closest<HTMLElement>("[data-model-advanced-key]")?.hidden, false, "invalid parameters stay expanded after validation");
     assert.equal(providerModalTestDocument.activeElement, preserved);
     providerModalElementByFocusKey(first, "provider-test-connection")?.click();
     await flushProviderModalTasks();
@@ -10149,10 +10154,19 @@ async function assertProviderLimitOverrideRoundTrip(): Promise<void> {
     input.value = value;
     input.oninput?.(new Event("input"));
   }
+  const fieldBeforeCollapse = providerModalElementByFocusKey(first, limitKey)!;
+  const parametersToggle = providerModalElementByFocusKey(first, parametersKey)!;
+  parametersToggle.focus(); parametersToggle.click();
+  assert.equal(fieldBeforeCollapse.closest<HTMLElement>("[data-model-advanced-key]")?.hidden, true);
+  assert.equal(parametersToggle.getAttribute("aria-expanded"), "false");
+  parametersToggle.click();
+  assert.equal(providerModalElementByFocusKey(first, limitKey), fieldBeforeCollapse, "collapse and reopen preserve the actual parameter field");
+  assert.equal(fieldBeforeCollapse.value, "120000");
+  assert.equal(providerModalTestDocument.activeElement, parametersToggle, "parameter toggle keeps keyboard focus without redrawing the form");
   const defaultControl = providerModalElementByFocusKey(first, `model-default:${modelId}`)!;
   defaultControl.checked = true;
   defaultControl.fireEvent("change");
-  assert.equal(providerModalElementByFocusKey(first, limitKey)?.closest<HTMLDetailsElement>("details")?.open, true,
+  assert.equal(providerModalElementByFocusKey(first, limitKey)?.closest<HTMLElement>("[data-model-advanced-key]")?.hidden, false,
     "changing the default keeps an already expanded parameter section open");
   providerModalElementByFocusKey(first, "save")?.click();
   await flushProviderModalTasks();

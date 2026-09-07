@@ -20464,13 +20464,16 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
 .echoink-settings-demo .codex-provider-model-choice:last-child{border:0}
 .echoink-settings-demo .codex-provider-model-choice.is-selected{background:none}
 .echoink-settings-demo .codex-provider-model-choice{position:relative}
-.echoink-settings-demo .codex-provider-model-choice-selection{padding-right:82px}
-.echoink-settings-demo .codex-provider-model-advanced{padding:0;background:none;border:0;margin:0;container-type:normal}
-.echoink-settings-demo .codex-provider-model-advanced[open]{padding:15px;background:var(--soft);border:1px solid var(--line);border-radius:8px;margin-top:14px}
-.echoink-settings-demo .codex-provider-model-advanced>summary{position:absolute;right:0;top:17px;display:flex;gap:5px;align-items:center;margin:0;list-style:none;font-size:calc(var(--font-text-size,16px)*.625);font-weight:400;color:var(--secondary)}
-.echoink-settings-demo .codex-provider-model-advanced>summary::-webkit-details-marker{display:none}
-.echoink-settings-demo .codex-provider-model-advanced>summary svg{width:12px;height:12px}
-.echoink-settings-demo .codex-provider-model-advanced[open]>summary svg{transform:rotate(180deg)}
+.echoink-settings-demo .codex-provider-model-choice-selection{padding-right:0;flex-wrap:nowrap;gap:16px}
+.echoink-settings-demo .codex-provider-model-choice-enabled{flex:1}
+.echoink-settings-demo .codex-provider-model-choice-actions{display:flex;align-items:center;gap:21px;flex:none}
+.echoink-settings-demo .codex-provider-model-advanced{padding:15px;background:var(--soft);border:1px solid var(--line);border-radius:8px;margin:14px 0 0;container-type:normal;min-width:0}
+.echoink-settings-demo .codex-provider-model-parameters{display:flex;gap:5px;align-items:center;margin:0;padding:0;min-height:0;height:auto;border:0;background:none;box-shadow:none;font-size:calc(var(--font-text-size,16px)*.625);font-weight:400;line-height:1.5;color:var(--secondary)}
+.echoink-settings-demo .codex-provider-model-parameters svg{width:12px;height:12px}
+.echoink-settings-demo .codex-provider-model-parameters[aria-expanded=true] svg{transform:rotate(180deg)}
+.echoink-settings-demo .codex-provider-model-manager .echoink-settings-page-description{max-width:920px}
+.echoink-settings-demo .codex-provider-model-modal .codex-provider-model-advanced-description{max-width:none}
+@container settings (max-width:600px){.echoink-settings-demo .codex-provider-model-choice-selection{gap:10px}.echoink-settings-demo .codex-provider-model-choice-actions{gap:12px}}
 .echoink-settings-demo .codex-provider-option-icon{width:25px;height:25px;padding:2px;border:0;border-radius:4px;background:none}
 .echoink-settings-demo .codex-provider-option-icon>svg{flex:none;fill:none;stroke:none;width:20px;height:20px;max-width:none;max-height:none}
 .echoink-settings-demo .codex-provider-saved-icon>svg{flex:none;fill:none;stroke:none;width:25px;height:25px;max-width:none;max-height:none}
