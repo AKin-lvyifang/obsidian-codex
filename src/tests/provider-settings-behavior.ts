@@ -1061,6 +1061,7 @@ async function assertSkillToggleNotCommittedRestoresAuthoritativeUi(): Promise<v
   let persisted = structuredClone(DEFAULT_SETTINGS);
   persisted.settingsTab = "resources";
   persisted.resourceManagementTab = "skills";
+  if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "resource-style-candidate") persisted.settingsLanguage = "en";
   persisted.resources.catalog = [skill];
   const plugin: Record<string, any> = {
     app: new App(),
@@ -1109,11 +1110,13 @@ async function assertSkillToggleNotCommittedRestoresAuthoritativeUi(): Promise<v
   assert.equal(search.ownerDocument.activeElement, search);
   filters.updateResourceSummaryCounts();
   assert.equal(summary.children[1], enabledColumn);
+  writeSettingsStyleFixture(tab.containerEl, "filtered");
   tab.containerEl.querySelector<ProviderModalTestElement>(".codex-resource-search-clear")!.click();
   assert.equal(empty.hidden, true);
   assert.equal(search.value, "");
   assert.equal(search.ownerDocument.activeElement, search);
   assert.equal(summary.children[1], enabledColumn);
+  writeSettingsStyleFixture(tab.containerEl, "cleared");
   const row = toggle.closest<ProviderModalTestElement>(".codex-resource-row");
   assert.ok(row);
   assert.equal(toggle.checked, false);
@@ -1127,6 +1130,22 @@ async function assertSkillToggleNotCommittedRestoresAuthoritativeUi(): Promise<v
   assert.equal(plugin.settings.resources.catalog[0]?.enabled, false);
   assert.equal(persisted.resources.catalog[0]?.enabled, false);
   tab.hide();
+}
+
+function writeSettingsStyleFixture(root: HTMLElement, state: string): void {
+  if (!["resource-style-candidate", "knowledge-style-candidate"].includes(process.env.ECHOINK_PROVIDER_SETTINGS_CASE ?? "")) return;
+  const escape = (value: string) => value.replace(/&/gu, "&amp;").replace(/</gu, "&lt;").replace(/"/gu, "&quot;");
+  const serialize = (element: any): string => {
+    const attributes = new Map<string, string>(element.attributeValues);
+    if (element.className) attributes.set("class", element.className);
+    for (const [name, value] of Object.entries(element.dataset)) attributes.set(`data-${name.replace(/[A-Z]/gu, letter => `-${letter.toLowerCase()}`)}`, String(value));
+    if (element.hidden) attributes.set("hidden", "");
+    if (element.disabled) attributes.set("disabled", "");
+    if (element.value) attributes.set("value", element.value);
+    return `<${element.localName} ${[...attributes].map(([name, value]) => `${name}="${escape(value)}"`).join(" ")}>${escape(element.ownTextContent)}${element.children.map(serialize).join("")}</${element.localName}>`;
+  };
+  mkdirSync(".tmp", { recursive: true });
+  writeFileSync(`.tmp/settings-style-${state}.html`, `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Resource filter ${state}</title><link rel="stylesheet" href="../styles.css"><style>:root{--font-interface:system-ui;--font-text-size:16px;--text-normal:#303238;--text-muted:#73767e;--background-primary:#fff;--background-secondary:#f7f7f9;--background-modifier-border:#e6e7eb;--interactive-accent:#7860b3}body{margin:0}.setting-item{display:flex}</style>${serialize(root)}`);
 }
 
 async function assertBuiltinSkillPresetLabels(): Promise<void> {
@@ -6133,6 +6152,7 @@ async function assertKnowledgeInitProgressAndCompletion(): Promise<void> {
   done.settings.knowledgeBase.initialization.status = "initialized";
   const doneTab = await renderKnowledgeInitTab(done.plugin);
   const donePanel = knowledgeInitPanel(doneTab);
+  writeSettingsStyleFixture(doneTab.containerEl, "knowledge-ready");
   assert.ok(doneTab.containerEl.querySelector(".settings-knowledge-dashboard"));
   assert.equal(doneTab.containerEl.querySelector(".init-awaiting"), null);
   assert.equal(
@@ -12767,6 +12787,11 @@ if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "visual") {
   await assertKnowledgeInitRecoveryAndActionErrorRendering();
   await assertKnowledgeSettingsDetailRetiresLegacyControls();
   console.log("PASS affected Knowledge initialization UI and local state lifecycles");
+} else if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "resource-style-candidate") {
+  await assertSkillToggleNotCommittedRestoresAuthoritativeUi();
+  console.log("PASS resource filter action lifecycle; browser style fixtures written to .tmp/settings-style-*.html");
+} else if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "knowledge-style-candidate") {
+  await assertKnowledgeInitProgressAndCompletion();
 } else if (process.env.ECHOINK_PROVIDER_SETTINGS_CASE === "settings-window") {
   await runSettingsWindowRefreshTest();
   console.log("PASS detached settings refresh and cancellation with hidden main window");

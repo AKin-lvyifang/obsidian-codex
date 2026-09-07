@@ -20510,10 +20510,13 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
 .echoink-settings-demo .codex-resource-manager .codex-resource-tabs>button.codex-resource-tab{padding:0 2px 12px;min-height:0;background:none;border:0;border-radius:0;font-size:calc(var(--font-text-size,16px)*.75);box-shadow:none;line-height:1.5}
 .echoink-settings-demo .codex-resource-manager .codex-resource-tab.is-active:after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:2px;background:var(--accent);border-radius:2px}
 .echoink-settings-demo .codex-resource-manager .codex-resource-toolbar{display:flex;justify-content:space-between;gap:16px}
+.echoink-settings-demo .codex-resource-manager{gap:0}
 .echoink-settings-demo .codex-resource-manager .codex-resource-search{max-width:365px;min-width:0;flex:1}
 .echoink-settings-demo .codex-resource-manager .codex-resource-body{padding:0;overflow:hidden;border-radius:var(--radius)}
 .echoink-settings-demo .codex-resource-manager .codex-resource-summary{padding:11px 19px;background:var(--soft);border-bottom:1px solid var(--line);font-size:calc(var(--font-text-size,16px)*.625)}
 .echoink-settings-demo .codex-resource-manager .codex-resource-row{padding:17px 19px;gap:12px}
+.echoink-settings-demo .codex-resource-manager .codex-resource-row.is-search-hidden{display:none}
+.echoink-settings-demo .codex-resource-manager .resources-list-heading>span:last-child{flex:none;width:auto;min-width:36px;white-space:nowrap}
 .echoink-settings-demo .codex-resource-manager .codex-resource-row+.codex-resource-row{border-top:1px solid var(--line)}
 .echoink-settings-demo .codex-resource-manager .codex-resource-row-icon{display:grid;place-items:center;width:31px;height:31px;flex:none;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--secondary)}
 .echoink-settings-demo .codex-resource-manager .codex-resource-row-icon>svg{width:15px;height:15px}
@@ -20602,7 +20605,7 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
 .echoink-settings-demo .echoink-knowledge-init-bar-indicator{height:100%;background:var(--accent)}
 /* The initialization flow and assignment rows are distinct product structures. */
 .echoink-settings-demo .codex-knowledge-settings .echoink-knowledge-init-panel{display:block;margin:0;background:var(--bg);padding:22px}
-.echoink-settings-demo .codex-knowledge-settings .echoink-knowledge-init-panel.initialization{display:flex;align-items:center;gap:14px;padding:18px 20px;background:var(--soft)}
+.echoink-settings-demo .codex-knowledge-settings .echoink-knowledge-init-panel.initialization{display:flex;flex-direction:row;align-items:center;gap:14px;padding:18px 20px;background:var(--soft)}
 .echoink-settings-demo .echoink-knowledge-init-panel.initialization>.echoink-init-ready-copy{flex:1;min-width:0}
 .echoink-settings-demo .echoink-init-ready-copy h3{font-size:calc(var(--font-text-size,16px)*.8125);font-weight:500;margin:0 0 5px}
 .echoink-settings-demo .echoink-init-ready-copy p{font-size:calc(var(--font-text-size,16px)*.6875);color:var(--secondary);line-height:1.85;margin:0}
@@ -20876,10 +20879,12 @@ details.codex-smooth-ai-reasoning[open] .codex-smooth-ai-reasoning-caret {
  .echoink-settings-demo .echoink-knowledge-init-custom :is(.init-assignment,.init-attachment){align-items:stretch;flex-direction:column;gap:8px}
  .echoink-settings-demo .echoink-knowledge-init-custom .echoink-knowledge-init-assignment-target{width:100%}
 }
-@container settings (max-width:560px){
- .echoink-settings-demo .echoink-resource-detail :is(.codex-mcp-server-toggle-row,.codex-mcp-tool-policy-row){flex-direction:column;align-items:stretch;gap:10px}
- .echoink-settings-demo .echoink-resource-detail .codex-mcp-server-toggle-row>[data-slot=switch]{align-self:flex-start}
- .echoink-settings-demo .echoink-resource-detail .codex-mcp-tool-policy-controls{width:100%;margin-left:0;justify-content:flex-start}
+.echoink-settings-demo .echoink-resource-detail .codex-mcp-server-toggle-row{flex-direction:row;flex-wrap:nowrap}
+.echoink-settings-demo .echoink-resource-detail .codex-mcp-server-toggle-row>[data-slot=switch]{flex:none}
+.echoink-settings-demo .echoink-resource-detail .codex-mcp-tool-policy-controls{width:auto}
+@container settings (max-width:520px){
+ .echoink-settings-demo .echoink-resource-detail .codex-mcp-tool-policy-row{flex-direction:column;align-items:stretch;gap:10px}
+ .echoink-settings-demo .echoink-resource-detail .codex-mcp-tool-policy-controls{width:auto;margin-left:auto;align-self:flex-end;justify-content:flex-end}
 }
 /* MIT Origin UI primitive styling, scoped to the actual library controls.
    EchoInk maps Origin's utility styles to the approved Demo tokens. No preflight. */
