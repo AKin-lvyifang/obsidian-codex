@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import process from "process";
+import { reactDomScriptResourcesPlugin } from "./scripts/react-dom-script-resources.mjs";
 
 const buildMode = process.argv[2];
 const isPiImageBundleProbe = buildMode === "pi-image-bundle-probe";
@@ -698,6 +699,7 @@ const context = await esbuild.context({
   minify: isProd,
   treeShaking: true,
   plugins: [
+    reactDomScriptResourcesPlugin,
     piOpenAICodexOAuthPlugin,
     piRuntimeSurfacePlugin,
     piPhotonRuntimePlugin,

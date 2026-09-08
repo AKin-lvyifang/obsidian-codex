@@ -28,6 +28,7 @@ import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 import Module from "node:module";
+import { findDynamicScriptCreations, SCRIPT_RESOURCE_DISABLED } from "./react-dom-script-resources.mjs";
 
 const DIST_MAIN_JS = path.join(process.cwd(), "dist", "main.js");
 
@@ -119,6 +120,13 @@ function checkSize() {
 function checkMarkers() {
   if (!existsSync(DIST_MAIN_JS)) return;
   const contents = readFileSync(DIST_MAIN_JS, "utf8");
+  const scriptCreations = findDynamicScriptCreations(contents, DIST_MAIN_JS);
+  if (scriptCreations.length) {
+    failures.push(`bundle contains ${scriptCreations.length} dynamic script element creations`);
+  }
+  if (!contents.includes(SCRIPT_RESOURCE_DISABLED)) {
+    failures.push("React DOM script-resource adaptation is missing from the bundle");
+  }
   for (const marker of VIOLATION_MARKERS) {
     if (contents.includes(marker)) {
       failures.push(`forbidden marker present in bundle: ${marker}`);

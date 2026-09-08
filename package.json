@@ -17,6 +17,7 @@
     "prepare": "node scripts/install-git-hooks.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node scripts/run-tests.mjs",
+    "test:react-dom-resources": "node scripts/react-dom-script-resources-tests.mjs",
     "test:provider-settings": "node scripts/provider-settings-tests.mjs",
     "test:conversation-ui": "node scripts/conversation-ui-tests.mjs",
     "test:personal-memory": "node src/tests/personal-memory-tests.mjs",
