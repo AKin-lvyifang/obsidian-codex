@@ -43,7 +43,10 @@ EchoInk vendors the official Magic UI `BentoGrid`, `AnimatedShinyText`,
 shared `cn` utility, and shadcn-compatible `Button` sources at commit
 `2d671cc6c0e0f40e28682c9cbddd16694dcfe627`. The upstream global animation
 declarations are retained locally as provenance for the isolated build-time
-Tailwind CSS output.
+Tailwind CSS output. The unmodified upstream stylesheet is stored as
+`src/home/magic-ui/provenance/globals.css.reference`; the build reads only its
+`shiny-text` animation declaration and keyframes, rather than shipping the global
+stylesheet.
 
 - Repository: https://github.com/magicuidesign/magicui
 - Source manifest: `src/home/magic-ui/SOURCE.json`

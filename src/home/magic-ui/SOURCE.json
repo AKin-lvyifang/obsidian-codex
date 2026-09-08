@@ -27,7 +27,7 @@
     },
     {
       "upstreamPath": "apps/www/styles/globals.css",
-      "localPath": "provenance/globals.css",
+      "localPath": "provenance/globals.css.reference",
       "sha256": "b290ad71358829d043a8453924e0b97878596294849de34ea08451412fd760f2"
     },
     {

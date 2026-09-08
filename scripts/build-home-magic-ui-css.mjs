@@ -13,7 +13,7 @@ const scope = ".echoink-home-magic-ui";
 const startMarker = "/* ECHOINK_HOME_MAGIC_UI_CSS_START */";
 const endMarker = "/* ECHOINK_HOME_MAGIC_UI_CSS_END */";
 
-const upstreamCss = await readFile(path.join(sourceDir, "provenance", "globals.css"), "utf8");
+const upstreamCss = await readFile(path.join(sourceDir, "provenance", "globals.css.reference"), "utf8");
 const animationNames = ["shiny-text"];
 const animationVariables = animationNames.map((name) => extractDeclaration(upstreamCss, `--animate-${name}`));
 const keyframes = animationNames.map((name) => extractKeyframes(upstreamCss, name));
