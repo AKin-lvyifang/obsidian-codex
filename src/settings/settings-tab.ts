@@ -4,6 +4,8 @@ import { renderSettingsKnowledgeDashboard } from "./knowledge-dashboard";
 import { BUILTIN_SKILLS } from "../harness/resources/builtin-skills";
 import { mountSettingsEditor } from "./inline-editor";
 import { Modal, Notice, PluginSettingTab, Setting, TFile, type TFolder, normalizePath, setIcon, setTooltip } from "obsidian";
+import type { SettingGroup, SettingsCategoryGroupDefinition } from "../types/obsidian-settings";
+import { settingsCategoryDefinitions } from "./settings-search";
 import type CodexForObsidianPlugin from "../main";
 import { DeveloperModePanel } from "./developer-mode-panel";
 import type { PiConversationCatalogEntry } from "../harness/pi-native/contracts";
@@ -172,6 +174,12 @@ interface BuiltinSkillEditorState {
   error: string;
 }
 
+interface NativeSettingsNavigation {
+  listEl: HTMLElement;
+  workspaceEl: HTMLElement;
+  rows: Map<VisibleSettingsTab, { setting: Setting; button: HTMLButtonElement | null }>;
+}
+
 const settingsContainerFocusIntents = new WeakMap<HTMLElement, string>();
 const PERSONALITY_TEMPLATE_FOCUS_INTENT = "explicit:general:personality-template";
 
@@ -241,10 +249,11 @@ export class CodexSettingTab extends PluginSettingTab {
   private onboardingRefreshGeneration = 0;
   private developerPanel: DeveloperModePanel | null = null;
   private inlineEditor: { tab: VisibleSettingsTab; host: HTMLElement; dispose: () => void } | null = null;
+  private nativeSettingsNavigation: NativeSettingsNavigation | null = null;
 
   constructor(private readonly plugin: CodexForObsidianPlugin) {
     super(plugin.app, plugin);
-    this.plugin.register(() => disposeOriginControls(this.containerEl));
+    this.plugin.register(() => this.disposeSettingsView());
     this.resourceSnapshot = snapshotFromWorkspaceResourceCache(this.plugin.settings.workspaceResourceCache);
     this.resourceLoaded = loadedTabsFromWorkspaceResourceCache(this.plugin.settings.workspaceResourceCache);
     this.resourceLoadErrors = errorsFromWorkspaceResourceCache(this.plugin.settings.workspaceResourceCache);
@@ -254,12 +263,68 @@ export class CodexSettingTab extends PluginSettingTab {
     return settingsCopy(this.plugin.settings.settingsLanguage);
   }
 
+  getSettingDefinitions(): SettingsCategoryGroupDefinition[] {
+    return settingsCategoryDefinitions(this.plugin.settings.settingsLanguage,
+      (tab, setting, group) => this.renderNativeSettingsCategory(tab, setting, group));
+  }
+
+  private renderNativeSettingsCategory(
+    tab: VisibleSettingsTab,
+    setting: Setting,
+    group: SettingGroup
+  ): () => void {
+    if (this.nativeSettingsNavigation?.listEl !== group.listEl) {
+      this.disposeSettingsView();
+      const workspaceEl = group.listEl.parentElement;
+      if (!workspaceEl) return () => undefined;
+      this.containerEl.addClass("echoink-settings-host");
+      workspaceEl.addClass("echoink-settings-demo", "echoink-native-settings-workspace");
+      this.nativeSettingsNavigation = { listEl: group.listEl, workspaceEl, rows: new Map() };
+      this.settingsTitleEl = workspaceEl.createDiv({ cls: "codex-settings-title" });
+      workspaceEl.insertBefore(this.settingsTitleEl, group.listEl);
+      const tabsEl = workspaceEl.createDiv({ cls: "codex-settings-tabs-slot" });
+      this.settingsTabsEl = tabsEl;
+      workspaceEl.insertBefore(tabsEl, group.listEl);
+      tabsEl.appendChild(group.listEl);
+      this.createSettingsBody(workspaceEl);
+      this.beginSettingsDisplay();
+    }
+    const navigation = this.nativeSettingsNavigation;
+    if (!navigation) return () => undefined;
+    const row = { setting, button: null as HTMLButtonElement | null };
+    navigation.rows.set(tab, row);
+    setting.settingEl.addClass("echoink-native-settings-row");
+    // Keep the host's row and name elements: search can still focus/highlight
+    // this real visible boundary. Only the original button lives inside it.
+    this.renderTopTabs(this.settingsTabsEl!, visibleSettingsTab(this.plugin.settings.settingsTab));
+    this.scheduleDisplay();
+    return () => {
+      if (setting.nameEl.parentElement === row.button) setting.infoEl.appendChild(setting.nameEl);
+      disposeOriginControls(setting.settingEl);
+      if (navigation.rows.get(tab) !== row) return;
+      navigation.rows.delete(tab);
+      if (this.nativeSettingsNavigation === navigation && navigation.rows.size === 0) {
+        this.disposeSettingsView();
+      }
+    };
+  }
+
   display(): void {
+    // Host 1.13+ owns the definition rows; an imperative refresh must not delete them.
+    if (this.nativeSettingsNavigation) {
+      this.scheduleDisplay();
+      return;
+    }
+    this.renderSettingsShell();
+    this.beginSettingsDisplay();
+    this.renderSettingsContent();
+  }
+
+  private beginSettingsDisplay(): void {
     this.settingsVisible = true;
     this.lastRenderedSettingsTab = null;
     this.settingsTabIconAnimation = null;
     this.cancelScheduledDisplay();
-    this.renderSettingsShell();
     const pendingResourceId = this.plugin.consumeEchoInkSettingsResourceDetail?.() ?? "";
     if (pendingResourceId) {
       this.openSettingsDetail({
@@ -267,32 +332,16 @@ export class CodexSettingTab extends PluginSettingTab {
         resourceId: pendingResourceId
       });
     }
-    this.renderSettingsContent();
   }
 
   hide(): void {
-    this.inlineEditor?.dispose();
-    this.inlineEditor = null;
-    this.developerPanel?.dispose();
-    this.developerPanel = null;
     const shouldConfirmKnowledgePreference =
       this.settingsDetail === "knowledge-preferences"
       && knowledgeMaintenancePreferenceIsDirty(
         this.knowledgePreferenceEditor
       )
       && !this.knowledgePreferenceClosePromptRunning;
-    this.settingsVisible = false;
-    this.clearOnboardingCoachmark(true);
-    this.knowledgeInitSection?.dispose();
-    this.knowledgeDashboardRequestId += 1;
-    this.knowledgeDashboardEl = null;
-    this.knowledgeDashboardSnapshot = null;
-    this.knowledgeDashboardLoading = false;
-    this.knowledgeDashboardError = "";
-    disposeKnowledgeDashboardTooltipState(this.knowledgeDashboardTooltipState);
-    this.disconnectSettingsTabsResizeObserver();
-    this.cancelScheduledDisplay();
-    disposeOriginControls(this.containerEl);
+    this.disposeSettingsView();
     super.hide();
     if (shouldConfirmKnowledgePreference) {
       this.knowledgePreferenceClosePromptRunning = true;
@@ -313,6 +362,43 @@ export class CodexSettingTab extends PluginSettingTab {
     }
   }
 
+  private disposeSettingsView(): void {
+    const navigation = this.nativeSettingsNavigation;
+    for (const { setting, button } of navigation?.rows.values() ?? []) {
+      if (setting.nameEl.parentElement === button) setting.infoEl.appendChild(setting.nameEl);
+    }
+    this.inlineEditor?.dispose();
+    this.inlineEditor = null;
+    this.developerPanel?.dispose();
+    this.developerPanel = null;
+    this.settingsVisible = false;
+    this.clearOnboardingCoachmark(true);
+    this.knowledgeInitSection?.dispose();
+    this.knowledgeDashboardRequestId += 1;
+    this.knowledgeDashboardEl = null;
+    this.knowledgeDashboardSnapshot = null;
+    this.knowledgeDashboardLoading = false;
+    this.knowledgeDashboardError = "";
+    disposeKnowledgeDashboardTooltipState(this.knowledgeDashboardTooltipState);
+    this.disconnectSettingsTabsResizeObserver();
+    this.cancelScheduledDisplay();
+    this.clearResourceSearchDebounceTimer();
+    disposeOriginControls(navigation?.workspaceEl ?? this.containerEl);
+    this.nativeSettingsNavigation = null;
+    if (navigation) {
+      // Return the host list before removing our shell; never remove its rows.
+      if (this.settingsTabsEl?.contains(navigation.listEl)) {
+        navigation.workspaceEl.insertBefore(navigation.listEl, this.settingsTabsEl);
+      }
+      this.settingsTitleEl?.remove();
+      this.settingsTabsEl?.remove();
+      this.settingsBodyEl?.remove();
+      this.settingsStatusEl?.remove();
+      navigation.rows.clear();
+      this.settingsTitleEl = this.settingsTabsEl = this.settingsBodyEl = this.settingsStatusEl = null;
+    }
+  }
+
   private renderSettingsShell(): void {
     this.disconnectSettingsTabsResizeObserver();
     const { containerEl } = this;
@@ -323,6 +409,10 @@ export class CodexSettingTab extends PluginSettingTab {
     const workspace = containerEl.createDiv({ cls: "echoink-settings-demo" });
     this.settingsTitleEl = workspace.createDiv({ cls: "codex-settings-title" });
     this.settingsTabsEl = workspace.createDiv({ cls: "codex-settings-tabs-slot" });
+    this.createSettingsBody(workspace);
+  }
+
+  private createSettingsBody(workspace: HTMLElement): void {
     this.settingsBodyEl = workspace.createDiv({ cls: "codex-settings-body" });
     this.settingsStatusEl = workspace.createDiv({
       cls: "codex-settings-status",
@@ -335,6 +425,7 @@ export class CodexSettingTab extends PluginSettingTab {
   }
 
   private ensureSettingsShell(): void {
+    if (this.nativeSettingsNavigation) return;
     if (this.settingsBodyEl && this.containerEl.contains(this.settingsBodyEl)) return;
     this.renderSettingsShell();
   }
@@ -357,8 +448,10 @@ export class CodexSettingTab extends PluginSettingTab {
       this.knowledgeDashboardEl = null;
       disposeOriginControls(titleEl);
       titleEl.empty();
-      disposeOriginControls(tabsEl);
-      tabsEl.empty();
+      if (!this.nativeSettingsNavigation) {
+        disposeOriginControls(tabsEl);
+        tabsEl.empty();
+      }
       const activeInline = this.inlineEditor;
       if (activeInline && activeInline.tab === visibleSettingsTab(this.plugin.settings.settingsTab)) activeInline.host.remove();
       else if (activeInline) { activeInline.dispose(); this.inlineEditor = null; }
@@ -769,6 +862,9 @@ export class CodexSettingTab extends PluginSettingTab {
         this.plugin.settings.settingsLanguage = normalizeSettingsLanguage(value);
         await this.plugin.saveSettings(true);
         await this.plugin.refreshLanguageSurfaces();
+        // Refresh native labels/index as well as the existing content. The
+        // method is absent on old hosts, which continue through display().
+        (this as CodexSettingTab & { update?: () => void }).update?.();
         this.scheduleDisplay();
       });
     }));
@@ -2857,14 +2953,12 @@ export class CodexSettingTab extends PluginSettingTab {
     activeTab: VisibleSettingsTab
   ): void {
     const copy = this.copy;
-    const tabs = container.createDiv({
-      cls: "codex-settings-tabs",
-      attr: {
-        role: "tablist",
-        "aria-labelledby": SETTINGS_TITLE_ID,
-        "aria-orientation": "horizontal"
-      }
-    });
+    const navigation = this.nativeSettingsNavigation;
+    const tabs = navigation?.listEl ?? container.createDiv({ cls: "codex-settings-tabs" });
+    tabs.addClass("codex-settings-tabs");
+    tabs.setAttr("role", "tablist");
+    tabs.setAttr("aria-labelledby", SETTINGS_TITLE_ID);
+    tabs.setAttr("aria-orientation", "horizontal");
     let activeButton: HTMLButtonElement | null = null;
     const keepActiveTabVisible = () => {
       if (!activeButton?.isConnected) return;
@@ -2912,9 +3006,11 @@ export class CodexSettingTab extends PluginSettingTab {
         ? activeAnimationElapsed
         : null;
     SETTINGS_TABS.forEach((tab, index) => {
+      const nativeRow = navigation?.rows.get(tab.id);
+      if (navigation && !nativeRow) return;
       const label = copy.tabs[tab.id];
       const isActive = activeTab === tab.id;
-      const button = createOriginButton(tabs, {
+      const button = nativeRow?.button ?? createOriginButton(nativeRow?.setting.controlEl ?? tabs, {
         cls: `codex-settings-tab ${isActive ? "is-active" : ""}`,
         attr: {
           id: settingsTabDomId(tab.id),
@@ -2927,16 +3023,22 @@ export class CodexSettingTab extends PluginSettingTab {
           tabindex: isActive ? "0" : "-1"
         }
       });
-      const icon = button.createSpan({ cls: "codex-settings-tab-icon settings-motion-icon" });
+      if (nativeRow) nativeRow.button = button;
+      button.toggleClass("is-active", isActive);
+      button.setAttr("aria-selected", String(isActive));
+      button.setAttr("tabindex", isActive ? "0" : "-1");
+      const icon = button.querySelector<HTMLElement>(".codex-settings-tab-icon")
+        ?? button.createSpan({ cls: "codex-settings-tab-icon settings-motion-icon" });
       renderAnimatedSettingsTabIcon(
         icon,
         tab.icon,
         isActive ? activeAnimationProgress : null
       );
-      button.createSpan({
-        cls: "codex-settings-tab-label",
-        text: label
-      });
+      const labelEl = nativeRow?.setting.nameEl
+        ?? button.createSpan({ cls: "codex-settings-tab-label" });
+      labelEl.addClass("codex-settings-tab-label");
+      labelEl.setText(label);
+      if (nativeRow && labelEl.parentElement !== button) button.appendChild(labelEl);
       if (isActive) {
         activeButton = button;
       }
