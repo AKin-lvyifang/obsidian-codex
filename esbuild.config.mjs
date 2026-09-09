@@ -639,17 +639,19 @@ const piProviderSdkShimsPlugin = {
 
 const context = await esbuild.context({
   banner: {
-    js: "/* EchoInk Agent */"
+    js: `/* EchoInk Agent */
+var __echoInkPiModuleUrl = require("node:url").pathToFileURL(
+  require("node:path").join(require("node:path").parse(process.execPath).root, "__echoink_pi_runtime__", "main.js")
+).href;`
   },
   // Pi publishes one ESM entry for its SDK and dormant CLI/TUI utilities.
-  // Obsidian loads a CJS bundle, so preserve a deterministic module URL for
-  // those ESM helpers; controlled Chat never uses their package-relative CLI
-  // resources, extensions, clipboard, or image workers.
+  // Obsidian evaluates CJS without __filename/__dirname. Keep a synthetic URL
+  // for those helpers, using the running host's filesystem root and URL rules
+  // (including Windows drive letters), rather than the build machine's path.
+  // Controlled Chat never uses Pi's package-relative CLI assets or extensions.
   define: {
     "process.env.NODE_ENV": JSON.stringify(isProd ? "production" : "development"),
-    "import.meta.url": JSON.stringify(
-      "file:///__echoink_pi_runtime__/main.js"
-    )
+    "import.meta.url": "__echoInkPiModuleUrl"
   },
   entryPoints: [
     isPiImageBundleProbe

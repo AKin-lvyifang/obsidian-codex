@@ -32,3 +32,36 @@ jobs:
 
       - name: Run Obsidian pre-release verification
         run: npm run verify:obsidian
+
+      - name: Upload verified bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: obsidian-review-bundle
+          path: dist/main.js
+          if-no-files-found: error
+
+  bundle-load:
+    name: Bundle load (${{ matrix.os }})
+    needs: review
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Set up Obsidian-compatible Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "20.14.0"
+
+      - name: Download verified bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: obsidian-review-bundle
+          path: dist
+
+      - name: Check native bundle loading
+        run: node scripts/check-bundle-load.mjs --native-only dist/main.js

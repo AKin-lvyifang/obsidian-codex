@@ -15,7 +15,8 @@
  *   3. `dist/main.js` must complete module evaluation under Node with the
  *      browser-side externals stubbed — a top-level `ReferenceError` or similar
  *      from a shim would otherwise pass typecheck/build yet crash the plugin on
- *      startup.
+ *      startup. Probe the native host and macOS/Linux/Windows path and URL
+ *      semantics in separate processes; CI also runs the same asset on all OSes.
  *   4. Pi's public image helpers must retain the version-anchored Photon WASM
  *      bridge inside the single bundle rather than falling back to the old
  *      always-null image-processing shim.
@@ -26,8 +27,7 @@
  */
 import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
-import { createRequire } from "node:module";
-import Module from "node:module";
+import { spawnSync } from "node:child_process";
 import { findDynamicScriptCreations, SCRIPT_RESOURCE_DISABLED } from "./react-dom-script-resources.mjs";
 
 const DIST_MAIN_JS = path.join(process.cwd(), "dist", "main.js");
@@ -67,27 +67,6 @@ const PI_IMAGE_RUNTIME_MARKER =
 const PI_IMAGE_FORBIDDEN_MARKERS = [
   "EchoInk never processes images through Pi's default read tool",
   "export async function loadPhoton() { return null; }"
-];
-
-/** Browser-side modules the production bundle keeps external. */
-const EXTERNAL_MODULES = [
-  "obsidian",
-  "electron",
-  "@codemirror/autocomplete",
-  "@codemirror/collab",
-  "@codemirror/commands",
-  "@codemirror/language",
-  "@codemirror/lint",
-  "@codemirror/search",
-  "@codemirror/state",
-  "@codemirror/view",
-  "@lezer/common",
-  "@lezer/highlight",
-  "@lezer/lr"
-];
-const BUNDLED_ONLY_MODULE_PREFIXES = [
-  "@earendil-works/pi-coding-agent",
-  "@silvia-odwyer/photon-node"
 ];
 
 const failures = [];
@@ -153,46 +132,22 @@ function checkMarkers() {
 }
 
 /**
- * Evaluate the CJS bundle in a throwaway module graph. The bundle is built with
- * `platform: "node"` and keeps Obsidian/Electron/CodeMirror/Lezer external, so
- * stub those with a Proxy module whose every named export is an empty class
- * (the plugin only extends/references them at runtime, not at module load).
- * This is the cheapest reliable way to catch a shim that throws during module
- * evaluation while typecheck and build both pass.
+ * Check module evaluation and OS-sensitive URL handling on the actual bundle.
+ * Keep this probe standalone so CI can load the same asset on all three OSes
+ * without node_modules masking a missing bundled dependency.
  */
 function checkLoad() {
   if (!existsSync(DIST_MAIN_JS)) return;
 
-  const require = createRequire(import.meta.url);
-  const proxy = new Proxy({}, {
-    get(_target, prop) {
-      if (prop === "__esModule") return true;
-      if (prop === "default") return proxy;
-      return class {};
-    }
+  const result = spawnSync(process.execPath, [
+    path.join(process.cwd(), "scripts", "check-bundle-load.mjs"),
+    DIST_MAIN_JS
+  ], {
+    stdio: "inherit",
+    timeout: 180_000
   });
-
-  const originalLoad = Module._load;
-  const externalSet = new Set(EXTERNAL_MODULES);
-  Module._load = function (request, parent, isMain) {
-    if (BUNDLED_ONLY_MODULE_PREFIXES.some((prefix) =>
-      request === prefix || request.startsWith(`${prefix}/`)
-    )) {
-      throw new Error(`production bundle escaped to external module: ${request}`);
-    }
-    if (externalSet.has(request)) return proxy;
-    return originalLoad.call(this, request, parent, isMain);
-  };
-
-  try {
-    require(DIST_MAIN_JS);
-    console.log("bundle module load: OK");
-  } catch (error) {
-    failures.push(
-      `dist/main.js threw during module load: ${error instanceof Error ? error.message : String(error)}`
-    );
-  } finally {
-    Module._load = originalLoad;
+  if (result.status !== 0) {
+    failures.push(`bundle load probe failed${result.error ? `: ${result.error.message}` : ""}`);
   }
 }
 
